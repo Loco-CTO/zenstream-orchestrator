@@ -1,7 +1,7 @@
 "use client";
 
 import React, { ReactElement, useCallback } from "react";
-import { FaCopy } from "react-icons/fa";
+import { IconCopy } from "@tabler/icons-react";
 
 /**
  * This file contains various reusable components for the dashboard page.
@@ -74,7 +74,7 @@ function Codeblock({ code }: { code: string }) {
         type="button"
         className="flex items-center justify-center size-12 cursor-pointer"
       >
-        <FaCopy className="size-5 text-schemes-dark-on-background bg-opacity-0" />
+        <IconCopy className="size-5 text-schemes-dark-on-background bg-opacity-0" />
       </button>
     </div>
   );

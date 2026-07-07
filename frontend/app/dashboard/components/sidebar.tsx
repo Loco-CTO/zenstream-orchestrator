@@ -2,8 +2,7 @@
 
 import React, { useCallback } from "react";
 import Image from "next/image";
-import { MdSpaceDashboard } from "react-icons/md";
-import { IoLogOut } from "react-icons/io5";
+import { IconDashboard, IconLogout2 } from "@tabler/icons-react";
 import { useRouter } from "next/navigation";
 import { getCookie, deleteCookie } from "cookies-next";
 import appConfig from "@/app/config";
@@ -121,7 +120,7 @@ export default function Navbar() {
         <div className="flex flex-col items-center justify-center gap-3">
           <Tab
             icon={
-              <MdSpaceDashboard className="size-8 text-schemes-dark-on-background" />
+              <IconDashboard className="size-8 text-schemes-dark-on-background" />
             }
             path="/dashboard"
           />
@@ -133,7 +132,7 @@ export default function Navbar() {
           onClick={handleClick}
           className="relative bg-schemes-dark-surface-container-lowest rounded-full size-12 flex items-center justify-center ease-out group-hover:size-14 group-hover:bg-schemes-dark-surface-variant transition-all duration-150"
         >
-          <IoLogOut className="size-8 text-schemes-dark-on-background" />
+          <IconLogout2 className="size-8 text-schemes-dark-on-background" />
         </a>
       </div>
     </div>

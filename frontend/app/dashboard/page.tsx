@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useState } from "react";
-import { FaKey, FaHome } from "react-icons/fa";
+import { IconHome, IconKey } from "@tabler/icons-react";
 import {
   Gadget,
   Greeting,
@@ -59,7 +59,7 @@ export default function Dashboard() {
         <div className="flex flex-col items-start justify-start w-full h-full gap-9 singlecol-padding md:leftcol-padding">
           <Gadget
             title="Generate Orchestrator Invite"
-            icon={<FaKey className="size-5 text-schemes-dark-on-background" />}
+            icon={<IconKey className="size-5 text-schemes-dark-on-background" />}
             content={
               <form
                 method="POST"
@@ -76,7 +76,9 @@ export default function Dashboard() {
           />
           <Gadget
             title="Backend Address"
-            icon={<FaHome className="size-5 text-schemes-dark-on-background" />}
+            icon={
+              <IconHome className="size-5 text-schemes-dark-on-background" />
+            }
             content={
               <div className="h-full w-full flex flex-col items-start justify-start gap-4 py-6">
                 <Input

@@ -7,7 +7,7 @@ import type { Metadata } from "next";
  * Metadata for the not found layout.
  */
 export const metadata: Metadata = {
-  title: "ZenStream | Not Found",
+	title: "ZenStream | Not Found",
 };
 
 /**
@@ -16,18 +16,18 @@ export const metadata: Metadata = {
  * @returns A React element containing the not found layout.
  */
 export default function NotFoundLayout({
-  children,
+	children,
 }: {
-  children: React.ReactNode;
+	children: React.ReactNode;
 }) {
-  return (
-    <html lang="en">
-      <Head>
-        <link rel="icon" href="../../public/favicon.ico" />
-      </Head>
-      <body className="bg-schemes-dark-surface-container-lowest flex flex-row h-screen w-full">
-        {children}
-      </body>
-    </html>
-  );
+	return (
+		<html lang="en">
+			<Head>
+				<link rel="icon" href="../../public/favicon.ico" />
+			</Head>
+			<body className="bg-schemes-dark-surface-container-lowest flex flex-row h-screen w-full">
+				{children}
+			</body>
+		</html>
+	);
 }

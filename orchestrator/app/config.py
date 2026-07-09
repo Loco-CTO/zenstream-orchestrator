@@ -45,7 +45,7 @@ class Config:
                         "create": """
                     CREATE TABLE IF NOT EXISTS users (
                         username TEXT UNIQUE NOT NULL,
-                        password TEXT NOT NULL,
+                        password TEXT NOT NULL
                     )
                 """,
                         "columns": {
@@ -89,6 +89,17 @@ class Config:
                             "expiration": "TEXT NOT NULL",
                         },
                     },
+                    "user_preferences": {
+                        "create": """
+                        CREATE TABLE IF NOT EXISTS user_preferences (
+                            jellyfin_user_id TEXT PRIMARY KEY NOT NULL,
+                            locale TEXT NOT NULL DEFAULT 'en'
+                        )""",
+                        "columns": {
+                            "jellyfin_user_id": "TEXT NOT NULL",
+                            "locale": "TEXT NOT NULL DEFAULT 'en'",
+                        },
+                    },
                 },
             },
             db_file=os.path.join(os.getcwd(), "sqlite/orchestrator.db"),
@@ -97,7 +108,7 @@ class Config:
         self.database.connect()
         self.database.create_tables()
         self.database.execute(
-            "INSERT OR IGNORE INTO users VALUES ('admin', ?)",
+            "INSERT OR IGNORE INTO users (username, password) VALUES ('admin', ?)",
             (sha256("admin".encode()).hexdigest(),),
         )
 

@@ -45,6 +45,7 @@ class Orchestrator:
                         "Username",
                         "Password",
                         "url",
+                        "X-Jellyfin-Token",
                     ],
                     "expose_headers": ["TOKEN"],
                 }
@@ -83,7 +84,13 @@ class Orchestrator:
         """Serve the Orchestrator."""
         if os.getenv("DEBUG"):
             self.logger.info("Serving Orchestrator in debug mode...")
-            self.app.run(debug=True, host="127.0.0.1", port=9090, use_reloader=False)
+            self.app.run(
+                debug=True,
+                host="127.0.0.1",
+                port=9090,
+                use_reloader=os.getenv("USE_RELOADER", "").lower()
+                in {"1", "true", "yes"},
+            )
         else:
             self.logger.info("Serving Orchestrator...")
             serve(self.app, host="127.0.0.1", port=9090)

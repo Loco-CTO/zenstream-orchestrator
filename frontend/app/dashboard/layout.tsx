@@ -8,7 +8,7 @@ import type { Metadata } from "next";
  * Metadata for the dashboard layout.
  */
 export const metadata: Metadata = {
-  title: "ZenStream | Dashboard",
+	title: "ZenStream | Dashboard",
 };
 
 /**
@@ -17,19 +17,19 @@ export const metadata: Metadata = {
  * @returns A React element containing the dashboard layout.
  */
 export default function DashboardLayout({
-  children,
+	children,
 }: {
-  children: React.ReactNode;
+	children: React.ReactNode;
 }) {
-  return (
-    <html lang="en">
-      <Head>
-        <link rel="icon" href="../../public/favicon.ico" />
-      </Head>
-      <body className="bg-schemes-dark-surface-container-lowest flex flex-row h-screen w-full">
-        <Navbar />
-        <div className="grow ml-20">{children}</div>
-      </body>
-    </html>
-  );
+	return (
+		<html lang="en">
+			<Head>
+				<link rel="icon" href="../../public/favicon.ico" />
+			</Head>
+			<body className="bg-schemes-dark-surface-container-lowest flex flex-row h-screen w-full">
+				<Navbar />
+				<div className="grow ml-20">{children}</div>
+			</body>
+		</html>
+	);
 }

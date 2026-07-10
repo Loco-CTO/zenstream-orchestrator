@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 
 class DatabaseHandler:
@@ -15,6 +16,7 @@ class DatabaseHandler:
         self.create_query = create_query
         self.db_file = db_file
         self.connection = None
+        self.lock = threading.RLock()
         self.connect()
 
     def connect(self):
@@ -88,19 +90,17 @@ class DatabaseHandler:
 
     def execute(self, query, params=None):
         """Execute a query on the database."""
-        cursor = self.connection.cursor()
-        try:
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            self.connection.commit()
-            return cursor.fetchall()
-        except sqlite3.Error as e:
-            print(f"Database error: {e}")
-            return e
-        finally:
-            cursor.close()
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute(query, params or ())
+                self.connection.commit()
+                return cursor.fetchall()
+            except sqlite3.Error as e:
+                print(f"Database error: {e}")
+                return e
+            finally:
+                cursor.close()
 
     def fetchall(self):
         """Fetch all rows from the database."""

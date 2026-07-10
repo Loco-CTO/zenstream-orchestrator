@@ -6,6 +6,7 @@ import re
 SUPPORTED_LOCALES = {"en", "ja"}
 DEFAULT_SUBTITLE_STYLE = {
     "fontFamily": "sans",
+    "bold": False,
     "textScale": 100,
     "fontColor": "#ffffff",
     "borderSize": 0,
@@ -43,24 +44,24 @@ class UserPreference:
 
     def get_subtitle_style(self) -> dict:
         rows = self._db.execute(
-            "SELECT subtitle_font_family, subtitle_text_scale, subtitle_font_color, subtitle_border_size, subtitle_border_color, subtitle_background_color, subtitle_background_opacity FROM user_preferences WHERE jellyfin_user_id = ?",
+            "SELECT subtitle_font_family, subtitle_bold, subtitle_text_scale, subtitle_font_color, subtitle_border_size, subtitle_border_color, subtitle_background_color, subtitle_background_opacity FROM user_preferences WHERE jellyfin_user_id = ?",
             (self.jellyfin_user_id,),
         )
         if not rows:
             return dict(DEFAULT_SUBTITLE_STYLE)
         row = rows[0]
         return {
-            "fontFamily": row[0], "textScale": row[1], "fontColor": row[2], "borderSize": row[3],
-            "borderColor": row[4], "backgroundColor": row[5], "backgroundOpacity": row[6],
+            "fontFamily": row[0], "bold": bool(row[1]), "textScale": row[2], "fontColor": row[3], "borderSize": row[4],
+            "borderColor": row[5], "backgroundColor": row[6], "backgroundOpacity": row[7],
         }
 
     def set_subtitle_style(self, style: dict) -> dict:
         normalized = _validate_subtitle_style(style)
         self._db.execute(
-            """INSERT INTO user_preferences (jellyfin_user_id, subtitle_font_family, subtitle_text_scale, subtitle_font_color, subtitle_border_size, subtitle_border_color, subtitle_background_color, subtitle_background_opacity)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(jellyfin_user_id) DO UPDATE SET subtitle_font_family=excluded.subtitle_font_family, subtitle_text_scale=excluded.subtitle_text_scale, subtitle_font_color=excluded.subtitle_font_color, subtitle_border_size=excluded.subtitle_border_size, subtitle_border_color=excluded.subtitle_border_color, subtitle_background_color=excluded.subtitle_background_color, subtitle_background_opacity=excluded.subtitle_background_opacity""",
-            (self.jellyfin_user_id, normalized["fontFamily"], normalized["textScale"], normalized["fontColor"], normalized["borderSize"], normalized["borderColor"], normalized["backgroundColor"], normalized["backgroundOpacity"]),
+            """INSERT INTO user_preferences (jellyfin_user_id, subtitle_font_family, subtitle_bold, subtitle_text_scale, subtitle_font_color, subtitle_border_size, subtitle_border_color, subtitle_background_color, subtitle_background_opacity)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(jellyfin_user_id) DO UPDATE SET subtitle_font_family=excluded.subtitle_font_family, subtitle_bold=excluded.subtitle_bold, subtitle_text_scale=excluded.subtitle_text_scale, subtitle_font_color=excluded.subtitle_font_color, subtitle_border_size=excluded.subtitle_border_size, subtitle_border_color=excluded.subtitle_border_color, subtitle_background_color=excluded.subtitle_background_color, subtitle_background_opacity=excluded.subtitle_background_opacity""",
+            (self.jellyfin_user_id, normalized["fontFamily"], int(normalized["bold"]), normalized["textScale"], normalized["fontColor"], normalized["borderSize"], normalized["borderColor"], normalized["backgroundColor"], normalized["backgroundOpacity"]),
         )
         return normalized
 
@@ -83,4 +84,6 @@ def _validate_subtitle_style(value: dict) -> dict:
             raise ValueError(f"{key} must be a six-digit hex color.")
     if result["fontFamily"] not in {"sans", "serif", "mono"}:
         raise ValueError("fontFamily must be sans, serif, or mono.")
+    if not isinstance(result["bold"], bool):
+        raise ValueError("bold must be a boolean.")
     return result

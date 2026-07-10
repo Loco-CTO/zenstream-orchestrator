@@ -34,14 +34,14 @@ class FakeSubtitleDatabase:
             if not style:
                 return []
             return [(
-                style["fontFamily"], style["textScale"], style["fontColor"],
+                style["fontFamily"], int(style["bold"]), style["textScale"], style["fontColor"],
                 style["borderSize"], style["borderColor"], style["backgroundColor"],
                 style["backgroundOpacity"],
             )]
         self.values[params[0]] = {
-            "fontFamily": params[1], "textScale": params[2], "fontColor": params[3],
-            "borderSize": params[4], "borderColor": params[5], "backgroundColor": params[6],
-            "backgroundOpacity": params[7],
+            "fontFamily": params[1], "bold": bool(params[2]), "textScale": params[3], "fontColor": params[4],
+            "borderSize": params[5], "borderColor": params[6], "backgroundColor": params[7],
+            "backgroundOpacity": params[8],
         }
         return []
 

@@ -94,6 +94,7 @@ class Config:
                         CREATE TABLE IF NOT EXISTS user_preferences (
                             jellyfin_user_id TEXT PRIMARY KEY NOT NULL,
                             locale TEXT NOT NULL DEFAULT 'en',
+                            subtitle_font_family TEXT NOT NULL DEFAULT 'sans',
                             subtitle_text_scale REAL NOT NULL DEFAULT 100,
                             subtitle_font_color TEXT NOT NULL DEFAULT '#ffffff',
                             subtitle_border_size REAL NOT NULL DEFAULT 0,
@@ -104,6 +105,7 @@ class Config:
                         "columns": {
                             "jellyfin_user_id": "TEXT NOT NULL",
                             "locale": "TEXT NOT NULL DEFAULT 'en'",
+                            "subtitle_font_family": "TEXT NOT NULL DEFAULT 'sans'",
                             "subtitle_text_scale": "REAL NOT NULL DEFAULT 100",
                             "subtitle_font_color": "TEXT NOT NULL DEFAULT '#ffffff'",
                             "subtitle_border_size": "REAL NOT NULL DEFAULT 0",

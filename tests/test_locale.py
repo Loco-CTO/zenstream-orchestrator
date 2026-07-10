@@ -8,7 +8,7 @@ from flask import Flask
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "orchestrator"))
 
 from api.zenstream.locale import LocalePreference
-from app.models.preference import UserPreference
+from app.models.preference import DEFAULT_SUBTITLE_STYLE, UserPreference, _validate_subtitle_style
 from jellyfin.api_service import _build_auth_header, authenticated_user_id
 
 
@@ -21,6 +21,28 @@ class FakeDatabase:
             locale = self.values.get(params[0])
             return [(locale,)] if locale else []
         self.values[params[0]] = params[1]
+        return []
+
+
+class FakeSubtitleDatabase:
+    def __init__(self):
+        self.values = {}
+
+    def execute(self, query, params):
+        if query.lstrip().startswith("SELECT"):
+            style = self.values.get(params[0])
+            if not style:
+                return []
+            return [(
+                style["fontFamily"], style["textScale"], style["fontColor"],
+                style["borderSize"], style["borderColor"], style["backgroundColor"],
+                style["backgroundOpacity"],
+            )]
+        self.values[params[0]] = {
+            "fontFamily": params[1], "textScale": params[2], "fontColor": params[3],
+            "borderSize": params[4], "borderColor": params[5], "backgroundColor": params[6],
+            "backgroundOpacity": params[7],
+        }
         return []
 
 
@@ -48,6 +70,17 @@ class PreferenceModelTests(unittest.TestCase):
         first.set_locale("ja")
         self.assertEqual(first.get_locale(), "ja")
         self.assertEqual(second.get_locale(), "en")
+
+    def test_persists_subtitle_font_family_with_the_style(self):
+        self.preference._db = FakeSubtitleDatabase()
+        style = {**DEFAULT_SUBTITLE_STYLE, "fontFamily": "serif", "textScale": 125}
+        self.assertEqual(self.preference.get_subtitle_style(), DEFAULT_SUBTITLE_STYLE)
+        self.assertEqual(self.preference.set_subtitle_style(style), style)
+        self.assertEqual(self.preference.get_subtitle_style(), style)
+
+    def test_rejects_unknown_subtitle_font_family(self):
+        with self.assertRaises(ValueError):
+            _validate_subtitle_style({"fontFamily": "comic-sans"})
 
 
 class JellyfinAuthenticationTests(unittest.TestCase):

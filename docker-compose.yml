@@ -11,7 +11,7 @@ services:
       ORCHESTRATOR_HOST: 0.0.0.0
       ORCHESTRATOR_PORT: 9088
     volumes:
-      - orchestrator-sqlite:/app/orchestrator/sqlite
+      - orchestrator-sqlite:/app/sqlite
     restart: unless-stopped
 
 volumes:

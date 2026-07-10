@@ -93,11 +93,23 @@ class Config:
                         "create": """
                         CREATE TABLE IF NOT EXISTS user_preferences (
                             jellyfin_user_id TEXT PRIMARY KEY NOT NULL,
-                            locale TEXT NOT NULL DEFAULT 'en'
+                            locale TEXT NOT NULL DEFAULT 'en',
+                            subtitle_text_scale REAL NOT NULL DEFAULT 100,
+                            subtitle_font_color TEXT NOT NULL DEFAULT '#ffffff',
+                            subtitle_border_size REAL NOT NULL DEFAULT 0,
+                            subtitle_border_color TEXT NOT NULL DEFAULT '#000000',
+                            subtitle_background_color TEXT NOT NULL DEFAULT '#000000',
+                            subtitle_background_opacity REAL NOT NULL DEFAULT 0
                         )""",
                         "columns": {
                             "jellyfin_user_id": "TEXT NOT NULL",
                             "locale": "TEXT NOT NULL DEFAULT 'en'",
+                            "subtitle_text_scale": "REAL NOT NULL DEFAULT 100",
+                            "subtitle_font_color": "TEXT NOT NULL DEFAULT '#ffffff'",
+                            "subtitle_border_size": "REAL NOT NULL DEFAULT 0",
+                            "subtitle_border_color": "TEXT NOT NULL DEFAULT '#000000'",
+                            "subtitle_background_color": "TEXT NOT NULL DEFAULT '#000000'",
+                            "subtitle_background_opacity": "REAL NOT NULL DEFAULT 0",
                         },
                     },
                 },

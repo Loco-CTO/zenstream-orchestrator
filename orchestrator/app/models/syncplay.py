@@ -21,6 +21,12 @@ class SyncplayGroup:
     def member(self,user): return bool(self.db.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=?",(self.id,user)))
     def join(self,user,name): self.db.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES (?,?,?) ON CONFLICT(group_id,user_id) DO UPDATE SET username=excluded.username",(self.id,user,name))
     def leave(self,user): self.db.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?",(self.id,user))
+    def waiting_for_members(self):
+        members=self.db.execute("SELECT viewing,loading FROM syncplay_members WHERE group_id=?",(self.id,))
+        return any(not viewing or loading for viewing,loading in members)
+    def begin_media(self,item_id,position):
+        self.db.execute("UPDATE syncplay_members SET viewing=0,loading=1 WHERE group_id=?",(self.id,))
+        return self.update(item_id=item_id,position=position,playing=0,resume=1)
     def update(self, **values):
         state=self.state(); values["revision"]=state["revision"]+1; values["updated"]=time.time()
         fields=','.join(f"{key}=?" for key in values); self.db.execute(f"UPDATE syncplay_groups SET {fields} WHERE id=?",tuple(values.values())+(self.id,)); return self.state()

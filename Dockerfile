@@ -3,9 +3,9 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     ORCHESTRATOR_HOST=0.0.0.0 \
-    ORCHESTRATOR_PORT=9090
+    ORCHESTRATOR_PORT=9088
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY orchestrator/ ./orchestrator/
-EXPOSE 9090
+EXPOSE 9088
 CMD ["python", "orchestrator/init.py"]

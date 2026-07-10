@@ -4,12 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "${ORCHESTRATOR_PORT:-9090}:9090"
+      - "${ORCHESTRATOR_PORT:-9088}:9088"
     environment:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY}
       JELLYFIN_URL: ${JELLYFIN_URL:?Set JELLYFIN_URL}
       ORCHESTRATOR_HOST: 0.0.0.0
-      ORCHESTRATOR_PORT: 9090
+      ORCHESTRATOR_PORT: 9088
     volumes:
       - orchestrator-sqlite:/app/orchestrator/sqlite
     restart: unless-stopped

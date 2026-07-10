@@ -7,10 +7,11 @@ on:
         description: Version component to bump
         required: true
         type: choice
+        default: fix
         options:
-          - major
-          - minor
           - fix
+          - minor
+          - major
 
 permissions:
   contents: write

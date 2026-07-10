@@ -11,7 +11,7 @@ from .user import (
     me,
     register,
 )
-from .zenstream import locale, subtitles
+from .zenstream import locale, subtitles, syncplay
 
 api_namespaces = [
     api_namespace_user,

@@ -116,6 +116,8 @@ class Config:
                             "subtitle_background_opacity": "REAL NOT NULL DEFAULT 0",
                         },
                     },
+                    "syncplay_groups": {"create": """CREATE TABLE IF NOT EXISTS syncplay_groups (id TEXT PRIMARY KEY, host_user_id TEXT NOT NULL, host_name TEXT NOT NULL, allow_controls INTEGER NOT NULL DEFAULT 0, item_id TEXT, position REAL NOT NULL DEFAULT 0, playing INTEGER NOT NULL DEFAULT 0, resume INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, ended INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL)""", "columns": {"id":"TEXT", "host_user_id":"TEXT", "host_name":"TEXT", "allow_controls":"INTEGER NOT NULL DEFAULT 0", "item_id":"TEXT", "position":"REAL NOT NULL DEFAULT 0", "playing":"INTEGER NOT NULL DEFAULT 0", "resume":"INTEGER NOT NULL DEFAULT 0", "revision":"INTEGER NOT NULL DEFAULT 0", "ended":"INTEGER NOT NULL DEFAULT 0", "updated":"REAL NOT NULL DEFAULT 0"}},
+                    "syncplay_members": {"create": """CREATE TABLE IF NOT EXISTS syncplay_members (group_id TEXT NOT NULL, user_id TEXT NOT NULL, username TEXT NOT NULL, viewing INTEGER NOT NULL DEFAULT 0, loading INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (group_id, user_id))""", "columns": {"group_id":"TEXT", "user_id":"TEXT", "username":"TEXT", "viewing":"INTEGER NOT NULL DEFAULT 0", "loading":"INTEGER NOT NULL DEFAULT 0"}},
                 },
             },
             db_file=os.path.join(os.getcwd(), "sqlite/orchestrator.db"),

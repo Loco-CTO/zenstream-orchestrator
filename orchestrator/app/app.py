@@ -87,10 +87,14 @@ class Orchestrator:
             self.app.run(
                 debug=True,
                 host="127.0.0.1",
-                port=9090,
+                port=int(os.getenv("ORCHESTRATOR_PORT", "9090")),
                 use_reloader=os.getenv("USE_RELOADER", "").lower()
                 in {"1", "true", "yes"},
             )
         else:
             self.logger.info("Serving Orchestrator...")
-            serve(self.app, host="127.0.0.1", port=9090)
+            serve(
+                self.app,
+                host=os.getenv("ORCHESTRATOR_HOST", "127.0.0.1"),
+                port=int(os.getenv("ORCHESTRATOR_PORT", "9090")),
+            )

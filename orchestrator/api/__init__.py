@@ -1,27 +1,19 @@
-import os
-import importlib
 from .user import api_namespace_user
 from .zenstream import api_namespace_zs
+
+from .user import (
+    authenticate,
+    check_invite,
+    delete_invite,
+    generate_invite,
+    login,
+    logout,
+    me,
+    register,
+)
+from .zenstream import locale, subtitles
 
 api_namespaces = [
     api_namespace_user,
     api_namespace_zs,
 ]
-
-endpoints = os.path.join(os.path.dirname(__file__))
-
-
-def list_folders(directory):
-    return [
-        name
-        for name in os.listdir(directory)
-        if os.path.isdir(os.path.join(directory, name))
-    ]
-
-
-for endpoint in list_folders(endpoints):
-    endpoint_path = os.path.join(endpoints, endpoint)
-    for method in os.listdir(endpoint_path):
-        if method.endswith(".py") and method != "__init__.py":
-            module_name = f"api.{endpoint}.{method[:-3]}"
-            importlib.import_module(module_name)

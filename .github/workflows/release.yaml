@@ -1,0 +1,85 @@
+name: Version and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version component to bump
+        required: true
+        type: choice
+        options:
+          - major
+          - minor
+          - fix
+
+permissions:
+  contents: write
+
+concurrency:
+  group: version-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Bump orchestrator version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          version=$(sed -nE 's/^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' orchestrator/version.py)
+          [ -n "$version" ] || { echo 'Could not read orchestrator version.' >&2; exit 1; }
+          IFS=. read -r major minor fix <<< "$version"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; fix=0 ;;
+            minor) minor=$((minor + 1)); fix=0 ;;
+            fix) fix=$((fix + 1)) ;;
+            *) echo "Unsupported bump: $BUMP" >&2; exit 1 ;;
+          esac
+          new_version="$major.$minor.$fix"
+          tag="v$new_version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Release tag $tag already exists." >&2
+            exit 1
+          fi
+          sed -i "s/^__version__ = \"$version\"$/__version__ = \"$new_version\"/" orchestrator/version.py
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push main
+        id: commit
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add orchestrator/version.py
+          git commit -m "chore: release v$VERSION"
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Align stable with main
+        run: |
+          git fetch origin stable || true
+          stable_sha=$(git rev-parse refs/remotes/origin/stable 2>/dev/null || printf '%040d' 0)
+          git push origin "HEAD:stable" --force-with-lease="refs/heads/stable:$stable_sha"
+
+      - name: Create GitHub release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: '${{ steps.version.outputs.tag }}',
+              target_commitish: '${{ steps.commit.outputs.sha }}',
+              generate_release_notes: true,
+              name: '${{ steps.version.outputs.tag }}'
+            });

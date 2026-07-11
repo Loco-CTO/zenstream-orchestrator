@@ -21,12 +21,12 @@ class SyncplayGroup:
 
     def _state(self, cursor, include_ended=False):
         ended = "" if include_ended else " AND ended=0"
-        cursor.execute("SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,media_generation,updated,ended FROM syncplay_groups WHERE id=?" + ended, (self.id,))
+        cursor.execute("SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,timeline_revision,media_generation,anchor_position,anchor_time,effective_at,playback_state,pause_reason,updated,ended FROM syncplay_groups WHERE id=?" + ended, (self.id,))
         r = cursor.fetchone()
         if not r: return None
         cursor.execute("SELECT user_id,username,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
         members = cursor.fetchall()
-        return {"id": self.id, "name": f"{r[1]}'s group", "hostUserId": r[0], "hostName": r[1], "allowViewerControls": bool(r[2]), "itemId": r[3], "position": r[4], "playing": bool(r[5]), "resumeWhenReady": bool(r[6]), "revision": r[7], "mediaGeneration": r[8], "updatedAt": r[9], "ended": bool(r[10]), "members": [{"userId": m[0], "username": m[1], "viewing": bool(m[2]), "loading": bool(m[3]), "readyGeneration": m[4], "role": "host" if m[0] == r[0] else "viewer"} for m in members]}
+        return {"id": self.id, "name": f"{r[1]}'s group", "hostUserId": r[0], "hostName": r[1], "allowViewerControls": bool(r[2]), "itemId": r[3], "position": r[4], "playing": bool(r[5]), "resumeWhenReady": bool(r[6]), "revision": r[7], "groupRevision": r[7], "timelineRevision": r[8], "mediaGeneration": r[9], "anchorPosition": r[10], "anchorServerTime": r[11], "effectiveAt": r[12], "playbackState": r[13], "pauseReason": r[14], "updatedAt": r[15], "ended": bool(r[16]), "members": [{"userId": m[0], "username": m[1], "viewing": bool(m[2]), "loading": bool(m[3]), "readyGeneration": m[4], "role": "host" if m[0] == r[0] else "viewer"} for m in members]}
 
     def state(self):
         with self.db.transaction() as cursor: return self._state(cursor)
@@ -60,8 +60,9 @@ class SyncplayGroup:
             self._store(cursor, operation_id, user, result)
             return result
 
-    def transition(self, cursor, state, **values):
+    def transition(self, cursor, state, timeline=False, **values):
         values["revision"] = state["revision"] + 1
+        if timeline: values["timeline_revision"] = state["timelineRevision"] + 1
         values["updated"] = time.time()
         fields = ",".join(f"{key}=?" for key in values)
         cursor.execute(f"UPDATE syncplay_groups SET {fields} WHERE id=?", tuple(values.values()) + (self.id,))

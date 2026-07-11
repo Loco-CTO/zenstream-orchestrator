@@ -16,7 +16,9 @@ class MemoryDatabase:
             CREATE TABLE syncplay_groups (
                 id TEXT PRIMARY KEY, host_user_id TEXT, host_name TEXT,
                 allow_controls INTEGER, item_id TEXT, position REAL, playing INTEGER,
-                resume INTEGER, revision INTEGER, media_generation INTEGER, ended INTEGER, updated REAL
+                resume INTEGER, revision INTEGER, timeline_revision INTEGER, media_generation INTEGER,
+                anchor_position REAL, anchor_time REAL, effective_at REAL, playback_state TEXT, pause_reason TEXT,
+                ended INTEGER, updated REAL
             );
             CREATE TABLE syncplay_members (
                 group_id TEXT, user_id TEXT, username TEXT, viewing INTEGER,
@@ -46,8 +48,8 @@ class SyncplayReadinessTests(unittest.TestCase):
     def setUp(self):
         self.database = MemoryDatabase()
         self.database.execute(
-            "INSERT INTO syncplay_groups VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("group", "host", "Alex", 0, "old-item", 3, 1, 0, 4, 0, 0, 0),
+            "INSERT INTO syncplay_groups VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("group", "host", "Alex", 0, "old-item", 3, 1, 0, 4, 0, 0, 3, 0, 0, "playing", None, 0, 0),
         )
         for user in ("host", "viewer"):
             self.database.execute(

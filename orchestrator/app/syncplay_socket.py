@@ -1,4 +1,5 @@
 from flask import current_app, request
+import time
 from flask_socketio import SocketIO, emit
 
 from app.models.syncplay import SyncplayGroup
@@ -26,6 +27,13 @@ def connect(auth):
         return False
     current_app.logger.info("Connected Syncplay Socket.IO client for %s", user_id)
     emit("syncplay:groups", {"groups": groups()}, to=request.sid)
+
+
+@socketio.on("syncplay:clock", namespace="/syncplay")
+def clock_probe(message):
+    """Return server timestamps for an NTP-style client clock estimate."""
+    received = time.time()
+    return {"clientSentAt": (message or {}).get("clientSentAt"), "serverReceivedAt": received, "serverSentAt": time.time()}
 
 
 def broadcast_group(group):

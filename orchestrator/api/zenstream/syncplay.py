@@ -1,4 +1,5 @@
 import math
+import time
 
 from flask import request
 from flask_restx import Resource
@@ -29,6 +30,27 @@ def group_for(group_id):
 
 
 def stale(error): return {"message": "Playback state is out of date.", "group": error.state}, 409
+
+
+def projected_position(state, now=None):
+    now = time.time() if now is None else now
+    if state["playbackState"] != "playing" or now < state["effectiveAt"]:
+        return state["anchorPosition"]
+    return state["anchorPosition"] + max(0, now - state["anchorServerTime"])
+
+
+def schedule(group, cursor, state, position, reason=None):
+    now = time.time(); effective = now + 1.0
+    group.transition(cursor, state, timeline=True, position=position, playing=1, resume=0,
+                     anchor_position=position, anchor_time=effective, effective_at=effective,
+                     playback_state="playing", pause_reason=reason)
+
+
+def pause(group, cursor, state, reason):
+    now = time.time(); position = projected_position(state, now)
+    group.transition(cursor, state, timeline=True, position=position, playing=0, resume=1 if reason == "buffering" else 0,
+                     anchor_position=position, anchor_time=now, effective_at=0,
+                     playback_state="paused", pause_reason=reason)
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups")
@@ -74,7 +96,7 @@ class Group(Resource):
         try:
             def apply(cursor, state):
                 if state["hostUserId"] == user:
-                    group.transition(cursor, state, ended=1, playing=0, resume=0)
+                    group.transition(cursor, state, timeline=True, ended=1, playing=0, resume=0, playback_state="paused", effective_at=0)
                 else:
                     cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, user))
                     group.transition(cursor, state)
@@ -112,7 +134,9 @@ class Member(Resource):
                 cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, member_id))
                 generation = state["mediaGeneration"]
                 waiting = group.waiting_for_members(cursor, generation)
-                group.transition(cursor, state, playing=0 if waiting else int(state["resumeWhenReady"]), resume=int(waiting))
+                if waiting: pause(group, cursor, state, "buffering")
+                elif state["resumeWhenReady"]: schedule(group, cursor, state, projected_position(state), "buffering")
+                else: group.transition(cursor, state)
             state = group.mutate(user, expected(data), operation(data), apply)
         except PermissionError: return {"message": "Only the host can remove members."}, 403
         except ValueError: return {"message": "The host cannot remove themselves."}, 400
@@ -135,11 +159,13 @@ class Command(Resource):
                     if not isinstance(item, str): raise ValueError
                     generation = state["mediaGeneration"] + 1
                     cursor.execute("UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1,presence_sequence=0 WHERE group_id=?", (group_id,))
-                    group.transition(cursor, state, item_id=item, position=float(pos), playing=0, resume=1, media_generation=generation)
+                    group.transition(cursor, state, timeline=True, item_id=item, position=float(pos), playing=0, resume=1, media_generation=generation, anchor_position=float(pos), anchor_time=time.time(), effective_at=0, playback_state="paused", pause_reason="readiness")
                     return
                 waiting = group.waiting_for_members(cursor, state["mediaGeneration"])
-                playing = bool(data.get("playing", state["playing"])) and not waiting
-                group.transition(cursor, state, item_id=item, position=float(pos), playing=int(playing), resume=int(bool(data.get("playing")) and waiting))
+                requested = bool(data.get("playing", state["playing"]))
+                if requested and not waiting: schedule(group, cursor, state, float(pos))
+                elif requested: group.transition(cursor, state, timeline=True, item_id=item, position=float(pos), playing=0, resume=1, anchor_position=float(pos), anchor_time=time.time(), effective_at=0, playback_state="paused", pause_reason="readiness")
+                else: pause(group, cursor, state, "command")
             state = group.mutate(user, expected(data), operation(data), apply)
         except PermissionError: return {"message": "Only the host can control playback."}, 403
         except ValueError: return {"message": "A media item is required."}, 400
@@ -164,8 +190,8 @@ class Presence(Resource):
             viewing = bool(data.get("viewing")); loading = bool(data.get("loading")) if viewing else False
             cursor.execute("UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND user_id=?", (int(viewing), int(loading), generation if viewing and not loading else -1, sequence, group_id, user))
             waiting = group.waiting_for_members(cursor, generation)
-            if waiting and state["playing"]: group.transition(cursor, state, playing=0, resume=1)
-            elif not waiting and state["resumeWhenReady"]: group.transition(cursor, state, playing=1, resume=0)
+            if waiting and state["playing"]: pause(group, cursor, state, "buffering")
+            elif not waiting and state["resumeWhenReady"]: schedule(group, cursor, state, projected_position(state), "buffering")
             else: group.transition(cursor, state)
         # Presence must be allowed to land after a state update; the media generation and
         # sequence are its concurrency controls, so do not reject it by group revision.

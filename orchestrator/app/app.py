@@ -1,6 +1,5 @@
 import os
 
-from waitress import serve
 from flask import Blueprint, Flask
 from flask_restx import Api
 from logger import Logger
@@ -9,7 +8,7 @@ from flask_cors import CORS
 
 from api import api_namespaces
 from app.config import Config
-from app.syncplay_socket import syncplay_websocket
+from app.syncplay_socket import socketio
 
 
 class Orchestrator:
@@ -58,18 +57,12 @@ class Orchestrator:
 
         self.app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
         self.app.config["RESTX_MASK_SWAGGER"] = False
+        socketio.init_app(self.app)
         reloader_enabled = os.getenv("USE_RELOADER", "").lower() in {
             "1",
             "true",
             "yes",
         }
-        # Werkzeug creates a supervisor and a child process when reloading.
-        # Bind the WebSocket port only in the child process.
-        if not (os.getenv("DEBUG") and reloader_enabled) or os.getenv(
-            "WERKZEUG_RUN_MAIN"
-        ) == "true":
-            syncplay_websocket.start()
-
         api_blueprint = Blueprint("api", __name__, url_prefix="/api")
 
         self.api = Api(
@@ -96,7 +89,8 @@ class Orchestrator:
         """Serve the Orchestrator."""
         if os.getenv("DEBUG"):
             self.logger.info("Serving Orchestrator in debug mode...")
-            self.app.run(
+            socketio.run(
+                self.app,
                 debug=True,
                 host="127.0.0.1",
                 port=int(os.getenv("ORCHESTRATOR_PORT", "9090")),
@@ -105,8 +99,9 @@ class Orchestrator:
             )
         else:
             self.logger.info("Serving Orchestrator...")
-            serve(
+            socketio.run(
                 self.app,
                 host=os.getenv("ORCHESTRATOR_HOST", "127.0.0.1"),
                 port=int(os.getenv("ORCHESTRATOR_PORT", "9090")),
+                allow_unsafe_werkzeug=True,
             )

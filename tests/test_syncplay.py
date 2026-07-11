@@ -6,7 +6,7 @@ from contextlib import contextmanager
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "orchestrator"))
 
-from app.models.syncplay import SyncplayGroup
+from app.models.syncplay import StaleSyncplayState, SyncplayGroup
 
 
 class MemoryDatabase:
@@ -82,6 +82,20 @@ class SyncplayReadinessTests(unittest.TestCase):
         self.database.execute("UPDATE syncplay_members SET ready_generation=1 WHERE group_id=?", ("group",))
         with self.database.transaction() as cursor:
             self.assertFalse(self.group.waiting_for_members(cursor, 1))
+
+    def test_duplicate_operation_returns_the_original_snapshot(self):
+        def apply(cursor, old):
+            self.group.transition(cursor, old, playing=0)
+
+        first = self.group.mutate("host", 4, "pause-once", apply)
+        repeated = self.group.mutate("host", 5, "pause-once", apply)
+        self.assertEqual(first["revision"], 5)
+        self.assertEqual(repeated["revision"], 5)
+
+    def test_stale_revision_cannot_change_group_state(self):
+        with self.assertRaises(StaleSyncplayState):
+            self.group.mutate("host", 3, "stale", lambda cursor, old: self.group.transition(cursor, old, playing=0))
+        self.assertEqual(self.group.state()["revision"], 4)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from jellyfin.api_service import authenticated_user_id
 
 
 socketio = SocketIO(
-    async_mode="threading", cors_allowed_origins="*", path="api/socket.io"
+    async_mode="eventlet", cors_allowed_origins="*", path="api/socket.io"
 )
 
 

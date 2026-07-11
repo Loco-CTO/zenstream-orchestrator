@@ -22,6 +22,9 @@ class MemoryDatabase:
                 group_id TEXT, user_id TEXT, username TEXT, viewing INTEGER,
                 loading INTEGER, ready_generation INTEGER DEFAULT -1, presence_sequence INTEGER DEFAULT 0, PRIMARY KEY (group_id, user_id)
             );
+            CREATE TABLE syncplay_operations (
+                operation_id TEXT PRIMARY KEY, group_id TEXT, user_id TEXT, state TEXT
+            );
         """)
 
     def execute(self, query, params):

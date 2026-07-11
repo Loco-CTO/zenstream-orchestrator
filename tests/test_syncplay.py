@@ -99,6 +99,26 @@ class SyncplayReadinessTests(unittest.TestCase):
             self.group.mutate("host", 3, "stale", lambda cursor, old: self.group.transition(cursor, old, playing=0))
         self.assertEqual(self.group.state()["revision"], 4)
 
+    def test_disconnecting_a_viewer_releases_a_group_waiting_to_resume(self):
+        self.database.execute(
+            "UPDATE syncplay_groups SET playing=0,resume=1,playback_state='paused',pause_reason='buffering' WHERE id=?",
+            ("group",),
+        )
+
+        state = self.group.remove_disconnected_member("viewer")
+
+        self.assertTrue(state["playing"])
+        self.assertFalse(state["resumeWhenReady"])
+        self.assertEqual([member["userId"] for member in state["members"]], ["host"])
+        self.assertGreater(state["effectiveAt"], 0)
+
+    def test_disconnecting_the_host_ends_the_group(self):
+        state = self.group.remove_disconnected_member("host")
+
+        self.assertTrue(state["ended"])
+        self.assertFalse(state["playing"])
+        self.assertEqual(state["pauseReason"], "host-disconnected")
+
 
 if __name__ == "__main__":
     unittest.main()

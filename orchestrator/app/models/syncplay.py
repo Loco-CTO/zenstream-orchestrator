@@ -9,6 +9,28 @@ class StaleSyncplayState(Exception):
     def __init__(self, state): self.state = state
 
 
+def projected_position(state, now=None):
+    now = time.time() if now is None else now
+    if state["playbackState"] != "playing" or now < state["effectiveAt"]:
+        return state["anchorPosition"]
+    return state["anchorPosition"] + max(0, now - state["anchorServerTime"])
+
+
+def schedule(group, cursor, state, position, reason=None):
+    now = time.time(); effective = now + 1.0
+    group.transition(cursor, state, timeline=True, position=position, playing=1, resume=0,
+                     anchor_position=position, anchor_time=effective, effective_at=effective,
+                     playback_state="playing", pause_reason=reason)
+
+
+def pause(group, cursor, state, reason):
+    now = time.time(); position = projected_position(state, now)
+    group.transition(cursor, state, timeline=True, position=position, playing=0,
+                     resume=1 if reason == "buffering" else 0,
+                     anchor_position=position, anchor_time=now, effective_at=0,
+                     playback_state="paused", pause_reason=reason)
+
+
 class SyncplayGroup:
     def __init__(self, group_id): self.id, self.db = group_id, Config().database
 
@@ -70,3 +92,25 @@ class SyncplayGroup:
     def waiting_for_members(self, cursor, generation):
         cursor.execute("SELECT viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
         return any(not viewing or loading or ready_generation != generation for viewing, loading, ready_generation in cursor.fetchall())
+
+    def remove_disconnected_member(self, user_id):
+        """Remove a member whose final Syncplay socket did not reconnect."""
+        with self.db.transaction() as cursor:
+            state = self._state(cursor)
+            if not state: return None
+            cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user_id))
+            if not cursor.fetchone(): return None
+            if state["hostUserId"] == user_id:
+                self.transition(cursor, state, timeline=True, ended=1, playing=0, resume=0,
+                                playback_state="paused", effective_at=0,
+                                pause_reason="host-disconnected")
+            else:
+                cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user_id))
+                waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
+                if waiting and state["playing"]:
+                    pause(self, cursor, state, "buffering")
+                elif not waiting and state["resumeWhenReady"]:
+                    schedule(self, cursor, state, projected_position(state), "buffering")
+                else:
+                    self.transition(cursor, state)
+            return self._state(cursor, include_ended=True)

@@ -4,7 +4,13 @@ import time
 from flask import request
 from flask_restx import Resource
 
-from app.models.syncplay import StaleSyncplayState, SyncplayGroup
+from app.models.syncplay import (
+    StaleSyncplayState,
+    SyncplayGroup,
+    pause,
+    projected_position,
+    schedule,
+)
 from app.syncplay_socket import broadcast_group, broadcast_group_ended
 from jellyfin.api_service import authenticated_user_id
 from . import api_namespace_zs
@@ -30,27 +36,6 @@ def group_for(group_id):
 
 
 def stale(error): return {"message": "Playback state is out of date.", "group": error.state}, 409
-
-
-def projected_position(state, now=None):
-    now = time.time() if now is None else now
-    if state["playbackState"] != "playing" or now < state["effectiveAt"]:
-        return state["anchorPosition"]
-    return state["anchorPosition"] + max(0, now - state["anchorServerTime"])
-
-
-def schedule(group, cursor, state, position, reason=None):
-    now = time.time(); effective = now + 1.0
-    group.transition(cursor, state, timeline=True, position=position, playing=1, resume=0,
-                     anchor_position=position, anchor_time=effective, effective_at=effective,
-                     playback_state="playing", pause_reason=reason)
-
-
-def pause(group, cursor, state, reason):
-    now = time.time(); position = projected_position(state, now)
-    group.transition(cursor, state, timeline=True, position=position, playing=0, resume=1 if reason == "buffering" else 0,
-                     anchor_position=position, anchor_time=now, effective_at=0,
-                     playback_state="paused", pause_reason=reason)
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups")
@@ -149,13 +134,14 @@ class Command(Resource):
     def post(self, group_id):
         user, group, error = group_for(group_id)
         if error: return error
-        data = body(); pos = data.get("position")
+        data = body(); pos = data.get("position"); action = data.get("action")
         if not isinstance(pos, (int, float)) or not math.isfinite(pos) or pos < 0: return {"message": "Invalid playback position."}, 400
+        if action not in {"media", "play", "pause", "seek"}: return {"message": "Invalid playback command."}, 400
         try:
             def apply(cursor, state):
                 if user != state["hostUserId"] and not state["allowViewerControls"]: raise PermissionError
                 item = data.get("itemId", state["itemId"])
-                if data.get("action") == "media":
+                if action == "media":
                     if not isinstance(item, str): raise ValueError
                     generation = state["mediaGeneration"] + 1
                     cursor.execute("UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1,presence_sequence=0 WHERE group_id=?", (group_id,))
@@ -163,6 +149,15 @@ class Command(Resource):
                     return
                 waiting = group.waiting_for_members(cursor, state["mediaGeneration"])
                 requested = bool(data.get("playing", state["playing"]))
+                # A seek made while media is loading must keep the pending start.
+                # The local player is paused during readiness, so its raw `playing`
+                # value alone would otherwise cancel the group release.
+                if action == "seek" and state["resumeWhenReady"]:
+                    requested = True
+                elif action == "play":
+                    requested = True
+                elif action == "pause":
+                    requested = False
                 if requested and not waiting: schedule(group, cursor, state, float(pos))
                 elif requested: group.transition(cursor, state, timeline=True, item_id=item, position=float(pos), playing=0, resume=1, anchor_position=float(pos), anchor_time=time.time(), effective_at=0, playback_state="paused", pause_reason="readiness")
                 else: pause(group, cursor, state, "command")

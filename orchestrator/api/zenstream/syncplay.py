@@ -2,6 +2,7 @@ import math
 from flask import request
 from flask_restx import Resource
 from app.models.syncplay import SyncplayGroup
+from app.syncplay_socket import broadcast_group, broadcast_group_ended
 from jellyfin.api_service import authenticated_user_id
 from . import api_namespace_zs
 
@@ -41,7 +42,9 @@ class Groups(Resource):
         user = identity()
         if not user:
             return {"message": "Authentication required."}, 401
-        return SyncplayGroup.create(user, name()).state(), 201
+        state = SyncplayGroup.create(user, name()).state()
+        broadcast_group(state)
+        return state, 201
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/join")
@@ -54,7 +57,9 @@ class Join(Resource):
         if not group.state():
             return {"message": "Group not found."}, 404
         group.join(user, name())
-        return group.state(), 200
+        state = group.state()
+        broadcast_group(state)
+        return state, 200
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>")
@@ -71,8 +76,10 @@ class Group(Resource):
             group.db.execute(
                 "UPDATE syncplay_groups SET ended=1 WHERE id=?", (group_id,)
             )
+            broadcast_group_ended(group_id)
         else:
             group.leave(user)
+            broadcast_group(group.state())
         return "", 204
 
     def patch(self, group_id):
@@ -84,7 +91,9 @@ class Group(Resource):
             return {"message": "Only the host can change settings."}, 403
         if not isinstance(value, bool):
             return {"message": "allowViewerControls must be boolean."}, 400
-        return group.update(allow_controls=int(value)), 200
+        state = group.update(allow_controls=int(value))
+        broadcast_group(state)
+        return state, 200
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/command")
@@ -106,17 +115,23 @@ class Command(Resource):
         if data.get("action") == "media" and not isinstance(item, str):
             return {"message": "A media item is required."}, 400
         if data.get("action") == "media":
-            return group.begin_media(item, float(pos)), 200
+            result = group.begin_media(item, float(pos))
+            broadcast_group(result)
+            return result, 200
         if data.get("playing") and group.waiting_for_members():
-            return group.update(
+            result = group.update(
                 item_id=item, position=float(pos), playing=0, resume=1
-            ), 200
-        return group.update(
+            )
+            broadcast_group(result)
+            return result, 200
+        result = group.update(
             item_id=item,
             position=float(pos),
             playing=int(bool(data.get("playing", state["playing"]))),
             resume=0,
-        ), 200
+        )
+        broadcast_group(result)
+        return result, 200
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/presence")
@@ -135,7 +150,8 @@ class Presence(Resource):
         state = group.state()
         blocked = group.waiting_for_members()
         if blocked and state["playing"]:
-            return group.update(playing=0, resume=1), 200
+            state = group.update(playing=0, resume=1)
         if not blocked and state["resumeWhenReady"]:
-            return group.update(playing=1, resume=0), 200
+            state = group.update(playing=1, resume=0)
+        broadcast_group(state)
         return state, 200

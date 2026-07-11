@@ -9,6 +9,7 @@ from flask_cors import CORS
 
 from api import api_namespaces
 from app.config import Config
+from app.syncplay_socket import syncplay_websocket
 
 
 class Orchestrator:
@@ -57,6 +58,17 @@ class Orchestrator:
 
         self.app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
         self.app.config["RESTX_MASK_SWAGGER"] = False
+        reloader_enabled = os.getenv("USE_RELOADER", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        # Werkzeug creates a supervisor and a child process when reloading.
+        # Bind the WebSocket port only in the child process.
+        if not (os.getenv("DEBUG") and reloader_enabled) or os.getenv(
+            "WERKZEUG_RUN_MAIN"
+        ) == "true":
+            syncplay_websocket.start()
 
         api_blueprint = Blueprint("api", __name__, url_prefix="/api")
 

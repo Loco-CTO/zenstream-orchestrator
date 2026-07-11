@@ -226,6 +226,7 @@ fabric.properties
 # Database stuff
 *.sqlite
 *.db
+sqlite/
 
 #Other stuff
 .idea/codeStyles/codeStyleConfig.xml

@@ -1,6 +1,10 @@
 from .database import DatabaseHandler
 import os
 from hashlib import sha256
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Config:
@@ -35,8 +39,8 @@ class Config:
 
     def create_database(self):
         """Create the database handler."""
-        if os.path.exists(os.path.join(os.getcwd(), "sqlite")) is False:
-            os.makedirs(os.path.join(os.getcwd(), "sqlite"))
+        database_directory = PROJECT_ROOT / "sqlite"
+        database_directory.mkdir(exist_ok=True)
         self._database = DatabaseHandler(
             db_type="sqlite",
             create_query={
@@ -120,7 +124,7 @@ class Config:
                     "syncplay_members": {"create": """CREATE TABLE IF NOT EXISTS syncplay_members (group_id TEXT NOT NULL, user_id TEXT NOT NULL, username TEXT NOT NULL, viewing INTEGER NOT NULL DEFAULT 0, loading INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (group_id, user_id))""", "columns": {"group_id":"TEXT", "user_id":"TEXT", "username":"TEXT", "viewing":"INTEGER NOT NULL DEFAULT 0", "loading":"INTEGER NOT NULL DEFAULT 0"}},
                 },
             },
-            db_file=os.path.join(os.getcwd(), "sqlite/orchestrator.db"),
+            db_file=str(database_directory / "orchestrator.db"),
         )
 
         self.database.connect()

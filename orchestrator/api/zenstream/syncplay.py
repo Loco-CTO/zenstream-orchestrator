@@ -1,7 +1,9 @@
 import math
+
 from flask import request
 from flask_restx import Resource
-from app.models.syncplay import SyncplayGroup
+
+from app.models.syncplay import StaleSyncplayState, SyncplayGroup
 from app.syncplay_socket import broadcast_group, broadcast_group_ended
 from jellyfin.api_service import authenticated_user_id
 from . import api_namespace_zs
@@ -12,36 +14,33 @@ def identity():
     return authenticated_user_id(token) if token else None
 
 
-def name():
-    return request.headers.get("X-ZenStream-Username", "ZenStream")
+def name(): return request.headers.get("X-ZenStream-Username", "ZenStream")
+def body(): return request.get_json(silent=True) or {}
+def operation(data): return data.get("operationId") if isinstance(data.get("operationId"), str) else None
+def expected(data): return data.get("expectedRevision") if isinstance(data.get("expectedRevision"), int) else None
 
 
 def group_for(group_id):
-    user = identity()
-    group = SyncplayGroup(group_id)
-    if not user:
-        return None, None, ({"message": "Authentication required."}, 401)
-    if not group.state():
-        return None, None, ({"message": "Group not found."}, 404)
-    if not group.member(user):
-        return None, None, ({"message": "Join this group first."}, 403)
+    user = identity(); group = SyncplayGroup(group_id)
+    if not user: return None, None, ({"message": "Authentication required."}, 401)
+    if not group.state(): return None, None, ({"message": "Group not found."}, 404)
+    if not group.member(user): return None, None, ({"message": "Join this group first."}, 403)
     return user, group, None
+
+
+def stale(error): return {"message": "Playback state is out of date.", "group": error.state}, 409
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups")
 class Groups(Resource):
     def get(self):
-        if not identity():
-            return {"message": "Authentication required."}, 401
-        ids = SyncplayGroup("_").db.execute(
-            "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
-        )
+        if not identity(): return {"message": "Authentication required."}, 401
+        ids = SyncplayGroup("_").db.execute("SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ())
         return {"groups": [SyncplayGroup(x[0]).state() for x in ids]}, 200
 
     def post(self):
         user = identity()
-        if not user:
-            return {"message": "Authentication required."}, 401
+        if not user: return {"message": "Authentication required."}, 401
         state = SyncplayGroup.create(user, name()).state()
         broadcast_group(state)
         return state, 201
@@ -50,16 +49,16 @@ class Groups(Resource):
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/join")
 class Join(Resource):
     def post(self, group_id):
-        user = identity()
-        group = SyncplayGroup(group_id)
-        if not user:
-            return {"message": "Authentication required."}, 401
-        if not group.state():
-            return {"message": "Group not found."}, 404
-        group.join(user, name())
-        state = group.state()
-        broadcast_group(state)
-        return state, 200
+        user = identity(); group = SyncplayGroup(group_id); data = body()
+        if not user: return {"message": "Authentication required."}, 401
+        if not group.state(): return {"message": "Group not found."}, 404
+        try:
+            def apply(cursor, state):
+                cursor.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES (?,?,?) ON CONFLICT(group_id,user_id) DO UPDATE SET username=excluded.username", (group_id, user, name()))
+                group.transition(cursor, state)
+            state = group.mutate(user, expected(data), operation(data), apply)
+        except StaleSyncplayState as error: return stale(error)
+        broadcast_group(state); return state, 200
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>")
@@ -70,88 +69,105 @@ class Group(Resource):
 
     def delete(self, group_id):
         user, group, error = group_for(group_id)
-        if error:
-            return error
-        if group.state()["hostUserId"] == user:
-            group.db.execute(
-                "UPDATE syncplay_groups SET ended=1 WHERE id=?", (group_id,)
-            )
-            broadcast_group_ended(group_id)
-        else:
-            group.leave(user)
-            broadcast_group(group.state())
+        if error: return error
+        data = body()
+        try:
+            def apply(cursor, state):
+                if state["hostUserId"] == user:
+                    group.transition(cursor, state, ended=1, playing=0, resume=0)
+                else:
+                    cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, user))
+                    group.transition(cursor, state)
+            state = group.mutate(user, expected(data), operation(data), apply)
+        except StaleSyncplayState as error: return stale(error)
+        if state["ended"]: broadcast_group_ended(group_id, state["revision"])
+        else: broadcast_group(state)
         return "", 204
 
     def patch(self, group_id):
         user, group, error = group_for(group_id)
-        if error:
-            return error
-        value = (request.get_json(silent=True) or {}).get("allowViewerControls")
-        if group.state()["hostUserId"] != user:
-            return {"message": "Only the host can change settings."}, 403
-        if not isinstance(value, bool):
-            return {"message": "allowViewerControls must be boolean."}, 400
-        state = group.update(allow_controls=int(value))
-        broadcast_group(state)
-        return state, 200
+        if error: return error
+        data = body(); value = data.get("allowViewerControls")
+        if not isinstance(value, bool): return {"message": "allowViewerControls must be boolean."}, 400
+        try:
+            def apply(cursor, state):
+                if state["hostUserId"] != user: raise PermissionError
+                group.transition(cursor, state, allow_controls=int(value))
+            state = group.mutate(user, expected(data), operation(data), apply)
+        except PermissionError: return {"message": "Only the host can change settings."}, 403
+        except StaleSyncplayState as error: return stale(error)
+        broadcast_group(state); return state, 200
+
+
+@api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/members/<string:member_id>")
+class Member(Resource):
+    def delete(self, group_id, member_id):
+        user, group, error = group_for(group_id)
+        if error: return error
+        data = body()
+        try:
+            def apply(cursor, state):
+                if state["hostUserId"] != user: raise PermissionError
+                if member_id == user: raise ValueError
+                cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, member_id))
+                generation = state["mediaGeneration"]
+                waiting = group.waiting_for_members(cursor, generation)
+                group.transition(cursor, state, playing=0 if waiting else int(state["resumeWhenReady"]), resume=int(waiting))
+            state = group.mutate(user, expected(data), operation(data), apply)
+        except PermissionError: return {"message": "Only the host can remove members."}, 403
+        except ValueError: return {"message": "The host cannot remove themselves."}, 400
+        except StaleSyncplayState as error: return stale(error)
+        broadcast_group(state); return state, 200
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/command")
 class Command(Resource):
     def post(self, group_id):
         user, group, error = group_for(group_id)
-        if error:
-            return error
-        state = group.state()
-        data = request.get_json(silent=True) or {}
-        if user != state["hostUserId"] and not state["allowViewerControls"]:
-            return {"message": "Only the host can control playback."}, 403
-        if data.get("revision") != state["revision"]:
-            return {"message": "Playback state is out of date."}, 409
-        pos = data.get("position", state["position"])
-        if not isinstance(pos, (int, float)) or not math.isfinite(pos) or pos < 0:
-            return {"message": "Invalid playback position."}, 400
-        item = data.get("itemId", state["itemId"])
-        if data.get("action") == "media" and not isinstance(item, str):
-            return {"message": "A media item is required."}, 400
-        if data.get("action") == "media":
-            result = group.begin_media(item, float(pos))
-            broadcast_group(result)
-            return result, 200
-        if data.get("playing") and group.waiting_for_members():
-            result = group.update(
-                item_id=item, position=float(pos), playing=0, resume=1
-            )
-            broadcast_group(result)
-            return result, 200
-        result = group.update(
-            item_id=item,
-            position=float(pos),
-            playing=int(bool(data.get("playing", state["playing"]))),
-            resume=0,
-        )
-        broadcast_group(result)
-        return result, 200
+        if error: return error
+        data = body(); pos = data.get("position")
+        if not isinstance(pos, (int, float)) or not math.isfinite(pos) or pos < 0: return {"message": "Invalid playback position."}, 400
+        try:
+            def apply(cursor, state):
+                if user != state["hostUserId"] and not state["allowViewerControls"]: raise PermissionError
+                item = data.get("itemId", state["itemId"])
+                if data.get("action") == "media":
+                    if not isinstance(item, str): raise ValueError
+                    generation = state["mediaGeneration"] + 1
+                    cursor.execute("UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1,presence_sequence=0 WHERE group_id=?", (group_id,))
+                    group.transition(cursor, state, item_id=item, position=float(pos), playing=0, resume=1, media_generation=generation)
+                    return
+                waiting = group.waiting_for_members(cursor, state["mediaGeneration"])
+                playing = bool(data.get("playing", state["playing"])) and not waiting
+                group.transition(cursor, state, item_id=item, position=float(pos), playing=int(playing), resume=int(bool(data.get("playing")) and waiting))
+            state = group.mutate(user, expected(data), operation(data), apply)
+        except PermissionError: return {"message": "Only the host can control playback."}, 403
+        except ValueError: return {"message": "A media item is required."}, 400
+        except StaleSyncplayState as error: return stale(error)
+        broadcast_group(state); return state, 200
 
 
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/presence")
 class Presence(Resource):
     def post(self, group_id):
         user, group, error = group_for(group_id)
-        if error:
-            return error
-        data = request.get_json(silent=True) or {}
-        viewing = bool(data.get("viewing"))
-        loading = bool(data.get("loading")) if viewing else False
-        group.db.execute(
-            "UPDATE syncplay_members SET viewing=?,loading=? WHERE group_id=? AND user_id=?",
-            (int(viewing), int(loading), group_id, user),
-        )
-        state = group.state()
-        blocked = group.waiting_for_members()
-        if blocked and state["playing"]:
-            state = group.update(playing=0, resume=1)
-        if not blocked and state["resumeWhenReady"]:
-            state = group.update(playing=1, resume=0)
-        broadcast_group(state)
-        return state, 200
+        if error: return error
+        data = body(); generation = data.get("mediaGeneration"); sequence = data.get("presenceSequence")
+        if not isinstance(generation, int) or not isinstance(sequence, int): return {"message": "mediaGeneration and presenceSequence are required."}, 400
+        # Presence is intentionally an idempotent no-op when a delayed browser callback
+        # belongs to a previous item or has already been superseded.
+        def apply(cursor, state):
+            if generation != state["mediaGeneration"]: return
+            cursor.execute("SELECT presence_sequence FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, user))
+            row = cursor.fetchone()
+            if not row or sequence <= row[0]: return
+            viewing = bool(data.get("viewing")); loading = bool(data.get("loading")) if viewing else False
+            cursor.execute("UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND user_id=?", (int(viewing), int(loading), generation if viewing and not loading else -1, sequence, group_id, user))
+            waiting = group.waiting_for_members(cursor, generation)
+            if waiting and state["playing"]: group.transition(cursor, state, playing=0, resume=1)
+            elif not waiting and state["resumeWhenReady"]: group.transition(cursor, state, playing=1, resume=0)
+            else: group.transition(cursor, state)
+        # Presence must be allowed to land after a state update; the media generation and
+        # sequence are its concurrency controls, so do not reject it by group revision.
+        state = group.mutate(user, None, operation(data), apply)
+        broadcast_group(state); return state, 200

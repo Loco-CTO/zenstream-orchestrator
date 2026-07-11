@@ -33,8 +33,8 @@ def broadcast_group(group):
     socketio.emit("syncplay:group", {"group": group}, namespace="/syncplay")
 
 
-def broadcast_group_ended(group_id):
+def broadcast_group_ended(group_id, revision):
     current_app.logger.info("Broadcasting Syncplay group end for %s", group_id)
     socketio.emit(
-        "syncplay:group-ended", {"id": group_id}, namespace="/syncplay"
+        "syncplay:group-ended", {"id": group_id, "revision": revision}, namespace="/syncplay"
     )

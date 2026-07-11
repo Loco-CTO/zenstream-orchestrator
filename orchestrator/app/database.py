@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+from contextlib import contextmanager
 
 
 class DatabaseHandler:
@@ -99,6 +100,21 @@ class DatabaseHandler:
             except sqlite3.Error as e:
                 print(f"Database error: {e}")
                 return e
+            finally:
+                cursor.close()
+
+    @contextmanager
+    def transaction(self):
+        """Run a sequence of statements as one serialized SQLite transaction."""
+        with self.lock:
+            cursor = self.connection.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                yield cursor
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
             finally:
                 cursor.close()
 

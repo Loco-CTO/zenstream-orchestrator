@@ -26,7 +26,13 @@ class SyncplaySocketTests(unittest.TestCase):
         self.assertTrue(client.is_connected("/syncplay"))
         self.assertEqual(
             client.get_received("/syncplay"),
-            [{"name": "syncplay:groups", "args": [{"groups": []}], "namespace": "/syncplay"}],
+            [
+                {
+                    "name": "syncplay:groups",
+                    "args": [{"groups": []}],
+                    "namespace": "/syncplay",
+                }
+            ],
         )
 
     @patch("app.syncplay_socket.authenticated_user_id", return_value=None)
@@ -52,6 +58,12 @@ class SyncplaySocketTests(unittest.TestCase):
         with self.app.app_context():
             broadcast_group({"id": "group"})
 
-        expected = [{"name": "syncplay:group", "args": [{"group": {"id": "group"}}], "namespace": "/syncplay"}]
+        expected = [
+            {
+                "name": "syncplay:group",
+                "args": [{"group": {"id": "group"}}],
+                "namespace": "/syncplay",
+            }
+        ]
         self.assertEqual(first.get_received("/syncplay"), expected)
         self.assertEqual(second.get_received("/syncplay"), expected)

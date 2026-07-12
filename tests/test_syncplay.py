@@ -152,14 +152,15 @@ class SyncplayMigrationTests(unittest.TestCase):
 
     def test_old_primary_key_is_rebuilt(self):
         db, _ = self.migrate(
-            "CREATE TABLE syncplay_members (group_id TEXT, user_id TEXT, username TEXT, PRIMARY KEY(group_id,user_id))"
+            "CREATE TABLE syncplay_members (group_id TEXT, user_id TEXT, username TEXT, viewing INTEGER DEFAULT 0, loading INTEGER DEFAULT 0, ready_generation INTEGER DEFAULT -1, presence_sequence INTEGER DEFAULT 0, PRIMARY KEY(group_id,user_id))",
+            participant_column=True,
         )
-        self.assertEqual(db.execute("SELECT participant_id FROM syncplay_members", ()).fetchone()[0], "__legacy__")
+        self.assertTrue(db.execute("SELECT participant_id FROM syncplay_members", ()).fetchone()[0].startswith("__legacy__:"))
         self.assertEqual(db.execute("PRAGMA index_info(sqlite_autoindex_syncplay_members_1)").fetchall(), [(0, 0, "group_id"), (1, 2, "participant_id")])
 
     def test_partial_schema_and_old_unique_index_are_rebuilt(self):
         db, _ = self.migrate(
-            "CREATE TABLE syncplay_members (group_id TEXT, user_id TEXT, username TEXT, PRIMARY KEY(group_id,user_id))",
+            "CREATE TABLE syncplay_members (group_id TEXT, user_id TEXT, username TEXT, viewing INTEGER DEFAULT 0, loading INTEGER DEFAULT 0, ready_generation INTEGER DEFAULT -1, presence_sequence INTEGER DEFAULT 0, PRIMARY KEY(group_id,user_id))",
             participant_column=True,
             unique_user=True,
         )

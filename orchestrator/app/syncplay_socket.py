@@ -121,3 +121,21 @@ def broadcast_group_ended(group_id, revision):
     socketio.emit(
         "syncplay:group-ended", {"id": group_id, "revision": revision}, namespace="/syncplay"
     )
+
+
+def notify_participant_replaced(group_id, participant_id, revision):
+    """Tell only the displaced tab to leave its player immediately."""
+    with _connections_lock:
+        sids = tuple(_participant_sids.get((None, participant_id), ()))
+        if not sids:
+            sids = tuple(
+                sid for (user_id, current_participant), connected in _participant_sids.items()
+                if current_participant == participant_id for sid in connected
+            )
+    for sid in sids:
+        socketio.emit(
+            "syncplay:participant-replaced",
+            {"id": group_id, "revision": revision},
+            namespace="/syncplay",
+            to=sid,
+        )

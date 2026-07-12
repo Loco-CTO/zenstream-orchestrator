@@ -12,7 +12,7 @@ from app.models.syncplay import (
     projected_position,
     schedule,
 )
-from app.syncplay_socket import broadcast_group, broadcast_group_ended
+from app.syncplay_socket import broadcast_group, broadcast_group_ended, notify_participant_replaced
 from jellyfin.api_service import authenticated_user_id
 from . import api_namespace_zs
 
@@ -66,17 +66,24 @@ class Join(Resource):
         user, participant = identity(); group = SyncplayGroup(group_id); data = body()
         if not user: return {"message": "Authentication required."}, 401
         if not group.state(): return {"message": "Group not found."}, 404
+        replaced_participant = None
         try:
             def apply(cursor, state):
+                nonlocal replaced_participant
                 cursor.execute("SELECT 1 FROM syncplay_members m JOIN syncplay_groups g ON g.id=m.group_id WHERE m.user_id=? AND g.ended=0 AND m.group_id<>? LIMIT 1", (user, group_id))
                 if cursor.fetchone(): raise SyncplayMembershipConflict
                 cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?", (group_id, user, participant))
                 if cursor.fetchone(): return
+                cursor.execute("SELECT participant_id FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id<>?", (group_id, user, participant))
+                replaced_participant = cursor.fetchone()
+                cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id<>?", (group_id, user, participant))
                 cursor.execute("INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)", (group_id, user, participant, name()))
                 group.transition(cursor, state)
             state = group.mutate(user, expected(data), operation(data), apply)
         except SyncplayMembershipConflict: return {"message": "You must leave your current Syncplay group before joining another."}, 409
         except StaleSyncplayState as error: return stale(error)
+        if replaced_participant:
+            notify_participant_replaced(group_id, replaced_participant[0], state["revision"])
         broadcast_group(state); return state, 200
 
 

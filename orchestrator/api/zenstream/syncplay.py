@@ -68,6 +68,8 @@ class Join(Resource):
             def apply(cursor, state):
                 cursor.execute("SELECT 1 FROM syncplay_members m JOIN syncplay_groups g ON g.id=m.group_id WHERE m.user_id=? AND g.ended=0 AND m.group_id<>? LIMIT 1", (user, group_id))
                 if cursor.fetchone(): raise SyncplayMembershipConflict
+                cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, user))
+                if cursor.fetchone(): return
                 cursor.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES (?,?,?) ON CONFLICT(group_id,user_id) DO UPDATE SET username=excluded.username", (group_id, user, name()))
                 group.transition(cursor, state)
             state = group.mutate(user, expected(data), operation(data), apply)

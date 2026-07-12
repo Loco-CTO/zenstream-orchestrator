@@ -18,11 +18,11 @@ class MemoryDatabase:
                 allow_controls INTEGER, item_id TEXT, position REAL, playing INTEGER,
                 resume INTEGER, revision INTEGER, timeline_revision INTEGER, media_generation INTEGER,
                 anchor_position REAL, anchor_time REAL, effective_at REAL, playback_state TEXT, pause_reason TEXT,
-                ended INTEGER, updated REAL
+                host_disconnected_at REAL, ended INTEGER, updated REAL
             );
             CREATE TABLE syncplay_members (
-                group_id TEXT, user_id TEXT, username TEXT, viewing INTEGER,
-                loading INTEGER, ready_generation INTEGER DEFAULT -1, presence_sequence INTEGER DEFAULT 0, PRIMARY KEY (group_id, user_id)
+                group_id TEXT, user_id TEXT, participant_id TEXT, username TEXT, viewing INTEGER,
+                loading INTEGER, ready_generation INTEGER DEFAULT -1, presence_sequence INTEGER DEFAULT 0, PRIMARY KEY (group_id, participant_id)
             );
             CREATE TABLE syncplay_operations (
                 operation_id TEXT PRIMARY KEY, group_id TEXT, user_id TEXT, state TEXT
@@ -48,13 +48,13 @@ class SyncplayReadinessTests(unittest.TestCase):
     def setUp(self):
         self.database = MemoryDatabase()
         self.database.execute(
-            "INSERT INTO syncplay_groups VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("group", "host", "Alex", 0, "old-item", 3, 1, 0, 4, 0, 0, 3, 0, 0, "playing", None, 0, 0),
+            "INSERT INTO syncplay_groups VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("group", "host", "Alex", 0, "old-item", 3, 1, 0, 4, 0, 0, 3, 0, 0, "playing", None, None, 0, 0),
         )
         for user in ("host", "viewer"):
             self.database.execute(
-                "INSERT INTO syncplay_members VALUES (?,?,?,?,?,?,?)",
-                ("group", user, user, 1, 0, 0, 0),
+                "INSERT INTO syncplay_members VALUES (?,?,?,?,?,?,?,?)",
+                ("group", user, user + "-tab", user, 1, 0, 0, 0),
             )
         self.group = SyncplayGroup("group")
         self.group.db = self.database
@@ -105,7 +105,7 @@ class SyncplayReadinessTests(unittest.TestCase):
             ("group",),
         )
 
-        state = self.group.remove_disconnected_member("viewer")
+        state = self.group.remove_disconnected_member("viewer", "viewer-tab")
 
         self.assertTrue(state["playing"])
         self.assertFalse(state["resumeWhenReady"])
@@ -113,9 +113,9 @@ class SyncplayReadinessTests(unittest.TestCase):
         self.assertGreater(state["effectiveAt"], 0)
 
     def test_disconnecting_the_host_ends_the_group(self):
-        state = self.group.remove_disconnected_member("host")
+        state = self.group.mark_host_disconnected()
 
-        self.assertTrue(state["ended"])
+        self.assertFalse(state["ended"])
         self.assertFalse(state["playing"])
         self.assertEqual(state["pauseReason"], "host-disconnected")
 

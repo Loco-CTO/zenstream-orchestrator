@@ -39,13 +39,15 @@ class SyncplayGroup:
     def __init__(self, group_id): self.id, self.db = group_id, Config().database
 
     @classmethod
-    def create(cls, user_id, username):
+    def create(cls, user_id, participant_id, username=None):
+        if username is None:
+            username, participant_id = participant_id, "legacy"
         group = cls(str(uuid.uuid4())); now = time.time()
         with group.db.transaction() as cursor:
             cursor.execute("SELECT 1 FROM syncplay_members m JOIN syncplay_groups g ON g.id=m.group_id WHERE m.user_id=? AND g.ended=0 LIMIT 1", (user_id,))
             if cursor.fetchone(): raise SyncplayMembershipConflict
             cursor.execute("INSERT INTO syncplay_groups (id,host_user_id,host_name,updated) VALUES (?,?,?,?)", (group.id, user_id, username, now))
-            cursor.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES (?,?,?)", (group.id, user_id, username))
+            cursor.execute("INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)", (group.id, user_id, participant_id, username))
         return group
 
     def _state(self, cursor, include_ended=False):
@@ -53,22 +55,25 @@ class SyncplayGroup:
         cursor.execute("SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,timeline_revision,media_generation,anchor_position,anchor_time,effective_at,playback_state,pause_reason,host_disconnected_at,updated,ended FROM syncplay_groups WHERE id=?" + ended, (self.id,))
         r = cursor.fetchone()
         if not r: return None
-        cursor.execute("SELECT user_id,username,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
+        cursor.execute("SELECT user_id,participant_id,username,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
         members = cursor.fetchall()
-        return {"id": self.id, "name": f"{r[1]}'s group", "hostUserId": r[0], "hostName": r[1], "allowViewerControls": bool(r[2]), "itemId": r[3], "position": r[4], "playing": bool(r[5]), "resumeWhenReady": bool(r[6]), "revision": r[7], "groupRevision": r[7], "timelineRevision": r[8], "mediaGeneration": r[9], "anchorPosition": r[10], "anchorServerTime": r[11], "effectiveAt": r[12], "playbackState": r[13], "pauseReason": r[14], "hostDisconnectedAt": r[15], "updatedAt": r[16], "ended": bool(r[17]), "members": [{"userId": m[0], "username": m[1], "viewing": bool(m[2]), "loading": bool(m[3]), "readyGeneration": m[4], "role": "host" if m[0] == r[0] else "viewer"} for m in members]}
+        return {"id": self.id, "name": f"{r[1]}'s group", "hostUserId": r[0], "hostName": r[1], "allowViewerControls": bool(r[2]), "itemId": r[3], "position": r[4], "playing": bool(r[5]), "resumeWhenReady": bool(r[6]), "revision": r[7], "groupRevision": r[7], "timelineRevision": r[8], "mediaGeneration": r[9], "anchorPosition": r[10], "anchorServerTime": r[11], "effectiveAt": r[12], "playbackState": r[13], "pauseReason": r[14], "hostDisconnectedAt": r[15], "updatedAt": r[16], "ended": bool(r[17]), "members": [{"userId": m[0], "participantId": m[1], "username": m[2], "viewing": bool(m[3]), "loading": bool(m[4]), "readyGeneration": m[5], "role": "host" if m[0] == r[0] else "viewer"} for m in members]}
 
     def state(self):
         with self.db.transaction() as cursor: return self._state(cursor)
 
-    def member(self, user):
+    def member(self, user, participant_id):
         with self.db.transaction() as cursor:
-            cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user))
+            cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?", (self.id, user, participant_id))
             return bool(cursor.fetchone())
 
     @classmethod
-    def active_groups_for_user(cls, user):
+    def active_groups_for_user(cls, user, participant_id=None):
         group = cls("_")
-        rows = group.db.execute("SELECT g.id FROM syncplay_groups g JOIN syncplay_members m ON m.group_id=g.id WHERE m.user_id=? AND g.ended=0", (user,))
+        query = "SELECT g.id FROM syncplay_groups g JOIN syncplay_members m ON m.group_id=g.id WHERE m.user_id=? AND g.ended=0"
+        args = [user]
+        if participant_id is not None: query += " AND m.participant_id=?"; args.append(participant_id)
+        rows = group.db.execute(query, tuple(args))
         return [cls(row[0]) for row in rows]
 
     def _remembered(self, cursor, operation_id, user):
@@ -145,15 +150,15 @@ class SyncplayGroup:
             if state: states.append(state)
         return states
 
-    def remove_disconnected_member(self, user_id):
+    def remove_disconnected_member(self, user_id, participant_id="legacy"):
         """Remove a member whose final Syncplay socket did not reconnect."""
         with self.db.transaction() as cursor:
             state = self._state(cursor)
             if not state: return None
-            cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user_id))
+            cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?", (self.id, user_id, participant_id))
             if not cursor.fetchone(): return None
             if state["hostUserId"] == user_id: return None
-            cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user_id))
+            cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?", (self.id, user_id, participant_id))
             waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
             if waiting and state["playing"]:
                 pause(self, cursor, state, "buffering")

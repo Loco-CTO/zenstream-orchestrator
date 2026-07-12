@@ -9,6 +9,10 @@ class StaleSyncplayState(Exception):
     def __init__(self, state): self.state = state
 
 
+class SyncplayMembershipConflict(Exception):
+    pass
+
+
 def projected_position(state, now=None):
     now = time.time() if now is None else now
     if state["playbackState"] != "playing" or now < state["effectiveAt"]:
@@ -37,18 +41,21 @@ class SyncplayGroup:
     @classmethod
     def create(cls, user_id, username):
         group = cls(str(uuid.uuid4())); now = time.time()
-        group.db.execute("INSERT INTO syncplay_groups (id,host_user_id,host_name,updated) VALUES (?,?,?,?)", (group.id, user_id, username, now))
-        group.db.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES (?,?,?)", (group.id, user_id, username))
+        with group.db.transaction() as cursor:
+            cursor.execute("SELECT 1 FROM syncplay_members m JOIN syncplay_groups g ON g.id=m.group_id WHERE m.user_id=? AND g.ended=0 LIMIT 1", (user_id,))
+            if cursor.fetchone(): raise SyncplayMembershipConflict
+            cursor.execute("INSERT INTO syncplay_groups (id,host_user_id,host_name,updated) VALUES (?,?,?,?)", (group.id, user_id, username, now))
+            cursor.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES (?,?,?)", (group.id, user_id, username))
         return group
 
     def _state(self, cursor, include_ended=False):
         ended = "" if include_ended else " AND ended=0"
-        cursor.execute("SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,timeline_revision,media_generation,anchor_position,anchor_time,effective_at,playback_state,pause_reason,updated,ended FROM syncplay_groups WHERE id=?" + ended, (self.id,))
+        cursor.execute("SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,timeline_revision,media_generation,anchor_position,anchor_time,effective_at,playback_state,pause_reason,host_disconnected_at,updated,ended FROM syncplay_groups WHERE id=?" + ended, (self.id,))
         r = cursor.fetchone()
         if not r: return None
         cursor.execute("SELECT user_id,username,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
         members = cursor.fetchall()
-        return {"id": self.id, "name": f"{r[1]}'s group", "hostUserId": r[0], "hostName": r[1], "allowViewerControls": bool(r[2]), "itemId": r[3], "position": r[4], "playing": bool(r[5]), "resumeWhenReady": bool(r[6]), "revision": r[7], "groupRevision": r[7], "timelineRevision": r[8], "mediaGeneration": r[9], "anchorPosition": r[10], "anchorServerTime": r[11], "effectiveAt": r[12], "playbackState": r[13], "pauseReason": r[14], "updatedAt": r[15], "ended": bool(r[16]), "members": [{"userId": m[0], "username": m[1], "viewing": bool(m[2]), "loading": bool(m[3]), "readyGeneration": m[4], "role": "host" if m[0] == r[0] else "viewer"} for m in members]}
+        return {"id": self.id, "name": f"{r[1]}'s group", "hostUserId": r[0], "hostName": r[1], "allowViewerControls": bool(r[2]), "itemId": r[3], "position": r[4], "playing": bool(r[5]), "resumeWhenReady": bool(r[6]), "revision": r[7], "groupRevision": r[7], "timelineRevision": r[8], "mediaGeneration": r[9], "anchorPosition": r[10], "anchorServerTime": r[11], "effectiveAt": r[12], "playbackState": r[13], "pauseReason": r[14], "hostDisconnectedAt": r[15], "updatedAt": r[16], "ended": bool(r[17]), "members": [{"userId": m[0], "username": m[1], "viewing": bool(m[2]), "loading": bool(m[3]), "readyGeneration": m[4], "role": "host" if m[0] == r[0] else "viewer"} for m in members]}
 
     def state(self):
         with self.db.transaction() as cursor: return self._state(cursor)
@@ -57,6 +64,12 @@ class SyncplayGroup:
         with self.db.transaction() as cursor:
             cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user))
             return bool(cursor.fetchone())
+
+    @classmethod
+    def active_groups_for_user(cls, user):
+        group = cls("_")
+        rows = group.db.execute("SELECT g.id FROM syncplay_groups g JOIN syncplay_members m ON m.group_id=g.id WHERE m.user_id=? AND g.ended=0", (user,))
+        return [cls(row[0]) for row in rows]
 
     def _remembered(self, cursor, operation_id, user):
         if not operation_id: return None
@@ -93,6 +106,45 @@ class SyncplayGroup:
         cursor.execute("SELECT viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
         return any(not viewing or loading or ready_generation != generation for viewing, loading, ready_generation in cursor.fetchall())
 
+    def mark_host_disconnected(self):
+        with self.db.transaction() as cursor:
+            state = self._state(cursor)
+            if not state or state["hostDisconnectedAt"] is not None: return state
+            now = time.time(); position = projected_position(state, now)
+            self.transition(cursor, state, timeline=True, position=position, playing=0, resume=0,
+                            anchor_position=position, anchor_time=now, effective_at=0,
+                            playback_state="paused", pause_reason="host-disconnected",
+                            host_disconnected_at=now)
+            return self._state(cursor, include_ended=True)
+
+    def clear_host_disconnected(self):
+        with self.db.transaction() as cursor:
+            state = self._state(cursor)
+            if not state or state["hostDisconnectedAt"] is None: return state
+            self.transition(cursor, state, host_disconnected_at=None)
+            return self._state(cursor, include_ended=True)
+
+    def expire_host_disconnect(self, now=None):
+        now = time.time() if now is None else now
+        with self.db.transaction() as cursor:
+            state = self._state(cursor)
+            if not state or state["hostDisconnectedAt"] is None or now < state["hostDisconnectedAt"] + 300:
+                return None
+            self.transition(cursor, state, timeline=True, ended=1, playing=0, resume=0,
+                            playback_state="paused", effective_at=0,
+                            pause_reason="host-disconnected", host_disconnected_at=None)
+            return self._state(cursor, include_ended=True)
+
+    @classmethod
+    def expire_due_host_disconnects(cls, now=None):
+        now = time.time() if now is None else now
+        rows = cls("_").db.execute("SELECT id FROM syncplay_groups WHERE ended=0 AND host_disconnected_at IS NOT NULL AND host_disconnected_at<=?", (now - 300,))
+        states = []
+        for row in rows:
+            state = cls(row[0]).expire_host_disconnect(now)
+            if state: states.append(state)
+        return states
+
     def remove_disconnected_member(self, user_id):
         """Remove a member whose final Syncplay socket did not reconnect."""
         with self.db.transaction() as cursor:
@@ -100,17 +152,13 @@ class SyncplayGroup:
             if not state: return None
             cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user_id))
             if not cursor.fetchone(): return None
-            if state["hostUserId"] == user_id:
-                self.transition(cursor, state, timeline=True, ended=1, playing=0, resume=0,
-                                playback_state="paused", effective_at=0,
-                                pause_reason="host-disconnected")
+            if state["hostUserId"] == user_id: return None
+            cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user_id))
+            waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
+            if waiting and state["playing"]:
+                pause(self, cursor, state, "buffering")
+            elif not waiting and state["resumeWhenReady"]:
+                schedule(self, cursor, state, projected_position(state), "buffering")
             else:
-                cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (self.id, user_id))
-                waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
-                if waiting and state["playing"]:
-                    pause(self, cursor, state, "buffering")
-                elif not waiting and state["resumeWhenReady"]:
-                    schedule(self, cursor, state, projected_position(state), "buffering")
-                else:
-                    self.transition(cursor, state)
+                self.transition(cursor, state)
             return self._state(cursor, include_ended=True)

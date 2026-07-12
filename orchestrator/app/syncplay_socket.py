@@ -17,6 +17,7 @@ socketio = SocketIO(
 # their final authenticated Syncplay socket has remained disconnected long
 # enough for Socket.IO to reconnect through a temporary network interruption.
 DISCONNECT_GRACE_SECONDS = 30
+HOST_DISCONNECT_GRACE_SECONDS = 300
 _connections_lock = RLock()
 _user_sids = defaultdict(set)
 _sid_users = {}
@@ -24,6 +25,8 @@ _disconnect_epochs = defaultdict(int)
 
 
 def groups():
+    for state in SyncplayGroup.expire_due_host_disconnects():
+        broadcast_group_ended(state["id"], state["revision"])
     ids = SyncplayGroup("_").db.execute(
         "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
     )
@@ -42,6 +45,10 @@ def connect(auth):
         _user_sids[user_id].add(request.sid)
         _disconnect_epochs[user_id] += 1
     current_app.logger.info("Connected Syncplay Socket.IO client for %s", user_id)
+    for group in SyncplayGroup.active_groups_for_user(user_id):
+        state = group.clear_host_disconnected()
+        if state:
+            broadcast_group(state)
     emit("syncplay:groups", {"groups": groups()}, to=request.sid)
 
 
@@ -57,7 +64,13 @@ def disconnect():
         _user_sids.pop(user_id, None)
         _disconnect_epochs[user_id] += 1
         epoch = _disconnect_epochs[user_id]
+    for group in SyncplayGroup.active_groups_for_user(user_id):
+        state = group.state()
+        if state and state["hostUserId"] == user_id:
+            marked = group.mark_host_disconnected()
+            if marked: broadcast_group(marked)
     socketio.start_background_task(expire_disconnected_user, user_id, epoch)
+    socketio.start_background_task(expire_disconnected_host, user_id, epoch)
 
 
 @socketio.on("syncplay:clock", namespace="/syncplay")
@@ -83,6 +96,17 @@ def expire_disconnected_user(user_id, epoch):
             broadcast_group_ended(state["id"], state["revision"])
         else:
             broadcast_group(state)
+
+
+def expire_disconnected_host(user_id, epoch):
+    socketio.sleep(HOST_DISCONNECT_GRACE_SECONDS)
+    with _connections_lock:
+        if _user_sids.get(user_id) or _disconnect_epochs[user_id] != epoch:
+            return
+    for group in SyncplayGroup.active_groups_for_user(user_id):
+        state = group.expire_host_disconnect()
+        if state:
+            broadcast_group_ended(state["id"], state["revision"])
 
 
 def broadcast_group(group):

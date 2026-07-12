@@ -6,6 +6,7 @@ from flask_restx import Resource
 
 from app.models.syncplay import (
     StaleSyncplayState,
+    SyncplayMembershipConflict,
     SyncplayGroup,
     pause,
     projected_position,
@@ -42,13 +43,17 @@ def stale(error): return {"message": "Playback state is out of date.", "group": 
 class Groups(Resource):
     def get(self):
         if not identity(): return {"message": "Authentication required."}, 401
+        for state in SyncplayGroup.expire_due_host_disconnects(): broadcast_group_ended(state["id"], state["revision"])
         ids = SyncplayGroup("_").db.execute("SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ())
         return {"groups": [SyncplayGroup(x[0]).state() for x in ids]}, 200
 
     def post(self):
         user = identity()
         if not user: return {"message": "Authentication required."}, 401
-        state = SyncplayGroup.create(user, name()).state()
+        try:
+            state = SyncplayGroup.create(user, name()).state()
+        except SyncplayMembershipConflict:
+            return {"message": "You already belong to an active Syncplay group."}, 409
         broadcast_group(state)
         return state, 201
 
@@ -61,9 +66,12 @@ class Join(Resource):
         if not group.state(): return {"message": "Group not found."}, 404
         try:
             def apply(cursor, state):
+                cursor.execute("SELECT 1 FROM syncplay_members m JOIN syncplay_groups g ON g.id=m.group_id WHERE m.user_id=? AND g.ended=0 AND m.group_id<>? LIMIT 1", (user, group_id))
+                if cursor.fetchone(): raise SyncplayMembershipConflict
                 cursor.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES (?,?,?) ON CONFLICT(group_id,user_id) DO UPDATE SET username=excluded.username", (group_id, user, name()))
                 group.transition(cursor, state)
             state = group.mutate(user, expected(data), operation(data), apply)
+        except SyncplayMembershipConflict: return {"message": "You must leave your current Syncplay group before joining another."}, 409
         except StaleSyncplayState as error: return stale(error)
         broadcast_group(state); return state, 200
 
@@ -81,7 +89,7 @@ class Group(Resource):
         try:
             def apply(cursor, state):
                 if state["hostUserId"] == user:
-                    group.transition(cursor, state, timeline=True, ended=1, playing=0, resume=0, playback_state="paused", effective_at=0)
+                    group.transition(cursor, state, timeline=True, ended=1, playing=0, resume=0, playback_state="paused", effective_at=0, host_disconnected_at=None)
                 else:
                     cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, user))
                     group.transition(cursor, state)

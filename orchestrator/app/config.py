@@ -130,6 +130,7 @@ class Config:
 
         self.database.connect()
         self.database.create_tables()
+        self._migrate_syncplay_members_participant_key()
         self.database.execute(
             "INSERT OR IGNORE INTO users (username, password) VALUES ('admin', ?)",
             (sha256("admin".encode()).hexdigest(),),
@@ -139,6 +140,30 @@ class Config:
     def database(self):
         """Get the database handler."""
         return self._database
+
+    def _migrate_syncplay_members_participant_key(self):
+        """Rebuild legacy SQLite membership tables so multiple tabs can coexist."""
+        if self._database.db_type != "sqlite":
+            return
+        columns = self._database.execute("PRAGMA table_info(syncplay_members)", ())
+        primary_key = [row[1] for row in columns if row[5]]
+        if primary_key != ["user_id"]:
+            return
+        with self._database.transaction() as cursor:
+            cursor.execute("ALTER TABLE syncplay_members RENAME TO syncplay_members_legacy")
+            cursor.execute("""CREATE TABLE syncplay_members (
+                group_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                participant_id TEXT NOT NULL DEFAULT '', username TEXT NOT NULL,
+                viewing INTEGER NOT NULL DEFAULT 0, loading INTEGER NOT NULL DEFAULT 0,
+                ready_generation INTEGER NOT NULL DEFAULT -1,
+                presence_sequence INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (group_id, participant_id)
+            )""")
+            cursor.execute("""INSERT INTO syncplay_members
+                (group_id,user_id,participant_id,username,viewing,loading,ready_generation,presence_sequence)
+                SELECT group_id,user_id,'',username,viewing,loading,ready_generation,presence_sequence
+                FROM syncplay_members_legacy""")
+            cursor.execute("DROP TABLE syncplay_members_legacy")
 
     @property
     def base_address(self):

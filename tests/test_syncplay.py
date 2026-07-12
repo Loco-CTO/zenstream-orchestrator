@@ -7,6 +7,7 @@ from contextlib import contextmanager
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "orchestrator"))
 
 from app.models.syncplay import StaleSyncplayState, SyncplayGroup
+from app.config import Config
 
 
 class MemoryDatabase:
@@ -118,6 +119,62 @@ class SyncplayReadinessTests(unittest.TestCase):
         self.assertFalse(state["ended"])
         self.assertFalse(state["playing"])
         self.assertEqual(state["pauseReason"], "host-disconnected")
+
+
+class SyncplayMigrationTests(unittest.TestCase):
+    def migrate(self, ddl, participant_column=False, unique_user=False):
+        db = sqlite3.connect(":memory:")
+        db.execute(ddl)
+        if participant_column:
+            db.execute("ALTER TABLE syncplay_members ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''")
+        if unique_user:
+            db.execute("CREATE UNIQUE INDEX old_member_key ON syncplay_members(group_id, user_id)")
+        db.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES ('g','u','User')")
+        db.commit()
+
+        class Database:
+            db_type = "sqlite"
+            def execute(self, query, params):
+                return db.execute(query, params).fetchall()
+            @contextmanager
+            def transaction(self):
+                try:
+                    yield db
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+
+        owner = Config.__new__(Config)
+        owner._database = Database()
+        owner._migrate_syncplay_members_participant_key()
+        return db, owner
+
+    def test_old_primary_key_is_rebuilt(self):
+        db, _ = self.migrate(
+            "CREATE TABLE syncplay_members (group_id TEXT, user_id TEXT, username TEXT, PRIMARY KEY(group_id,user_id))"
+        )
+        self.assertEqual(db.execute("SELECT participant_id FROM syncplay_members", ()).fetchone()[0], "__legacy__")
+        self.assertEqual(db.execute("PRAGMA index_info(sqlite_autoindex_syncplay_members_1)").fetchall(), [(0, 0, "group_id"), (1, 2, "participant_id")])
+
+    def test_partial_schema_and_old_unique_index_are_rebuilt(self):
+        db, _ = self.migrate(
+            "CREATE TABLE syncplay_members (group_id TEXT, user_id TEXT, username TEXT, PRIMARY KEY(group_id,user_id))",
+            participant_column=True,
+            unique_user=True,
+        )
+        db.execute("INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES ('g','u','tab-2','User')")
+        db.commit()
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM syncplay_members").fetchone()[0], 2)
+
+    def test_correct_schema_is_idempotent(self):
+        db, owner = self.migrate(
+            "CREATE TABLE syncplay_members (group_id TEXT NOT NULL, user_id TEXT NOT NULL, participant_id TEXT NOT NULL DEFAULT '', username TEXT NOT NULL, PRIMARY KEY(group_id,participant_id))"
+        )
+        before = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='syncplay_members'").fetchone()[0]
+        owner._migrate_syncplay_members_participant_key()
+        after = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='syncplay_members'").fetchone()[0]
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

@@ -146,8 +146,19 @@ class Config:
         if self._database.db_type != "sqlite":
             return
         columns = self._database.execute("PRAGMA table_info(syncplay_members)", ())
-        primary_key = [row[1] for row in columns if row[5]]
-        if primary_key != ["user_id"]:
+        column_names = {row[1] for row in columns}
+        if "participant_id" not in column_names:
+            return
+        primary_key = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
+        unique_indexes = []
+        for index in self._database.execute("PRAGMA index_list(syncplay_members)", ()):
+            if not index[2]:
+                continue
+            unique_indexes.append(tuple(row[2] for row in self._database.execute(
+                f"PRAGMA index_info([{index[1]}])", ()
+            )))
+        if primary_key == ["group_id", "participant_id"] and \
+                tuple(unique_indexes) == (("group_id", "participant_id"),):
             return
         with self._database.transaction() as cursor:
             cursor.execute("ALTER TABLE syncplay_members RENAME TO syncplay_members_legacy")
@@ -161,7 +172,9 @@ class Config:
             )""")
             cursor.execute("""INSERT INTO syncplay_members
                 (group_id,user_id,participant_id,username,viewing,loading,ready_generation,presence_sequence)
-                SELECT group_id,user_id,'',username,viewing,loading,ready_generation,presence_sequence
+                SELECT group_id,user_id,
+                    CASE WHEN participant_id IS NULL OR participant_id = '' THEN '__legacy__:' || rowid ELSE participant_id END,
+                    username,viewing,loading,ready_generation,presence_sequence
                 FROM syncplay_members_legacy""")
             cursor.execute("DROP TABLE syncplay_members_legacy")
 

@@ -43,16 +43,27 @@ class Orchestrator:
         CORS(
             self.app,
             resources={
-                r"/api/*": {
+                r"/api/.*": {
                     "origins": cors_origins,
                     "supports_credentials": True,
+                    "methods": [
+                        "GET",
+                        "POST",
+                        "PUT",
+                        "PATCH",
+                        "DELETE",
+                        "OPTIONS",
+                    ],
                     "allow_headers": [
+                        "Accept",
+                        "Authorization",
                         "Content-Type",
                         "TOKEN",
                         "Username",
                         "Password",
                         "url",
                         "X-Jellyfin-Token",
+                        "X-Zenstream-Username",
                     ],
                     "expose_headers": ["TOKEN"],
                 }

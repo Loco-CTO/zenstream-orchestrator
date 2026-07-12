@@ -64,6 +64,7 @@ class Orchestrator:
                         "url",
                         "X-Jellyfin-Token",
                         "X-Zenstream-Username",
+                        "X-ZenStream-Participant",
                     ],
                     "expose_headers": ["TOKEN"],
                 }

@@ -28,16 +28,23 @@ class Orchestrator:
         """Create the Orchestrator."""
         self.logger.info("Creating Orchestrator...")
         self.app = Flask(__name__)
+        configured_origins = os.getenv("CORS_ORIGINS", "")
+        cors_origins = [
+            origin.strip() for origin in configured_origins.split(",") if origin.strip()
+        ]
+        cors_origins.extend(
+            origin
+            for origin in [
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+            ]
+            if origin not in cors_origins
+        )
         CORS(
             self.app,
             resources={
                 r"/api/*": {
-                    "origins": [
-                        "http://localhost:3000",
-                        "http://127.0.0.1:3000",
-                        f"{Config()._base_addresses['development']}",
-                        f"{Config()._base_addresses['production']}",
-                    ],
+                    "origins": cors_origins,
                     "supports_credentials": True,
                     "allow_headers": [
                         "Content-Type",

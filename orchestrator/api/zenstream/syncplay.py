@@ -19,7 +19,9 @@ from . import api_namespace_zs
 
 def identity():
     token = request.headers.get("X-Jellyfin-Token")
-    return authenticated_user_id(token) if token else None
+    user = authenticated_user_id(token) if token else None
+    participant = request.headers.get("X-ZenStream-Participant", "")
+    return (user, participant) if user and participant else (None, None)
 
 
 def name(): return request.headers.get("X-ZenStream-Username", "ZenStream")
@@ -29,11 +31,11 @@ def expected(data): return data.get("expectedRevision") if isinstance(data.get("
 
 
 def group_for(group_id):
-    user = identity(); group = SyncplayGroup(group_id)
+    user, participant = identity(); group = SyncplayGroup(group_id)
     if not user: return None, None, ({"message": "Authentication required."}, 401)
     if not group.state(): return None, None, ({"message": "Group not found."}, 404)
-    if not group.member(user): return None, None, ({"message": "Join this group first."}, 403)
-    return user, group, None
+    if not group.member(user, participant): return None, None, ({"message": "Join this group first."}, 403)
+    return (user, participant), group, None
 
 
 def stale(error): return {"message": "Playback state is out of date.", "group": error.state}, 409
@@ -42,16 +44,16 @@ def stale(error): return {"message": "Playback state is out of date.", "group": 
 @api_namespace_zs.route("zenstream/syncplay/groups")
 class Groups(Resource):
     def get(self):
-        if not identity(): return {"message": "Authentication required."}, 401
+        if not identity()[0]: return {"message": "Authentication required."}, 401
         for state in SyncplayGroup.expire_due_host_disconnects(): broadcast_group_ended(state["id"], state["revision"])
         ids = SyncplayGroup("_").db.execute("SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ())
         return {"groups": [SyncplayGroup(x[0]).state() for x in ids]}, 200
 
     def post(self):
-        user = identity()
+        user, participant = identity()
         if not user: return {"message": "Authentication required."}, 401
         try:
-            state = SyncplayGroup.create(user, name()).state()
+            state = SyncplayGroup.create(user, participant, name()).state()
         except SyncplayMembershipConflict:
             return {"message": "You already belong to an active Syncplay group."}, 409
         broadcast_group(state)
@@ -61,16 +63,16 @@ class Groups(Resource):
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/join")
 class Join(Resource):
     def post(self, group_id):
-        user = identity(); group = SyncplayGroup(group_id); data = body()
+        user, participant = identity(); group = SyncplayGroup(group_id); data = body()
         if not user: return {"message": "Authentication required."}, 401
         if not group.state(): return {"message": "Group not found."}, 404
         try:
             def apply(cursor, state):
                 cursor.execute("SELECT 1 FROM syncplay_members m JOIN syncplay_groups g ON g.id=m.group_id WHERE m.user_id=? AND g.ended=0 AND m.group_id<>? LIMIT 1", (user, group_id))
                 if cursor.fetchone(): raise SyncplayMembershipConflict
-                cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, user))
+                cursor.execute("SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?", (group_id, user, participant))
                 if cursor.fetchone(): return
-                cursor.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES (?,?,?) ON CONFLICT(group_id,user_id) DO UPDATE SET username=excluded.username", (group_id, user, name()))
+                cursor.execute("INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)", (group_id, user, participant, name()))
                 group.transition(cursor, state)
             state = group.mutate(user, expected(data), operation(data), apply)
         except SyncplayMembershipConflict: return {"message": "You must leave your current Syncplay group before joining another."}, 409
@@ -85,15 +87,16 @@ class Group(Resource):
         return error or (group.state(), 200)
 
     def delete(self, group_id):
-        user, group, error = group_for(group_id)
+        identity_value, group, error = group_for(group_id)
         if error: return error
+        user, participant = identity_value
         data = body()
         try:
             def apply(cursor, state):
                 if state["hostUserId"] == user:
                     group.transition(cursor, state, timeline=True, ended=1, playing=0, resume=0, playback_state="paused", effective_at=0, host_disconnected_at=None)
                 else:
-                    cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, user))
+                    cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND participant_id=?", (group_id, participant))
                     group.transition(cursor, state)
             state = group.mutate(user, expected(data), operation(data), apply)
         except StaleSyncplayState as error: return stale(error)
@@ -102,8 +105,9 @@ class Group(Resource):
         return "", 204
 
     def patch(self, group_id):
-        user, group, error = group_for(group_id)
+        identity_value, group, error = group_for(group_id)
         if error: return error
+        user, participant = identity_value
         data = body(); value = data.get("allowViewerControls")
         if not isinstance(value, bool): return {"message": "allowViewerControls must be boolean."}, 400
         try:
@@ -119,8 +123,9 @@ class Group(Resource):
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/members/<string:member_id>")
 class Member(Resource):
     def delete(self, group_id, member_id):
-        user, group, error = group_for(group_id)
+        identity_value, group, error = group_for(group_id)
         if error: return error
+        user, participant = identity_value
         data = body()
         try:
             def apply(cursor, state):
@@ -142,8 +147,9 @@ class Member(Resource):
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/command")
 class Command(Resource):
     def post(self, group_id):
-        user, group, error = group_for(group_id)
+        identity_value, group, error = group_for(group_id)
         if error: return error
+        user, participant = identity_value
         data = body(); pos = data.get("position"); action = data.get("action")
         if not isinstance(pos, (int, float)) or not math.isfinite(pos) or pos < 0: return {"message": "Invalid playback position."}, 400
         if action not in {"media", "play", "pause", "seek"}: return {"message": "Invalid playback command."}, 400
@@ -181,19 +187,20 @@ class Command(Resource):
 @api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/presence")
 class Presence(Resource):
     def post(self, group_id):
-        user, group, error = group_for(group_id)
+        identity_value, group, error = group_for(group_id)
         if error: return error
+        user, participant = identity_value
         data = body(); generation = data.get("mediaGeneration"); sequence = data.get("presenceSequence")
         if not isinstance(generation, int) or not isinstance(sequence, int): return {"message": "mediaGeneration and presenceSequence are required."}, 400
         # Presence is intentionally an idempotent no-op when a delayed browser callback
         # belongs to a previous item or has already been superseded.
         def apply(cursor, state):
             if generation != state["mediaGeneration"]: return
-            cursor.execute("SELECT presence_sequence FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, user))
+            cursor.execute("SELECT presence_sequence FROM syncplay_members WHERE group_id=? AND participant_id=?", (group_id, participant))
             row = cursor.fetchone()
             if not row or sequence <= row[0]: return
             viewing = bool(data.get("viewing")); loading = bool(data.get("loading")) if viewing else False
-            cursor.execute("UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND user_id=?", (int(viewing), int(loading), generation if viewing and not loading else -1, sequence, group_id, user))
+            cursor.execute("UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND participant_id=?", (int(viewing), int(loading), generation if viewing and not loading else -1, sequence, group_id, participant))
             waiting = group.waiting_for_members(cursor, generation)
             if waiting and state["playing"]: pause(group, cursor, state, "buffering")
             elif not waiting and state["resumeWhenReady"]: schedule(group, cursor, state, projected_position(state), "buffering")

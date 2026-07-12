@@ -59,11 +59,7 @@ class Orchestrator:
             },
         )
 
-        self.logger.info(
-            "CORS_ORIGINS runtime value: %r",
-            os.getenv("CORS_ORIGINS"),
-        )
-
+        self.logger.info(f"CORS_ORIGINS runtime value: {os.getenv('CORS_ORIGINS')!r}")
         if os.getenv("SECRET_KEY") is None:
             raise Exception("Environment variable `SECRET_KEY` not set")
 

@@ -6,6 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ORCHESTRATOR_PORT=9088
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+COPY alembic.ini ./
+COPY migrations/ ./migrations/
 COPY orchestrator/ ./orchestrator/
 EXPOSE 9088
 CMD ["python", "orchestrator/init.py"]

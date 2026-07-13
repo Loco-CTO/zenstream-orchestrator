@@ -2,6 +2,8 @@ from .database import DatabaseHandler
 import os
 from hashlib import sha256
 from pathlib import Path
+from alembic import command
+from alembic.config import Config as AlembicConfig
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -128,9 +130,7 @@ class Config:
             db_file=str(database_directory / "orchestrator.db"),
         )
 
-        self.database.connect()
-        self.database.create_tables()
-        self._migrate_syncplay_members_participant_key()
+        self._run_migrations()
         self.database.execute(
             "INSERT OR IGNORE INTO users (username, password) VALUES ('admin', ?)",
             (sha256("admin".encode()).hexdigest(),),
@@ -141,42 +141,16 @@ class Config:
         """Get the database handler."""
         return self._database
 
+    def _run_migrations(self):
+        """Bring the configured database to the latest Alembic revision."""
+        alembic = AlembicConfig(str(PROJECT_ROOT / "alembic.ini"))
+        alembic.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+        alembic.set_main_option("sqlalchemy.url", f"sqlite:///{self._database.db_file}")
+        command.upgrade(alembic, "head")
+
     def _migrate_syncplay_members_participant_key(self):
-        """Rebuild legacy SQLite membership tables so multiple tabs can coexist."""
-        if self._database.db_type != "sqlite":
-            return
-        columns = self._database.execute("PRAGMA table_info(syncplay_members)", ())
-        column_names = {row[1] for row in columns}
-        if "participant_id" not in column_names:
-            return
-        primary_key = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
-        unique_indexes = []
-        for index in self._database.execute("PRAGMA index_list(syncplay_members)", ()):
-            if not index[2]:
-                continue
-            unique_indexes.append(tuple(row[2] for row in self._database.execute(
-                f"PRAGMA index_info([{index[1]}])", ()
-            )))
-        if primary_key == ["group_id", "participant_id"] and \
-                tuple(unique_indexes) == (("group_id", "participant_id"),):
-            return
-        with self._database.transaction() as cursor:
-            cursor.execute("ALTER TABLE syncplay_members RENAME TO syncplay_members_legacy")
-            cursor.execute("""CREATE TABLE syncplay_members (
-                group_id TEXT NOT NULL, user_id TEXT NOT NULL,
-                participant_id TEXT NOT NULL DEFAULT '', username TEXT NOT NULL,
-                viewing INTEGER NOT NULL DEFAULT 0, loading INTEGER NOT NULL DEFAULT 0,
-                ready_generation INTEGER NOT NULL DEFAULT -1,
-                presence_sequence INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (group_id, participant_id)
-            )""")
-            cursor.execute("""INSERT INTO syncplay_members
-                (group_id,user_id,participant_id,username,viewing,loading,ready_generation,presence_sequence)
-                SELECT group_id,user_id,
-                    CASE WHEN participant_id IS NULL OR participant_id = '' THEN '__legacy__:' || rowid ELSE participant_id END,
-                    username,viewing,loading,ready_generation,presence_sequence
-                FROM syncplay_members_legacy""")
-            cursor.execute("DROP TABLE syncplay_members_legacy")
+        """Compatibility entry point for callers of the former one-off migration."""
+        self._run_migrations()
 
     @property
     def base_address(self):

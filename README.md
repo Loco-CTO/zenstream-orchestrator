@@ -41,6 +41,13 @@ ZenStream Orchestrator is a robust application server that extends the functiona
    pip install -r requirements.txt
    ```
 
+Database schema changes are managed with Alembic. The server automatically runs
+`alembic upgrade head` during startup; to apply migrations manually, run:
+
+```sh
+alembic -c alembic.ini upgrade head
+```
+
 ## 🛠️ Usage
 
 1. Set up the environment variables:

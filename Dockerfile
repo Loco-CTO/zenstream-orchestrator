@@ -7,6 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini ./
+COPY .main-version.json ./
 COPY migrations/ ./migrations/
 COPY orchestrator/ ./orchestrator/
 EXPOSE 9088

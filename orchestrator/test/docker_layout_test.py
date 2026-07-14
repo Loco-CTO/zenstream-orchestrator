@@ -10,7 +10,9 @@ class DockerLayoutTest(unittest.TestCase):
         dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("COPY alembic.ini ./", dockerfile)
+        self.assertIn("COPY .main-version.json ./", dockerfile)
         self.assertIn("COPY migrations/ ./migrations/", dockerfile)
+        self.assertTrue((PROJECT_ROOT / ".main-version.json").is_file())
         self.assertTrue((PROJECT_ROOT / "alembic.ini").is_file())
         self.assertTrue((PROJECT_ROOT / "migrations" / "env.py").is_file())
 

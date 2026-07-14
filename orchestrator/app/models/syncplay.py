@@ -111,6 +111,17 @@ class SyncplayGroup:
         cursor.execute("SELECT viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
         return any(not viewing or loading or ready_generation != generation for viewing, loading, ready_generation in cursor.fetchall())
 
+    def reconcile_readiness(self, cursor, state):
+        """Release pending playback when every current member is media-ready."""
+        waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
+        if waiting and state["playing"]:
+            pause(self, cursor, state, "buffering")
+        elif not waiting and state["resumeWhenReady"]:
+            schedule(self, cursor, state, projected_position(state), "buffering")
+        else:
+            self.transition(cursor, state)
+        return waiting
+
     def mark_host_disconnected(self):
         with self.db.transaction() as cursor:
             state = self._state(cursor)
@@ -159,11 +170,5 @@ class SyncplayGroup:
             if not cursor.fetchone(): return None
             if state["hostUserId"] == user_id: return None
             cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?", (self.id, user_id, participant_id))
-            waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
-            if waiting and state["playing"]:
-                pause(self, cursor, state, "buffering")
-            elif not waiting and state["resumeWhenReady"]:
-                schedule(self, cursor, state, projected_position(state), "buffering")
-            else:
-                self.transition(cursor, state)
+            self.reconcile_readiness(cursor, state)
             return self._state(cursor, include_ended=True)

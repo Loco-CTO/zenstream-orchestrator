@@ -86,6 +86,26 @@ class SyncplayReadinessTests(unittest.TestCase):
         with self.database.transaction() as cursor:
             self.assertFalse(self.group.waiting_for_members(cursor, 1))
 
+    def test_single_host_presence_releases_pending_playback(self):
+        self.database.execute("DELETE FROM syncplay_members WHERE user_id=?", ("viewer",))
+
+        def apply(cursor, old):
+            cursor.execute("UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1 WHERE group_id=?", ("group",))
+            self.group.transition(cursor, old, item_id="solo-item", playing=0, resume=1,
+                                  media_generation=1, playback_state="paused", pause_reason="readiness")
+
+        state = self.group.mutate("host", 4, "solo-media", apply)
+        self.assertTrue(state["resumeWhenReady"])
+
+        def report_ready(cursor, current):
+            cursor.execute("UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE group_id=?", ("group",))
+            self.group.reconcile_readiness(cursor, current)
+
+        released = self.group.mutate("host", state["revision"], "solo-ready", report_ready)
+        self.assertTrue(released["playing"])
+        self.assertFalse(released["resumeWhenReady"])
+        self.assertEqual(released["playbackState"], "playing")
+
     def test_duplicate_operation_returns_the_original_snapshot(self):
         def apply(cursor, old):
             self.group.transition(cursor, old, playing=0)

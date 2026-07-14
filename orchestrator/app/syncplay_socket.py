@@ -18,6 +18,10 @@ socketio = SocketIO(
 # enough for Socket.IO to reconnect through a temporary network interruption.
 DISCONNECT_GRACE_SECONDS = 30
 HOST_DISCONNECT_GRACE_SECONDS = 300
+# A route transition can briefly replace the host's Socket.IO connection while
+# the player page is loading. Do not pause/broadcast a host disconnect for that
+# transient gap; the normal reconnect grace still applies afterward.
+HOST_DISCONNECT_MARK_DELAY_SECONDS = 30
 _connections_lock = RLock()
 _participant_sids = defaultdict(set)
 _sid_users = {}
@@ -67,11 +71,12 @@ def disconnect():
         _participant_sids.pop(key, None)
         _disconnect_epochs[key] += 1
         epoch = _disconnect_epochs[key]
-    for group in SyncplayGroup.active_groups_for_user(user_id, participant_id):
-        state = group.state()
-        if state and state["hostUserId"] == user_id:
-            marked = group.mark_host_disconnected()
-            if marked: broadcast_group(marked)
+    socketio.start_background_task(
+        mark_disconnected_host,
+        user_id,
+        participant_id,
+        epoch,
+    )
     socketio.start_background_task(expire_disconnected_user, user_id, participant_id, epoch)
     socketio.start_background_task(expire_disconnected_host, user_id, participant_id, epoch)
 
@@ -110,6 +115,20 @@ def expire_disconnected_host(user_id, participant_id, epoch):
         state = group.expire_host_disconnect()
         if state:
             broadcast_group_ended(state["id"], state["revision"])
+
+
+def mark_disconnected_host(user_id, participant_id, epoch):
+    """Delay host pause broadcasts until a route-transition reconnect settles."""
+    socketio.sleep(HOST_DISCONNECT_MARK_DELAY_SECONDS)
+    with _connections_lock:
+        if _participant_sids.get((user_id, participant_id)) or _disconnect_epochs[(user_id, participant_id)] != epoch:
+            return
+    for group in SyncplayGroup.active_groups_for_user(user_id, participant_id):
+        state = group.state()
+        if state and state["hostUserId"] == user_id:
+            marked = group.mark_host_disconnected()
+            if marked:
+                broadcast_group(marked)
 
 
 def broadcast_group(group):

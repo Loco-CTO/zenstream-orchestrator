@@ -1,6 +1,6 @@
 import os
 
-from flask import Blueprint, Flask
+from flask import Blueprint, Flask, redirect
 from flask_restx import Api
 from logger import Logger
 from .config import load_config
@@ -96,6 +96,11 @@ class Orchestrator:
             description="ZenStream Orchestrator API",
             doc="/swagger/",
         )
+
+        @api_blueprint.get("/docs/")
+        def api_docs():
+            """Provide a conventional alias for the generated Swagger UI."""
+            return redirect("/api/swagger/")
 
         for api_namespace in api_namespaces:
             self.api.add_namespace(api_namespace, "/")

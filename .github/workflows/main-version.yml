@@ -1,0 +1,47 @@
+name: Update main version
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: [.main-version.json]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: main-version
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Update tracked counter
+        id: counter
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$(git tag --merged HEAD --list 'v[0-9]*' --sort=-version:refname | head -n 1)
+          if [ -n "$tag" ]; then
+            count=$(git rev-list "$tag..HEAD" --count)
+          else
+            count=$(git rev-list HEAD --count)
+          fi
+          printf '{\n  "main": %s\n}\n' "$count" > .main-version.json
+          if git diff --quiet -- .main-version.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Commit counter
+        if: steps.counter.outputs.changed == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .main-version.json
+          git commit -m "chore: update main version counter"
+          git push origin HEAD:main

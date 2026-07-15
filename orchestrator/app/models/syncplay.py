@@ -120,6 +120,17 @@ class SyncplayGroup:
             self.transition(cursor, state)
         return waiting
 
+    def set_participation(self, user_id, participant_id, watching, operation_id=None):
+        """Update durable viewing intent without trusting a caller-supplied identity."""
+        def apply(cursor, state):
+            loading = int(watching and state["itemId"] is not None and state["resumeWhenReady"])
+            cursor.execute(
+                "UPDATE syncplay_members SET watching_together=?,viewing=0,loading=?,ready_generation=-1,presence_sequence=0 WHERE group_id=? AND user_id=? AND participant_id=?",
+                (int(watching), loading, self.id, user_id, participant_id),
+            )
+            self.reconcile_readiness(cursor, state)
+        return self.mutate(user_id, None, operation_id, apply)
+
     def mark_host_disconnected(self):
         with self.db.transaction() as cursor:
             state = self._state(cursor)

@@ -222,14 +222,7 @@ class Participation(Resource):
         data = body(); watching = data.get("watchingTogether")
         if not isinstance(watching, bool): return {"message": "watchingTogether must be boolean."}, 400
         try:
-            def apply(cursor, state):
-                loading = int(watching and state["itemId"] is not None and state["resumeWhenReady"])
-                cursor.execute(
-                    "UPDATE syncplay_members SET watching_together=?,viewing=0,loading=?,ready_generation=-1,presence_sequence=0 WHERE group_id=? AND participant_id=?",
-                    (int(watching), loading, group_id, participant),
-                )
-                group.reconcile_readiness(cursor, state)
-            state = group.mutate(user, None, operation(data), apply)
+            state = group.set_participation(user, participant, watching, operation(data))
         except StaleSyncplayState as error:
             return stale(error)
         broadcast_group(state); return state, 200

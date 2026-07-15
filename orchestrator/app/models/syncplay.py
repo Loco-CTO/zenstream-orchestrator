@@ -55,9 +55,9 @@ class SyncplayGroup:
         cursor.execute("SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,timeline_revision,media_generation,anchor_position,anchor_time,effective_at,playback_state,pause_reason,host_disconnected_at,updated,ended FROM syncplay_groups WHERE id=?" + ended, (self.id,))
         r = cursor.fetchone()
         if not r: return None
-        cursor.execute("SELECT user_id,participant_id,username,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
+        cursor.execute("SELECT user_id,participant_id,username,watching_together,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
         members = cursor.fetchall()
-        return {"id": self.id, "name": f"{r[1]}'s group", "hostUserId": r[0], "hostName": r[1], "allowViewerControls": bool(r[2]), "itemId": r[3], "position": r[4], "playing": bool(r[5]), "resumeWhenReady": bool(r[6]), "revision": r[7], "groupRevision": r[7], "timelineRevision": r[8], "mediaGeneration": r[9], "anchorPosition": r[10], "anchorServerTime": r[11], "effectiveAt": r[12], "playbackState": r[13], "pauseReason": r[14], "hostDisconnectedAt": r[15], "updatedAt": r[16], "ended": bool(r[17]), "members": [{"userId": m[0], "participantId": m[1], "username": m[2], "viewing": bool(m[3]), "loading": bool(m[4]), "readyGeneration": m[5], "role": "host" if m[0] == r[0] else "viewer"} for m in members]}
+        return {"id": self.id, "name": f"{r[1]}'s group", "hostUserId": r[0], "hostName": r[1], "allowViewerControls": bool(r[2]), "itemId": r[3], "position": r[4], "playing": bool(r[5]), "resumeWhenReady": bool(r[6]), "revision": r[7], "groupRevision": r[7], "timelineRevision": r[8], "mediaGeneration": r[9], "anchorPosition": r[10], "anchorServerTime": r[11], "effectiveAt": r[12], "playbackState": r[13], "pauseReason": r[14], "hostDisconnectedAt": r[15], "updatedAt": r[16], "ended": bool(r[17]), "members": [{"userId": m[0], "participantId": m[1], "username": m[2], "watchingTogether": bool(m[3]), "viewing": bool(m[4]), "loading": bool(m[5]), "readyGeneration": m[6], "role": "host" if m[0] == r[0] else "viewer"} for m in members]}
 
     def state(self):
         with self.db.transaction() as cursor: return self._state(cursor)
@@ -108,15 +108,13 @@ class SyncplayGroup:
         cursor.execute(f"UPDATE syncplay_groups SET {fields} WHERE id=?", tuple(values.values()) + (self.id,))
 
     def waiting_for_members(self, cursor, generation):
-        cursor.execute("SELECT viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?", (self.id,))
+        cursor.execute("SELECT viewing,loading,ready_generation FROM syncplay_members WHERE group_id=? AND watching_together=1", (self.id,))
         return any(not viewing or loading or ready_generation != generation for viewing, loading, ready_generation in cursor.fetchall())
 
     def reconcile_readiness(self, cursor, state):
         """Release pending playback when every current member is media-ready."""
         waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
-        if waiting and state["playing"]:
-            pause(self, cursor, state, "buffering")
-        elif not waiting and state["resumeWhenReady"]:
+        if not waiting and state["resumeWhenReady"]:
             schedule(self, cursor, state, projected_position(state), "buffering")
         else:
             self.transition(cursor, state)

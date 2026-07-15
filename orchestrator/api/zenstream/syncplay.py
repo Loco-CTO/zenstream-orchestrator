@@ -164,7 +164,8 @@ class Command(Resource):
                 if action == "media":
                     if not isinstance(item, str): raise ValueError
                     generation = state["mediaGeneration"] + 1
-                    cursor.execute("UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1,presence_sequence=0 WHERE group_id=?", (group_id,))
+                    cursor.execute("UPDATE syncplay_members SET watching_together=1 WHERE group_id=? AND participant_id=?", (group_id, participant))
+                    cursor.execute("UPDATE syncplay_members SET viewing=0,loading=CASE WHEN watching_together=1 THEN 1 ELSE 0 END,ready_generation=-1,presence_sequence=0 WHERE group_id=?", (group_id,))
                     group.transition(cursor, state, timeline=True, item_id=item, position=float(pos), playing=0, resume=1, media_generation=generation, anchor_position=float(pos), anchor_time=time.time(), effective_at=0, playback_state="paused", pause_reason="readiness")
                     return
                 requested = bool(data.get("playing", state["playing"]))
@@ -200,13 +201,35 @@ class Presence(Resource):
         # belongs to a previous item or has already been superseded.
         def apply(cursor, state):
             if generation != state["mediaGeneration"]: return
-            cursor.execute("SELECT presence_sequence FROM syncplay_members WHERE group_id=? AND participant_id=?", (group_id, participant))
+            cursor.execute("SELECT presence_sequence,watching_together FROM syncplay_members WHERE group_id=? AND participant_id=?", (group_id, participant))
             row = cursor.fetchone()
-            if not row or sequence <= row[0]: return
+            if not row or sequence <= row[0] or not row[1]: return
             viewing = bool(data.get("viewing")); loading = bool(data.get("loading")) if viewing else False
             cursor.execute("UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND participant_id=?", (int(viewing), int(loading), generation if viewing and not loading else -1, sequence, group_id, participant))
             group.reconcile_readiness(cursor, state)
         # Presence must be allowed to land after a state update; the media generation and
         # sequence are its concurrency controls, so do not reject it by group revision.
         state = group.mutate(user, None, operation(data), apply)
+        broadcast_group(state); return state, 200
+
+
+@api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/participation")
+class Participation(Resource):
+    def post(self, group_id):
+        identity_value, group, error = group_for(group_id)
+        if error: return error
+        user, participant = identity_value
+        data = body(); watching = data.get("watchingTogether")
+        if not isinstance(watching, bool): return {"message": "watchingTogether must be boolean."}, 400
+        try:
+            def apply(cursor, state):
+                loading = int(watching and state["itemId"] is not None and state["resumeWhenReady"])
+                cursor.execute(
+                    "UPDATE syncplay_members SET watching_together=?,viewing=0,loading=?,ready_generation=-1,presence_sequence=0 WHERE group_id=? AND participant_id=?",
+                    (int(watching), loading, group_id, participant),
+                )
+                group.reconcile_readiness(cursor, state)
+            state = group.mutate(user, None, operation(data), apply)
+        except StaleSyncplayState as error:
+            return stale(error)
         broadcast_group(state); return state, 200

@@ -78,7 +78,7 @@ class SyncplayModelTests(unittest.TestCase):
         self.assertTrue(state["playing"])
         self.assertFalse(next(member for member in state["members"] if member["userId"] == "viewer")["watchingTogether"])
 
-    def test_buffering_after_start_does_not_pause_room(self):
+    def test_buffering_after_start_pauses_room_until_ready(self):
         group = SyncplayGroup.create("host", "host-tab", "Host")
         def prepare(cursor, state):
             cursor.execute("UPDATE syncplay_members SET viewing=1,loading=1,ready_generation=-1 WHERE participant_id='host-tab'")
@@ -86,5 +86,13 @@ class SyncplayModelTests(unittest.TestCase):
         group.mutate("host", None, None, prepare)
         def reconcile(cursor, state): group.reconcile_readiness(cursor, state)
         state = group.mutate("host", None, None, reconcile)
+        self.assertFalse(state["playing"])
+        self.assertTrue(state["resumeWhenReady"])
+        self.assertEqual(state["pauseReason"], "buffering")
+
+        def ready(cursor, state):
+            cursor.execute("UPDATE syncplay_members SET loading=0,ready_generation=1 WHERE participant_id='host-tab'")
+            group.reconcile_readiness(cursor, state)
+        state = group.mutate("host", None, None, ready)
         self.assertTrue(state["playing"])
-        self.assertEqual(state["playbackState"], "playing")
+        self.assertFalse(state["resumeWhenReady"])

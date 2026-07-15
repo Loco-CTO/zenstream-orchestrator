@@ -112,9 +112,25 @@ class SyncplayGroup:
         return any(not viewing or loading or ready_generation != generation for viewing, loading, ready_generation in cursor.fetchall())
 
     def reconcile_readiness(self, cursor, state):
-        """Release pending playback when every current member is media-ready."""
+        """Pause for opted-in buffering members and resume when all are ready."""
         waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
-        if not waiting and state["resumeWhenReady"]:
+        if waiting and (state["playing"] or state["playbackState"] == "playing"):
+            now = time.time()
+            position = projected_position(state, now)
+            self.transition(
+                cursor,
+                state,
+                timeline=True,
+                position=position,
+                playing=0,
+                resume=1,
+                anchor_position=position,
+                anchor_time=now,
+                effective_at=0,
+                playback_state="paused",
+                pause_reason="buffering",
+            )
+        elif not waiting and state["resumeWhenReady"]:
             schedule(self, cursor, state, projected_position(state), "buffering")
         else:
             self.transition(cursor, state)

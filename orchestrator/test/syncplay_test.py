@@ -96,3 +96,21 @@ class SyncplayModelTests(unittest.TestCase):
         state = group.mutate("host", None, None, ready)
         self.assertTrue(state["playing"])
         self.assertFalse(state["resumeWhenReady"])
+
+    def test_explicit_pause_is_not_released_by_readiness(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+
+        def prepare(cursor, state):
+            cursor.execute("UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE participant_id='host-tab'")
+            group.transition(cursor, state, timeline=True, item_id="movie", media_generation=1,
+                             playing=0, resume=0, playback_state="paused", pause_reason="command")
+
+        group.mutate("host", None, None, prepare)
+
+        def reconcile(cursor, state):
+            group.reconcile_readiness(cursor, state)
+
+        state = group.mutate("host", None, None, reconcile)
+        self.assertFalse(state["playing"])
+        self.assertFalse(state["resumeWhenReady"])
+        self.assertEqual(state["pauseReason"], "command")

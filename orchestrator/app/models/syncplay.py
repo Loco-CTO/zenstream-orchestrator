@@ -130,7 +130,11 @@ class SyncplayGroup:
                 playback_state="paused",
                 pause_reason="buffering",
             )
-        elif not waiting and state["resumeWhenReady"]:
+        elif (
+            not waiting
+            and state["resumeWhenReady"]
+            and state["pauseReason"] != "command"
+        ):
             schedule(self, cursor, state, projected_position(state), "buffering")
         else:
             self.transition(cursor, state)

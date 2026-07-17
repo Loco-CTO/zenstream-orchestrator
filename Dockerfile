@@ -1,3 +1,10 @@
+FROM node:22-slim AS dashboard-build
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
 FROM python:3.10-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -9,6 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini ./
 COPY .main-version.json ./
 COPY migrations/ ./migrations/
+COPY assets/ ./assets/
 COPY orchestrator/ ./orchestrator/
+COPY --from=dashboard-build /frontend/out/ ./orchestrator/web/
 EXPOSE 9088
 CMD ["python", "orchestrator/init.py"]

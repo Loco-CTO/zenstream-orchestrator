@@ -12,6 +12,7 @@ from .user import (
     register,
 )
 from .zenstream import locale, subtitles, syncplay, version
+from . import admin
 
 api_namespaces = [
     api_namespace_user,

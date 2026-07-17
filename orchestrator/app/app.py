@@ -1,6 +1,6 @@
 import os
 
-from flask import Blueprint, Flask, redirect
+from flask import Blueprint, Flask, redirect, send_from_directory
 from flask_restx import Api
 from logger import Logger
 from .config import load_config
@@ -28,6 +28,49 @@ class Orchestrator:
         """Create the Orchestrator."""
         self.logger.info("Creating Orchestrator...")
         self.app = Flask(__name__)
+        web_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "web"))
+        if not os.path.isdir(web_root):
+            web_root = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "out")
+            )
+        assets_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "assets")
+        )
+
+        @self.app.get("/_next/<path:asset>")
+        def next_asset(asset):
+            return send_from_directory(os.path.join(web_root, "_next"), asset)
+
+        @self.app.get("/icons/<path:asset>")
+        def web_icon(asset):
+            return send_from_directory(os.path.join(web_root, "icons"), asset)
+
+        @self.app.get("/assets/<path:asset>")
+        def web_asset(asset):
+            return send_from_directory(assets_root, asset)
+
+        @self.app.get("/favicon.ico")
+        def favicon():
+            return send_from_directory(web_root, "favicon.ico")
+
+        @self.app.get("/")
+        def root():
+            return {
+                "status": "ok",
+            }
+
+        @self.app.get("/web/")
+        @self.app.get("/web/<path:asset>")
+        def web(asset=""):
+            requested = os.path.join(web_root, asset)
+            if asset and os.path.isfile(requested):
+                return send_from_directory(web_root, asset)
+            route = asset.strip("/") or "login"
+            page_path = os.path.join(web_root, "web", route, "index.html")
+            if os.path.isfile(page_path):
+                return send_from_directory(page_path.rsplit(os.sep, 1)[0], "index.html")
+            return {"message": "Dashboard assets are not installed."}, 503
+
         configured_origins = os.getenv("CORS_ORIGINS", "")
         cors_origins = [
             origin.strip() for origin in configured_origins.split(",") if origin.strip()

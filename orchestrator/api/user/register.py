@@ -31,7 +31,9 @@ class UserRegister(Resource):
         password = args.get("Password")
         if type(username) is not str or type(password) is not str:
             return {}, 403
-        invite_id = urlparse(request.headers.get("Referer")).path.split("/")[-2]
+        invite_id = args.get("url")
+        if not isinstance(invite_id, str):
+            invite_id = urlparse(request.headers.get("Referer", "")).query.split("invite=")[-1]
 
         success, invalid = User(
             username.strip(), sha256(password.strip().encode()).hexdigest()

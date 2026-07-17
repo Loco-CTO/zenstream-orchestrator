@@ -10,6 +10,10 @@ class User:
         self.password = sha256(password.encode()).hexdigest() if password else None
         self._db = Config()._database
 
+    @staticmethod
+    def hash_password(password: str) -> str:
+        return sha256(password.encode("utf-8")).hexdigest()
+
     def authenticate(self, token: str) -> bool:
         """Authenticate user with token"""
         self._db.execute(
@@ -39,7 +43,7 @@ class User:
 
         try:
             self._db.execute(
-                "INSERT INTO users VALUES (?, ?, '{}')",
+                "INSERT INTO users (username, password, disabled) VALUES (?, ?, 0)",
                 (self.username, self.password),
             )
             return True, False
@@ -49,7 +53,7 @@ class User:
     def login(self, password: str) -> str | bool:
         """Login user and return token"""
         check = self._db.execute(
-            "SELECT * FROM users WHERE username = ? AND password = ?",
+            "SELECT * FROM users WHERE username = ? AND password = ? AND (disabled = 0 OR disabled IS NULL)",
             (self.username, password),
         )
 
@@ -72,6 +76,33 @@ class User:
             return token
         return False
 
+    @classmethod
+    def list_accounts(cls) -> list[dict]:
+        db = Config().database
+        return [{"username": row[0], "disabled": bool(row[1])} for row in db.execute("SELECT username, COALESCE(disabled, 0) FROM users ORDER BY username")]
+
+    @classmethod
+    def set_disabled_account(cls, username: str, disabled: bool) -> bool:
+        db = Config().database
+        changed = db.execute("UPDATE users SET disabled = ? WHERE username = ?", (int(disabled), username))
+        if disabled:
+            db.execute("DELETE FROM client_secrets WHERE username = ?", (username,))
+        return bool(changed)
+
+    @classmethod
+    def reset_password(cls, username: str, password: str) -> bool:
+        db = Config().database
+        changed = db.execute("UPDATE users SET password = ?, disabled = 0 WHERE username = ?", (cls.hash_password(password), username))
+        db.execute("DELETE FROM client_secrets WHERE username = ?", (username,))
+        return bool(changed)
+
+    @classmethod
+    def delete_account(cls, username: str) -> bool:
+        db = Config().database
+        changed = db.execute("DELETE FROM users WHERE username = ?", (username,))
+        db.execute("DELETE FROM client_secrets WHERE username = ?", (username,))
+        return bool(changed)
+
     def logout(self, token: str) -> bool:
         """Logout user by removing token"""
         operation = self._db.execute(
@@ -87,12 +118,13 @@ class User:
         """Return user info"""
         try:
             data = self._db.execute(
-                "SELECT * FROM users WHERE username = ?",
+            "SELECT * FROM users WHERE username = ?",
                 (self.username,),
             )
             return {
                 "username": data[0][0],
                 "password": data[0][1],
+                "disabled": bool(data[0][2]) if len(data[0]) > 2 else False,
             }
         except Exception:
             return {}

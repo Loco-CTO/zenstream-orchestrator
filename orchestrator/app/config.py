@@ -38,6 +38,13 @@ class Config:
         }
 
         self.create_database()
+        from app.models.admin import Admin
+        credentials = Admin.bootstrap()
+        if credentials:
+            print("\n=== ZENSTREAM ORCHESTRATOR ROOT ADMIN ===")
+            print(f"Username: {credentials[0]}")
+            print(f"Password: {credentials[1]}")
+            print("Save these credentials now; they are shown only once.\n")
 
     def create_database(self):
         """Create the database handler."""

@@ -2,6 +2,15 @@
 
 @theme {
   --color-*: initial;
+  /* The dashboard uses Tailwind's neutral/utility colors in addition to the
+     exported ZenStream palette. Keep these explicit because the wildcard
+     reset above removes Tailwind's default color tokens. */
+  --color-white: #ffffff;
+  --color-black: #000000;
+  --color-violet-200: #ddd6fe;
+  --color-violet-300: #c4b5fd;
+  --color-violet-400: #a78bfa;
+  --color-red-200: #fecaca;
   --color-core-colors-primary: #576edf;
   --color-core-colors-secondary: #00b38f;
   --color-core-colors-tertiary: #99a9ff;

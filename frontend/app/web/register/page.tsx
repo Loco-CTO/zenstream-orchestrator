@@ -1,0 +1,10 @@
+"use client";
+import { FormEvent, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+
+export default function RegisterPage() {
+  const router = useRouter(); const [invite, setInvite] = useState(""); const [username, setUsername] = useState(""); const [password, setPassword] = useState(""); const [message, setMessage] = useState("");
+  useEffect(() => setInvite(new URLSearchParams(window.location.search).get("invite") || ""), []);
+  async function submit(event: FormEvent) { event.preventDefault(); const response = await fetch("/api/user/register", { method: "POST", headers: { Username: username, Password: password, url: invite } }); if (response.status === 201) { setMessage("Account created. Redirecting to administrator login…"); setTimeout(() => router.push("/web/login"), 900); } else setMessage("This invite is invalid or the username is already in use."); }
+  return <main className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,#251f50_0%,#07070c_55%)] p-6"><form onSubmit={submit} className="w-full max-w-md rounded-3xl border border-white/10 bg-black/25 p-8 backdrop-blur-2xl"><img src="/assets/icons/icon.png" alt="ZenStream" className="mb-5 h-14 w-14 rounded-2xl" /><p className="text-xs font-bold uppercase tracking-[.28em] text-violet-300/75">ZenStream</p><h1 className="mt-3 text-3xl font-black">Create an account</h1><div className="mt-8 space-y-4"><input required value={username} onChange={e => setUsername(e.target.value)} placeholder="Username" className="h-12 w-full rounded-xl border border-white/10 bg-white/5 px-4 outline-none placeholder:text-white/30" /><input required type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Password" className="h-12 w-full rounded-xl border border-white/10 bg-white/5 px-4 outline-none placeholder:text-white/30" /></div>{message && <p className="mt-4 text-sm text-white/60">{message}</p>}<button className="mt-6 h-12 w-full rounded-xl bg-violet-300 font-semibold text-black">Register</button></form></main>;
+}

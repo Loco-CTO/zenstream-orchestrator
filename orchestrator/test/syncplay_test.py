@@ -3,7 +3,7 @@ import unittest
 
 from app.config import Config
 from app.database import DatabaseHandler
-from app.models.syncplay import SyncplayGroup, SyncplayMembershipConflict
+from app.models.syncplay import SyncplayGroup, SyncplayMembershipConflict, StaleSyncplayState, pause, schedule
 
 
 class SyncplayModelTests(unittest.TestCase):
@@ -114,3 +114,21 @@ class SyncplayModelTests(unittest.TestCase):
         self.assertFalse(state["playing"])
         self.assertFalse(state["resumeWhenReady"])
         self.assertEqual(state["pauseReason"], "command")
+
+    def test_schedule_and_pause_preserve_authoritative_timeline(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        state = group.mutate("host", None, None, lambda cursor, current: schedule(group, cursor, current, 42))
+        self.assertTrue(state["playing"])
+        self.assertEqual(state["anchorPosition"], 42)
+        self.assertEqual(state["playbackState"], "playing")
+        paused = group.mutate("host", state["revision"], None, lambda cursor, current: pause(group, cursor, current, "command"))
+        self.assertFalse(paused["playing"])
+        self.assertEqual(paused["playbackState"], "paused")
+        self.assertEqual(paused["pauseReason"], "command")
+        self.assertGreaterEqual(paused["anchorPosition"], 42)
+
+    def test_stale_command_revision_is_rejected(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        latest = group.mutate("host", None, None, lambda cursor, state: schedule(group, cursor, state, 10))
+        with self.assertRaises(StaleSyncplayState) as error:
+            group.mutate("host", latest["revision"] - 1, "stale-command", lambda cursor, state: pause(group, cursor, state, "command"))

@@ -20,10 +20,10 @@ class DockerLayoutTest(unittest.TestCase):
         dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
         compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
-        self.assertIn("ORCHESTRATOR_PORT=9090", dockerfile)
-        self.assertIn("EXPOSE 9090", dockerfile)
-        self.assertIn("${ORCHESTRATOR_PORT:-9090}:9090", compose)
-        self.assertIn("ORCHESTRATOR_PORT: 9090", compose)
+        self.assertIn("ORCHESTRATOR_PORT=9088", dockerfile)
+        self.assertIn("EXPOSE 9088", dockerfile)
+        self.assertIn("${ORCHESTRATOR_PORT:-9088}:9088", compose)
+        self.assertIn("ORCHESTRATOR_PORT: 9088", compose)
 
     def test_docker_context_keeps_dashboard_assets(self):
         dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")

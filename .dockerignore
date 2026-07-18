@@ -8,6 +8,5 @@ __pycache__
 sqlite
 orchestrator/sqlite
 tests
-frontend
 .git
 .gitignore

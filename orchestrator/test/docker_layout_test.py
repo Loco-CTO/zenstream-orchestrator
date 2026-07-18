@@ -30,7 +30,9 @@ class DockerLayoutTest(unittest.TestCase):
         dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("COPY assets/ ./assets/", dockerfile)
+        self.assertIn("COPY frontend/ ./", dockerfile)
         self.assertNotRegex(dockerignore, r"(?m)^/?assets/?$")
+        self.assertNotRegex(dockerignore, r"(?m)^/?frontend/?$")
 
 
 if __name__ == "__main__":

@@ -420,6 +420,11 @@
   color utility to any element that depends on these defaults.
 */
 @layer base {
+  html,
+  body {
+    background: #000;
+  }
+
   *,
   ::after,
   ::before,
@@ -478,4 +483,23 @@
     background: #888;
     border-radius: 4px;
   }
+}
+
+@layer components {
+  .console-root { min-height: 100vh; background: #000; color: #f5f5f5; }
+  .console-root > header { background: #000 !important; }
+  .console-rail { background: #000; border-color: rgba(255,255,255,.08); }
+  .console-wordmark { color: #8edbc9; letter-spacing: .24em; }
+  .console-kicker { color: rgba(157,229,211,.7); letter-spacing: .16em; text-transform: uppercase; font-size: .7rem; font-weight: 700; }
+  .console-nav-active { color: #07100e; background: #8edbc9; }
+  .console-nav-link { color: rgba(220,240,235,.58); }
+  .console-nav-link:hover { color: #f5faf8; background: rgba(157,229,211,.08); }
+  .console-card { border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.025); }
+  .console-card:hover { border-color: rgba(255,255,255,.18); }
+  .console-input { border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.04); color: #f5f5f5; }
+  .console-input:focus { border-color: rgba(142,219,201,.7); }
+  .console-button { background: #8edbc9; color: #07100e; }
+  .console-button:hover { background: #a9ebdc; }
+  .console-muted { color: rgba(220,240,235,.52); }
+  .console-divider { border-color: rgba(176,220,210,.12); }
 }

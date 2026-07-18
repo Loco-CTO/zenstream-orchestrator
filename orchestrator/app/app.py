@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -111,6 +111,13 @@ def _user_headers(username: str | None, token: str | None):
     return username.strip(), token
 
 
+def _admin_headers(username: str | None, token: str | None):
+    username, token = _user_headers(username, token)
+    if not Admin(username).authenticate(token):
+        raise HTTPException(403, "Invalid administrator credentials.")
+    return username, token
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_config()
@@ -185,6 +192,65 @@ async def login(Username: str | None = Header(None), Password: str | None = Head
     if not token:
         raise HTTPException(403, "Invalid credentials.")
     return JSONResponse({}, status_code=202, headers={"TOKEN": token})
+
+
+@app.post("/api/admin/login")
+async def admin_login(Username: str | None = Header(None), Password: str | None = Header(None)):
+    username, password = _user_headers(Username, Password)
+    token = Admin(username).login(password)
+    if not token:
+        raise HTTPException(403, "Invalid administrator credentials.")
+    return JSONResponse({}, status_code=202, headers={"TOKEN": token})
+
+
+@app.post("/api/admin/logout", status_code=204)
+async def admin_logout(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    username, token = _admin_headers(Username, TOKEN)
+    Admin(username).logout(token)
+
+
+@app.get("/api/admin/overview")
+async def admin_overview(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    username, _ = _admin_headers(Username, TOKEN)
+    db = Admin(username)._db
+    counts = db.execute("SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users")[0]
+    return {"users": counts[0] or 0, "active_users": counts[1] or 0, "disabled_users": counts[2] or 0, "administrators": db.execute("SELECT COUNT(*) FROM admins WHERE disabled = 0")[0][0], "pending_invites": db.execute("SELECT COUNT(*) FROM invites")[0][0]}
+
+
+@app.get("/api/admin/accounts")
+async def admin_accounts(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    username, _ = _admin_headers(Username, TOKEN)
+    return Admin(username).list_accounts()
+
+
+@app.get("/api/admin/users")
+async def admin_users(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    _admin_headers(Username, TOKEN)
+    return User.list_accounts()
+
+
+@app.post("/api/admin/accounts", status_code=201)
+async def admin_create_account(Target_Username: str | None = Header(None), New_Password: str | None = Header(None), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    username, _ = _admin_headers(Username, TOKEN)
+    if not Target_Username or not New_Password or len(New_Password) < 8 or not Admin(username).create(Target_Username, New_Password):
+        raise HTTPException(400, "Invalid or duplicate administrator account.")
+
+
+@app.patch("/api/admin/users/{target_username}")
+async def admin_update_user(target_username: str, disabled: bool | None = Query(None), New_Password: str | None = Header(None), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    _admin_headers(Username, TOKEN)
+    if New_Password is not None:
+        if len(New_Password) < 8 or not User.reset_password(target_username, New_Password):
+            raise HTTPException(400, "Invalid password or user not found.")
+    elif disabled is None or not User.set_disabled_account(target_username, disabled):
+        raise HTTPException(404, "User not found.")
+
+
+@app.delete("/api/admin/users/{target_username}", status_code=204)
+async def admin_delete_user(target_username: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    _admin_headers(Username, TOKEN)
+    if not User.delete_account(target_username):
+        raise HTTPException(404, "User not found.")
 
 
 @app.post("/api/user/authenticate")

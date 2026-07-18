@@ -1,7 +1,7 @@
 FROM node:22-slim AS dashboard-build
 WORKDIR /frontend
 COPY frontend/package*.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
+RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 

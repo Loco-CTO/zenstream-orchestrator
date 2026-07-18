@@ -297,6 +297,14 @@ async def version():
     return {"version": __version__, "main": main}
 
 
+@app.get("/api/config")
+async def mobile_config():
+    jellyfin_url = os.getenv("JELLYFIN_URL", "").rstrip("/")
+    if not jellyfin_url:
+        raise HTTPException(503, "Jellyfin server is not configured.")
+    return {"jellyfinUrl": jellyfin_url}
+
+
 @app.get("/api/preferences/locale")
 async def get_locale(x_jellyfin_token: str | None = Header(None)):
     user_id = authenticated_user_id(x_jellyfin_token) if x_jellyfin_token else None

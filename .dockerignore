@@ -9,6 +9,5 @@ sqlite
 orchestrator/sqlite
 tests
 frontend
-assets
 .git
 .gitignore

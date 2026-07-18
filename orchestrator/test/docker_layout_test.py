@@ -25,6 +25,13 @@ class DockerLayoutTest(unittest.TestCase):
         self.assertIn("${ORCHESTRATOR_PORT:-9090}:9090", compose)
         self.assertIn("ORCHESTRATOR_PORT: 9090", compose)
 
+    def test_docker_context_keeps_dashboard_assets(self):
+        dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+        dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn("COPY assets/ ./assets/", dockerfile)
+        self.assertNotRegex(dockerignore, r"(?m)^/?assets/?$")
+
 
 if __name__ == "__main__":
     unittest.main()

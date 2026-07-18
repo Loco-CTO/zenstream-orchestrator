@@ -1,14 +1,9 @@
 import json
 from pathlib import Path
 
-from flask_restx import Resource
-
 from version import __version__
-from . import api_namespace_zs
 
-
-@api_namespace_zs.route("version")
-class Version(Resource):
+class Version:
     def get(self):
         return {"version": __version__, "main": _main_version()}, 200
 

@@ -1,20 +1,6 @@
-from .user import api_namespace_user
-from .zenstream import api_namespace_zs
+"""Legacy API package retained for model/test imports.
 
-from .user import (
-    authenticate,
-    check_invite,
-    delete_invite,
-    generate_invite,
-    login,
-    logout,
-    me,
-    register,
-)
-from .zenstream import locale, subtitles, syncplay, version
-from . import admin
+HTTP routing is implemented by :mod:`app.app` using FastAPI routers.
+"""
 
-api_namespaces = [
-    api_namespace_user,
-    api_namespace_zs,
-]
+api_namespaces = []

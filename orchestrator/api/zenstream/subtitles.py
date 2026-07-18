@@ -6,7 +6,7 @@ from jellyfin.api_service import authenticated_user_id
 from . import api_namespace_zs
 
 
-@api_namespace_zs.route("zenstream/preferences/subtitles")
+@api_namespace_zs.route("preferences/subtitles")
 class SubtitlePreference(Resource):
     def get(self):
         user_id, error = _authenticated_user()

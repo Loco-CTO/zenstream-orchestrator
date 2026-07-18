@@ -41,7 +41,7 @@ def group_for(group_id):
 def stale(error): return {"message": "Playback state is out of date.", "group": error.state}, 409
 
 
-@api_namespace_zs.route("zenstream/syncplay/groups")
+@api_namespace_zs.route("syncplay/groups")
 class Groups(Resource):
     def get(self):
         if not identity()[0]: return {"message": "Authentication required."}, 401
@@ -60,7 +60,7 @@ class Groups(Resource):
         return state, 201
 
 
-@api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/join")
+@api_namespace_zs.route("syncplay/groups/<string:group_id>/join")
 class Join(Resource):
     def post(self, group_id):
         user, participant = identity(); group = SyncplayGroup(group_id); data = body()
@@ -87,7 +87,7 @@ class Join(Resource):
         broadcast_group(state); return state, 200
 
 
-@api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>")
+@api_namespace_zs.route("syncplay/groups/<string:group_id>")
 class Group(Resource):
     def get(self, group_id):
         _, group, error = group_for(group_id)
@@ -127,7 +127,7 @@ class Group(Resource):
         broadcast_group(state); return state, 200
 
 
-@api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/members/<string:member_id>")
+@api_namespace_zs.route("syncplay/groups/<string:group_id>/members/<string:member_id>")
 class Member(Resource):
     def delete(self, group_id, member_id):
         identity_value, group, error = group_for(group_id)
@@ -148,7 +148,7 @@ class Member(Resource):
         broadcast_group(state); return state, 200
 
 
-@api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/command")
+@api_namespace_zs.route("syncplay/groups/<string:group_id>/command")
 class Command(Resource):
     def post(self, group_id):
         identity_value, group, error = group_for(group_id)
@@ -189,7 +189,7 @@ class Command(Resource):
         broadcast_group(state); return state, 200
 
 
-@api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/presence")
+@api_namespace_zs.route("syncplay/groups/<string:group_id>/presence")
 class Presence(Resource):
     def post(self, group_id):
         identity_value, group, error = group_for(group_id)
@@ -213,7 +213,7 @@ class Presence(Resource):
         broadcast_group(state); return state, 200
 
 
-@api_namespace_zs.route("zenstream/syncplay/groups/<string:group_id>/participation")
+@api_namespace_zs.route("syncplay/groups/<string:group_id>/participation")
 class Participation(Resource):
     def post(self, group_id):
         identity_value, group, error = group_for(group_id)

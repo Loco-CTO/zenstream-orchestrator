@@ -112,7 +112,7 @@ class LocaleEndpointTests(unittest.TestCase):
     def test_reads_locale_for_token_derived_user(self, _, preference):
         preference.return_value.get_locale.return_value = "ja"
         with self.app.test_request_context(
-            "/api/zenstream/preferences/locale",
+            "/api/preferences/locale",
             headers={"X-Jellyfin-Token": "valid"},
         ):
             body, status = LocalePreference().get()
@@ -120,7 +120,7 @@ class LocaleEndpointTests(unittest.TestCase):
         preference.assert_called_once_with("derived-user")
 
     def test_requires_token(self):
-        with self.app.test_request_context("/api/zenstream/preferences/locale"):
+        with self.app.test_request_context("/api/preferences/locale"):
             body, status = LocalePreference().get()
         self.assertEqual(status, 401)
         self.assertIn("authentication", body["message"].lower())
@@ -128,7 +128,7 @@ class LocaleEndpointTests(unittest.TestCase):
     @patch("api.zenstream.locale.authenticated_user_id", return_value=None)
     def test_rejects_invalid_token(self, _):
         with self.app.test_request_context(
-            "/api/zenstream/preferences/locale",
+            "/api/preferences/locale",
             headers={"X-Jellyfin-Token": "invalid"},
         ):
             _, status = LocalePreference().get()
@@ -137,7 +137,7 @@ class LocaleEndpointTests(unittest.TestCase):
     @patch("api.zenstream.locale.authenticated_user_id", return_value="derived-user")
     def test_rejects_invalid_locale(self, _):
         with self.app.test_request_context(
-            "/api/zenstream/preferences/locale",
+            "/api/preferences/locale",
             method="PATCH",
             headers={"X-Jellyfin-Token": "valid"},
             json={"locale": "fr"},

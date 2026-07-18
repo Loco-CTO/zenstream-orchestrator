@@ -10,7 +10,7 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     ORCHESTRATOR_HOST=0.0.0.0 \
-    ORCHESTRATOR_PORT=9088
+    ORCHESTRATOR_PORT=9090
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini ./
@@ -19,5 +19,5 @@ COPY migrations/ ./migrations/
 COPY assets/ ./assets/
 COPY orchestrator/ ./orchestrator/
 COPY --from=dashboard-build /frontend/out/ ./orchestrator/web/
-EXPOSE 9088
+EXPOSE 9090
 CMD ["python", "orchestrator/init.py"]

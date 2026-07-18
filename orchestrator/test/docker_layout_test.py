@@ -16,6 +16,15 @@ class DockerLayoutTest(unittest.TestCase):
         self.assertTrue((PROJECT_ROOT / "alembic.ini").is_file())
         self.assertTrue((PROJECT_ROOT / "migrations" / "env.py").is_file())
 
+    def test_container_uses_application_port(self):
+        dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+        compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertIn("ORCHESTRATOR_PORT=9090", dockerfile)
+        self.assertIn("EXPOSE 9090", dockerfile)
+        self.assertIn("${ORCHESTRATOR_PORT:-9090}:9090", compose)
+        self.assertIn("ORCHESTRATOR_PORT: 9090", compose)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,4 @@
 import asyncio
-import json
 import math
 import os
 import time
@@ -17,6 +16,7 @@ from app.models import Invite
 from app.models.user import User
 from app.models.admin import Admin
 from app.models.syncplay import SyncplayGroup, SyncplayMembershipConflict, StaleSyncplayState, pause, schedule
+from api.zenstream.version import _main_version
 from jellyfin.api_service import authenticated_user_id
 from version import __version__
 
@@ -288,13 +288,7 @@ async def check_invite(url: str | None = Header(None)):
 
 @app.get("/api/version")
 async def version():
-    main = 0
-    try:
-        metadata = json.loads((Path(__file__).resolve().parents[2] / ".main-version.json").read_text())
-        main = metadata.get("main", 0)
-    except (OSError, ValueError, TypeError):
-        pass
-    return {"version": __version__, "main": main}
+    return {"version": __version__, "main": _main_version()}
 
 
 @app.get("/api/config")

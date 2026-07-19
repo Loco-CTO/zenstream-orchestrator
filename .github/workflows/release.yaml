@@ -51,6 +51,7 @@ jobs:
             exit 1
           fi
           sed -i "s/^__version__ = \"$version\"$/__version__ = \"$new_version\"/" orchestrator/version.py
+          printf '{\n  "main": 0\n}\n' > .main-version.json
           echo "version=$new_version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -61,7 +62,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add orchestrator/version.py
+          git add orchestrator/version.py .main-version.json
           git commit -m "chore: release v$VERSION"
           git push origin HEAD:main
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"

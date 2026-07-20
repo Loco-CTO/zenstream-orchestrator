@@ -31,6 +31,7 @@ from app.models.syncplay import (
     schedule,
 )
 from api.zenstream.version import _main_version
+from api.zenstream.gateway import gateway_lifespan, router as gateway_router
 from jellyfin.api_service import authenticated_user_id
 from version import __version__
 
@@ -158,7 +159,8 @@ async def lifespan(app: FastAPI):
     load_config()
     if not os.getenv("SECRET_KEY"):
         raise RuntimeError("Environment variable `SECRET_KEY` not set")
-    yield
+    async with gateway_lifespan():
+        yield
     await hub.broadcast({"type": "system", "event": "shutdown"})
 
 
@@ -184,6 +186,7 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["TOKEN"],
 )
+app.include_router(gateway_router)
 
 web_root, assets_root = _static_roots()
 if assets_root.is_dir():
@@ -385,10 +388,9 @@ async def version():
 
 @app.get("/api/config")
 async def mobile_config():
-    jellyfin_url = os.getenv("JELLYFIN_URL", "").rstrip("/")
-    if not jellyfin_url:
+    if not os.getenv("JELLYFIN_URL", "").rstrip("/"):
         raise HTTPException(503, "Jellyfin server is not configured.")
-    return {"jellyfinUrl": jellyfin_url}
+    return {"proxyVersion": 1, "version": __version__, "main": _main_version()}
 
 
 @app.get("/api/preferences/locale")

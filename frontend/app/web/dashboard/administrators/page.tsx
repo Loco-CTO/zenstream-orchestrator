@@ -1,5 +1,6 @@
 "use client";
 import { FormEvent, useEffect, useState } from "react";
+import { IconRefresh } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 type Admin = { username: string; is_root: boolean; disabled: boolean };
 export default function AdministratorsPage() {
@@ -48,13 +49,7 @@ export default function AdministratorsPage() {
 	}
 	return (
 		<div>
-			<p className="console-kicker">Access control</p>
-			<h1 className="mt-3 text-4xl font-black tracking-tight">
-				Administrators
-			</h1>
-			<p className="mt-2 text-sm console-muted">
-				Decide who can operate the local console.
-			</p>
+			<div className="flex items-center gap-3 pb-5"><h1 className="text-3xl font-semibold tracking-tight">Administrators</h1><button onClick={() => load()} className="material-icon-button" aria-label="Refresh administrators" title="Refresh administrators"><IconRefresh size={17} /></button></div>
 			<div className="mt-8 grid gap-6 lg:grid-cols-[1.4fr_1fr]">
 				<section className="console-card overflow-hidden rounded-2xl">
 					<div className="border-b console-divider px-5 py-4 text-[10px] font-bold uppercase tracking-[.16em] console-muted">

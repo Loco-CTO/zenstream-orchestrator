@@ -215,9 +215,22 @@ def _tvdb_images(data: dict) -> list[dict]:
 
 
 class MetadataService:
+    _fetch_locks_guard = threading.Lock()
+    _fetch_locks: dict[tuple[str, str, str, str], threading.Lock] = {}
+
     def __init__(self):
         self.credentials = MetadataCredentials()
         self.cache = MetadataCache()
+
+    @classmethod
+    def _lock_for(cls, provider: str, entity_type: str, provider_id: str, locale: str) -> threading.Lock:
+        key = (provider, entity_type, provider_id, locale or "en")
+        with cls._fetch_locks_guard:
+            lock = cls._fetch_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                cls._fetch_locks[key] = lock
+            return lock
 
     def client(self, provider: str):
         credential = self.credentials.get(provider)
@@ -240,14 +253,18 @@ class MetadataService:
             raise ProviderError("Unsupported provider")
 
     def fetch(self, provider: str, entity_type: str, provider_id: str, locale: str) -> dict:
-        cached = self.cache.get(provider, entity_type, provider_id, locale)
-        if cached and not cached.pop("_stale", False):
-            return cached
-        client = self.client(provider)
-        payload = client.details(entity_type, provider_id, locale)
-        normalized = client.normalize(entity_type, provider_id, payload)
-        self.cache.put(provider, entity_type, provider_id, locale, normalized)
-        return normalized
+        lock = self._lock_for(provider, entity_type, provider_id, locale)
+        with lock:
+            # Another request may have populated the cache while this request
+            # was waiting. Re-check before making a provider call.
+            cached = self.cache.get(provider, entity_type, provider_id, locale)
+            if cached and not cached.pop("_stale", False):
+                return cached
+            client = self.client(provider)
+            payload = client.details(entity_type, provider_id, locale)
+            normalized = client.normalize(entity_type, provider_id, payload)
+            self.cache.put(provider, entity_type, provider_id, locale, normalized)
+            return normalized
 
     def fetch_fallback(self, provider: str, entity_type: str, provider_id: str, locale: str) -> dict | None:
         """Resolve requested locale, then English, then any cached translation."""

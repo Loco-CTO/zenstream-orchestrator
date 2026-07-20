@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
+import { IconRefresh } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 type User = { username: string; disabled: boolean };
 export default function UsersPage() {
@@ -58,13 +59,9 @@ export default function UsersPage() {
 	}
 	return (
 		<div>
-			<p className="console-kicker">Directory</p>
-			<div className="mt-3 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+			<div className="flex flex-col justify-between gap-4 pb-5 sm:flex-row sm:items-center">
 				<div>
-					<h1 className="text-4xl font-black tracking-tight">Users</h1>
-					<p className="mt-2 text-sm console-muted">
-						Manage access to your ZenStream library.
-					</p>
+					<div className="flex items-center gap-3"><h1 className="text-3xl font-semibold tracking-tight">Users</h1><button onClick={() => load()} className="material-icon-button" aria-label="Refresh users" title="Refresh users"><IconRefresh size={17} /></button></div>
 				</div>
 				<input
 					value={query}

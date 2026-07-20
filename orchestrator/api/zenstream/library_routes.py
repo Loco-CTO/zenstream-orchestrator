@@ -232,7 +232,8 @@ async def list_jobs(Username: str | None = Header(None), TOKEN: str | None = Hea
         recent = scheduler.store.runs(definition["id"], 10)
         if definition["kind"] == "library_scan":
             recent = scheduler.store.library_runs((definition.get("config") or {}).get("libraryId"), 10)
-        values.append({**definition, "recentRuns": recent})
+        current = recent[0] if recent else None
+        values.append({**definition, "lastState": current["state"] if current else definition["lastState"], "lastMessage": (current.get("message") or current.get("error")) if current else definition["lastMessage"], "recentRuns": recent})
     return {"jobs": values}
 
 
@@ -264,6 +265,24 @@ async def run_scheduled_job(job_id: str, Username: str | None = Header(None), TO
         return scheduler.run_now(job_id)
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
+
+
+@router.post("/jobs/{job_id}/runs/{run_id}/terminate")
+async def terminate_scheduled_job(job_id: str, run_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    require_admin(Username, TOKEN)
+    definition = scheduler.store.definition(job_id)
+    if not definition:
+        raise HTTPException(404, "Scheduled job not found.")
+    if definition["kind"] == "library_scan":
+        library_id = (definition.get("config") or {}).get("libraryId")
+        run = store.job(run_id)
+        if not run or run["libraryId"] != library_id:
+            raise HTTPException(404, "Task run not found.")
+        return runtime.terminate(run_id)
+    run = scheduler.terminate(job_id, run_id)
+    if not run:
+        raise HTTPException(404, "Task run not found.")
+    return run
 
 
 @router.get("/libraries/{library_id}/items")
@@ -354,10 +373,10 @@ async def get_image(entity_id: str, imageType: str = Query("poster"), locale: st
             return FileResponse(path)
     metadata = await asyncio.to_thread(_metadata_for, item, locale, True)
     if not metadata:
-        raise HTTPException(404, "Image metadata is not available yet.")
+        return Response(status_code=202, headers={"Retry-After": "10"})
     image = choose_image(metadata.get("images", []), locale, imageType)
     if not image:
-        raise HTTPException(404, "Image not found.")
+        return Response(status_code=202, headers={"Retry-After": "10"})
     cache_root = Path(store.db.db_file).parent / "metadata-cache" / "images"
     cache_root.mkdir(parents=True, exist_ok=True)
     extension = Path(image["url"].split("?", 1)[0]).suffix.lower() or ".jpg"

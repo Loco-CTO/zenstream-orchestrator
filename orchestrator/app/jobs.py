@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from app.config import Config
+from app.library import JobTerminated, runtime as library_runtime
 from app.providers import ProviderError, MetadataService
 
 
@@ -27,14 +28,14 @@ class JobStore:
     @staticmethod
     def _definition(row) -> dict:
         try:
-            config = json.loads(row[8] or "{}")
+            config = json.loads(row[7] or "{}")
         except json.JSONDecodeError:
             config = {}
         return {
             "id": row[0], "key": row[1], "name": row[2], "description": row[3],
             "kind": row[4], "intervalMinutes": row[5], "enabled": bool(row[6]),
-            "config": config, "nextRunAt": row[9], "lastRunAt": row[10],
-            "lastRunId": row[11], "lastState": row[12], "lastMessage": row[13],
+            "config": config, "nextRunAt": row[8], "lastRunAt": row[9],
+            "lastRunId": row[10], "lastState": row[11], "lastMessage": row[12],
             "createdAt": row[13], "updatedAt": row[14],
         }
 
@@ -75,7 +76,15 @@ class JobStore:
             self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (now(), now(), definition["id"]))
 
     def ensure_library(self, library: dict) -> dict:
-        return self.ensure(f"library_scan:{library['id']}", f"Scan {library['name']}", "Index the library without moving or renaming files.", "library_scan", library.get("scanIntervalMinutes") or 1440, {"libraryId": library["id"]}, library.get("watchEnabled", True))
+        description = "Index the library without moving or renaming files."
+        definition = self.ensure(f"library_scan:{library['id']}", f"Scan {library['name']}", description, "library_scan", library.get("scanIntervalMinutes") or 1440, {"libraryId": library["id"]}, library.get("watchEnabled", True))
+        # Repair older definitions whose config was lost by the former row mapper,
+        # while preserving task-level interval and enabled settings.
+        self.db.execute(
+            "UPDATE job_definitions SET name=?,description=?,config=?,updated_at=? WHERE id=?",
+            (f"Scan {library['name']}", description, json.dumps({"libraryId": library["id"]}), now(), definition["id"]),
+        )
+        return self.definition(definition["id"])  # type: ignore[return-value]
 
     def update_definition(self, definition_id: str, values: dict) -> dict:
         definition = self.definition(definition_id)
@@ -107,8 +116,26 @@ class JobStore:
         self.db.execute("UPDATE job_definitions SET last_state='queued',last_message=?,updated_at=? WHERE id=?", ("Queued", timestamp, definition["id"]))
         return self.runs(definition["id"], 1)[0]
 
+    def create_or_get_active_run(self, definition: dict) -> tuple[dict, bool]:
+        """Atomically keep at most one queued/running run for a task definition."""
+        timestamp = now()
+        with self.db.transaction() as cursor:
+            cursor.execute("SELECT id FROM job_runs WHERE definition_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1", (definition["id"],))
+            existing = cursor.fetchone()
+            if existing:
+                run_id = existing[0]
+                created = False
+            else:
+                run_id = new_id()
+                library_id = (definition.get("config") or {}).get("libraryId")
+                cursor.execute("INSERT INTO job_runs(id,definition_id,library_id,kind,created_at) VALUES(?,?,?,?,?)", (run_id, definition["id"], library_id, definition["kind"], timestamp))
+                cursor.execute("UPDATE job_definitions SET last_state='queued',last_message=?,updated_at=? WHERE id=?", ("Queued", timestamp, definition["id"]))
+                created = True
+        runs = [run for run in self.runs(definition["id"], 100) if run["id"] == run_id]
+        return runs[0], created
+
     def queued_or_running(self, definition_id: str) -> bool:
-        return bool(self.db.execute("SELECT 1 FROM job_runs WHERE definition_id=? AND state IN ('queued','running') LIMIT 1", (definition_id,)))
+        return bool(self.db.execute("SELECT 1 FROM job_runs WHERE definition_id=? AND state IN ('queued','running','terminating') LIMIT 1", (definition_id,)))
 
     def due(self) -> list[dict]:
         rows = self.db.execute("SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=? ORDER BY next_run_at", (now(),))
@@ -137,7 +164,8 @@ class MetadataRefreshJob:
         self.store = store
         self.db = store.db
 
-    def run(self, run_id: str, definition: dict) -> None:
+    def run(self, run_id: str, definition: dict, should_terminate=None) -> None:
+        should_terminate = should_terminate or (lambda: False)
         locales = [str(locale).strip() for locale in (definition.get("config") or {}).get("locales", ["en"]) if str(locale).strip()]
         try:
             locales.extend(str(row[0]).strip() for row in self.db.execute("SELECT DISTINCT locale FROM user_preferences WHERE locale IS NOT NULL") if str(row[0]).strip())
@@ -153,6 +181,8 @@ class MetadataRefreshJob:
         service = MetadataService()
         completed = 0
         for (entity_id, entity_type), identifiers in items.items():
+            if should_terminate():
+                raise JobTerminated()
             for locale in locales:
                 priorities = {"series": ["tvdb", "tmdb"], "episode": ["tvdb", "tmdb"], "season": ["tvdb", "tmdb"], "movie": ["tmdb", "tvdb"], "collection": ["tvdb"], "artist": ["musicbrainz"], "release": ["musicbrainz"], "track": ["musicbrainz"]}.get(entity_type, [])
                 ordered = sorted(identifiers, key=lambda value: priorities.index(value[0]) if value[0] in priorities else 99)
@@ -177,8 +207,9 @@ class JobScheduler:
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.active: set[str] = set()
+        self.active_definitions: set[str] = set()
+        self.cancel_events: dict[str, threading.Event] = {}
         self.active_lock = threading.RLock()
-        self.max_workers = 4
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -186,6 +217,7 @@ class JobScheduler:
         self.store.ensure_defaults()
         for library in self.library_runtime.store.list():
             self.store.ensure_library(library)
+        self._recover_active_runs()
         self.stop_event.clear()
         self.thread = threading.Thread(target=self._dispatch, name="zenstream-job-scheduler", daemon=True)
         self.thread.start()
@@ -214,12 +246,47 @@ class JobScheduler:
         if definition["kind"] == "library_scan":
             library_id = (definition.get("config") or {}).get("libraryId")
             job = self.library_runtime.enqueue(library_id, "scan")
-            self.store.db.execute("UPDATE job_definitions SET last_state='queued',last_run_at=?,last_message=?,updated_at=? WHERE id=?", (now(), "Library scan queued", now(), definition_id))
+            self.store.db.execute("UPDATE job_definitions SET last_state=?,last_run_at=?,last_message=?,updated_at=? WHERE id=?", (job["state"], now(), job.get("message") or "Library scan queued", now(), definition_id))
             return job
-        run = self.store.create_run(definition)
+        run, _ = self.store.create_or_get_active_run(definition)
         with self.condition:
             self.condition.notify_all()
         return run
+
+    def terminate(self, definition_id: str, run_id: str) -> dict | None:
+        runs = [run for run in self.store.runs(definition_id, 100) if run["id"] == run_id]
+        if not runs:
+            return None
+        run = runs[0]
+        if run["state"] not in {"queued", "running", "terminating"}:
+            return run
+        with self.active_lock:
+            cancel_event = self.cancel_events.get(run_id)
+            if cancel_event:
+                cancel_event.set()
+                self.store.update_run(run_id, state="terminating", message="Termination requested")
+            else:
+                self.store.update_run(run_id, state="terminated", message="Terminated by administrator", error=None, finished_at=now())
+        with self.condition:
+            self.condition.notify_all()
+        return next((value for value in self.store.runs(definition_id, 100) if value["id"] == run_id), None)
+
+    def _recover_active_runs(self) -> None:
+        """Resume one interrupted run per task and terminate stale duplicates."""
+        rows = self.store.db.execute("SELECT id,definition_id,state FROM job_runs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC")
+        by_definition: dict[str, list[tuple[str, str]]] = {}
+        for run_id, definition_id, state in rows:
+            by_definition.setdefault(definition_id, []).append((run_id, state))
+        timestamp = now()
+        with self.store.db.transaction() as cursor:
+            for runs in by_definition.values():
+                resumable = [run for run in runs if run[1] != "terminating"]
+                keep_id = resumable[0][0] if resumable else None
+                for run_id, state in runs:
+                    if run_id == keep_id:
+                        cursor.execute("UPDATE job_runs SET state='queued',progress_current=0,progress_total=0,message='Queued again after Orchestrator restart',error=NULL,started_at=NULL,finished_at=NULL,thread_name=NULL WHERE id=?", (run_id,))
+                    else:
+                        cursor.execute("UPDATE job_runs SET state='terminated',message='Superseded by the active task run',error=NULL,finished_at=? WHERE id=?", (timestamp, run_id))
 
     def _schedule_due(self):
         for definition in self.store.due():
@@ -231,25 +298,34 @@ class JobScheduler:
                     self.library_runtime.enqueue(library_id, "scan")
                 self.store.mark_scheduled(definition["id"], None, "Library scan queued")
             else:
-                run = self.store.create_run(definition)
+                run, created = self.store.create_or_get_active_run(definition)
+                if not created:
+                    continue
                 self.store.mark_scheduled(definition["id"], run["id"])
 
     def _dispatch(self):
         while not self.stop_event.is_set():
             self._schedule_due()
-            with self.active_lock:
-                capacity = self.max_workers - len(self.active)
-            if capacity > 0:
-                queued = self.store.runs(limit=capacity * 2)
-                for run in queued:
-                    if run["state"] != "queued":
+            queued = self.store.runs(limit=1000)
+            for run in queued:
+                if run["state"] != "queued":
+                    continue
+                with self.active_lock:
+                    if run["id"] in self.active or run["definitionId"] in self.active_definitions:
                         continue
-                    with self.active_lock:
-                        if len(self.active) >= self.max_workers or run["id"] in self.active:
-                            break
-                        self.active.add(run["id"])
-                    thread = threading.Thread(target=self._execute, args=(run["id"],), name=f"zenstream-job-{run['id'][:8]}", daemon=True)
-                    thread.start()
+                    self.active.add(run["id"])
+                    self.active_definitions.add(run["definitionId"])
+                    self.cancel_events[run["id"]] = threading.Event()
+                    with self.store.db.transaction() as cursor:
+                        cursor.execute("UPDATE job_runs SET state='running',started_at=?,thread_name=?,message='Starting task' WHERE id=? AND state='queued'", (now(), f"zenstream-job-{run['id'][:8]}", run["id"]))
+                        claimed = cursor.rowcount == 1
+                    if not claimed:
+                        self.active.discard(run["id"])
+                        self.active_definitions.discard(run["definitionId"])
+                        self.cancel_events.pop(run["id"], None)
+                        continue
+                thread = threading.Thread(target=self._execute, args=(run["id"],), name=f"zenstream-job-{run['id'][:8]}", daemon=True)
+                thread.start()
             with self.condition:
                 self.condition.wait(timeout=1)
 
@@ -265,16 +341,20 @@ class JobScheduler:
                 config = {}
             definition = self.store.definition(definition_id) or {"id": definition_id, "kind": kind, "config": config, "name": name}
             if kind == "metadata_refresh":
-                MetadataRefreshJob(self.store).run(run_id, definition)
+                MetadataRefreshJob(self.store).run(run_id, definition, self.cancel_events[run_id].is_set)
             else:
                 self.store.update_run(run_id, state="failed", error=f"Unsupported job kind: {kind}", finished_at=now())
+        except JobTerminated:
+            self.store.update_run(run_id, state="terminated", message="Terminated by administrator", error=None, finished_at=now())
         except Exception as error:
             self.store.update_run(run_id, state="failed", error=str(error), finished_at=now())
         finally:
             with self.active_lock:
                 self.active.discard(run_id)
+                self.cancel_events.pop(run_id, None)
+                row = self.store.db.execute("SELECT definition_id FROM job_runs WHERE id=?", (run_id,))
+                if row:
+                    self.active_definitions.discard(row[0][0])
 
-
-from app.library import runtime as library_runtime
 
 scheduler = JobScheduler(library_runtime)

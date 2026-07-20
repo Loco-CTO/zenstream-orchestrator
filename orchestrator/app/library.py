@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from app.config import Config
 
@@ -31,6 +31,11 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
 ID_RE = re.compile(r"\[(?P<provider>tmdbid|tvdbid|imdbid)-(?P<id>[^\]]+)\]", re.IGNORECASE)
 EPISODE_RE = re.compile(r"(?i)(?:^|[^A-Z0-9])S(?P<season>\d{1,3})E(?P<episode>\d{1,4})(?:[-.]?E(?P<end>\d{1,4}))?")
 SEASON_RE = re.compile(r"(?i)^(?:season\s*|s)(\d{1,3})$")
+ACTIVE_JOB_STATES = ("queued", "running", "terminating")
+
+
+class JobTerminated(Exception):
+    """Raised when a background worker acknowledges a termination request."""
 
 
 def now() -> str:
@@ -268,12 +273,13 @@ class LibraryScanner:
         self.store = store or LibraryStore()
         self.db = self.store.db
 
-    def scan(self, library_id: str, job_id: str) -> None:
+    def scan(self, library_id: str, job_id: str, should_terminate: Callable[[], bool] | None = None) -> None:
+        should_terminate = should_terminate or (lambda: False)
         library = self.store.get(library_id)
         if not library:
             raise ValueError("Library not found")
         if library["type"] == "collection":
-            self.derive_collection(library_id, job_id)
+            self.derive_collection(library_id, job_id, should_terminate)
             return
         root = Path(library["directory"])
         if not root.is_dir():
@@ -284,19 +290,29 @@ class LibraryScanner:
         try:
             with self.db.transaction() as cursor:
                 cursor.execute("DELETE FROM library_entities WHERE library_id=?", (library_id,))
+            self._check_termination(should_terminate)
             if library["type"] == "movies":
-                count = self._scan_movies(library_id, root, job_id)
+                count = self._scan_movies(library_id, root, job_id, should_terminate)
             elif library["type"] == "tv_series":
-                count = self._scan_series(library_id, root, job_id)
+                count = self._scan_series(library_id, root, job_id, should_terminate)
             else:
-                count = self._scan_music(library_id, root, job_id)
+                count = self._scan_music(library_id, root, job_id, should_terminate)
             finished = now()
             self.store.update_job(job_id, state="completed", progress_current=count, progress_total=count, finished_at=finished, message=f"Indexed {count} entries")
+            self.store.set_scan_state(library_id, "ready", finished=finished)
+        except JobTerminated:
+            finished = now()
+            self.store.update_job(job_id, state="terminated", message="Terminated by administrator", error=None, finished_at=finished)
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except Exception as error:
             self.store.update_job(job_id, state="failed", error=str(error), finished_at=now())
             self.store.set_scan_state(library_id, "error", error=str(error), finished=now())
             raise
+
+    @staticmethod
+    def _check_termination(should_terminate: Callable[[], bool]) -> None:
+        if should_terminate():
+            raise JobTerminated()
 
     def _entity(self, library_id: str, parent_id: str | None, entity_type: str, path: str | None, **numbers) -> str:
         entity_id = new_id()
@@ -339,11 +355,12 @@ class LibraryScanner:
                 (new_id(), entity_id, relative(str(root), str(path)), role, language, None, stat.st_size, stat.st_mtime_ns),
             )
 
-    def _scan_movies(self, library_id: str, root: Path, job_id: str) -> int:
+    def _scan_movies(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool]) -> int:
         entries = [path for path in root.iterdir() if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS]
         self.store.update_job(job_id, progress_total=len(entries))
         count = 0
         for entry in entries:
+            self._check_termination(should_terminate)
             entity = self._entity(library_id, None, "movie", relative(str(root), str(entry)))
             self._ids(entity, provider_ids(entry.name))
             files = list(entry.rglob("*")) if entry.is_dir() else [entry]
@@ -354,11 +371,12 @@ class LibraryScanner:
             self.store.update_job(job_id, progress_current=count, message=f"Indexed {entry.name}")
         return count
 
-    def _scan_series(self, library_id: str, root: Path, job_id: str) -> int:
+    def _scan_series(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool]) -> int:
         series_dirs = [path for path in root.iterdir() if path.is_dir()]
         self.store.update_job(job_id, progress_total=len(series_dirs))
-        count = 0
-        for series_dir in series_dirs:
+        episode_count = 0
+        for series_index, series_dir in enumerate(series_dirs, start=1):
+            self._check_termination(should_terminate)
             series = self._entity(library_id, None, "series", relative(str(root), str(series_dir)))
             self._ids(series, provider_ids(series_dir.name))
             season_dirs = [path for path in series_dir.iterdir() if path.is_dir() and (SEASON_RE.match(path.name) or path.name.lower() == "specials")]
@@ -370,6 +388,7 @@ class LibraryScanner:
                 season = self._entity(library_id, series, "season", relative(str(root), str(season_dir)), season_number=season_number)
                 episode_paths = season_dir.iterdir() if season_dir == series_dir else season_dir.rglob("*")
                 for media in episode_paths:
+                    self._check_termination(should_terminate)
                     if not media.is_file() or media.suffix.lower() not in VIDEO_EXTENSIONS:
                         continue
                     episode_match = EPISODE_RE.search(media.stem)
@@ -382,12 +401,12 @@ class LibraryScanner:
                     episode = self._entity(library_id, season, "episode", relative(str(root), str(media)), season_number=season_number, episode_number=episode_number, episode_end_number=end_number)
                     self._ids(episode, provider_ids(media.name))
                     self._files(episode, root, [media] + [sidecar for sidecar in media.parent.iterdir() if sidecar.is_file() and sidecar.stem.startswith(media.stem) and sidecar != media])
-                    count += 1
+                    episode_count += 1
             self._files(series, root, [path for path in series_dir.iterdir() if path.is_file()])
-            self.store.update_job(job_id, progress_current=len([x for x in series_dirs[: count + 1]]), message=f"Indexed {series_dir.name}")
-        return count
+            self.store.update_job(job_id, progress_current=series_index, message=f"Indexed {series_dir.name} ({episode_count} episodes)")
+        return len(series_dirs)
 
-    def _scan_music(self, library_id: str, root: Path, job_id: str) -> int:
+    def _scan_music(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool]) -> int:
         album_dirs = []
         for directory, _, filenames in os.walk(root):
             if any(Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames):
@@ -396,6 +415,7 @@ class LibraryScanner:
         count = 0
         artists: dict[str, str] = {}
         for album_dir in album_dirs:
+            self._check_termination(should_terminate)
             artist_name = album_dir.relative_to(root).parts[0] if album_dir.relative_to(root).parts else album_dir.name
             artist = artists.get(artist_name)
             if not artist:
@@ -404,6 +424,7 @@ class LibraryScanner:
             release = self._entity(library_id, artist, "release", relative(str(root), str(album_dir)))
             tracks = [path for path in album_dir.iterdir() if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS]
             for track in sorted(tracks):
+                self._check_termination(should_terminate)
                 tags = parse_audio_tags(track)
                 track_number = _int_tag(tags.get("TRACKNUMBER") or tags.get("TRACK"))
                 disc_number = _int_tag(tags.get("DISCNUMBER") or tags.get("DISC"))
@@ -415,7 +436,8 @@ class LibraryScanner:
             self.store.update_job(job_id, progress_current=count, message=f"Indexed {album_dir.name}")
         return count
 
-    def derive_collection(self, library_id: str, job_id: str) -> None:
+    def derive_collection(self, library_id: str, job_id: str, should_terminate: Callable[[], bool] | None = None) -> None:
+        should_terminate = should_terminate or (lambda: False)
         library = self.store.get(library_id)
         if not library:
             raise ValueError("Library not found")
@@ -439,6 +461,7 @@ class LibraryScanner:
             lists: dict[str, dict] = {}
             # Lists are paged; stop at the first short page to avoid unbounded calls.
             for page in range(0, 50):
+                self._check_termination(should_terminate)
                 page_values = client.lists(page)
                 for value in page_values:
                     if value.get("isOfficial"):
@@ -448,6 +471,7 @@ class LibraryScanner:
             self.store.update_job(job_id, progress_total=len(lists))
             count = 0
             for list_id, base in lists.items():
+                self._check_termination(should_terminate)
                 try:
                     payload = client.list_details(list_id)
                 except ProviderError:
@@ -472,6 +496,10 @@ class LibraryScanner:
                 self.store.update_job(job_id, progress_current=count, message=f"Derived {title}")
             self.store.update_job(job_id, state="completed", progress_current=count, progress_total=len(lists), finished_at=now(), message=f"Derived {count} official collections")
             self.store.set_scan_state(library_id, "ready", finished=now())
+        except JobTerminated:
+            finished = now()
+            self.store.update_job(job_id, state="terminated", message="Terminated by administrator", error=None, finished_at=finished)
+            self.store.set_scan_state(library_id, "ready", finished=finished)
         except Exception as error:
             self.store.update_job(job_id, state="failed", error=str(error), finished_at=now())
             self.store.set_scan_state(library_id, "error", error=str(error), finished=now())
@@ -526,12 +554,13 @@ class LibraryRuntime:
         self._watch_paths: set[str] = set()
         self._reconcile_due: dict[str, float] = {}
         self._active_jobs: set[str] = set()
+        self._cancel_events: dict[str, threading.Event] = {}
         self._active_lock = threading.RLock()
-        self.max_workers = 4
 
     def start(self):
         if self.thread and self.thread.is_alive():
             return
+        self._recover_active_jobs()
         self.stop_event.clear()
         self._configure_watchers()
         self.thread = threading.Thread(target=self._run, name="zenstream-library-jobs", daemon=True)
@@ -560,13 +589,56 @@ class LibraryRuntime:
         self._configure_watchers()
 
     def enqueue(self, library_id: str, kind: str = "scan") -> dict:
-        existing = self.store.db.execute("SELECT id FROM library_jobs WHERE library_id=? AND kind=? AND state IN ('queued','running') ORDER BY created_at DESC LIMIT 1", (library_id, kind))
-        if existing:
-            return self.store.job(existing[0][0])  # type: ignore[return-value]
-        job = self.store.create_job(library_id, kind)
+        # Scan, reconcile, and collection rebuild all mutate the same inventory.
+        # Claim the task atomically so different triggers cannot overlap.
+        with self.store.db.transaction() as cursor:
+            cursor.execute("SELECT id FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1", (library_id,))
+            existing = cursor.fetchone()
+            if existing:
+                job_id = existing[0]
+            else:
+                job_id = new_id()
+                cursor.execute("INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)", (job_id, library_id, kind, now()))
+        job = self.store.job(job_id)
         with self.condition:
             self.condition.notify_all()
-        return job
+        return job  # type: ignore[return-value]
+
+    def terminate(self, job_id: str) -> dict | None:
+        job = self.store.job(job_id)
+        if not job or job["state"] not in ACTIVE_JOB_STATES:
+            return job
+        finished = now()
+        with self._active_lock:
+            cancel_event = self._cancel_events.get(job_id)
+            if cancel_event:
+                cancel_event.set()
+                self.store.update_job(job_id, state="terminating", message="Termination requested")
+            else:
+                self.store.update_job(job_id, state="terminated", message="Terminated by administrator", error=None, finished_at=finished)
+        with self.condition:
+            self.condition.notify_all()
+        return self.store.job(job_id)
+
+    def _recover_active_jobs(self) -> None:
+        """Resume one interrupted run per library and collapse stale duplicates."""
+        rows = self.store.db.execute(
+            "SELECT id,library_id,state FROM library_jobs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC"
+        )
+        by_library: dict[str, list[tuple[str, str]]] = {}
+        for job_id, library_id, state in rows:
+            by_library.setdefault(library_id, []).append((job_id, state))
+        timestamp = now()
+        with self.store.db.transaction() as cursor:
+            for library_id, jobs in by_library.items():
+                resumable = [job for job in jobs if job[1] != "terminating"]
+                keep_id = resumable[0][0] if resumable else None
+                for job_id, state in jobs:
+                    if job_id == keep_id:
+                        cursor.execute("UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after Orchestrator restart',error=NULL,started_at=NULL,finished_at=NULL WHERE id=?", (job_id,))
+                    else:
+                        cursor.execute("UPDATE library_jobs SET state='terminated',message='Superseded by the active task run',error=NULL,finished_at=? WHERE id=?", (timestamp, job_id))
+                cursor.execute("UPDATE libraries SET scan_state='idle',scan_error=NULL,updated_at=? WHERE id=?", (timestamp, library_id))
 
     def request_reconcile(self, library_id: str) -> None:
         # Debounce bursts from copy/move operations into one reconcile job.
@@ -617,17 +689,25 @@ class LibraryRuntime:
                 continue
             job_id, library_id, kind = rows[0]
             with self._active_lock:
-                if len(self._active_jobs) >= self.max_workers or job_id in self._active_jobs:
+                if job_id in self._active_jobs:
                     with self.condition:
                         self.condition.wait(timeout=0.2)
                     continue
                 self._active_jobs.add(job_id)
+                self._cancel_events[job_id] = threading.Event()
+                with self.store.db.transaction() as cursor:
+                    cursor.execute("UPDATE library_jobs SET state='running',started_at=?,message='Starting scan' WHERE id=? AND state='queued'", (now(), job_id))
+                    claimed = cursor.rowcount == 1
+                if not claimed:
+                    self._active_jobs.discard(job_id)
+                    self._cancel_events.pop(job_id, None)
+                    continue
             threading.Thread(target=self._execute_job, args=(job_id, library_id, kind), name=f"zenstream-library-{job_id[:8]}", daemon=True).start()
 
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
         try:
             if kind in {"scan", "reconcile", "collection_rebuild"}:
-                self.scanner.scan(library_id, job_id)
+                self.scanner.scan(library_id, job_id, self._cancel_events[job_id].is_set)
             else:
                 self.store.update_job(job_id, state="failed", error=f"Unsupported job kind: {kind}", finished_at=now())
         except Exception:
@@ -636,6 +716,7 @@ class LibraryRuntime:
         finally:
             with self._active_lock:
                 self._active_jobs.discard(job_id)
+                self._cancel_events.pop(job_id, None)
             with self.condition:
                 self.condition.notify_all()
 

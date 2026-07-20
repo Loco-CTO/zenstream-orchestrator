@@ -57,7 +57,7 @@ export default function AdminShell({
 	}
 	return (
 		<div className="console-root min-h-screen">
-			<header className="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-white/5 bg-[#050505]/95 px-5 backdrop-blur-xl md:hidden">
+			<header className="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-white/5 bg-[#111111]/95 px-5 backdrop-blur-xl md:hidden">
 				<button
 					onClick={() => setOpen(!open)}
 					className="rounded-md p-2 console-muted"
@@ -76,53 +76,54 @@ export default function AdminShell({
 				</button>
 			</header>
 			<aside
-				className={`${open ? "flex" : "hidden"} console-rail fixed inset-y-0 left-0 z-30 w-[220px] flex-col border-r p-4 md:flex`}
+				className={`${open ? "flex" : "hidden"} console-rail fixed inset-y-0 left-0 z-30 w-[70px] flex-col border-r px-2 pt-5 pb-2 md:flex`}
 			>
 				<Link
 					href="/web/dashboard"
-					className="flex items-center gap-2 border-b border-white/5 pb-5"
+					className="flex items-center justify-center pb-3"
 				>
 					<img
-						src="/assets/icons/icon.png"
+						src="/icons/icon.png"
 						alt="ZenStream"
-						className="h-9 w-9 rounded-lg"
+						className="h-10 w-10 rounded-xl"
+						onError={(event) => {
+							event.currentTarget.onerror = null;
+							event.currentTarget.src = "/favicon.ico";
+						}}
 					/>
-					<div>
-						<p className="console-wordmark text-[10px] font-black">ZENSTREAM</p>
-						<p className="mt-1 text-[11px] console-muted">Control panel</p>
-					</div>
 				</Link>
-				<div className="mt-5 flex items-center gap-2 text-[11px] console-muted">
-					<span className="h-2 w-2 rounded-full bg-[#8edbc9]" /> Service online
-				</div>
-				<nav className="mt-5 space-y-0.5">
+				<nav className="mt-6 space-y-0.5">
 					{links.map(([label, href, Icon]) => (
 						<Link
 							key={href}
 							href={href}
 							onClick={() => setOpen(false)}
-							className={`flex items-center gap-2.5 rounded-md px-2.5 py-2.5 text-[13px] transition ${pathname === href ? "console-nav-active font-semibold" : "console-nav-link"}`}
+							className={`admin-nav-item group relative flex h-11 w-full items-center justify-center rounded-md text-xs transition ${pathname === href ? "console-nav-active font-semibold" : "console-nav-link"}`}
+							title={label}
 						>
-							<Icon size={17} stroke={1.7} />
-							{label}
+							<Icon size={21} stroke={1.7} />
+							<span className="admin-tooltip" role="tooltip">
+								{label}
+							</span>
 						</Link>
 					))}
 				</nav>
-				<div className="mt-auto border-t border-white/5 pt-5">
-					<p className="text-[10px] uppercase tracking-[.15em] console-muted">
-						Signed in as
-					</p>
-					<p className="mt-2 text-sm font-semibold">{session.username}</p>
+				<div className="mt-auto border-t border-white/5 pt-3">
 					<button
 						onClick={logout}
-						className="mt-5 flex items-center gap-2 text-sm console-muted hover:text-white"
+						aria-label="Sign out"
+						title={`Sign out (${session.username})`}
+						className="admin-nav-item group relative flex h-10 w-full items-center justify-center rounded-md console-muted hover:text-white"
 					>
-						<IconLogout size={16} /> Sign out
+						<IconLogout size={21} />
+						<span className="admin-tooltip" role="tooltip">
+							Sign out
+						</span>
 					</button>
 				</div>
 			</aside>
-			<main className="min-h-screen md:pl-[220px]">
-				<div className="w-full px-5 py-7 sm:px-8 md:px-10 md:py-8">
+			<main className="min-h-screen md:pl-[70px]">
+				<div className="w-full px-5 py-10 sm:px-8 md:px-10 md:py-12">
 					{children}
 				</div>
 			</main>

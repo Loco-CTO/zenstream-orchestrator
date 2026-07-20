@@ -60,9 +60,7 @@ export default function MetadataPage() {
 
 	return (
 		<div>
-			<p className="console-kicker">Metadata</p>
-			<h1 className="mt-3 text-4xl font-black tracking-tight">Provider connections</h1>
-			<p className="mt-2 max-w-2xl text-sm leading-6 console-muted">Credentials are encrypted by the orchestrator and are never returned to the browser. Metadata is fetched per language when a library preview needs it.</p>
+			<div className="flex items-center gap-3 pb-5"><h1 className="text-3xl font-semibold tracking-tight">Provider connections</h1><button onClick={() => session && load(session)} className="material-icon-button" aria-label="Refresh metadata providers" title="Refresh metadata providers"><IconRefresh size={17} /></button></div>
 			<div className="mt-8 grid gap-6 lg:grid-cols-2">
 				<form onSubmit={(event) => save(event, "tmdb")} className="console-card rounded-2xl p-6">
 					<div className="flex items-start justify-between"><div><p className="console-kicker">Movies and secondary TV metadata</p><h2 className="mt-2 text-xl font-bold">TMDB</h2></div><IconKey className="text-[#8fe4cf]" size={22} /></div>

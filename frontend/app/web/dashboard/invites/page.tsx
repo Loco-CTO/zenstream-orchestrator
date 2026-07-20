@@ -24,11 +24,7 @@ export default function InvitesPage() {
 	}
 	return (
 		<div>
-			<p className="console-kicker">Access links</p>
-			<h1 className="mt-3 text-4xl font-black">Invites</h1>
-			<p className="mt-2 text-sm console-muted">
-				Give someone a secure path into your library.
-			</p>
+			<h1 className="pb-5 text-3xl font-semibold tracking-tight">Invites</h1>
 			<div className="console-card mt-8 max-w-2xl rounded-2xl p-6">
 				<h2 className="text-xl font-bold">Create a registration invite</h2>
 				<p className="mt-2 text-sm leading-6 console-muted">

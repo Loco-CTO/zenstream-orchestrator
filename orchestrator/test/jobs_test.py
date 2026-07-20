@@ -1,5 +1,6 @@
 import threading
 import unittest
+from unittest.mock import patch
 
 from app.database import DatabaseHandler
 from app.jobs import JobScheduler, JobStore, MetadataHydrationQueue
@@ -69,6 +70,7 @@ class MetadataHydrationQueueTest(unittest.TestCase):
         self.queue = MetadataHydrationQueue(scheduler)
 
     def tearDown(self):
+        self.queue.stop()
         self.db.close()
 
     def test_requests_are_coalesced_per_entity_and_locale(self):
@@ -77,8 +79,19 @@ class MetadataHydrationQueueTest(unittest.TestCase):
 
         self.assertEqual(first["queued"], 1)
         self.assertEqual(second["queued"], 0)
-        self.assertEqual(first["jobId"], second["jobId"])
+        self.assertNotIn("jobId", first)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM metadata_hydration_requests")[0][0], 1)
+
+    def test_worker_wakes_immediately_for_an_on_demand_request(self):
+        processed = threading.Event()
+
+        def hydrate(*_args):
+            processed.set()
+
+        with patch("app.jobs._hydrate_request", side_effect=hydrate):
+            self.queue.start()
+            self.queue.enqueue(["entity-1"], "ja")
+            self.assertTrue(processed.wait(2), "on-demand hydration worker did not wake")
 
 
 if __name__ == "__main__":

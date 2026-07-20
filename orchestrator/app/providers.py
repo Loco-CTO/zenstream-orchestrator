@@ -375,6 +375,7 @@ class MetadataService:
                     candidates = client.search(entity_type, query, year) if provider == "tmdb" else client.search(entity_type, query)
                     provider_id = _select_match(candidates, query, year)
                 normalized = self.fetch(provider, entity_type, str(provider_id), "en", force=True)
+                explicit_by_provider.setdefault(provider, str(provider_id))
                 selected = selected or normalized
                 for value in normalized.get("ids", []) or []:
                     explicit_by_provider.setdefault(value["provider"], value["id"])
@@ -383,9 +384,8 @@ class MetadataService:
         if not selected:
             detail = "; ".join(errors) or "no matching provider result"
             raise ProviderError(f"Could not resolve {entity_type} '{query}': {detail}")
-        if entity_type in {"series", "movie"} and any(provider not in explicit_by_provider for provider in priorities):
-            missing = ", ".join(provider for provider in priorities if provider not in explicit_by_provider)
-            raise ProviderError(f"Could not resolve all required provider IDs for '{query}'; missing {missing}")
+        if entity_type in {"series", "movie"} and priorities[0] not in explicit_by_provider:
+            raise ProviderError(f"Could not resolve the required primary provider ID for '{query}'; missing {priorities[0]}")
         return {"metadata": selected, "providerIds": [{"provider": provider, "id": provider_id} for provider, provider_id in explicit_by_provider.items()]}
 
 

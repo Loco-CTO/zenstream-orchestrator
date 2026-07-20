@@ -8,7 +8,7 @@ from unittest.mock import patch
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import LibraryRuntime, LibraryStore, guess_media, provider_ids
-from app.providers import ProviderError, TMDBClient, _select_match, choose_image
+from app.providers import MetadataService, ProviderError, TMDBClient, _select_match, choose_image
 
 
 class LibraryMetadataTest(unittest.TestCase):
@@ -97,6 +97,26 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(value["year"], "2020")
         self.assertEqual(value["tags"], ["Drama"])
         self.assertEqual({item["provider"] for item in value["ids"]}, {"tvdb", "imdb"})
+
+    def test_primary_provider_is_required_but_secondary_provider_is_optional(self):
+        service = MetadataService.__new__(MetadataService)
+        service.fetch = lambda provider, entity_type, provider_id, locale, force=False: {"provider": provider, "providerId": provider_id, "title": "Example"}
+
+        class PrimaryOnlyClient:
+            def __init__(self, provider):
+                self.provider = provider
+
+            def search(self, entity_type, query, *args):
+                if self.provider != "tvdb":
+                    raise ProviderError("optional provider unavailable")
+                return [{"providerId": "primary-1", "title": "Example", "year": "2020"}]
+
+        service.client = lambda provider: PrimaryOnlyClient(provider)
+        series = service.resolve_inventory_entity("series", "Example", "2020")
+        self.assertEqual(series["providerIds"], [{"provider": "tvdb", "id": "primary-1"}])
+
+        with self.assertRaises(ProviderError):
+            service.resolve_inventory_entity("movie", "Example", "2020")
 
 
 class LibraryJobControlTest(unittest.TestCase):

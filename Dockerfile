@@ -1,9 +1,7 @@
 FROM node:26-slim AS dashboard-build
 WORKDIR /frontend
-COPY frontend/package.json ./
-COPY frontend/package-lock.json ./
-RUN npm ci --include=dev --ignore-scripts --no-audit --no-fund
 COPY frontend/ ./
+RUN npm install --include=dev --ignore-scripts --no-audit --no-fund
 RUN npm run build
 
 FROM python:3.14-slim

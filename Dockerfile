@@ -5,7 +5,7 @@ RUN npm install --ignore-scripts --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
-FROM python:3.10-slim
+FROM python:3.14-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

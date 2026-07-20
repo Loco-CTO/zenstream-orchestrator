@@ -22,7 +22,8 @@ class MemoryDatabase:
                 host_disconnected_at REAL, ended INTEGER, updated REAL
             );
             CREATE TABLE syncplay_members (
-                group_id TEXT, user_id TEXT, participant_id TEXT, username TEXT, viewing INTEGER,
+                group_id TEXT, user_id TEXT, participant_id TEXT, username TEXT,
+                watching_together INTEGER DEFAULT 1, viewing INTEGER,
                 loading INTEGER, ready_generation INTEGER DEFAULT -1, presence_sequence INTEGER DEFAULT 0, PRIMARY KEY (group_id, participant_id)
             );
             CREATE TABLE syncplay_operations (
@@ -54,8 +55,8 @@ class SyncplayReadinessTests(unittest.TestCase):
         )
         for user in ("host", "viewer"):
             self.database.execute(
-                "INSERT INTO syncplay_members VALUES (?,?,?,?,?,?,?,?)",
-                ("group", user, user + "-tab", user, 1, 0, 0, 0),
+                "INSERT INTO syncplay_members VALUES (?,?,?,?,?,?,?,?,?)",
+                ("group", user, user + "-tab", user, 1, 1, 0, 0, 0),
             )
         self.group = SyncplayGroup("group")
         self.group.db = self.database

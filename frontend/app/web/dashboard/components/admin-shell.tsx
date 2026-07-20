@@ -5,7 +5,9 @@ import { useEffect, useState } from "react";
 import {
 	IconAdjustments,
 	IconChartDonut,
+	IconDatabase,
 	IconKey,
+	IconLibrary,
 	IconLogout,
 	IconMenu2,
 	IconShieldLock,
@@ -16,6 +18,8 @@ import { clearSession, readSession, adminFetch, Session } from "./admin-client";
 
 const links = [
 	["Overview", "/web/dashboard", IconChartDonut],
+	["Libraries", "/web/dashboard/libraries", IconLibrary],
+	["Metadata", "/web/dashboard/metadata", IconDatabase],
 	["Users", "/web/dashboard/users", IconUsers],
 	["Administrators", "/web/dashboard/administrators", IconShieldLock],
 	["Invites", "/web/dashboard/invites", IconKey],

@@ -1,10 +1,15 @@
 import type { NextConfig } from "next";
 
+const isDevelopment = process.env.NODE_ENV === "development";
+
 const nextConfig: NextConfig = {
-  output: "export",
+  ...(isDevelopment ? {} : { output: "export" as const }),
+  // Keep Turbopack's mutable development manifests away from production builds.
+  distDir: isDevelopment ? ".next-dev" : ".next",
+  turbopack: { root: __dirname },
   trailingSlash: true,
   async rewrites() {
-    if (process.env.NODE_ENV !== "development") return [];
+    if (!isDevelopment) return [];
     return [
       {
         source: "/api/:path*",

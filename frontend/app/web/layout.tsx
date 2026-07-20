@@ -7,9 +7,5 @@ export const metadata: Metadata = {
 };
 
 export default function WebLayout({ children }: { children: React.ReactNode }) {
-	return (
-		<html lang="en">
-			<body className="min-h-screen bg-[#07070c] text-white">{children}</body>
-		</html>
-	);
+	return children;
 }

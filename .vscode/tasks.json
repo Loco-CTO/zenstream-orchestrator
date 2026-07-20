@@ -2,37 +2,37 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "vite",
-      "type": "npm",
-      "script": "dev",
-      "isBackground": true,
-      "problemMatcher": [
-        {
-          "owner": "typescript",
-          "source": "ts",
-          "applyTo": "closedDocuments",
-          "fileLocation": [
-            "relative",
-            "${cwd}"
-          ],
-          "pattern": "$tsc",
-          "background": {
-            "activeOnStart": true,
-            "beginsPattern": {
-              "regexp": ".*"
-            },
-            "endsPattern": {
-              "regexp": ".*compiled successfully.*"
-            }
-          }
-        }
+      "label": "Orchestrator: Frontend",
+      "type": "shell",
+      "command": "npm",
+      "args": [
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "3001"
       ],
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "orchestrator-frontend",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": ".*Ready in.*"
+        }
+      },
       "group": {
         "kind": "build",
         "isDefault": true
       },
       "options": {
-        "cwd": "${workspaceFolder}/frontend"
+        "cwd": "${workspaceFolder}/frontend",
+        "env": {
+          "ORCHESTRATOR_API_URL": "http://127.0.0.1:9090"
+        }
       }
     }
   ]

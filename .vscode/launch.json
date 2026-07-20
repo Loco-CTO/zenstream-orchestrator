@@ -6,35 +6,13 @@
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/orchestrator/init.py",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
       "cwd": "${workspaceFolder}/orchestrator",
       "console": "integratedTerminal",
       "subProcess": true,
+      "envFile": "${workspaceFolder}/.env",
       "env": {
-        "FLASK_ENV": "development",
-        "SECRET_KEY": "your_secret_key"
-      },
-      "autoReload": {
-        "enable": true,
-        "pattern": [
-          "**/*.py"
-        ]
-      },
-      "args": [
-        "run",
-        "--no-debugger",
-        "--no-reload"
-      ]
-    },
-    {
-      "name": "Debug Orchestrator: Frontend",
-      "type": "node-terminal",
-      "request": "launch",
-      "command": "npm run dev",
-      "cwd": "${workspaceFolder}/frontend",
-      "serverReadyAction": {
-        "pattern": "- Local:.+(https?://.+)",
-        "uriFormat": "%s",
-        "action": "openExternally"
+        "USE_RELOADER": "true"
       }
     }
   ],
@@ -42,9 +20,10 @@
     {
       "name": "Debug Orchestrator: Full Stack",
       "configurations": [
-        "Debug Orchestrator: Backend",
-        "Debug Orchestrator: Frontend"
-      ]
+        "Debug Orchestrator: Backend"
+      ],
+      "preLaunchTask": "Orchestrator: Frontend",
+      "stopAll": true
     }
   ]
 }

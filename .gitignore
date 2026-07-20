@@ -309,3 +309,4 @@ tsconfig.*.json
 *.bak
 *.swp
 *.tmp
+frontend/.next-dev/*

@@ -1,0 +1,630 @@
+"""Native media-library inventory and background job runtime."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+from app.config import Config
+
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:  # pragma: no cover - optional in minimal installations
+    FileSystemEventHandler = object  # type: ignore[assignment,misc]
+    Observer = None  # type: ignore[assignment,misc]
+
+
+LIBRARY_TYPES = {"tv_series", "movies", "music", "collection"}
+VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".webm", ".mpg", ".mpeg", ".vob"}
+AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".wma", ".aiff", ".aif", ".ape", ".wv"}
+SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
+LYRIC_EXTENSIONS = {".lrc", ".elrc", ".txt"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
+ID_RE = re.compile(r"\[(?P<provider>tmdbid|tvdbid|imdbid)-(?P<id>[^\]]+)\]", re.IGNORECASE)
+EPISODE_RE = re.compile(r"(?i)(?:^|[^A-Z0-9])S(?P<season>\d{1,3})E(?P<episode>\d{1,4})(?:[-.]?E(?P<end>\d{1,4}))?")
+SEASON_RE = re.compile(r"(?i)^(?:season\s*|s)(\d{1,3})$")
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_id() -> str:
+    return str(uuid.uuid4())
+
+
+def normalized_path(path: str) -> str:
+    value = os.path.abspath(os.path.expanduser(path.strip()))
+    if not os.path.isdir(value):
+        raise ValueError("Library directory does not exist or is not a directory.")
+    return os.path.normcase(os.path.normpath(value))
+
+
+def relative(root: str, path: str) -> str:
+    return os.path.relpath(path, root).replace(os.sep, "/")
+
+
+def provider_ids(name: str) -> list[tuple[str, str, str]]:
+    result = []
+    for match in ID_RE.finditer(name):
+        provider = match.group("provider").lower()
+        provider = {"tmdbid": "tmdb", "tvdbid": "tvdb", "imdbid": "imdb"}[provider]
+        identifier_type = {"tmdb": "movie", "tvdb": "series", "imdb": "imdb"}[provider]
+        result.append((provider, identifier_type, match.group("id").strip()))
+    return result
+
+
+def parse_nfo_ids(path: Path) -> list[tuple[str, str, str]]:
+    if path.suffix.lower() != ".nfo":
+        return []
+    try:
+        import xml.etree.ElementTree as ET
+
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return []
+    values = []
+    for node in root.findall(".//uniqueid"):
+        provider = (node.attrib.get("type") or "").lower()
+        value = (node.text or "").strip()
+        if not value:
+            continue
+        if provider in {"tmdb", "themoviedb"}:
+            values.append(("tmdb", "movie", value))
+        elif provider in {"tvdb", "thetvdb"}:
+            values.append(("tvdb", "series", value))
+        elif provider in {"imdb"}:
+            values.append(("imdb", "imdb", value))
+    return values
+
+
+def parse_audio_tags(path: Path) -> dict[str, str]:
+    try:
+        from mutagen import File
+
+        audio = File(path, easy=False)
+        if audio is None or not audio.tags:
+            return {}
+        tags: dict[str, str] = {}
+        for raw_key, raw_value in audio.tags.items():
+            key = str(raw_key).upper()
+            if isinstance(raw_value, (list, tuple)):
+                value = str(raw_value[0]) if raw_value else ""
+            else:
+                value = str(raw_value)
+            if value:
+                tags[key] = value
+        return tags
+    except Exception:
+        return {}
+
+
+def guess_media(path: Path) -> dict:
+    """Use GuessIt as a tolerant fallback for release-style filenames."""
+    try:
+        from guessit import guessit
+
+        value = guessit(path.name)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def media_role(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    name = path.stem.lower()
+    if suffix in VIDEO_EXTENSIONS or suffix in AUDIO_EXTENSIONS:
+        return "media"
+    if suffix in SUBTITLE_EXTENSIONS:
+        return "subtitle"
+    if suffix in LYRIC_EXTENSIONS:
+        return "lyrics"
+    if suffix in IMAGE_EXTENSIONS:
+        return "image"
+    if name == "theme" or path.parent.name.lower() == "theme-music":
+        return "theme"
+    return None
+
+
+class LibraryStore:
+    def __init__(self):
+        self.db = Config().database
+
+    def list(self) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT id,name,type,directory,watch_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries ORDER BY name COLLATE NOCASE"
+        )
+        return [self._row(row) for row in rows]
+
+    @staticmethod
+    def _row(row) -> dict:
+        return {
+            "id": row[0], "name": row[1], "type": row[2], "directory": row[3],
+            "watchEnabled": bool(row[4]), "scanIntervalMinutes": row[5], "scanState": row[6],
+            "scanError": row[7], "lastScanStartedAt": row[8], "lastScanFinishedAt": row[9],
+            "createdAt": row[10], "updatedAt": row[11],
+        }
+
+    def get(self, library_id: str) -> dict | None:
+        rows = self.db.execute(
+            "SELECT id,name,type,directory,watch_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries WHERE id=?",
+            (library_id,),
+        )
+        return self._row(rows[0]) if rows else None
+
+    def sources(self, library_id: str) -> list[str]:
+        return [row[0] for row in self.db.execute("SELECT source_library_id FROM library_sources WHERE library_id=? ORDER BY source_library_id", (library_id,))]
+
+    def create(self, name: str, library_type: str, directory: str | None, watch_enabled: bool = True, interval: int = 1440, source_ids: Iterable[str] = ()) -> dict:
+        name = name.strip()
+        if not name or library_type not in LIBRARY_TYPES:
+            raise ValueError("A name and supported library type are required.")
+        if library_type == "collection":
+            directory = None
+            source_ids = list(dict.fromkeys(source_ids))
+            if not source_ids:
+                raise ValueError("A Collection library needs at least one Movie or TV source library.")
+        else:
+            if not directory:
+                raise ValueError("A directory is required for physical libraries.")
+            directory = normalized_path(directory)
+        interval = max(15, min(43200, int(interval or 1440)))
+        library_id = new_id()
+        timestamp = now()
+        with self.db.transaction() as cursor:
+            cursor.execute("SELECT 1 FROM libraries WHERE name=? COLLATE NOCASE", (name,))
+            if cursor.fetchone():
+                raise ValueError("A library with that name already exists.")
+            if directory:
+                cursor.execute("SELECT 1 FROM libraries WHERE directory=?", (directory,))
+                if cursor.fetchone():
+                    raise ValueError("A library already uses that directory.")
+            cursor.execute(
+                "INSERT INTO libraries(id,name,type,directory,watch_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (library_id, name, library_type, directory, int(watch_enabled), interval, timestamp, timestamp),
+            )
+            for source_id in source_ids:
+                cursor.execute("SELECT type FROM libraries WHERE id=?", (source_id,))
+                source = cursor.fetchone()
+                if not source or source[0] not in {"movies", "tv_series"}:
+                    raise ValueError("Collections can source only Movie and TV libraries.")
+                cursor.execute("INSERT INTO library_sources(library_id,source_library_id) VALUES(?,?)", (library_id, source_id))
+        return self.get(library_id)  # type: ignore[return-value]
+
+    def update(self, library_id: str, values: dict) -> dict:
+        current = self.get(library_id)
+        if not current:
+            raise KeyError("Library not found")
+        name = str(values.get("name", current["name"])).strip()
+        interval = max(15, min(43200, int(values.get("scanIntervalMinutes", current["scanIntervalMinutes"]) or 1440)))
+        directory = current["directory"]
+        if current["type"] != "collection" and "directory" in values:
+            directory = normalized_path(str(values["directory"]))
+        watch_enabled = int(bool(values.get("watchEnabled", current["watchEnabled"])))
+        self.db.execute(
+            "UPDATE libraries SET name=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
+            (name, directory, watch_enabled, interval, now(), library_id),
+        )
+        if current["type"] == "collection" and "sourceLibraryIds" in values:
+            source_ids = list(dict.fromkeys(values["sourceLibraryIds"]))
+            with self.db.transaction() as cursor:
+                cursor.execute("DELETE FROM library_sources WHERE library_id=?", (library_id,))
+                for source_id in source_ids:
+                    cursor.execute("SELECT type FROM libraries WHERE id=?", (source_id,))
+                    source = cursor.fetchone()
+                    if not source or source[0] not in {"movies", "tv_series"}:
+                        raise ValueError("Collections can source only Movie and TV libraries.")
+                    cursor.execute("INSERT INTO library_sources(library_id,source_library_id) VALUES(?,?)", (library_id, source_id))
+        return self.get(library_id)  # type: ignore[return-value]
+
+    def delete(self, library_id: str) -> bool:
+        library = self.get(library_id)
+        if not library:
+            return False
+        self.db.execute("DELETE FROM libraries WHERE id=?", (library_id,))
+        return True
+
+    def set_scan_state(self, library_id: str, state: str, error: str | None = None, started: str | None = None, finished: str | None = None) -> None:
+        self.db.execute(
+            "UPDATE libraries SET scan_state=?,scan_error=?,last_scan_started_at=COALESCE(?,last_scan_started_at),last_scan_finished_at=COALESCE(?,last_scan_finished_at),updated_at=? WHERE id=?",
+            (state, error, started, finished, now(), library_id),
+        )
+
+    def create_job(self, library_id: str, kind: str) -> dict:
+        job_id = new_id()
+        timestamp = now()
+        self.db.execute("INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)", (job_id, library_id, kind, timestamp))
+        return self.job(job_id)  # type: ignore[return-value]
+
+    def job(self, job_id: str) -> dict | None:
+        rows = self.db.execute("SELECT id,library_id,kind,state,progress_current,progress_total,message,error,created_at,started_at,finished_at FROM library_jobs WHERE id=?", (job_id,))
+        if not rows:
+            return None
+        row = rows[0]
+        return {"id": row[0], "libraryId": row[1], "kind": row[2], "state": row[3], "progressCurrent": row[4], "progressTotal": row[5], "message": row[6], "error": row[7], "createdAt": row[8], "startedAt": row[9], "finishedAt": row[10]}
+
+    def jobs(self, library_id: str) -> list[dict]:
+        return [self.job(row[0]) for row in self.db.execute("SELECT id FROM library_jobs WHERE library_id=? ORDER BY created_at DESC LIMIT 50", (library_id,)) if self.job(row[0])]  # type: ignore[list-item]
+
+    def update_job(self, job_id: str, **values) -> None:
+        allowed = {"state", "progress_current", "progress_total", "message", "error", "started_at", "finished_at"}
+        updates = [(key, value) for key, value in values.items() if key in allowed]
+        if not updates:
+            return
+        fields = ",".join(f"{key}=?" for key, _ in updates)
+        self.db.execute(f"UPDATE library_jobs SET {fields} WHERE id=?", [value for _, value in updates] + [job_id])
+
+
+class LibraryScanner:
+    def __init__(self, store: LibraryStore | None = None):
+        self.store = store or LibraryStore()
+        self.db = self.store.db
+
+    def scan(self, library_id: str, job_id: str) -> None:
+        library = self.store.get(library_id)
+        if not library:
+            raise ValueError("Library not found")
+        if library["type"] == "collection":
+            self.derive_collection(library_id, job_id)
+            return
+        root = Path(library["directory"])
+        if not root.is_dir():
+            raise ValueError("Library directory is no longer available")
+        started = now()
+        self.store.set_scan_state(library_id, "scanning", started=started, error=None)
+        self.store.update_job(job_id, state="running", started_at=started, message="Discovering media")
+        try:
+            with self.db.transaction() as cursor:
+                cursor.execute("DELETE FROM library_entities WHERE library_id=?", (library_id,))
+            if library["type"] == "movies":
+                count = self._scan_movies(library_id, root, job_id)
+            elif library["type"] == "tv_series":
+                count = self._scan_series(library_id, root, job_id)
+            else:
+                count = self._scan_music(library_id, root, job_id)
+            finished = now()
+            self.store.update_job(job_id, state="completed", progress_current=count, progress_total=count, finished_at=finished, message=f"Indexed {count} entries")
+            self.store.set_scan_state(library_id, "ready", finished=finished)
+        except Exception as error:
+            self.store.update_job(job_id, state="failed", error=str(error), finished_at=now())
+            self.store.set_scan_state(library_id, "error", error=str(error), finished=now())
+            raise
+
+    def _entity(self, library_id: str, parent_id: str | None, entity_type: str, path: str | None, **numbers) -> str:
+        entity_id = new_id()
+        timestamp = now()
+        fields = {"season_number": None, "episode_number": None, "episode_end_number": None, "disc_number": None, "track_number": None}
+        fields.update(numbers)
+        self.db.execute(
+            "INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,disc_number,track_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (entity_id, library_id, parent_id, entity_type, path, fields["season_number"], fields["episode_number"], fields["episode_end_number"], fields["disc_number"], fields["track_number"], timestamp, timestamp),
+        )
+        return entity_id
+
+    def _ids(self, entity_id: str, values: Iterable[tuple[str, str, str]]) -> None:
+        row = self.db.execute("SELECT entity_type FROM library_entities WHERE id=?", (entity_id,))
+        entity_type = row[0][0] if row else ""
+        found = False
+        for provider, identifier_type, value in values:
+            if provider in {"tmdb", "tvdb"} and entity_type in {"movie", "series"}:
+                identifier_type = "movie" if entity_type == "movie" else "series"
+            self.db.execute("INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)", (entity_id, provider, identifier_type, value, int(provider in {"tmdb", "tvdb", "musicbrainz"})))
+            found = True
+        if found:
+            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='explicit_id',updated_at=? WHERE id=?", (now(), entity_id))
+
+    def _files(self, entity_id: str, root: Path, files: Iterable[Path]) -> None:
+        for path in files:
+            role = media_role(path)
+            if not role:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            language = None
+            parts = path.stem.split(".")
+            if len(parts) > 1 and len(parts[-1]) in {2, 3}:
+                language = parts[-1].lower()
+            self.db.execute(
+                "INSERT OR REPLACE INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
+                (new_id(), entity_id, relative(str(root), str(path)), role, language, None, stat.st_size, stat.st_mtime_ns),
+            )
+
+    def _scan_movies(self, library_id: str, root: Path, job_id: str) -> int:
+        entries = [path for path in root.iterdir() if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS]
+        self.store.update_job(job_id, progress_total=len(entries))
+        count = 0
+        for entry in entries:
+            entity = self._entity(library_id, None, "movie", relative(str(root), str(entry)))
+            self._ids(entity, provider_ids(entry.name))
+            files = list(entry.rglob("*")) if entry.is_dir() else [entry]
+            for nfo in (path for path in files if path.suffix.lower() == ".nfo"):
+                self._ids(entity, parse_nfo_ids(nfo))
+            self._files(entity, root, [path for path in files if path.is_file()])
+            count += 1
+            self.store.update_job(job_id, progress_current=count, message=f"Indexed {entry.name}")
+        return count
+
+    def _scan_series(self, library_id: str, root: Path, job_id: str) -> int:
+        series_dirs = [path for path in root.iterdir() if path.is_dir()]
+        self.store.update_job(job_id, progress_total=len(series_dirs))
+        count = 0
+        for series_dir in series_dirs:
+            series = self._entity(library_id, None, "series", relative(str(root), str(series_dir)))
+            self._ids(series, provider_ids(series_dir.name))
+            season_dirs = [path for path in series_dir.iterdir() if path.is_dir() and (SEASON_RE.match(path.name) or path.name.lower() == "specials")]
+            if any(path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS for path in series_dir.iterdir()):
+                season_dirs.append(series_dir)
+            for season_dir in season_dirs:
+                match = SEASON_RE.match(season_dir.name)
+                season_number = int(match.group(1)) if match else (0 if season_dir.name.lower() == "specials" else 1)
+                season = self._entity(library_id, series, "season", relative(str(root), str(season_dir)), season_number=season_number)
+                episode_paths = season_dir.iterdir() if season_dir == series_dir else season_dir.rglob("*")
+                for media in episode_paths:
+                    if not media.is_file() or media.suffix.lower() not in VIDEO_EXTENSIONS:
+                        continue
+                    episode_match = EPISODE_RE.search(media.stem)
+                    guessed = guess_media(media) if not episode_match else {}
+                    if not episode_match and not (guessed.get("season") and guessed.get("episode")):
+                        continue
+                    season_number = int(episode_match.group("season")) if episode_match else int(guessed["season"])
+                    episode_number = int(episode_match.group("episode")) if episode_match else int(guessed["episode"] if not isinstance(guessed["episode"], list) else guessed["episode"][0])
+                    end_number = int(episode_match.group("end")) if episode_match and episode_match.group("end") else None
+                    episode = self._entity(library_id, season, "episode", relative(str(root), str(media)), season_number=season_number, episode_number=episode_number, episode_end_number=end_number)
+                    self._ids(episode, provider_ids(media.name))
+                    self._files(episode, root, [media] + [sidecar for sidecar in media.parent.iterdir() if sidecar.is_file() and sidecar.stem.startswith(media.stem) and sidecar != media])
+                    count += 1
+            self._files(series, root, [path for path in series_dir.iterdir() if path.is_file()])
+            self.store.update_job(job_id, progress_current=len([x for x in series_dirs[: count + 1]]), message=f"Indexed {series_dir.name}")
+        return count
+
+    def _scan_music(self, library_id: str, root: Path, job_id: str) -> int:
+        album_dirs = []
+        for directory, _, filenames in os.walk(root):
+            if any(Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames):
+                album_dirs.append(Path(directory))
+        self.store.update_job(job_id, progress_total=len(album_dirs))
+        count = 0
+        artists: dict[str, str] = {}
+        for album_dir in album_dirs:
+            artist_name = album_dir.relative_to(root).parts[0] if album_dir.relative_to(root).parts else album_dir.name
+            artist = artists.get(artist_name)
+            if not artist:
+                artist = self._entity(library_id, None, "artist", artist_name)
+                artists[artist_name] = artist
+            release = self._entity(library_id, artist, "release", relative(str(root), str(album_dir)))
+            tracks = [path for path in album_dir.iterdir() if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS]
+            for track in sorted(tracks):
+                tags = parse_audio_tags(track)
+                track_number = _int_tag(tags.get("TRACKNUMBER") or tags.get("TRACK"))
+                disc_number = _int_tag(tags.get("DISCNUMBER") or tags.get("DISC"))
+                entity = self._entity(library_id, release, "track", relative(str(root), str(track)), disc_number=disc_number, track_number=track_number)
+                self._ids(entity, _music_ids(tags))
+                self._files(entity, root, [track] + [sidecar for sidecar in track.parent.iterdir() if sidecar.is_file() and sidecar.stem.startswith(track.stem) and sidecar != track])
+                count += 1
+            self._files(release, root, [path for path in album_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS])
+            self.store.update_job(job_id, progress_current=count, message=f"Indexed {album_dir.name}")
+        return count
+
+    def derive_collection(self, library_id: str, job_id: str) -> None:
+        library = self.store.get(library_id)
+        if not library:
+            raise ValueError("Library not found")
+        sources = self.store.sources(library_id)
+        self.store.set_scan_state(library_id, "scanning", started=now(), error=None)
+        self.store.update_job(job_id, state="running", started_at=now(), message="Deriving collections")
+        with self.db.transaction() as cursor:
+            cursor.execute("DELETE FROM library_entities WHERE library_id=?", (library_id,))
+        try:
+            from app.providers import MetadataService, ProviderError, TVDBClient
+
+            service = MetadataService()
+            client = service.client("tvdb")
+            if not isinstance(client, TVDBClient):
+                raise ProviderError("TheTVDB is not configured")
+            source_rows = self.db.execute(
+                "SELECT e.id,e.entity_type,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.library_id IN ({}) AND p.provider='tvdb' AND p.identifier_type IN ('series','movie')".format(",".join("?" * len(sources))),
+                sources,
+            ) if sources else []
+            by_id = {(row[1], str(row[2])): row[0] for row in source_rows}
+            lists: dict[str, dict] = {}
+            # Lists are paged; stop at the first short page to avoid unbounded calls.
+            for page in range(0, 50):
+                page_values = client.lists(page)
+                for value in page_values:
+                    if value.get("isOfficial"):
+                        lists[str(value.get("id"))] = value
+                if len(page_values) < 100:
+                    break
+            self.store.update_job(job_id, progress_total=len(lists))
+            count = 0
+            for list_id, base in lists.items():
+                try:
+                    payload = client.list_details(list_id)
+                except ProviderError:
+                    continue
+                data = payload.get("data", payload)
+                members = []
+                for entity in data.get("entities", []) or []:
+                    key = ("movie", str(entity.get("movieId"))) if entity.get("movieId") else ("series", str(entity.get("seriesId"))) if entity.get("seriesId") else None
+                    if key and key in by_id:
+                        members.append(by_id[key])
+                members = list(dict.fromkeys(members))
+                if len(members) < 2:
+                    continue
+                collection = self._entity(library_id, None, "collection", f"tvdb-list-{list_id}")
+                self._ids(collection, [("tvdb", "collection", list_id)])
+                for position, source_entity in enumerate(members):
+                    self.db.execute("INSERT INTO collection_members(collection_entity_id,source_entity_id,position) VALUES(?,?,?)", (collection, source_entity, position))
+                # Store a lightweight localized seed; full metadata remains the provider cache.
+                title = base.get("name") or data.get("name") or f"Collection {list_id}"
+                service.cache.put("tvdb", "collection", list_id, "en", {"title": title, "overview": data.get("overview"), "provider": "tvdb", "providerId": list_id, "images": []})
+                count += 1
+                self.store.update_job(job_id, progress_current=count, message=f"Derived {title}")
+            self.store.update_job(job_id, state="completed", progress_current=count, progress_total=len(lists), finished_at=now(), message=f"Derived {count} official collections")
+            self.store.set_scan_state(library_id, "ready", finished=now())
+        except Exception as error:
+            self.store.update_job(job_id, state="failed", error=str(error), finished_at=now())
+            self.store.set_scan_state(library_id, "error", error=str(error), finished=now())
+            raise
+
+
+def _int_tag(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.search(r"\d+", value)
+    return int(match.group(0)) if match else None
+
+
+def _music_ids(tags: dict[str, str]) -> list[tuple[str, str, str]]:
+    ids: list[tuple[str, str, str]] = []
+    mapping = {
+        "MUSICBRAINZ_ARTISTID": "artist",
+        "MUSICBRAINZ_ALBUMARTISTID": "artist",
+        "MUSICBRAINZ_RELEASEGROUPID": "release_group",
+        "MUSICBRAINZ_ALBUMID": "release",
+        "MUSICBRAINZ_TRACKID": "recording",
+        "MUSICBRAINZ_RELEASETRACKID": "release_track",
+        "MUSICBRAINZ_WORKID": "work",
+    }
+    for key, identifier_type in mapping.items():
+        for value in (tags.get(key) or "").split(";"):
+            if value.strip():
+                ids.append(("musicbrainz", identifier_type, value.strip()))
+    return ids
+
+
+class _LibraryChangeHandler(FileSystemEventHandler):
+    def __init__(self, runtime: "LibraryRuntime", library_id: str):
+        self.runtime = runtime
+        self.library_id = library_id
+
+    def on_any_event(self, event):  # watchdog emits separate create/modify/delete/move events
+        if not getattr(event, "is_directory", False):
+            self.runtime.request_reconcile(self.library_id)
+
+
+class LibraryRuntime:
+    """Durable scan worker with daily repair scheduling and optional filesystem watching."""
+
+    def __init__(self):
+        self.store = LibraryStore()
+        self.scanner = LibraryScanner(self.store)
+        self.condition = threading.Condition()
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.observer = None
+        self._watch_paths: set[str] = set()
+        self._reconcile_due: dict[str, float] = {}
+
+    def start(self):
+        if self.thread and self.thread.is_alive():
+            return
+        self.stop_event.clear()
+        self._configure_watchers()
+        self.thread = threading.Thread(target=self._run, name="zenstream-library-jobs", daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        with self.condition:
+            self.condition.notify_all()
+        if self.thread:
+            self.thread.join(timeout=5)
+        if self.observer:
+            self.observer.stop()
+            self.observer.join(timeout=5)
+            self.observer = None
+        self._watch_paths.clear()
+
+    def refresh_watchers(self) -> None:
+        if not (self.thread and self.thread.is_alive()):
+            return
+        if self.observer:
+            self.observer.stop()
+            self.observer.join(timeout=5)
+            self.observer = None
+        self._watch_paths.clear()
+        self._configure_watchers()
+
+    def enqueue(self, library_id: str, kind: str = "scan") -> dict:
+        existing = self.store.db.execute("SELECT id FROM library_jobs WHERE library_id=? AND kind=? AND state IN ('queued','running') ORDER BY created_at DESC LIMIT 1", (library_id, kind))
+        if existing:
+            return self.store.job(existing[0][0])  # type: ignore[return-value]
+        job = self.store.create_job(library_id, kind)
+        with self.condition:
+            self.condition.notify_all()
+        return job
+
+    def request_reconcile(self, library_id: str) -> None:
+        # Debounce bursts from copy/move operations into one reconcile job.
+        self._reconcile_due[library_id] = time.monotonic() + 5
+        with self.condition:
+            self.condition.notify_all()
+
+    def _configure_watchers(self) -> None:
+        if Observer is None:
+            return
+        observer = Observer()
+        for library in self.store.list():
+            directory = library.get("directory")
+            if not library.get("watchEnabled") or not directory or not os.path.isdir(directory):
+                continue
+            try:
+                observer.schedule(_LibraryChangeHandler(self, library["id"]), directory, recursive=True)
+                self._watch_paths.add(directory)
+            except OSError:
+                continue
+        if self._watch_paths:
+            observer.start()
+            self.observer = observer
+
+    def _schedule_repairs(self) -> None:
+        now_epoch = time.time()
+        for library in self.store.list():
+            if library["type"] == "collection" or not library.get("scanIntervalMinutes"):
+                continue
+            finished = library.get("lastScanFinishedAt")
+            try:
+                due = not finished or datetime.fromisoformat(finished).timestamp() + library["scanIntervalMinutes"] * 60 <= now_epoch
+            except (TypeError, ValueError, OSError):
+                due = True
+            if due:
+                self.enqueue(library["id"], "scan")
+
+    def _run(self):
+        next_repair = 0.0
+        while not self.stop_event.is_set():
+            if time.time() >= next_repair:
+                self._schedule_repairs()
+                next_repair = time.time() + 30
+            due = [library_id for library_id, deadline in self._reconcile_due.items() if time.monotonic() >= deadline]
+            for library_id in due:
+                self.enqueue(library_id, "reconcile")
+                self._reconcile_due.pop(library_id, None)
+            rows = self.store.db.execute("SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1")
+            if not rows:
+                with self.condition:
+                    self.condition.wait(timeout=1)
+                continue
+            job_id, library_id, kind = rows[0]
+            try:
+                if kind in {"scan", "reconcile", "collection_rebuild"}:
+                    self.scanner.scan(library_id, job_id)
+                else:
+                    self.store.update_job(job_id, state="failed", error=f"Unsupported job kind: {kind}", finished_at=now())
+            except Exception:
+                # The scanner records the durable error; keep the worker alive for later jobs.
+                continue
+
+
+runtime = LibraryRuntime()

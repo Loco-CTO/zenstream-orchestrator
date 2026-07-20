@@ -59,6 +59,8 @@ class MetadataCredentials:
         return values
 
     def get(self, provider: str) -> dict | None:
+        if provider == "musicbrainz":
+            return {}
         if provider not in PROVIDERS:
             raise ValueError("Unsupported metadata provider")
         rows = self.db.execute(

@@ -297,6 +297,7 @@ class LibraryScanner:
                 count = self._scan_series(library_id, root, job_id, should_terminate)
             else:
                 count = self._scan_music(library_id, root, job_id, should_terminate)
+            self._resolve_and_seed(library_id, library["type"], job_id, should_terminate)
             finished = now()
             self.store.update_job(job_id, state="completed", progress_current=count, progress_total=count, finished_at=finished, message=f"Indexed {count} entries")
             self.store.set_scan_state(library_id, "ready", finished=finished)
@@ -336,6 +337,76 @@ class LibraryScanner:
             found = True
         if found:
             self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='explicit_id',updated_at=? WHERE id=?", (now(), entity_id))
+
+    def _resolve_and_seed(self, library_id: str, library_type: str, job_id: str, should_terminate: Callable[[], bool]) -> None:
+        """Resolve top-level inventory entities and seed English/common metadata."""
+        from app.providers import MetadataService, ProviderError
+
+        entity_types = {
+            "movies": {"movie"},
+            "tv_series": {"series"},
+            "music": {"artist", "release", "track"},
+        }.get(library_type, set())
+        if not entity_types:
+            return
+        parent_filter = " AND parent_id IS NULL" if library_type != "music" else ""
+        rows = self.db.execute(
+            "SELECT id,entity_type,relative_path,season_number,episode_number FROM library_entities WHERE library_id=?{} AND entity_type IN ({}) ORDER BY relative_path".format(parent_filter, ",".join("?" * len(entity_types))),
+            [library_id, *sorted(entity_types)],
+        )
+        self.store.update_job(job_id, progress_total=len(rows), progress_current=0, message="Resolving provider metadata")
+        service = MetadataService()
+        for index, (entity_id, entity_type, relative_path, _season, _episode) in enumerate(rows, start=1):
+            self._check_termination(should_terminate)
+            query, year = _inventory_query(relative_path or "")
+            explicit = [
+                {"provider": row[0], "id": row[2]}
+                for row in self.db.execute("SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?", (entity_id,))
+            ]
+            try:
+                result = service.resolve_inventory_entity(entity_type, query, year, explicit)
+            except ProviderError as error:
+                self.db.execute("UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), entity_id))
+                raise ValueError(f"Metadata resolution failed for {relative_path or entity_type}: {error}") from error
+            values = []
+            for value in result["providerIds"]:
+                identifier_type = "movie" if entity_type == "movie" else "series" if entity_type == "series" else entity_type
+                values.append((value["provider"], identifier_type, value["id"]))
+            self._ids(entity_id, values)
+            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), entity_id))
+            if entity_type == "series":
+                self._derive_tmdb_child_ids(entity_id)
+                self._derive_provider_child_ids(entity_id, result["metadata"])
+                self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE parent_id=? AND match_status='unresolved'", (now(), entity_id))
+            self.store.update_job(job_id, progress_current=index, message=f"Resolved {query}")
+
+    def _derive_tmdb_child_ids(self, series_id: str) -> None:
+        provider_rows = self.db.execute("SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='tmdb'", (series_id,))
+        if not provider_rows:
+            return
+        children = self.db.execute("SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=?", (series_id,))
+        for child_id, entity_type, season_number, episode_number in children:
+            if entity_type == "season":
+                provider_id = f"{provider_rows[0][0]}:{season_number}"
+            elif entity_type == "episode" and season_number is not None and episode_number is not None:
+                provider_id = f"{provider_rows[0][0]}:{season_number}:{episode_number}"
+            else:
+                continue
+            self._ids(child_id, [("tmdb", entity_type, provider_id)])
+            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE id=?", (now(), child_id))
+
+    def _derive_provider_child_ids(self, series_id: str, metadata: dict) -> None:
+        if metadata.get("provider") == "tmdb":
+            return
+        children = self.db.execute("SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=?", (series_id,))
+        for child_id, entity_type, season_number, episode_number in children:
+            for value in metadata.get("children", []) or []:
+                if value.get("type") != entity_type or int(value.get("season", -1)) != int(season_number or -2):
+                    continue
+                if entity_type == "episode" and int(value.get("episode", -1)) != int(episode_number or -2):
+                    continue
+                self._ids(child_id, [(metadata.get("provider", ""), entity_type, str(value["id"]))])
+                break
 
     def _files(self, entity_id: str, root: Path, files: Iterable[Path]) -> None:
         for path in files:
@@ -506,6 +577,20 @@ class LibraryScanner:
             raise
 
 
+def _inventory_query(relative_path: str) -> tuple[str, str | None]:
+    path = Path(relative_path)
+    raw = path.stem if path.suffix else path.name
+    parsed = guess_media(path)
+    query = str(parsed.get("title") or raw)
+    query = re.sub(r"\[[^\]]+\]", " ", query)
+    query = re.sub(r"\s+", " ", query).strip(" .-_[]")
+    year = str(parsed.get("year") or "")[:4] or None
+    if not year:
+        match = re.search(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)", raw)
+        year = match.group(1) if match else None
+    return query or raw, year
+
+
 def _int_tag(value: str | None) -> int | None:
     if not value:
         return None
@@ -561,6 +646,10 @@ class LibraryRuntime:
         if self.thread and self.thread.is_alive():
             return
         self._recover_active_jobs()
+        for library in self.store.list():
+            unresolved = self.store.db.execute("SELECT COUNT(*) FROM library_entities WHERE library_id=? AND match_status IN ('unresolved','failed')", (library["id"],))[0][0]
+            if unresolved:
+                self.enqueue(library["id"], "scan")
         self.stop_event.clear()
         self._configure_watchers()
         self.thread = threading.Thread(target=self._run, name="zenstream-library-jobs", daemon=True)
@@ -673,6 +762,8 @@ class LibraryRuntime:
                 due = not finished or datetime.fromisoformat(finished).timestamp() + library["scanIntervalMinutes"] * 60 <= now_epoch
             except (TypeError, ValueError, OSError):
                 due = True
+            unresolved = self.store.db.execute("SELECT COUNT(*) FROM library_entities WHERE library_id=? AND match_status IN ('unresolved','failed')", (library["id"],))[0][0]
+            due = due or (bool(unresolved) and not finished)
             if due:
                 self.enqueue(library["id"], "scan")
 

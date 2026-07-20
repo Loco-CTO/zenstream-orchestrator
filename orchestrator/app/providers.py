@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 import time
+import re
+import unicodedata
 from pathlib import Path
 from urllib.parse import quote
 
@@ -62,18 +64,36 @@ class TMDBClient(ProviderClient):
         return [{"provider": "tmdb", "providerId": str(value.get("id")), "title": value.get("title") or value.get("name"), "year": (value.get("release_date") or value.get("first_air_date") or "")[:4] or None, "overview": value.get("overview")} for value in payload.get("results", []) if value.get("id")]
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
-        kind = "tv" if entity_type in {"series", "season", "episode"} else "movie"
+        if entity_type == "season":
+            series_id, season = provider_id.split(":", 1)
+            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}", params={"language": locale, "append_to_response": "images,external_ids"})
+        if entity_type == "episode":
+            series_id, season, episode = provider_id.split(":", 2)
+            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}", params={"language": locale, "append_to_response": "images,external_ids"})
+        kind = "tv" if entity_type == "series" else "movie"
         return self._request(f"/{kind}/{quote(provider_id)}", params={"language": locale, "append_to_response": "images,external_ids"})
 
     def normalize(self, entity_type: str, provider_id: str, payload: dict) -> dict:
         title = payload.get("title") or payload.get("name") or payload.get("original_title") or payload.get("original_name")
+        external = payload.get("external_ids") or {}
+        ids = []
+        if external.get("tvdb_id"):
+            ids.append({"provider": "tvdb", "identifierType": "movie" if entity_type == "movie" else "series", "id": str(external["tvdb_id"])})
+        if external.get("imdb_id"):
+            ids.append({"provider": "imdb", "identifierType": "imdb", "id": str(external["imdb_id"])})
+        dates = payload.get("release_date") or payload.get("first_air_date") or payload.get("air_date")
+        genres = payload.get("genres") or payload.get("tags") or []
         return {
             "title": title,
             "overview": payload.get("overview"),
-            "year": (payload.get("release_date") or payload.get("first_air_date") or "")[:4] or None,
+            "date": dates or None,
+            "year": (dates or "")[:4] or None,
+            "tags": [value.get("name") if isinstance(value, dict) else str(value) for value in genres if value],
             "originalLanguage": payload.get("original_language"),
             "provider": "tmdb",
             "providerId": provider_id,
+            "ids": ids,
+            "children": [{"type": "season", "season": value.get("season_number"), "id": str(value.get("id"))} for value in payload.get("seasons", []) or [] if value.get("id") is not None and value.get("season_number") is not None],
             "images": self._images(payload),
         }
 
@@ -156,13 +176,29 @@ class TVDBClient(ProviderClient):
     def normalize(self, entity_type: str, provider_id: str, payload: dict) -> dict:
         data = payload.get("data", payload)
         translation = payload.get("translation") or {}
+        ids = []
+        for remote in data.get("remoteIds", []) or data.get("remote_ids", []) or []:
+            source = str(remote.get("sourceName") or remote.get("sourceInfo") or remote.get("type") or "").lower()
+            value = remote.get("id") or remote.get("value")
+            if not value:
+                continue
+            if "tmdb" in source:
+                ids.append({"provider": "tmdb", "identifierType": "movie" if entity_type == "movie" else "series", "id": str(value)})
+            elif "imdb" in source:
+                ids.append({"provider": "imdb", "identifierType": "imdb", "id": str(value)})
+        genres = data.get("genres") or data.get("tags") or []
+        dates = data.get("firstAired") or data.get("lastAired") or data.get("releaseDate")
         return {
             "title": translation.get("name") or data.get("name") or data.get("title"),
             "overview": translation.get("overview") or data.get("overview") or data.get("overviewTranslations", [None])[0],
-            "year": (data.get("year") or data.get("firstAired") or "")[:4] or None,
+            "date": dates or None,
+            "year": str(data.get("year") or dates or "")[:4] or None,
+            "tags": [value.get("name") if isinstance(value, dict) else str(value) for value in genres if value],
             "originalLanguage": data.get("originalLanguage"),
             "provider": "tvdb",
             "providerId": provider_id,
+            "ids": ids,
+            "children": _tvdb_children(data),
             "images": _tvdb_images(data),
         }
 
@@ -186,6 +222,13 @@ class MusicBrainzClient(ProviderClient):
         endpoint = {"artist": "artist", "release": "release", "release_group": "release-group", "recording": "recording", "work": "work"}.get(entity_type, "release")
         return self._request(f"/{endpoint}/{quote(provider_id)}", {"inc": "artist-credits+aliases+releases+release-groups+recordings"})
 
+    def search(self, entity_type: str, query: str) -> list[dict]:
+        endpoint = {"artist": "artist", "release": "release", "track": "recording", "recording": "recording"}.get(entity_type, "release")
+        field = {"artist": "artist", "release": "release", "track": "recording", "recording": "recording"}.get(entity_type, "release")
+        payload = self._request(f"/{endpoint}", {"query": f'{field}:"{query}"', "limit": 10})
+        values = payload.get(f"{endpoint}s", []) or []
+        return [{"provider": "musicbrainz", "providerId": str(value.get("id")), "title": value.get("name") or value.get("title"), "year": str(value.get("first-release-date") or value.get("date") or "")[:4] or None} for value in values if value.get("id")]
+
     def normalize(self, entity_type: str, provider_id: str, payload: dict) -> dict:
         images = []
         if entity_type in {"release", "release_group"}:
@@ -193,7 +236,9 @@ class MusicBrainzClient(ProviderClient):
             if archive_key.get("front") or entity_type == "release":
                 endpoint = "release-group" if entity_type == "release_group" else "release"
                 images.append({"type": "poster", "language": None, "url": f"https://coverartarchive.org/{endpoint}/{quote(provider_id)}/front-500", "score": 0, "width": 500, "provider": "musicbrainz"})
-        return {"title": payload.get("name") or payload.get("title"), "overview": None, "year": None, "originalLanguage": None, "provider": "musicbrainz", "providerId": provider_id, "images": images}
+        date = payload.get("first-release-date") or payload.get("date")
+        tags = [value.get("name") for value in payload.get("tags", []) or [] if value.get("name")]
+        return {"title": payload.get("name") or payload.get("title"), "overview": None, "date": date, "year": str(date or "")[:4] or None, "tags": tags, "originalLanguage": None, "provider": "musicbrainz", "providerId": provider_id, "ids": [], "images": images}
 
 
 def _tvdb_language(locale: str) -> str:
@@ -211,6 +256,20 @@ def _tvdb_images(data: dict) -> list[dict]:
         values.append({"type": image_type, "language": artwork.get("language") or artwork.get("lang"), "url": url, "score": artwork.get("score", 0), "width": artwork.get("width", 0), "provider": "tvdb"})
     if data.get("image"):
         values.append({"type": "poster", "language": None, "url": data["image"], "score": 0, "width": 0, "provider": "tvdb"})
+    return values
+
+
+def _tvdb_children(data: dict) -> list[dict]:
+    values = []
+    for season in data.get("seasons", []) or []:
+        season_number = season.get("seasonNumber") or season.get("number")
+        if season.get("id") is not None and season_number is not None:
+            values.append({"type": "season", "season": season_number, "id": str(season["id"])})
+    for episode in data.get("episodes", []) or []:
+        season_number = episode.get("seasonNumber") or episode.get("season")
+        episode_number = episode.get("number") or episode.get("episodeNumber")
+        if episode.get("id") is not None and season_number is not None and episode_number is not None:
+            values.append({"type": "episode", "season": season_number, "episode": episode_number, "id": str(episode["id"])})
     return values
 
 
@@ -252,13 +311,13 @@ class MetadataService:
         else:
             raise ProviderError("Unsupported provider")
 
-    def fetch(self, provider: str, entity_type: str, provider_id: str, locale: str) -> dict:
+    def fetch(self, provider: str, entity_type: str, provider_id: str, locale: str, force: bool = False) -> dict:
         lock = self._lock_for(provider, entity_type, provider_id, locale)
         with lock:
             # Another request may have populated the cache while this request
             # was waiting. Re-check before making a provider call.
             cached = self.cache.get(provider, entity_type, provider_id, locale)
-            if cached and not cached.pop("_stale", False):
+            if cached and not force and not cached.pop("_stale", False):
                 return cached
             client = self.client(provider)
             payload = client.details(entity_type, provider_id, locale)
@@ -266,18 +325,18 @@ class MetadataService:
             self.cache.put(provider, entity_type, provider_id, locale, normalized)
             return normalized
 
-    def fetch_fallback(self, provider: str, entity_type: str, provider_id: str, locale: str) -> dict | None:
+    def fetch_fallback(self, provider: str, entity_type: str, provider_id: str, locale: str, force: bool = False) -> dict | None:
         """Resolve requested locale, then English, then any cached translation."""
         wanted = (locale or "en").lower()
         candidates = [wanted] if wanted == "en" else [wanted, "en"]
         values: list[dict] = []
         for candidate in candidates:
             cached = self.cache.get(provider, entity_type, provider_id, candidate)
-            if cached and not cached.pop("_stale", False):
+            if cached and not force and not cached.pop("_stale", False):
                 values.append(cached)
                 continue
             try:
-                values.append(self.fetch(provider, entity_type, provider_id, candidate))
+                values.append(self.fetch(provider, entity_type, provider_id, candidate, force=force))
             except ProviderError:
                 continue
         any_cached = self.cache.any(provider, entity_type, provider_id)
@@ -295,6 +354,62 @@ class MetadataService:
                 elif not merged.get(key) and field:
                     merged[key] = field
         return merged
+
+    def resolve_inventory_entity(self, entity_type: str, query: str, year: str | None = None, explicit_ids: list[dict] | None = None) -> dict:
+        """Resolve an inventory entity and seed its English/common provider cache."""
+        priorities = {
+            "series": ["tvdb", "tmdb"], "movie": ["tmdb", "tvdb"],
+            "artist": ["musicbrainz"], "release": ["musicbrainz"],
+            "track": ["musicbrainz"], "recording": ["musicbrainz"],
+        }.get(entity_type, [])
+        if not priorities:
+            raise ProviderError(f"No provider resolution strategy exists for {entity_type}")
+        explicit_by_provider = {value["provider"]: value["id"] for value in (explicit_ids or []) if value.get("provider") in priorities}
+        selected: dict | None = None
+        errors: list[str] = []
+        for provider in priorities:
+            try:
+                client = self.client(provider)
+                provider_id = explicit_by_provider.get(provider)
+                if not provider_id:
+                    candidates = client.search(entity_type, query, year) if provider == "tmdb" else client.search(entity_type, query)
+                    provider_id = _select_match(candidates, query, year)
+                normalized = self.fetch(provider, entity_type, str(provider_id), "en", force=True)
+                selected = selected or normalized
+                for value in normalized.get("ids", []) or []:
+                    explicit_by_provider.setdefault(value["provider"], value["id"])
+            except (ProviderError, ValueError, KeyError) as error:
+                errors.append(f"{provider}: {error}")
+        if not selected:
+            detail = "; ".join(errors) or "no matching provider result"
+            raise ProviderError(f"Could not resolve {entity_type} '{query}': {detail}")
+        if entity_type in {"series", "movie"} and any(provider not in explicit_by_provider for provider in priorities):
+            missing = ", ".join(provider for provider in priorities if provider not in explicit_by_provider)
+            raise ProviderError(f"Could not resolve all required provider IDs for '{query}'; missing {missing}")
+        return {"metadata": selected, "providerIds": [{"provider": provider, "id": provider_id} for provider, provider_id in explicit_by_provider.items()]}
+
+
+def _normalized_match_text(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "").encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
+def _select_match(candidates: list[dict], query: str, year: str | None = None) -> str:
+    wanted = _normalized_match_text(query)
+    scored = []
+    for candidate in candidates:
+        title = _normalized_match_text(str(candidate.get("title") or ""))
+        if not title:
+            continue
+        score = 100 if title == wanted else 75 if wanted in title or title in wanted else 0
+        if year and candidate.get("year") and str(candidate["year"])[:4] == str(year)[:4]:
+            score += 20
+        if score:
+            scored.append((score, str(candidate["providerId"])))
+    scored.sort(reverse=True)
+    if not scored or scored[0][0] < 95 or (len(scored) > 1 and scored[0][0] == scored[1][0]):
+        raise ProviderError(f"No unique high-confidence match for '{query}'")
+    return scored[0][1]
 
 
 def choose_image(images: list[dict], requested: str, image_type: str) -> dict | None:

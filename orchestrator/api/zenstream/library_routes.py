@@ -48,7 +48,7 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     return value
 
 
-def _metadata_for(item: dict, locale: str, fetch: bool = False) -> dict | None:
+def _metadata_for(item: dict, locale: str, fetch: bool = False, fallback: bool = True) -> dict | None:
     service = MetadataService()
     priorities = {"series": ["tvdb", "tmdb"], "episode": ["tvdb", "tmdb"], "season": ["tvdb", "tmdb"], "movie": ["tmdb", "tvdb"], "artist": ["musicbrainz"], "release": ["musicbrainz"], "track": ["musicbrainz"], "collection": ["tvdb"]}
     merged: dict = {}
@@ -56,7 +56,7 @@ def _metadata_for(item: dict, locale: str, fetch: bool = False) -> dict | None:
         ids = [value for value in item["providerIds"] if value["provider"] == provider]
         if not ids:
             continue
-        cached = service.fetch_fallback(provider, item["type"], ids[0]["id"], locale) if fetch else _cached_provider_metadata(service.cache, provider, item["type"], ids[0]["id"], locale)
+        cached = service.fetch_fallback(provider, item["type"], ids[0]["id"], locale) if fetch else _cached_provider_metadata(service.cache, provider, item["type"], ids[0]["id"], locale, fallback)
         if cached:
             for key, value in cached.items():
                 if key == "images":
@@ -66,17 +66,19 @@ def _metadata_for(item: dict, locale: str, fetch: bool = False) -> dict | None:
     return merged or None
 
 
-def _cached_provider_metadata(cache: MetadataCache, provider: str, entity_type: str, provider_id: str, locale: str) -> dict | None:
+def _cached_provider_metadata(cache: MetadataCache, provider: str, entity_type: str, provider_id: str, locale: str, fallback: bool = True) -> dict | None:
     values = []
-    for candidate in dict.fromkeys([locale or "en", "en"]):
+    candidates = [locale or "en"] if not fallback or (locale or "en") == "en" else [locale, "en"]
+    for candidate in dict.fromkeys(candidates):
         cached = cache.get(provider, entity_type, provider_id, candidate)
         if cached:
             cached.pop("_stale", None)
             values.append(cached)
-    fallback = cache.any(provider, entity_type, provider_id)
     if fallback:
-        fallback.pop("_stale", None)
-        values.append(fallback)
+        fallback_value = cache.any(provider, entity_type, provider_id)
+        if fallback_value:
+            fallback_value.pop("_stale", None)
+            values.append(fallback_value)
     if not values:
         return None
     merged = {}
@@ -87,6 +89,17 @@ def _cached_provider_metadata(cache: MetadataCache, provider: str, entity_type: 
             elif not merged.get(key) and field:
                 merged[key] = field
     return merged
+
+
+def _metadata_state(item: dict, locale: str, metadata: dict | None) -> str:
+    if metadata:
+        return "ready"
+    rows = store.db.execute("SELECT state FROM metadata_hydration_requests WHERE entity_id=? AND locale=?", (item["id"], (locale or "en").lower()))
+    if rows and rows[0][0] in {"queued", "running"}:
+        return rows[0][0]
+    if rows and rows[0][0] == "error":
+        return "error"
+    return "queued" if item.get("providerIds") else "error"
 
 
 @router.get("/metadata/providers")
@@ -295,7 +308,17 @@ async def list_items(library_id: str, parentId: str | None = Query(None), locale
     where = "library_id=? AND parent_id IS ?"
     total = store.db.execute(f"SELECT COUNT(*) FROM library_entities WHERE {where}", params)[0][0]
     rows = store.db.execute(f"SELECT id FROM library_entities WHERE {where} ORDER BY entity_type, relative_path COLLATE NOCASE LIMIT ? OFFSET ?", params + [pageSize, (page - 1) * pageSize])
-    items = [_entity(row[0], locale) for row in rows]
+    items = []
+    missing = []
+    for row in rows:
+        item = _entity(row[0], locale)
+        item["metadata"] = _metadata_for(item, locale, False, fallback=False)
+        item["metadataState"] = _metadata_state(item, locale, item["metadata"])
+        if not item["metadata"] and item["providerIds"]:
+            missing.append(item["id"])
+        items.append(item)
+    if missing:
+        scheduler.enqueue_metadata_hydration(missing, locale)
     return {"items": items, "page": page, "pageSize": pageSize, "total": total}
 
 
@@ -303,7 +326,10 @@ async def list_items(library_id: str, parentId: str | None = Query(None), locale
 async def get_item(entity_id: str, locale: str = Query("en"), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
     require_admin(Username, TOKEN)
     item = _entity(entity_id, locale, include_metadata=True)
-    item["metadata"] = await asyncio.to_thread(_metadata_for, item, locale, True)
+    item["metadata"] = await asyncio.to_thread(_metadata_for, item, locale, False, False)
+    item["metadataState"] = _metadata_state(item, locale, item["metadata"])
+    if not item["metadata"] and item["providerIds"]:
+        scheduler.enqueue_metadata_hydration([entity_id], locale)
     return item
 
 
@@ -312,16 +338,7 @@ async def hydrate_items(request: Request, Username: str | None = Header(None), T
     require_admin(Username, TOKEN)
     data = await request.json()
     locale = str(data.get("locale") or "en")
-    values = []
-    for entity_id in data.get("entityIds") or []:
-        item = _entity(str(entity_id), locale)
-        try:
-            payload = await asyncio.to_thread(_metadata_for, item, locale, True)
-            if payload:
-                values.append({"entityId": entity_id, "metadata": payload})
-        except ProviderError:
-            continue
-    return {"items": values}
+    return scheduler.enqueue_metadata_hydration([str(value) for value in data.get("entityIds") or []], locale)
 
 
 @router.get("/library-items/{entity_id}/matches")
@@ -371,8 +388,13 @@ async def get_image(entity_id: str, imageType: str = Query("poster"), locale: st
         path = Path(library["directory"]) / local[0][0]
         if path.is_file():
             return FileResponse(path)
-    metadata = await asyncio.to_thread(_metadata_for, item, locale, True)
+    # Library previews must never turn a cache miss into inline provider work.
+    # A page can request dozens of images at once; slow provider hydration would
+    # occupy the browser's connection pool and make dashboard navigation wait.
+    metadata = await asyncio.to_thread(_metadata_for, item, locale, False, False)
     if not metadata:
+        if item.get("providerIds"):
+            scheduler.enqueue_metadata_hydration([entity_id], locale)
         return Response(status_code=202, headers={"Retry-After": "10"})
     image = choose_image(metadata.get("images", []), locale, imageType)
     if not image:

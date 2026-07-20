@@ -24,6 +24,7 @@ type Item = {
 	relativePath?: string;
 	parentId?: string | null;
 	metadata?: { title?: string } | null;
+	metadataState?: "ready" | "queued" | "running" | "error";
 	matchStatus: string;
 	providerIds: { provider: string; id: string }[];
 };
@@ -110,6 +111,13 @@ function LibraryViewPage() {
 	useEffect(() => {
 		if (session && page !== 1) load(session, parent, page);
 	}, [page]);
+
+	const hydrationSignature = items.map((item) => item.id + ":" + item.metadataState).join(",");
+	useEffect(() => {
+		if (!session || !items.some((item) => item.metadataState === "queued" || item.metadataState === "running")) return;
+		const timer = window.setInterval(() => load(session, parent, page), 3000);
+		return () => window.clearInterval(timer);
+	}, [session, parent, page, locale, hydrationSignature]);
 
 	function openParent(id: string) {
 		setParent(id);
@@ -249,15 +257,18 @@ function ViewCard({
 	const cardRef = useRef<HTMLButtonElement | null>(null);
 	const [image, setImage] = useState<string | null>(null);
 	const [imageFailed, setImageFailed] = useState(false);
+	const [imagePending, setImagePending] = useState(false);
 	useEffect(() => {
 		const controller = new AbortController();
 		let url = "";
+		let retryTimer: number | undefined;
 		setImage(null);
 		setImageFailed(false);
-		let started = false;
+		setImagePending(false);
+		let inFlight = false;
 		const fetchImage = () => {
-			if (started || !session) return;
-			started = true;
+			if (inFlight || !session) return;
+			inFlight = true;
 			adminFetch(
 				"/api/admin/library-items/" +
 					item.id +
@@ -267,11 +278,19 @@ function ViewCard({
 				{ signal: controller.signal },
 			)
 				.then(async (response) => {
+					if (response.status === 202) {
+						setImagePending(true);
+						inFlight = false;
+						retryTimer = window.setTimeout(fetchImage, 3000);
+						return;
+					}
 					if (!response.ok) throw new Error("image");
+					setImagePending(false);
 					url = URL.createObjectURL(await response.blob());
 					setImage(url);
 				})
 				.catch((caught) => {
+					inFlight = false;
 					if ((caught as Error).name !== "AbortError") setImageFailed(true);
 				});
 		};
@@ -291,15 +310,17 @@ function ViewCard({
 			return () => {
 				observer.disconnect();
 				controller.abort();
+				if (retryTimer) window.clearTimeout(retryTimer);
 				if (url) URL.revokeObjectURL(url);
 			};
 		}
 		return () => {
 			controller.abort();
+			if (retryTimer) window.clearTimeout(retryTimer);
 			if (url) URL.revokeObjectURL(url);
 		};
 	}, [item.id, session, locale]);
-	const pending = !item.metadata && item.providerIds.length > 0;
+	const pending = item.metadataState === "queued" || item.metadataState === "running" || imagePending;
 	return (
 		<button
 			ref={cardRef}
@@ -327,7 +348,9 @@ function ViewCard({
 				</p>
 				<p className="mt-1 truncate text-[11px] material-muted">
 					{pending
-						? "Metadata pending scheduled refresh"
+						? "Loading metadata…"
+						: item.metadataState === "error"
+							? "Metadata unavailable; retry scan"
 						: item.type + " · " + item.matchStatus}
 				</p>
 			</div>

@@ -1,11 +1,14 @@
+import asyncio
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import LibraryRuntime, LibraryStore, guess_media, provider_ids
-from app.providers import choose_image
+from app.providers import ProviderError, TMDBClient, _select_match, choose_image
 
 
 class LibraryMetadataTest(unittest.TestCase):
@@ -32,6 +35,68 @@ class LibraryMetadataTest(unittest.TestCase):
         ]
         self.assertEqual(choose_image(images, "ja-JP", "poster")["url"], "ja")
         self.assertEqual(choose_image(images, "de-DE", "poster")["url"], "neutral")
+
+    def test_preview_image_cache_miss_does_not_hydrate_provider_metadata(self):
+        item = {
+            "id": "entity-1",
+            "libraryId": "library-1",
+            "type": "movie",
+            "providerIds": [{"provider": "tmdb", "id": "603"}],
+        }
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(library_routes, "_entity", return_value=item),
+            patch.object(
+                library_routes.store,
+                "get",
+                return_value={"id": "library-1", "directory": None},
+            ),
+            patch.object(library_routes.store.db, "execute", return_value=[]),
+            patch.object(library_routes, "_metadata_for", return_value=None) as metadata,
+            patch.object(library_routes.scheduler, "enqueue_metadata_hydration", return_value={"jobId": "job-1"}) as hydration,
+        ):
+            response = asyncio.run(
+                library_routes.get_image(
+                    "entity-1",
+                    imageType="poster",
+                    locale="en",
+                    Username="admin",
+                    TOKEN="token",
+                )
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.headers["retry-after"], "10")
+        metadata.assert_called_once_with(item, "en", False, False)
+        hydration.assert_called_once_with(["entity-1"], "en")
+
+    def test_provider_match_rejects_ambiguous_candidates(self):
+        with self.assertRaises(ProviderError):
+            _select_match(
+                [
+                    {"providerId": "1", "title": "Example Show", "year": "2020"},
+                    {"providerId": "2", "title": "Example Show", "year": "2020"},
+                ],
+                "Example Show",
+                "2020",
+            )
+
+    def test_tmdb_normalization_keeps_common_fields_and_external_ids(self):
+        value = TMDBClient({}, "api_key").normalize(
+            "series",
+            "10",
+            {
+                "name": "Example",
+                "first_air_date": "2020-01-02",
+                "overview": "Overview",
+                "genres": [{"name": "Drama"}],
+                "original_language": "ja",
+                "external_ids": {"tvdb_id": 42, "imdb_id": "tt1"},
+            },
+        )
+        self.assertEqual(value["year"], "2020")
+        self.assertEqual(value["tags"], ["Drama"])
+        self.assertEqual({item["provider"] for item in value["ids"]}, {"tvdb", "imdb"})
 
 
 class LibraryJobControlTest(unittest.TestCase):

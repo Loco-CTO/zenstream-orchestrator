@@ -1,4 +1,4 @@
-FROM node:22-slim AS dashboard-build
+FROM node:26-slim AS dashboard-build
 WORKDIR /frontend
 COPY frontend/package.json ./
 RUN npm install --ignore-scripts --no-audit --no-fund

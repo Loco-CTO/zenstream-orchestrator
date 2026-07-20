@@ -74,7 +74,7 @@ jobs:
           git push origin "HEAD:stable" --force-with-lease="refs/heads/stable:$stable_sha"
 
       - name: Create GitHub release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             await github.rest.repos.createRelease({

@@ -120,6 +120,68 @@ class SyncplayReadinessTests(unittest.TestCase):
             self.group.mutate("host", 3, "stale", lambda cursor, old: self.group.transition(cursor, old, playing=0))
         self.assertEqual(self.group.state()["revision"], 4)
 
+    def test_presence_from_an_older_timeline_cannot_pause_current_playback(self):
+        before = self.group.state()
+
+        with self.database.transaction() as cursor:
+            accepted = self.group.apply_presence(
+                cursor,
+                before,
+                "host",
+                "host-tab",
+                generation=0,
+                timeline_revision=-1,
+                sequence=1,
+                viewing=True,
+                loading=True,
+            )
+
+        after = self.group.state()
+        self.assertFalse(accepted)
+        self.assertEqual(after["revision"], before["revision"])
+        self.assertEqual(after["timelineRevision"], before["timelineRevision"])
+        self.assertTrue(after["playing"])
+        self.assertFalse(after["members"][0]["loading"])
+
+    def test_current_timeline_presence_still_pauses_and_resumes_playback(self):
+        before = self.group.state()
+
+        with self.database.transaction() as cursor:
+            accepted = self.group.apply_presence(
+                cursor,
+                before,
+                "host",
+                "host-tab",
+                generation=0,
+                timeline_revision=0,
+                sequence=1,
+                viewing=True,
+                loading=True,
+            )
+
+        paused = self.group.state()
+        self.assertTrue(accepted)
+        self.assertFalse(paused["playing"])
+        self.assertEqual(paused["pauseReason"], "buffering")
+
+        with self.database.transaction() as cursor:
+            accepted = self.group.apply_presence(
+                cursor,
+                paused,
+                "host",
+                "host-tab",
+                generation=0,
+                timeline_revision=paused["timelineRevision"],
+                sequence=2,
+                viewing=True,
+                loading=False,
+            )
+
+        resumed = self.group.state()
+        self.assertTrue(accepted)
+        self.assertTrue(resumed["playing"])
+        self.assertEqual(resumed["playbackState"], "playing")
+
     def test_disconnecting_a_viewer_releases_a_group_waiting_to_resume(self):
         self.database.execute(
             "UPDATE syncplay_groups SET playing=0,resume=1,playback_state='paused',pause_reason='buffering' WHERE id=?",

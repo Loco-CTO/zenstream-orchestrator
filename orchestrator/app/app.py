@@ -483,16 +483,34 @@ async def syncplay_command(group_id: str, request: Request):
 @app.post("/api/syncplay/groups/{group_id}/presence")
 async def syncplay_presence(group_id: str, request: Request):
     user, participant, group, data = await _sync_group_context(group_id, request)
-    generation, sequence = data.get("mediaGeneration"), data.get("presenceSequence")
-    if not isinstance(generation, int) or not isinstance(sequence, int): raise HTTPException(400, "mediaGeneration and presenceSequence are required.")
+    generation = data.get("mediaGeneration")
+    timeline_revision = data.get("timelineRevision")
+    sequence = data.get("presenceSequence")
+    if (
+        not isinstance(generation, int)
+        or not isinstance(timeline_revision, int)
+        or not isinstance(sequence, int)
+    ):
+        raise HTTPException(
+            400,
+            "mediaGeneration, timelineRevision, and presenceSequence are required.",
+        )
     def apply(cursor, state):
-        if generation != state["mediaGeneration"]: return
-        cursor.execute("SELECT presence_sequence,watching_together FROM syncplay_members WHERE group_id=? AND participant_id=?", (group_id, participant))
-        row = cursor.fetchone()
-        if not row or sequence <= row[0] or not row[1]: return
-        viewing, loading = bool(data.get("viewing")), bool(data.get("loading")) if data.get("viewing") else False
-        cursor.execute("UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND participant_id=?", (int(viewing), int(loading), generation if viewing and not loading else -1, sequence, group_id, participant))
-        group.reconcile_readiness(cursor, state)
+        # A presence request can spend longer in the network than the seek or
+        # playback transition that superseded it. Media generation protects
+        # item changes; timeline revision protects seeks and play/pause changes
+        # within the same item.
+        group.apply_presence(
+            cursor,
+            state,
+            user,
+            participant,
+            generation,
+            timeline_revision,
+            sequence,
+            bool(data.get("viewing")),
+            bool(data.get("loading")),
+        )
     state = group.mutate(user, None, data.get("operationId"), apply)
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state

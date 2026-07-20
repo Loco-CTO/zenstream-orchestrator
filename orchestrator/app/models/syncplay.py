@@ -140,6 +140,47 @@ class SyncplayGroup:
             self.transition(cursor, state)
         return waiting
 
+    def apply_presence(
+        self,
+        cursor,
+        state,
+        user_id,
+        participant_id,
+        generation,
+        timeline_revision,
+        sequence,
+        viewing,
+        loading,
+    ):
+        """Apply presence only if it belongs to the current playback timeline."""
+        if (
+            generation != state["mediaGeneration"]
+            or timeline_revision != state["timelineRevision"]
+        ):
+            return False
+        cursor.execute(
+            "SELECT presence_sequence,watching_together FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+            (self.id, user_id, participant_id),
+        )
+        row = cursor.fetchone()
+        if not row or sequence <= row[0] or not row[1]:
+            return False
+        loading = bool(viewing and loading)
+        cursor.execute(
+            "UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND user_id=? AND participant_id=?",
+            (
+                int(bool(viewing)),
+                int(loading),
+                generation if viewing and not loading else -1,
+                sequence,
+                self.id,
+                user_id,
+                participant_id,
+            ),
+        )
+        self.reconcile_readiness(cursor, state)
+        return True
+
     def set_participation(self, user_id, participant_id, watching, operation_id=None):
         """Update durable viewing intent without trusting a caller-supplied identity."""
         def apply(cursor, state):

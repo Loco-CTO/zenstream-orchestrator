@@ -3,6 +3,6 @@ uvicorn[standard]>=0.30.0
 websockets>=16.1.1
 python-dotenv>=1.0.1
 requests>=2.25.1
-termcolor>=1.1.0
+termcolor>=3.3.0
 nodeenv>=1.9.0
 alembic>=1.18.5

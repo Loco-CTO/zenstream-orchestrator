@@ -32,7 +32,6 @@ class DatabaseHandler:
         except sqlite3.Error as e:
             print(f"Error connecting to SQLite: {e}")
 
-
     def execute(self, query, params=None):
         """Execute a query on the database."""
         with self.lock:

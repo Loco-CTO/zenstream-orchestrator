@@ -77,27 +77,41 @@ def disconnect():
         participant_id,
         epoch,
     )
-    socketio.start_background_task(expire_disconnected_user, user_id, participant_id, epoch)
-    socketio.start_background_task(expire_disconnected_host, user_id, participant_id, epoch)
+    socketio.start_background_task(
+        expire_disconnected_user, user_id, participant_id, epoch
+    )
+    socketio.start_background_task(
+        expire_disconnected_host, user_id, participant_id, epoch
+    )
 
 
 @socketio.on("syncplay:clock", namespace="/syncplay")
 def clock_probe(message):
     """Return server timestamps for an NTP-style client clock estimate."""
     received = time.time()
-    return {"clientSentAt": (message or {}).get("clientSentAt"), "serverReceivedAt": received, "serverSentAt": time.time()}
+    return {
+        "clientSentAt": (message or {}).get("clientSentAt"),
+        "serverReceivedAt": received,
+        "serverSentAt": time.time(),
+    }
 
 
 def expire_disconnected_user(user_id, participant_id, epoch):
     socketio.sleep(DISCONNECT_GRACE_SECONDS)
     with _connections_lock:
-        if _participant_sids.get((user_id, participant_id)) or _disconnect_epochs[(user_id, participant_id)] != epoch:
+        if (
+            _participant_sids.get((user_id, participant_id))
+            or _disconnect_epochs[(user_id, participant_id)] != epoch
+        ):
             return
     ids = SyncplayGroup("_").db.execute(
-        "SELECT group_id FROM syncplay_members WHERE user_id=? AND participant_id=?", (user_id, participant_id)
+        "SELECT group_id FROM syncplay_members WHERE user_id=? AND participant_id=?",
+        (user_id, participant_id),
     )
     for row in ids:
-        state = SyncplayGroup(row[0]).remove_disconnected_member(user_id, participant_id)
+        state = SyncplayGroup(row[0]).remove_disconnected_member(
+            user_id, participant_id
+        )
         if not state:
             continue
         if state["ended"]:
@@ -109,7 +123,10 @@ def expire_disconnected_user(user_id, participant_id, epoch):
 def expire_disconnected_host(user_id, participant_id, epoch):
     socketio.sleep(HOST_DISCONNECT_GRACE_SECONDS)
     with _connections_lock:
-        if _participant_sids.get((user_id, participant_id)) or _disconnect_epochs[(user_id, participant_id)] != epoch:
+        if (
+            _participant_sids.get((user_id, participant_id))
+            or _disconnect_epochs[(user_id, participant_id)] != epoch
+        ):
             return
     for group in SyncplayGroup.active_groups_for_user(user_id, participant_id):
         state = group.expire_host_disconnect()
@@ -121,7 +138,10 @@ def mark_disconnected_host(user_id, participant_id, epoch):
     """Delay host pause broadcasts until a route-transition reconnect settles."""
     socketio.sleep(HOST_DISCONNECT_MARK_DELAY_SECONDS)
     with _connections_lock:
-        if _participant_sids.get((user_id, participant_id)) or _disconnect_epochs[(user_id, participant_id)] != epoch:
+        if (
+            _participant_sids.get((user_id, participant_id))
+            or _disconnect_epochs[(user_id, participant_id)] != epoch
+        ):
             return
     for group in SyncplayGroup.active_groups_for_user(user_id, participant_id):
         state = group.state()
@@ -138,7 +158,9 @@ def broadcast_group(group):
 def broadcast_group_ended(group_id, revision):
     current_app.logger.info("Broadcasting Syncplay group end for %s", group_id)
     socketio.emit(
-        "syncplay:group-ended", {"id": group_id, "revision": revision}, namespace="/syncplay"
+        "syncplay:group-ended",
+        {"id": group_id, "revision": revision},
+        namespace="/syncplay",
     )
 
 
@@ -148,8 +170,13 @@ def notify_participant_replaced(group_id, participant_id, revision):
         sids = tuple(_participant_sids.get((None, participant_id), ()))
         if not sids:
             sids = tuple(
-                sid for (user_id, current_participant), connected in _participant_sids.items()
-                if current_participant == participant_id for sid in connected
+                sid
+                for (
+                    user_id,
+                    current_participant,
+                ), connected in _participant_sids.items()
+                if current_participant == participant_id
+                for sid in connected
             )
     for sid in sids:
         socketio.emit(

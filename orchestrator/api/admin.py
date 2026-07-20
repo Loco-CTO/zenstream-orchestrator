@@ -46,14 +46,18 @@ class AdminProfile(Resource):
     @authenticate_admin
     def get(self):
         args = admin_parser.parse_args()
-        return Admin(args["Username"]).profile() or {"message": "Account not found."}, 200
+        return Admin(args["Username"]).profile() or {
+            "message": "Account not found."
+        }, 200
 
     @api_namespace_user.doc(parser=admin_parser)
     @authenticate_admin
     def patch(self):
         args = admin_parser.parse_args()
         try:
-            result = Admin(args["Username"]).update_profile(args.get("New-Username"), args.get("New-Password"), args["TOKEN"])
+            result = Admin(args["Username"]).update_profile(
+                args.get("New-Username"), args.get("New-Password"), args["TOKEN"]
+            )
             return {"username": result["username"]}, 200
         except ValueError as error:
             return {"message": str(error)}, 400
@@ -66,18 +70,29 @@ class AdminOverview(Resource):
     def get(self):
         args = admin_parser.parse_args()
         db = Admin(args["Username"])._db
-        users = db.execute("SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users")[0]
-        return {"users": users[0] or 0, "active_users": users[1] or 0, "disabled_users": users[2] or 0, "administrators": db.execute("SELECT COUNT(*) FROM admins WHERE disabled = 0")[0][0], "pending_invites": db.execute("SELECT COUNT(*) FROM invites")[0][0]}, 200
+        users = db.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users"
+        )[0]
+        return {
+            "users": users[0] or 0,
+            "active_users": users[1] or 0,
+            "disabled_users": users[2] or 0,
+            "administrators": db.execute(
+                "SELECT COUNT(*) FROM admins WHERE disabled = 0"
+            )[0][0],
+            "pending_invites": db.execute("SELECT COUNT(*) FROM invites")[0][0],
+        }, 200
 
 
 @api_namespace_user.route("admin/accounts")
 class AdminAccounts(Resource):
     model = api_namespace_user.model(
-        "AdminAccount", {
+        "AdminAccount",
+        {
             "username": fields.String,
             "is_root": fields.Boolean,
             "disabled": fields.Boolean,
-        }
+        },
     )
 
     @api_namespace_user.doc(parser=admin_parser)
@@ -94,8 +109,12 @@ class AdminAccounts(Resource):
         if not args.get("Target-Username") or not args.get("New-Password"):
             return {"message": "Target-Username and New-Password are required."}, 400
         if not args["Target-Username"].strip() or len(args["New-Password"]) < 8:
-            return {"message": "Username cannot be empty and password must be at least 8 characters."}, 400
-        if not Admin(args["Username"]).create(args["Target-Username"], args["New-Password"]):
+            return {
+                "message": "Username cannot be empty and password must be at least 8 characters."
+            }, 400
+        if not Admin(args["Username"]).create(
+            args["Target-Username"], args["New-Password"]
+        ):
             return {"message": "Administrator already exists."}, 409
         return {}, 201
 
@@ -108,14 +127,29 @@ class AdminAccount(Resource):
         args = admin_parser.parse_args()
         target = Admin(args["Username"])
         if args.get("New-Password"):
-            return ({}, 200) if target.rotate_password(username, args["New-Password"]) else ({"message": "Account not found."}, 404)
+            return (
+                ({}, 200)
+                if target.rotate_password(username, args["New-Password"])
+                else ({"message": "Account not found."}, 404)
+            )
         disabled = request.args.get("disabled", "true").lower() == "true"
-        return ({}, 200) if target.set_disabled(username, disabled) else ({"message": "Root account cannot be disabled or account was not found."}, 403)
+        return (
+            ({}, 200)
+            if target.set_disabled(username, disabled)
+            else (
+                {
+                    "message": "Root account cannot be disabled or account was not found."
+                },
+                403,
+            )
+        )
 
 
 @api_namespace_user.route("admin/users")
 class AdminUsers(Resource):
-    model = api_namespace_user.model("ManagedUser", {"username": fields.String, "disabled": fields.Boolean})
+    model = api_namespace_user.model(
+        "ManagedUser", {"username": fields.String, "disabled": fields.Boolean}
+    )
 
     @api_namespace_user.doc(parser=admin_parser)
     @api_namespace_user.marshal_with(model, as_list=True)
@@ -133,11 +167,23 @@ class AdminUser(Resource):
         if args.get("New-Password"):
             if len(args["New-Password"]) < 8:
                 return {"message": "Password must be at least 8 characters."}, 400
-            return ({}, 200) if User.reset_password(username, args["New-Password"]) else ({"message": "User not found."}, 404)
+            return (
+                ({}, 200)
+                if User.reset_password(username, args["New-Password"])
+                else ({"message": "User not found."}, 404)
+            )
         disabled = request.args.get("disabled", "true").lower() == "true"
-        return ({}, 200) if User.set_disabled_account(username, disabled) else ({"message": "User not found."}, 404)
+        return (
+            ({}, 200)
+            if User.set_disabled_account(username, disabled)
+            else ({"message": "User not found."}, 404)
+        )
 
     @api_namespace_user.doc(parser=admin_parser)
     @authenticate_admin
     def delete(self, username):
-        return ({}, 204) if User.delete_account(username) else ({"message": "User not found."}, 404)
+        return (
+            ({}, 204)
+            if User.delete_account(username)
+            else ({"message": "User not found."}, 404)
+        )

@@ -30,7 +30,9 @@ class JellyfinAuthenticationTests(unittest.TestCase):
         return result
 
     def test_reuses_a_recent_successful_authentication(self):
-        with patch("jellyfin.api_service.requests.get", return_value=self.response()) as request:
+        with patch(
+            "jellyfin.api_service.requests.get", return_value=self.response()
+        ) as request:
             self.assertEqual(api_service.authenticated_user_id("token"), "user")
             self.assertEqual(api_service.authenticated_user_id("token"), "user")
 
@@ -39,7 +41,9 @@ class JellyfinAuthenticationTests(unittest.TestCase):
     def test_revalidates_after_the_short_cache_period(self):
         with (
             patch("jellyfin.api_service.time.monotonic", side_effect=[100, 100, 131]),
-            patch("jellyfin.api_service.requests.get", return_value=self.response()) as request,
+            patch(
+                "jellyfin.api_service.requests.get", return_value=self.response()
+            ) as request,
         ):
             self.assertEqual(api_service.authenticated_user_id("token"), "user")
             self.assertEqual(api_service.authenticated_user_id("token"), "user")

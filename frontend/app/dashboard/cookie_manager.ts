@@ -7,16 +7,16 @@ import { setCookie } from "cookies-next";
  * @param {string} token - The token to set in the cookie.
  */
 const setCookies = (username: string, token: string) => {
-  setCookie("Username", username, {
-    path: "/",
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-  });
-  setCookie("TOKEN", token, {
-    path: "/",
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-  });
+	setCookie("Username", username, {
+		path: "/",
+		sameSite: "lax",
+		secure: process.env.NODE_ENV === "production",
+	});
+	setCookie("TOKEN", token, {
+		path: "/",
+		sameSite: "lax",
+		secure: process.env.NODE_ENV === "production",
+	});
 };
 
 const cookieManager = { setCookies };

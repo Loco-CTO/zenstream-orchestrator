@@ -5,7 +5,15 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,7 +23,13 @@ from app.config import load_config
 from app.models import Invite
 from app.models.user import User
 from app.models.admin import Admin
-from app.models.syncplay import SyncplayGroup, SyncplayMembershipConflict, StaleSyncplayState, pause, schedule
+from app.models.syncplay import (
+    SyncplayGroup,
+    SyncplayMembershipConflict,
+    StaleSyncplayState,
+    pause,
+    schedule,
+)
 from api.zenstream.version import _main_version
 from jellyfin.api_service import authenticated_user_id
 from version import __version__
@@ -42,15 +56,25 @@ class WebSocketHub:
 
     async def sockets_for(self, user: str, participant: str):
         async with self.lock:
-            return tuple(socket for socket, identity in self.identities.items() if identity == (user, participant))
+            return tuple(
+                socket
+                for socket, identity in self.identities.items()
+                if identity == (user, participant)
+            )
 
     async def remove(self, websocket: WebSocket):
         async with self.lock:
             self.clients.discard(websocket)
             identity = self.identities.pop(websocket, None)
-            if identity and not any(value == identity for value in self.identities.values()):
-                self.disconnect_epochs[identity] = self.disconnect_epochs.get(identity, 0) + 1
-            return identity, self.disconnect_epochs.get(identity, 0) if identity else None
+            if identity and not any(
+                value == identity for value in self.identities.values()
+            ):
+                self.disconnect_epochs[identity] = (
+                    self.disconnect_epochs.get(identity, 0) + 1
+                )
+            return identity, self.disconnect_epochs.get(
+                identity, 0
+            ) if identity else None
 
     async def broadcast(self, message: dict):
         async with self.lock:
@@ -75,7 +99,9 @@ async def _broadcast_group(state):
 
 async def _disconnect_cleanup(user, participant, epoch):
     await asyncio.sleep(30)
-    if await hub.epoch(user, participant) != epoch or await hub.sockets_for(user, participant):
+    if await hub.epoch(user, participant) != epoch or await hub.sockets_for(
+        user, participant
+    ):
         return
     for group in SyncplayGroup.active_groups_for_user(user, participant):
         state = group.state()
@@ -85,12 +111,21 @@ async def _disconnect_cleanup(user, participant, epoch):
             await _broadcast_group(group.remove_disconnected_member(user, participant))
 
     await asyncio.sleep(270)
-    if await hub.epoch(user, participant) != epoch or await hub.sockets_for(user, participant):
+    if await hub.epoch(user, participant) != epoch or await hub.sockets_for(
+        user, participant
+    ):
         return
     for group in SyncplayGroup.active_groups_for_user(user, participant):
         state = group.expire_host_disconnect()
         if state:
-            await hub.broadcast({"version": 1, "type": "group-ended", "id": state["id"], "revision": state["revision"]})
+            await hub.broadcast(
+                {
+                    "version": 1,
+                    "type": "group-ended",
+                    "id": state["id"],
+                    "revision": state["revision"],
+                }
+            )
 
 
 def _static_roots():
@@ -138,9 +173,17 @@ app = FastAPI(
 )
 
 origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip()]
-origins += [x for x in ("http://localhost:3000", "http://127.0.0.1:3000") if x not in origins]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True,
-                   allow_methods=["*"], allow_headers=["*"], expose_headers=["TOKEN"])
+origins += [
+    x for x in ("http://localhost:3000", "http://127.0.0.1:3000") if x not in origins
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["TOKEN"],
+)
 
 web_root, assets_root = _static_roots()
 if assets_root.is_dir():
@@ -181,13 +224,18 @@ async def dashboard(path: str = ""):
     fallback = web_root / "web" / "login" / "index.html"
     if fallback.is_file():
         return FileResponse(fallback)
-    return JSONResponse({"message": "Dashboard assets are not installed."}, status_code=503)
+    return JSONResponse(
+        {"message": "Dashboard assets are not installed."}, status_code=503
+    )
 
 
 @app.post("/api/user/login")
-async def login(Username: str | None = Header(None), Password: str | None = Header(None)):
+async def login(
+    Username: str | None = Header(None), Password: str | None = Header(None)
+):
     username, password = _user_headers(Username, Password)
     from hashlib import sha256
+
     token = User(username).login(sha256(password.encode()).hexdigest())
     if not token:
         raise HTTPException(403, "Invalid credentials.")
@@ -195,7 +243,9 @@ async def login(Username: str | None = Header(None), Password: str | None = Head
 
 
 @app.post("/api/admin/login")
-async def admin_login(Username: str | None = Header(None), Password: str | None = Header(None)):
+async def admin_login(
+    Username: str | None = Header(None), Password: str | None = Header(None)
+):
     username, password = _user_headers(Username, Password)
     token = Admin(username).login(password)
     if not token:
@@ -204,57 +254,99 @@ async def admin_login(Username: str | None = Header(None), Password: str | None 
 
 
 @app.post("/api/admin/logout", status_code=204)
-async def admin_logout(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def admin_logout(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
     username, token = _admin_headers(Username, TOKEN)
     Admin(username).logout(token)
 
 
 @app.get("/api/admin/overview")
-async def admin_overview(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def admin_overview(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
     username, _ = _admin_headers(Username, TOKEN)
     db = Admin(username)._db
-    counts = db.execute("SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users")[0]
-    return {"users": counts[0] or 0, "active_users": counts[1] or 0, "disabled_users": counts[2] or 0, "administrators": db.execute("SELECT COUNT(*) FROM admins WHERE disabled = 0")[0][0], "pending_invites": db.execute("SELECT COUNT(*) FROM invites")[0][0]}
+    counts = db.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users"
+    )[0]
+    return {
+        "users": counts[0] or 0,
+        "active_users": counts[1] or 0,
+        "disabled_users": counts[2] or 0,
+        "administrators": db.execute("SELECT COUNT(*) FROM admins WHERE disabled = 0")[
+            0
+        ][0],
+        "pending_invites": db.execute("SELECT COUNT(*) FROM invites")[0][0],
+    }
 
 
 @app.get("/api/admin/accounts")
-async def admin_accounts(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def admin_accounts(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
     username, _ = _admin_headers(Username, TOKEN)
     return Admin(username).list_accounts()
 
 
 @app.get("/api/admin/users")
-async def admin_users(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def admin_users(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
     _admin_headers(Username, TOKEN)
     return User.list_accounts()
 
 
 @app.post("/api/admin/accounts", status_code=201)
-async def admin_create_account(Target_Username: str | None = Header(None), New_Password: str | None = Header(None), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def admin_create_account(
+    Target_Username: str | None = Header(None),
+    New_Password: str | None = Header(None),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
     username, _ = _admin_headers(Username, TOKEN)
-    if not Target_Username or not New_Password or len(New_Password) < 8 or not Admin(username).create(Target_Username, New_Password):
+    if (
+        not Target_Username
+        or not New_Password
+        or len(New_Password) < 8
+        or not Admin(username).create(Target_Username, New_Password)
+    ):
         raise HTTPException(400, "Invalid or duplicate administrator account.")
 
 
 @app.patch("/api/admin/users/{target_username}")
-async def admin_update_user(target_username: str, disabled: bool | None = Query(None), New_Password: str | None = Header(None), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def admin_update_user(
+    target_username: str,
+    disabled: bool | None = Query(None),
+    New_Password: str | None = Header(None),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
     _admin_headers(Username, TOKEN)
     if New_Password is not None:
-        if len(New_Password) < 8 or not User.reset_password(target_username, New_Password):
+        if len(New_Password) < 8 or not User.reset_password(
+            target_username, New_Password
+        ):
             raise HTTPException(400, "Invalid password or user not found.")
     elif disabled is None or not User.set_disabled_account(target_username, disabled):
         raise HTTPException(404, "User not found.")
 
 
 @app.delete("/api/admin/users/{target_username}", status_code=204)
-async def admin_delete_user(target_username: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def admin_delete_user(
+    target_username: str,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
     _admin_headers(Username, TOKEN)
     if not User.delete_account(target_username):
         raise HTTPException(404, "User not found.")
 
 
 @app.post("/api/user/authenticate")
-async def authenticate(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def authenticate(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
     username, token = _user_headers(Username, TOKEN)
     if not User(username).authenticate(token):
         raise HTTPException(403, "Invalid credentials.")
@@ -302,36 +394,47 @@ async def mobile_config():
 @app.get("/api/preferences/locale")
 async def get_locale(x_jellyfin_token: str | None = Header(None)):
     user_id = authenticated_user_id(x_jellyfin_token) if x_jellyfin_token else None
-    if not user_id: raise HTTPException(401, "Invalid token.")
+    if not user_id:
+        raise HTTPException(401, "Invalid token.")
     from app.models.preference import UserPreference
+
     return {"locale": UserPreference(user_id).get_locale()}
 
 
 @app.patch("/api/preferences/locale")
 async def set_locale(request: Request, x_jellyfin_token: str | None = Header(None)):
     user_id = authenticated_user_id(x_jellyfin_token) if x_jellyfin_token else None
-    if not user_id: raise HTTPException(401, "Invalid token.")
+    if not user_id:
+        raise HTTPException(401, "Invalid token.")
     from app.models.preference import UserPreference, SUPPORTED_LOCALES
+
     locale = (await request.json()).get("locale")
-    if locale not in SUPPORTED_LOCALES: raise HTTPException(400, "Unsupported locale.")
+    if locale not in SUPPORTED_LOCALES:
+        raise HTTPException(400, "Unsupported locale.")
     return {"locale": UserPreference(user_id).set_locale(locale)}
 
 
 @app.get("/api/preferences/subtitles")
 async def get_subtitles(x_jellyfin_token: str | None = Header(None)):
     user_id = authenticated_user_id(x_jellyfin_token) if x_jellyfin_token else None
-    if not user_id: raise HTTPException(401, "Invalid token.")
+    if not user_id:
+        raise HTTPException(401, "Invalid token.")
     from app.models.preference import UserPreference
+
     return UserPreference(user_id).get_subtitle_style()
 
 
 @app.patch("/api/preferences/subtitles")
 async def set_subtitles(request: Request, x_jellyfin_token: str | None = Header(None)):
     user_id = authenticated_user_id(x_jellyfin_token) if x_jellyfin_token else None
-    if not user_id: raise HTTPException(401, "Invalid token.")
+    if not user_id:
+        raise HTTPException(401, "Invalid token.")
     from app.models.preference import UserPreference
-    try: return UserPreference(user_id).set_subtitle_style(await request.json())
-    except ValueError as error: raise HTTPException(400, str(error))
+
+    try:
+        return UserPreference(user_id).set_subtitle_style(await request.json())
+    except ValueError as error:
+        raise HTTPException(400, str(error))
 
 
 def _sync_identity(token: str | None, participant: str | None):
@@ -342,17 +445,27 @@ def _sync_identity(token: str | None, participant: str | None):
 
 
 @app.get("/api/syncplay/groups")
-async def syncplay_groups(x_jellyfin_token: str | None = Header(None), x_zenstream_participant: str | None = Header(None)):
+async def syncplay_groups(
+    x_jellyfin_token: str | None = Header(None),
+    x_zenstream_participant: str | None = Header(None),
+):
     _sync_identity(x_jellyfin_token, x_zenstream_participant)
-    rows = SyncplayGroup("_").db.execute("SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ())
+    rows = SyncplayGroup("_").db.execute(
+        "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
+    )
     return {"groups": [SyncplayGroup(row[0]).state() for row in rows]}
 
 
 @app.post("/api/syncplay/groups")
 async def syncplay_create(request: Request):
-    user, participant = _sync_identity(request.headers.get("x-jellyfin-token"), request.headers.get("x-zenstream-participant"))
+    user, participant = _sync_identity(
+        request.headers.get("x-jellyfin-token"),
+        request.headers.get("x-zenstream-participant"),
+    )
     try:
-        state = SyncplayGroup.create(user, participant, request.headers.get("x-zenstream-username", "ZenStream")).state()
+        state = SyncplayGroup.create(
+            user, participant, request.headers.get("x-zenstream-username", "ZenStream")
+        ).state()
     except SyncplayMembershipConflict:
         raise HTTPException(409, "You already belong to an active Syncplay group.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
@@ -361,45 +474,100 @@ async def syncplay_create(request: Request):
 
 @app.get("/api/syncplay/groups/{group_id}")
 async def syncplay_group(group_id: str, request: Request):
-    user, participant = _sync_identity(request.headers.get("x-jellyfin-token"), request.headers.get("x-zenstream-participant"))
+    user, participant = _sync_identity(
+        request.headers.get("x-jellyfin-token"),
+        request.headers.get("x-zenstream-participant"),
+    )
     group = SyncplayGroup(group_id)
     state = group.state()
-    if not state: raise HTTPException(404, "Group not found.")
-    if not group.member(user, participant): raise HTTPException(403, "Join this group first.")
+    if not state:
+        raise HTTPException(404, "Group not found.")
+    if not group.member(user, participant):
+        raise HTTPException(403, "Join this group first.")
     return state
 
 
 async def _sync_group_context(group_id: str, request: Request):
-    user, participant = _sync_identity(request.headers.get("x-jellyfin-token"), request.headers.get("x-zenstream-participant"))
+    user, participant = _sync_identity(
+        request.headers.get("x-jellyfin-token"),
+        request.headers.get("x-zenstream-participant"),
+    )
     group = SyncplayGroup(group_id)
-    if not group.state(): raise HTTPException(404, "Group not found.")
-    if not group.member(user, participant): raise HTTPException(403, "Join this group first.")
-    return user, participant, group, await request.json() if request.headers.get("content-length", "0") != "0" else {}
+    if not group.state():
+        raise HTTPException(404, "Group not found.")
+    if not group.member(user, participant):
+        raise HTTPException(403, "Join this group first.")
+    return (
+        user,
+        participant,
+        group,
+        await request.json()
+        if request.headers.get("content-length", "0") != "0"
+        else {},
+    )
 
 
 @app.post("/api/syncplay/groups/{group_id}/join")
 async def syncplay_join(group_id: str, request: Request):
-    user, participant = _sync_identity(request.headers.get("x-jellyfin-token"), request.headers.get("x-zenstream-participant"))
+    user, participant = _sync_identity(
+        request.headers.get("x-jellyfin-token"),
+        request.headers.get("x-zenstream-participant"),
+    )
     group = SyncplayGroup(group_id)
-    if not group.state(): raise HTTPException(404, "Group not found.")
-    data = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+    if not group.state():
+        raise HTTPException(404, "Group not found.")
+    data = (
+        await request.json()
+        if request.headers.get("content-length", "0") != "0"
+        else {}
+    )
     replaced = []
     try:
+
         def apply(cursor, state):
-            cursor.execute("SELECT 1 FROM syncplay_members m JOIN syncplay_groups g ON g.id=m.group_id WHERE m.user_id=? AND g.ended=0 AND m.group_id<>? LIMIT 1", (user, group_id))
-            if cursor.fetchone(): raise SyncplayMembershipConflict
-            cursor.execute("SELECT participant_id FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id<>?", (group_id, user, participant))
+            cursor.execute(
+                "SELECT 1 FROM syncplay_members m JOIN syncplay_groups g ON g.id=m.group_id WHERE m.user_id=? AND g.ended=0 AND m.group_id<>? LIMIT 1",
+                (user, group_id),
+            )
+            if cursor.fetchone():
+                raise SyncplayMembershipConflict
+            cursor.execute(
+                "SELECT participant_id FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id<>?",
+                (group_id, user, participant),
+            )
             replaced.extend(row[0] for row in cursor.fetchall())
-            cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id<>?", (group_id, user, participant))
-            cursor.execute("INSERT OR IGNORE INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)", (group_id, user, participant, request.headers.get("x-zenstream-username", "ZenStream")))
+            cursor.execute(
+                "DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id<>?",
+                (group_id, user, participant),
+            )
+            cursor.execute(
+                "INSERT OR IGNORE INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)",
+                (
+                    group_id,
+                    user,
+                    participant,
+                    request.headers.get("x-zenstream-username", "ZenStream"),
+                ),
+            )
             group.transition(cursor, state)
-        state = group.mutate(user, data.get("expectedRevision"), data.get("operationId"), apply)
-    except SyncplayMembershipConflict: raise HTTPException(409, "You must leave your current Syncplay group first.")
+
+        state = group.mutate(
+            user, data.get("expectedRevision"), data.get("operationId"), apply
+        )
+    except SyncplayMembershipConflict:
+        raise HTTPException(409, "You must leave your current Syncplay group first.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     for old_participant in replaced:
         for socket in await hub.sockets_for(user, old_participant):
             try:
-                await socket.send_json({"version": 1, "type": "participant-replaced", "id": group_id, "revision": state["revision"]})
+                await socket.send_json(
+                    {
+                        "version": 1,
+                        "type": "participant-replaced",
+                        "id": group_id,
+                        "revision": state["revision"],
+                    }
+                )
             except Exception:
                 pass
     return state
@@ -408,14 +576,39 @@ async def syncplay_join(group_id: str, request: Request):
 @app.delete("/api/syncplay/groups/{group_id}")
 async def syncplay_leave(group_id: str, request: Request):
     user, participant, group, data = await _sync_group_context(group_id, request)
+
     def apply(cursor, state):
         if state["hostUserId"] == user:
-            group.transition(cursor, state, timeline=True, ended=1, playing=0, resume=0, playback_state="paused", effective_at=0, host_disconnected_at=None)
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                ended=1,
+                playing=0,
+                resume=0,
+                playback_state="paused",
+                effective_at=0,
+                host_disconnected_at=None,
+            )
         else:
-            cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?", (group_id, user, participant))
+            cursor.execute(
+                "DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+                (group_id, user, participant),
+            )
             group.transition(cursor, state)
-    state = group.mutate(user, data.get("expectedRevision"), data.get("operationId"), apply)
-    await hub.broadcast({"version": 1, "type": "group-ended" if state["ended"] else "group", "id": group_id, "revision": state["revision"], "group": state})
+
+    state = group.mutate(
+        user, data.get("expectedRevision"), data.get("operationId"), apply
+    )
+    await hub.broadcast(
+        {
+            "version": 1,
+            "type": "group-ended" if state["ended"] else "group",
+            "id": group_id,
+            "revision": state["revision"],
+            "group": state,
+        }
+    )
     return JSONResponse(content=None, status_code=204)
 
 
@@ -423,12 +616,20 @@ async def syncplay_leave(group_id: str, request: Request):
 async def syncplay_settings(group_id: str, request: Request):
     user, participant, group, data = await _sync_group_context(group_id, request)
     value = data.get("allowViewerControls")
-    if not isinstance(value, bool): raise HTTPException(400, "allowViewerControls must be boolean.")
+    if not isinstance(value, bool):
+        raise HTTPException(400, "allowViewerControls must be boolean.")
+
     def apply(cursor, state):
-        if state["hostUserId"] != user: raise PermissionError
+        if state["hostUserId"] != user:
+            raise PermissionError
         group.transition(cursor, state, allow_controls=int(value))
-    try: state = group.mutate(user, data.get("expectedRevision"), data.get("operationId"), apply)
-    except PermissionError: raise HTTPException(403, "Only the host can change settings.")
+
+    try:
+        state = group.mutate(
+            user, data.get("expectedRevision"), data.get("operationId"), apply
+        )
+    except PermissionError:
+        raise HTTPException(403, "Only the host can change settings.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
 
@@ -436,14 +637,26 @@ async def syncplay_settings(group_id: str, request: Request):
 @app.delete("/api/syncplay/groups/{group_id}/members/{member_id}")
 async def syncplay_remove_member(group_id: str, member_id: str, request: Request):
     user, participant, group, data = await _sync_group_context(group_id, request)
+
     def apply(cursor, state):
-        if state["hostUserId"] != user: raise PermissionError
-        if member_id == user: raise ValueError
-        cursor.execute("DELETE FROM syncplay_members WHERE group_id=? AND user_id=?", (group_id, member_id))
+        if state["hostUserId"] != user:
+            raise PermissionError
+        if member_id == user:
+            raise ValueError
+        cursor.execute(
+            "DELETE FROM syncplay_members WHERE group_id=? AND user_id=?",
+            (group_id, member_id),
+        )
         group.reconcile_readiness(cursor, state)
-    try: state = group.mutate(user, data.get("expectedRevision"), data.get("operationId"), apply)
-    except PermissionError: raise HTTPException(403, "Only the host can remove members.")
-    except ValueError: raise HTTPException(400, "The host cannot remove themselves.")
+
+    try:
+        state = group.mutate(
+            user, data.get("expectedRevision"), data.get("operationId"), apply
+        )
+    except PermissionError:
+        raise HTTPException(403, "Only the host can remove members.")
+    except ValueError:
+        raise HTTPException(400, "The host cannot remove themselves.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
 
@@ -452,30 +665,87 @@ async def syncplay_remove_member(group_id: str, member_id: str, request: Request
 async def syncplay_command(group_id: str, request: Request):
     user, participant, group, data = await _sync_group_context(group_id, request)
     position, action = data.get("position"), data.get("action")
-    if not isinstance(position, (int, float)) or not math.isfinite(position) or position < 0: raise HTTPException(400, "Invalid playback position.")
-    if action not in {"media", "play", "pause", "seek"}: raise HTTPException(400, "Invalid playback command.")
+    if (
+        not isinstance(position, (int, float))
+        or not math.isfinite(position)
+        or position < 0
+    ):
+        raise HTTPException(400, "Invalid playback position.")
+    if action not in {"media", "play", "pause", "seek"}:
+        raise HTTPException(400, "Invalid playback command.")
+
     def apply(cursor, state):
-        if user != state["hostUserId"] and not state["allowViewerControls"]: raise PermissionError
+        if user != state["hostUserId"] and not state["allowViewerControls"]:
+            raise PermissionError
         item = data.get("itemId", state["itemId"])
         if action == "media":
-            if not isinstance(item, str): raise ValueError
+            if not isinstance(item, str):
+                raise ValueError
             generation = state["mediaGeneration"] + 1
-            cursor.execute("UPDATE syncplay_members SET watching_together=1 WHERE group_id=? AND participant_id=?", (group_id, participant))
-            cursor.execute("UPDATE syncplay_members SET viewing=0,loading=CASE WHEN watching_together=1 THEN 1 ELSE 0 END,ready_generation=-1,presence_sequence=0 WHERE group_id=?", (group_id,))
-            group.transition(cursor, state, timeline=True, item_id=item, position=float(position), playing=0, resume=1, media_generation=generation, anchor_position=float(position), anchor_time=time.time(), effective_at=0, playback_state="paused", pause_reason="readiness")
+            cursor.execute(
+                "UPDATE syncplay_members SET watching_together=1 WHERE group_id=? AND participant_id=?",
+                (group_id, participant),
+            )
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=0,loading=CASE WHEN watching_together=1 THEN 1 ELSE 0 END,ready_generation=-1,presence_sequence=0 WHERE group_id=?",
+                (group_id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                item_id=item,
+                position=float(position),
+                playing=0,
+                resume=1,
+                media_generation=generation,
+                anchor_position=float(position),
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="paused",
+                pause_reason="readiness",
+            )
             return
         requested = bool(data.get("playing", state["playing"]))
-        if action == "seek" and state["resumeWhenReady"]: requested = True
-        elif action == "play": requested = True
-        elif action == "pause": requested = False
+        if action == "seek" and state["resumeWhenReady"]:
+            requested = True
+        elif action == "play":
+            requested = True
+        elif action == "pause":
+            requested = False
         waiting = group.waiting_for_members(cursor, state["mediaGeneration"])
-        if requested and not waiting: schedule(group, cursor, state, float(position))
-        elif requested: group.transition(cursor, state, timeline=True, position=float(position), playing=0, resume=1, anchor_position=float(position), anchor_time=time.time(), effective_at=0, playback_state="paused", pause_reason="readiness")
-        else: pause(group, cursor, state, "command")
-    try: state = group.mutate(user, data.get("expectedRevision"), data.get("operationId"), apply)
-    except PermissionError: raise HTTPException(403, "Only the host can control playback.")
-    except ValueError: raise HTTPException(400, "A media item is required.")
-    except StaleSyncplayState as error: raise HTTPException(409, detail={"message": "Playback state is out of date.", "group": error.state})
+        if requested and not waiting:
+            schedule(group, cursor, state, float(position))
+        elif requested:
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                position=float(position),
+                playing=0,
+                resume=1,
+                anchor_position=float(position),
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="paused",
+                pause_reason="readiness",
+            )
+        else:
+            pause(group, cursor, state, "command")
+
+    try:
+        state = group.mutate(
+            user, data.get("expectedRevision"), data.get("operationId"), apply
+        )
+    except PermissionError:
+        raise HTTPException(403, "Only the host can control playback.")
+    except ValueError:
+        raise HTTPException(400, "A media item is required.")
+    except StaleSyncplayState as error:
+        raise HTTPException(
+            409,
+            detail={"message": "Playback state is out of date.", "group": error.state},
+        )
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
 
@@ -495,6 +765,7 @@ async def syncplay_presence(group_id: str, request: Request):
             400,
             "mediaGeneration, timelineRevision, and presenceSequence are required.",
         )
+
     def apply(cursor, state):
         # A presence request can spend longer in the network than the seek or
         # playback transition that superseded it. Media generation protects
@@ -511,6 +782,7 @@ async def syncplay_presence(group_id: str, request: Request):
             bool(data.get("viewing")),
             bool(data.get("loading")),
         )
+
     state = group.mutate(user, None, data.get("operationId"), apply)
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
@@ -520,17 +792,29 @@ async def syncplay_presence(group_id: str, request: Request):
 async def syncplay_participation(group_id: str, request: Request):
     user, participant, group, data = await _sync_group_context(group_id, request)
     watching = data.get("watchingTogether")
-    if not isinstance(watching, bool): raise HTTPException(400, "watchingTogether must be boolean.")
-    try: state = group.set_participation(user, participant, watching, data.get("operationId"))
-    except StaleSyncplayState as error: raise HTTPException(409, detail={"message": "Playback state is out of date.", "group": error.state})
+    if not isinstance(watching, bool):
+        raise HTTPException(400, "watchingTogether must be boolean.")
+    try:
+        state = group.set_participation(
+            user, participant, watching, data.get("operationId")
+        )
+    except StaleSyncplayState as error:
+        raise HTTPException(
+            409,
+            detail={"message": "Playback state is out of date.", "group": error.state},
+        )
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
 
 
 @app.websocket("/api/ws/syncplay")
 async def syncplay_socket(websocket: WebSocket):
-    token = websocket.headers.get("x-jellyfin-token") or websocket.query_params.get("token")
-    participant = websocket.headers.get("x-zenstream-participant") or websocket.query_params.get("participantId")
+    token = websocket.headers.get("x-jellyfin-token") or websocket.query_params.get(
+        "token"
+    )
+    participant = websocket.headers.get(
+        "x-zenstream-participant"
+    ) or websocket.query_params.get("participantId")
     user_id = authenticated_user_id(token) if token else None
     if not user_id or not participant:
         await websocket.close(code=1008)
@@ -541,13 +825,29 @@ async def syncplay_socket(websocket: WebSocket):
             state = group.clear_host_disconnected()
             if state:
                 await _broadcast_group(state)
-        rows = SyncplayGroup("_").db.execute("SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ())
-        await websocket.send_json({"version": 1, "type": "groups", "groups": [SyncplayGroup(row[0]).state() for row in rows]})
+        rows = SyncplayGroup("_").db.execute(
+            "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
+        )
+        await websocket.send_json(
+            {
+                "version": 1,
+                "type": "groups",
+                "groups": [SyncplayGroup(row[0]).state() for row in rows],
+            }
+        )
         while True:
             message = await websocket.receive_json()
             if message.get("type") == "clock":
                 received = time.time()
-                await websocket.send_json({"version": 1, "type": "clock", "clientSentAt": message.get("clientSentAt"), "serverReceivedAt": received, "serverSentAt": time.time()})
+                await websocket.send_json(
+                    {
+                        "version": 1,
+                        "type": "clock",
+                        "clientSentAt": message.get("clientSentAt"),
+                        "serverReceivedAt": received,
+                        "serverSentAt": time.time(),
+                    }
+                )
     except WebSocketDisconnect:
         pass
     finally:

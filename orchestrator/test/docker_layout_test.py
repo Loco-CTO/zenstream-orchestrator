@@ -32,7 +32,9 @@ class DockerLayoutTest(unittest.TestCase):
         self.assertIn("COPY assets/ ./assets/", dockerfile)
         self.assertIn("COPY frontend/ ./", dockerfile)
         self.assertIn("COPY frontend/package.json ./", dockerfile)
-        self.assertIn("RUN npm install --ignore-scripts --no-audit --no-fund", dockerfile)
+        self.assertIn(
+            "RUN npm install --ignore-scripts --no-audit --no-fund", dockerfile
+        )
         self.assertNotRegex(dockerignore, r"(?m)^/?assets/?$")
         self.assertNotRegex(dockerignore, r"(?m)^/?frontend/?$")
 

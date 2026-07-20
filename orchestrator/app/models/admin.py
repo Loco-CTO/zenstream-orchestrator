@@ -58,7 +58,9 @@ class Admin:
         )
 
     def logout(self, token: str) -> bool:
-        return bool(self._db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,)))
+        return bool(
+            self._db.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
+        )
 
     def list_accounts(self) -> list[dict]:
         return [
@@ -79,18 +81,37 @@ class Admin:
             return False
 
     def set_disabled(self, username: str, disabled: bool) -> bool:
-        return bool(self._db.execute("UPDATE admins SET disabled = ? WHERE username = ? AND is_root = 0", (int(disabled), username)))
+        return bool(
+            self._db.execute(
+                "UPDATE admins SET disabled = ? WHERE username = ? AND is_root = 0",
+                (int(disabled), username),
+            )
+        )
 
     def rotate_password(self, username: str, password: str) -> bool:
-        return bool(self._db.execute("UPDATE admins SET password = ?, disabled = 0 WHERE username = ?", (self.hash_password(password), username)))
+        return bool(
+            self._db.execute(
+                "UPDATE admins SET password = ?, disabled = 0 WHERE username = ?",
+                (self.hash_password(password), username),
+            )
+        )
 
     def profile(self) -> dict | None:
-        rows = self._db.execute("SELECT username, is_root, disabled FROM admins WHERE username = ?", (self.username,))
+        rows = self._db.execute(
+            "SELECT username, is_root, disabled FROM admins WHERE username = ?",
+            (self.username,),
+        )
         if not rows:
             return None
-        return {"username": rows[0][0], "is_root": bool(rows[0][1]), "disabled": bool(rows[0][2])}
+        return {
+            "username": rows[0][0],
+            "is_root": bool(rows[0][1]),
+            "disabled": bool(rows[0][2]),
+        }
 
-    def update_profile(self, new_username: str | None, new_password: str | None, current_token: str) -> dict:
+    def update_profile(
+        self, new_username: str | None, new_password: str | None, current_token: str
+    ) -> dict:
         target = (new_username or self.username).strip()
         if not target:
             raise ValueError("Username cannot be empty.")
@@ -99,13 +120,25 @@ class Admin:
         try:
             with self._db.transaction() as cursor:
                 if target != self.username:
-                    cursor.execute("UPDATE admins SET username = ? WHERE username = ?", (target, self.username))
+                    cursor.execute(
+                        "UPDATE admins SET username = ? WHERE username = ?",
+                        (target, self.username),
+                    )
                     if cursor.rowcount != 1:
                         raise ValueError("Username is already in use.")
-                    cursor.execute("UPDATE admin_sessions SET username = ? WHERE username = ?", (target, self.username))
+                    cursor.execute(
+                        "UPDATE admin_sessions SET username = ? WHERE username = ?",
+                        (target, self.username),
+                    )
                 if new_password is not None:
-                    cursor.execute("UPDATE admins SET password = ? WHERE username = ?", (self.hash_password(new_password), target))
-                    cursor.execute("DELETE FROM admin_sessions WHERE username = ? AND token != ?", (target, current_token))
+                    cursor.execute(
+                        "UPDATE admins SET password = ? WHERE username = ?",
+                        (self.hash_password(new_password), target),
+                    )
+                    cursor.execute(
+                        "DELETE FROM admin_sessions WHERE username = ? AND token != ?",
+                        (target, current_token),
+                    )
         except Exception as error:
             if "UNIQUE" in str(error).upper():
                 raise ValueError("Username is already in use.") from error

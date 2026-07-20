@@ -1,13 +1,132 @@
 "use client";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { IconArrowUpRight, IconKey, IconServer, IconShieldLock, IconUsers } from "@tabler/icons-react";
+import {
+	IconArrowUpRight,
+	IconKey,
+	IconServer,
+	IconShieldLock,
+	IconUsers,
+} from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "./components/admin-client";
-type Overview = { users: number; active_users: number; disabled_users: number; administrators: number; pending_invites: number };
+type Overview = {
+	users: number;
+	active_users: number;
+	disabled_users: number;
+	administrators: number;
+	pending_invites: number;
+};
 
 export default function DashboardOverview() {
-  const [session, setSession] = useState<Session | null>(null); const [data, setData] = useState<Overview | null>(null);
-  useEffect(() => { const current = readSession(); if (current) { setSession(current); adminFetch("/api/admin/overview", current).then(r => r.ok && r.json()).then(value => value && setData(value)); } }, []);
-  const stats = data ? [["Users", data.users, "/web/dashboard/users", IconUsers], ["Active users", data.active_users, "/web/dashboard/users", IconServer], ["Administrators", data.administrators, "/web/dashboard/administrators", IconShieldLock], ["Pending invites", data.pending_invites, "/web/dashboard/invites", IconKey]] as const : [];
-  return <div><div className="max-w-3xl"><p className="console-kicker">Overview</p><h1 className="mt-3 text-4xl font-black tracking-[-.04em] sm:text-5xl">Good to see you, <span className="text-[#8fe4cf]">{session?.username}</span>.</h1><p className="mt-4 text-base console-muted">Keep an eye on your library’s people, access, and service health.</p></div><section className="mt-10 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{stats.map(([label, value, href, Icon]) => <Link href={href} key={label} className="console-card group rounded-2xl p-5 transition"><div className="flex items-start justify-between"><span className="rounded-xl bg-[#55c9b0]/10 p-2.5 text-[#8fe4cf]"><Icon size={20} stroke={1.7} /></span><IconArrowUpRight className="console-muted opacity-40 transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-[#8fe4cf]" size={18} /></div><p className="mt-7 text-sm console-muted">{label}</p><p className="mt-1 text-3xl font-black">{value}</p></Link>)}</section><section className="mt-6 grid gap-6 lg:grid-cols-[1.35fr_.9fr]"><div className="console-card rounded-2xl p-6"><div className="flex items-center justify-between"><div><p className="console-kicker">Shortcuts</p><h2 className="mt-2 text-xl font-bold">Make a change</h2></div><span className="text-xs console-muted">Common actions</span></div><div className="mt-6 grid gap-3 sm:grid-cols-3"><Link href="/web/dashboard/users" className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"><IconUsers className="mb-8 text-[#8fe4cf]" size={20} /><span className="font-semibold">Manage users</span></Link><Link href="/web/dashboard/invites" className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"><IconKey className="mb-8 text-[#8fe4cf]" size={20} /><span className="font-semibold">Create invite</span></Link><Link href="/web/dashboard/administrators" className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"><IconShieldLock className="mb-8 text-[#8fe4cf]" size={20} /><span className="font-semibold">Access control</span></Link></div></div><div className="console-card rounded-2xl p-6"><p className="console-kicker">Service health</p><div className="mt-6 flex items-center gap-3"><span className="h-3 w-3 rounded-full bg-[#55c9b0] shadow-[0_0_16px_#55c9b0]" /><p className="text-lg font-bold">Orchestrator online</p></div><p className="mt-3 text-sm leading-6 console-muted">Local authentication and administrative controls are active.</p><div className="mt-7 border-t console-divider pt-4 text-xs console-muted">All systems operational</div></div></section></div>;
+	const [session, setSession] = useState<Session | null>(null);
+	const [data, setData] = useState<Overview | null>(null);
+	useEffect(() => {
+		const current = readSession();
+		if (current) {
+			setSession(current);
+			adminFetch("/api/admin/overview", current)
+				.then((r) => r.ok && r.json())
+				.then((value) => value && setData(value));
+		}
+	}, []);
+	const stats = data
+		? ([
+				["Users", data.users, "/web/dashboard/users", IconUsers],
+				["Active users", data.active_users, "/web/dashboard/users", IconServer],
+				[
+					"Administrators",
+					data.administrators,
+					"/web/dashboard/administrators",
+					IconShieldLock,
+				],
+				[
+					"Pending invites",
+					data.pending_invites,
+					"/web/dashboard/invites",
+					IconKey,
+				],
+			] as const)
+		: [];
+	return (
+		<div>
+			<div className="max-w-3xl">
+				<p className="console-kicker">Overview</p>
+				<h1 className="mt-3 text-4xl font-black tracking-[-.04em] sm:text-5xl">
+					Good to see you,{" "}
+					<span className="text-[#8fe4cf]">{session?.username}</span>.
+				</h1>
+				<p className="mt-4 text-base console-muted">
+					Keep an eye on your library’s people, access, and service health.
+				</p>
+			</div>
+			<section className="mt-10 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+				{stats.map(([label, value, href, Icon]) => (
+					<Link
+						href={href}
+						key={label}
+						className="console-card group rounded-2xl p-5 transition"
+					>
+						<div className="flex items-start justify-between">
+							<span className="rounded-xl bg-[#55c9b0]/10 p-2.5 text-[#8fe4cf]">
+								<Icon size={20} stroke={1.7} />
+							</span>
+							<IconArrowUpRight
+								className="console-muted opacity-40 transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-[#8fe4cf]"
+								size={18}
+							/>
+						</div>
+						<p className="mt-7 text-sm console-muted">{label}</p>
+						<p className="mt-1 text-3xl font-black">{value}</p>
+					</Link>
+				))}
+			</section>
+			<section className="mt-6 grid gap-6 lg:grid-cols-[1.35fr_.9fr]">
+				<div className="console-card rounded-2xl p-6">
+					<div className="flex items-center justify-between">
+						<div>
+							<p className="console-kicker">Shortcuts</p>
+							<h2 className="mt-2 text-xl font-bold">Make a change</h2>
+						</div>
+						<span className="text-xs console-muted">Common actions</span>
+					</div>
+					<div className="mt-6 grid gap-3 sm:grid-cols-3">
+						<Link
+							href="/web/dashboard/users"
+							className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"
+						>
+							<IconUsers className="mb-8 text-[#8fe4cf]" size={20} />
+							<span className="font-semibold">Manage users</span>
+						</Link>
+						<Link
+							href="/web/dashboard/invites"
+							className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"
+						>
+							<IconKey className="mb-8 text-[#8fe4cf]" size={20} />
+							<span className="font-semibold">Create invite</span>
+						</Link>
+						<Link
+							href="/web/dashboard/administrators"
+							className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"
+						>
+							<IconShieldLock className="mb-8 text-[#8fe4cf]" size={20} />
+							<span className="font-semibold">Access control</span>
+						</Link>
+					</div>
+				</div>
+				<div className="console-card rounded-2xl p-6">
+					<p className="console-kicker">Service health</p>
+					<div className="mt-6 flex items-center gap-3">
+						<span className="h-3 w-3 rounded-full bg-[#55c9b0] shadow-[0_0_16px_#55c9b0]" />
+						<p className="text-lg font-bold">Orchestrator online</p>
+					</div>
+					<p className="mt-3 text-sm leading-6 console-muted">
+						Local authentication and administrative controls are active.
+					</p>
+					<div className="mt-7 border-t console-divider pt-4 text-xs console-muted">
+						All systems operational
+					</div>
+				</div>
+			</section>
+		</div>
+	);
 }

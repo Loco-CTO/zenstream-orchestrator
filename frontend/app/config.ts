@@ -1,9 +1,9 @@
 interface AppConfig {
-  apiUrl: string;
+	apiUrl: string;
 }
 
 const appConfig: AppConfig = {
-  apiUrl: "",
+	apiUrl: "",
 };
 
 export default appConfig;

@@ -19,7 +19,9 @@ class SubtitlePreference(Resource):
         if error:
             return error
         try:
-            return UserPreference(user_id).set_subtitle_style(request.get_json(silent=True) or {}), 200
+            return UserPreference(user_id).set_subtitle_style(
+                request.get_json(silent=True) or {}
+            ), 200
         except ValueError as exc:
             return {"message": str(exc)}, 400
 

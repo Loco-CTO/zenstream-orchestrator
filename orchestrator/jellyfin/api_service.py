@@ -58,12 +58,16 @@ def authenticated_user_id(token: str) -> str | None:
     with _auth_cache_lock:
         _auth_cache[token_key] = (now + AUTH_CACHE_TTL_SECONDS, user_id)
         if len(_auth_cache) > 1024:
-            expired = [key for key, (expires_at, _) in _auth_cache.items() if expires_at <= now]
+            expired = [
+                key for key, (expires_at, _) in _auth_cache.items() if expires_at <= now
+            ]
             for key in expired:
                 _auth_cache.pop(key, None)
             overflow = len(_auth_cache) - 1024
             if overflow > 0:
-                oldest = sorted(_auth_cache, key=lambda key: _auth_cache[key][0])[:overflow]
+                oldest = sorted(_auth_cache, key=lambda key: _auth_cache[key][0])[
+                    :overflow
+                ]
                 for key in oldest:
                     _auth_cache.pop(key, None)
     return user_id

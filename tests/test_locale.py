@@ -8,7 +8,11 @@ from flask import Flask
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "orchestrator"))
 
 from api.zenstream.locale import LocalePreference
-from app.models.preference import DEFAULT_SUBTITLE_STYLE, UserPreference, _validate_subtitle_style
+from app.models.preference import (
+    DEFAULT_SUBTITLE_STYLE,
+    UserPreference,
+    _validate_subtitle_style,
+)
 from jellyfin.api_service import _build_auth_header, authenticated_user_id
 
 
@@ -33,14 +37,26 @@ class FakeSubtitleDatabase:
             style = self.values.get(params[0])
             if not style:
                 return []
-            return [(
-                style["fontFamily"], int(style["bold"]), style["textScale"], style["fontColor"],
-                style["borderSize"], style["borderColor"], style["backgroundColor"],
-                style["backgroundOpacity"],
-            )]
+            return [
+                (
+                    style["fontFamily"],
+                    int(style["bold"]),
+                    style["textScale"],
+                    style["fontColor"],
+                    style["borderSize"],
+                    style["borderColor"],
+                    style["backgroundColor"],
+                    style["backgroundOpacity"],
+                )
+            ]
         self.values[params[0]] = {
-            "fontFamily": params[1], "bold": bool(params[2]), "textScale": params[3], "fontColor": params[4],
-            "borderSize": params[5], "borderColor": params[6], "backgroundColor": params[7],
+            "fontFamily": params[1],
+            "bold": bool(params[2]),
+            "textScale": params[3],
+            "fontColor": params[4],
+            "borderSize": params[5],
+            "borderColor": params[6],
+            "backgroundColor": params[7],
             "backgroundOpacity": params[8],
         }
         return []

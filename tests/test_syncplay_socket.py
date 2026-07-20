@@ -90,7 +90,9 @@ class SyncplaySocketTests(unittest.TestCase):
     @patch("app.syncplay_socket.broadcast_group")
     @patch("app.syncplay_socket.socketio.sleep")
     @patch("app.syncplay_socket.SyncplayGroup")
-    def test_expired_viewer_connection_removes_the_member_and_broadcasts(self, group_factory, sleep, broadcast):
+    def test_expired_viewer_connection_removes_the_member_and_broadcasts(
+        self, group_factory, sleep, broadcast
+    ):
         lookup = group_factory.return_value
         lookup.db.execute.return_value = [("group",)]
         group = group_factory.return_value
@@ -105,4 +107,6 @@ class SyncplaySocketTests(unittest.TestCase):
 
         sleep.assert_called_once_with(syncplay_socket.DISCONNECT_GRACE_SECONDS)
         group.remove_disconnected_member.assert_called_once_with("viewer")
-        broadcast.assert_called_once_with({"id": "group", "revision": 7, "ended": False})
+        broadcast.assert_called_once_with(
+            {"id": "group", "revision": 7, "ended": False}
+        )

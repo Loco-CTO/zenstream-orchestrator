@@ -51,8 +51,14 @@ class UserPreference:
             return dict(DEFAULT_SUBTITLE_STYLE)
         row = rows[0]
         return {
-            "fontFamily": row[0], "bold": bool(row[1]), "textScale": row[2], "fontColor": row[3], "borderSize": row[4],
-            "borderColor": row[5], "backgroundColor": row[6], "backgroundOpacity": row[7],
+            "fontFamily": row[0],
+            "bold": bool(row[1]),
+            "textScale": row[2],
+            "fontColor": row[3],
+            "borderSize": row[4],
+            "borderColor": row[5],
+            "backgroundColor": row[6],
+            "backgroundOpacity": row[7],
         }
 
     def set_subtitle_style(self, style: dict) -> dict:
@@ -61,7 +67,17 @@ class UserPreference:
             """INSERT INTO user_preferences (jellyfin_user_id, subtitle_font_family, subtitle_bold, subtitle_text_scale, subtitle_font_color, subtitle_border_size, subtitle_border_color, subtitle_background_color, subtitle_background_opacity)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(jellyfin_user_id) DO UPDATE SET subtitle_font_family=excluded.subtitle_font_family, subtitle_bold=excluded.subtitle_bold, subtitle_text_scale=excluded.subtitle_text_scale, subtitle_font_color=excluded.subtitle_font_color, subtitle_border_size=excluded.subtitle_border_size, subtitle_border_color=excluded.subtitle_border_color, subtitle_background_color=excluded.subtitle_background_color, subtitle_background_opacity=excluded.subtitle_background_opacity""",
-            (self.jellyfin_user_id, normalized["fontFamily"], int(normalized["bold"]), normalized["textScale"], normalized["fontColor"], normalized["borderSize"], normalized["borderColor"], normalized["backgroundColor"], normalized["backgroundOpacity"]),
+            (
+                self.jellyfin_user_id,
+                normalized["fontFamily"],
+                int(normalized["bold"]),
+                normalized["textScale"],
+                normalized["fontColor"],
+                normalized["borderSize"],
+                normalized["borderColor"],
+                normalized["backgroundColor"],
+                normalized["backgroundOpacity"],
+            ),
         )
         return normalized
 
@@ -73,11 +89,20 @@ def _validate_subtitle_style(value: dict) -> dict:
     for key in result:
         if key in value:
             result[key] = value[key]
-    if not isinstance(result["textScale"], (int, float)) or not 50 <= result["textScale"] <= 200:
+    if (
+        not isinstance(result["textScale"], (int, float))
+        or not 50 <= result["textScale"] <= 200
+    ):
         raise ValueError("textScale must be between 50 and 200.")
-    if not isinstance(result["borderSize"], (int, float)) or not 0 <= result["borderSize"] <= 8:
+    if (
+        not isinstance(result["borderSize"], (int, float))
+        or not 0 <= result["borderSize"] <= 8
+    ):
         raise ValueError("borderSize must be between 0 and 8.")
-    if not isinstance(result["backgroundOpacity"], (int, float)) or not 0 <= result["backgroundOpacity"] <= 100:
+    if (
+        not isinstance(result["backgroundOpacity"], (int, float))
+        or not 0 <= result["backgroundOpacity"] <= 100
+    ):
         raise ValueError("backgroundOpacity must be between 0 and 100.")
     for key in ("fontColor", "borderColor", "backgroundColor"):
         if not isinstance(result[key], str) or not _HEX_COLOR.fullmatch(result[key]):

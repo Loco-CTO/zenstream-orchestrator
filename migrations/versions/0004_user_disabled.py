@@ -11,7 +11,10 @@ def upgrade():
     conn = op.get_bind()
     columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)")}
     if "disabled" not in columns:
-        op.add_column("users", sa.Column("disabled", sa.Integer(), nullable=False, server_default="0"))
+        op.add_column(
+            "users",
+            sa.Column("disabled", sa.Integer(), nullable=False, server_default="0"),
+        )
 
 
 def downgrade():

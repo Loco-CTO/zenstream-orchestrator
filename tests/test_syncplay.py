@@ -51,7 +51,27 @@ class SyncplayReadinessTests(unittest.TestCase):
         self.database = MemoryDatabase()
         self.database.execute(
             "INSERT INTO syncplay_groups VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("group", "host", "Alex", 0, "old-item", 3, 1, 0, 4, 0, 0, 3, 0, 0, "playing", None, None, 0, 0),
+            (
+                "group",
+                "host",
+                "Alex",
+                0,
+                "old-item",
+                3,
+                1,
+                0,
+                4,
+                0,
+                0,
+                3,
+                0,
+                0,
+                "playing",
+                None,
+                None,
+                0,
+                0,
+            ),
         )
         for user in ("host", "viewer"):
             self.database.execute(
@@ -63,8 +83,20 @@ class SyncplayReadinessTests(unittest.TestCase):
 
     def test_new_media_waits_until_every_member_is_ready(self):
         def apply(cursor, old):
-            cursor.execute("UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1 WHERE group_id=?", ("group",))
-            self.group.transition(cursor, old, item_id="new-item", position=0, playing=0, resume=1, media_generation=1)
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1 WHERE group_id=?",
+                ("group",),
+            )
+            self.group.transition(
+                cursor,
+                old,
+                item_id="new-item",
+                position=0,
+                playing=0,
+                resume=1,
+                media_generation=1,
+            )
+
         state = self.group.mutate("host", 4, "new-media", apply)
 
         self.assertEqual(state["itemId"], "new-item")
@@ -83,26 +115,47 @@ class SyncplayReadinessTests(unittest.TestCase):
             "UPDATE syncplay_members SET viewing=1, loading=0 WHERE group_id=? AND user_id=?",
             ("group", "viewer"),
         )
-        self.database.execute("UPDATE syncplay_members SET ready_generation=1 WHERE group_id=?", ("group",))
+        self.database.execute(
+            "UPDATE syncplay_members SET ready_generation=1 WHERE group_id=?",
+            ("group",),
+        )
         with self.database.transaction() as cursor:
             self.assertFalse(self.group.waiting_for_members(cursor, 1))
 
     def test_single_host_presence_releases_pending_playback(self):
-        self.database.execute("DELETE FROM syncplay_members WHERE user_id=?", ("viewer",))
+        self.database.execute(
+            "DELETE FROM syncplay_members WHERE user_id=?", ("viewer",)
+        )
 
         def apply(cursor, old):
-            cursor.execute("UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1 WHERE group_id=?", ("group",))
-            self.group.transition(cursor, old, item_id="solo-item", playing=0, resume=1,
-                                  media_generation=1, playback_state="paused", pause_reason="readiness")
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1 WHERE group_id=?",
+                ("group",),
+            )
+            self.group.transition(
+                cursor,
+                old,
+                item_id="solo-item",
+                playing=0,
+                resume=1,
+                media_generation=1,
+                playback_state="paused",
+                pause_reason="readiness",
+            )
 
         state = self.group.mutate("host", 4, "solo-media", apply)
         self.assertTrue(state["resumeWhenReady"])
 
         def report_ready(cursor, current):
-            cursor.execute("UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE group_id=?", ("group",))
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE group_id=?",
+                ("group",),
+            )
             self.group.reconcile_readiness(cursor, current)
 
-        released = self.group.mutate("host", state["revision"], "solo-ready", report_ready)
+        released = self.group.mutate(
+            "host", state["revision"], "solo-ready", report_ready
+        )
         self.assertTrue(released["playing"])
         self.assertFalse(released["resumeWhenReady"])
         self.assertEqual(released["playbackState"], "playing")
@@ -118,7 +171,12 @@ class SyncplayReadinessTests(unittest.TestCase):
 
     def test_stale_revision_cannot_change_group_state(self):
         with self.assertRaises(StaleSyncplayState):
-            self.group.mutate("host", 3, "stale", lambda cursor, old: self.group.transition(cursor, old, playing=0))
+            self.group.mutate(
+                "host",
+                3,
+                "stale",
+                lambda cursor, old: self.group.transition(cursor, old, playing=0),
+            )
         self.assertEqual(self.group.state()["revision"], 4)
 
     def test_presence_from_an_older_timeline_cannot_pause_current_playback(self):
@@ -209,16 +267,24 @@ class SyncplayMigrationTests(unittest.TestCase):
         db = sqlite3.connect(":memory:")
         db.execute(ddl)
         if participant_column:
-            db.execute("ALTER TABLE syncplay_members ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''")
+            db.execute(
+                "ALTER TABLE syncplay_members ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''"
+            )
         if unique_user:
-            db.execute("CREATE UNIQUE INDEX old_member_key ON syncplay_members(group_id, user_id)")
-        db.execute("INSERT INTO syncplay_members (group_id,user_id,username) VALUES ('g','u','User')")
+            db.execute(
+                "CREATE UNIQUE INDEX old_member_key ON syncplay_members(group_id, user_id)"
+            )
+        db.execute(
+            "INSERT INTO syncplay_members (group_id,user_id,username) VALUES ('g','u','User')"
+        )
         db.commit()
 
         class Database:
             db_type = "sqlite"
+
             def execute(self, query, params):
                 return db.execute(query, params).fetchall()
+
             @contextmanager
             def transaction(self):
                 try:
@@ -238,8 +304,17 @@ class SyncplayMigrationTests(unittest.TestCase):
             "CREATE TABLE syncplay_members (group_id TEXT, user_id TEXT, username TEXT, viewing INTEGER DEFAULT 0, loading INTEGER DEFAULT 0, ready_generation INTEGER DEFAULT -1, presence_sequence INTEGER DEFAULT 0, PRIMARY KEY(group_id,user_id))",
             participant_column=True,
         )
-        self.assertTrue(db.execute("SELECT participant_id FROM syncplay_members", ()).fetchone()[0].startswith("__legacy__:"))
-        self.assertEqual(db.execute("PRAGMA index_info(sqlite_autoindex_syncplay_members_1)").fetchall(), [(0, 0, "group_id"), (1, 2, "participant_id")])
+        self.assertTrue(
+            db.execute("SELECT participant_id FROM syncplay_members", ())
+            .fetchone()[0]
+            .startswith("__legacy__:")
+        )
+        self.assertEqual(
+            db.execute(
+                "PRAGMA index_info(sqlite_autoindex_syncplay_members_1)"
+            ).fetchall(),
+            [(0, 0, "group_id"), (1, 2, "participant_id")],
+        )
 
     def test_partial_schema_and_old_unique_index_are_rebuilt(self):
         db, _ = self.migrate(
@@ -247,17 +322,25 @@ class SyncplayMigrationTests(unittest.TestCase):
             participant_column=True,
             unique_user=True,
         )
-        db.execute("INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES ('g','u','tab-2','User')")
+        db.execute(
+            "INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES ('g','u','tab-2','User')"
+        )
         db.commit()
-        self.assertEqual(db.execute("SELECT COUNT(*) FROM syncplay_members").fetchone()[0], 2)
+        self.assertEqual(
+            db.execute("SELECT COUNT(*) FROM syncplay_members").fetchone()[0], 2
+        )
 
     def test_correct_schema_is_idempotent(self):
         db, owner = self.migrate(
             "CREATE TABLE syncplay_members (group_id TEXT NOT NULL, user_id TEXT NOT NULL, participant_id TEXT NOT NULL DEFAULT '', username TEXT NOT NULL, PRIMARY KEY(group_id,participant_id))"
         )
-        before = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='syncplay_members'").fetchone()[0]
+        before = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='syncplay_members'"
+        ).fetchone()[0]
         owner._migrate_syncplay_members_participant_key()
-        after = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='syncplay_members'").fetchone()[0]
+        after = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='syncplay_members'"
+        ).fetchone()[0]
         self.assertEqual(before, after)
 
 

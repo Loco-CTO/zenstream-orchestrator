@@ -79,12 +79,20 @@ class User:
     @classmethod
     def list_accounts(cls) -> list[dict]:
         db = Config().database
-        return [{"username": row[0], "disabled": bool(row[1])} for row in db.execute("SELECT username, COALESCE(disabled, 0) FROM users ORDER BY username")]
+        return [
+            {"username": row[0], "disabled": bool(row[1])}
+            for row in db.execute(
+                "SELECT username, COALESCE(disabled, 0) FROM users ORDER BY username"
+            )
+        ]
 
     @classmethod
     def set_disabled_account(cls, username: str, disabled: bool) -> bool:
         db = Config().database
-        changed = db.execute("UPDATE users SET disabled = ? WHERE username = ?", (int(disabled), username))
+        changed = db.execute(
+            "UPDATE users SET disabled = ? WHERE username = ?",
+            (int(disabled), username),
+        )
         if disabled:
             db.execute("DELETE FROM client_secrets WHERE username = ?", (username,))
         return bool(changed)
@@ -92,7 +100,10 @@ class User:
     @classmethod
     def reset_password(cls, username: str, password: str) -> bool:
         db = Config().database
-        changed = db.execute("UPDATE users SET password = ?, disabled = 0 WHERE username = ?", (cls.hash_password(password), username))
+        changed = db.execute(
+            "UPDATE users SET password = ?, disabled = 0 WHERE username = ?",
+            (cls.hash_password(password), username),
+        )
         db.execute("DELETE FROM client_secrets WHERE username = ?", (username,))
         return bool(changed)
 
@@ -118,7 +129,7 @@ class User:
         """Return user info"""
         try:
             data = self._db.execute(
-            "SELECT * FROM users WHERE username = ?",
+                "SELECT * FROM users WHERE username = ?",
                 (self.username,),
             )
             return {

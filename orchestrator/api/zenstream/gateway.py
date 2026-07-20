@@ -27,6 +27,7 @@ router = APIRouter(prefix="/api")
 _client: httpx.AsyncClient | None = None
 _token_vault: dict[str, tuple[str, float]] = {}
 _vault_lock = asyncio.Lock()
+_asset_limit = asyncio.Semaphore(8)
 # Resource tickets are used by native playback engines that cannot add request
 # headers. Keep them aligned with the in-memory token lease so a logged-in
 # mobile session does not lose its fallback stream URL after a short idle.
@@ -46,7 +47,6 @@ _PASS_RESPONSE_HEADERS = {
     "accept-ranges",
     "cache-control",
     "content-disposition",
-    "content-length",
     "content-range",
     "content-type",
     "etag",
@@ -214,6 +214,7 @@ async def _upstream_json(
         key: value
         for key, value in upstream.headers.items()
         if key.lower() not in _HOP_BY_HOP
+        and key.lower() not in {"content-encoding", "content-length"}
     }
     return Response(content, status_code=upstream.status_code, headers=response_headers)
 
@@ -241,7 +242,10 @@ async def login(request: Request):
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "Authorization": 'MediaBrowser Client="ZenStream", Device="ZenStream Orchestrator"',
+            "Authorization": (
+                'MediaBrowser Client="ZenStream", Device="ZenStream Server", '
+                'DeviceId="Orchestrator", Version="0.0.1b"'
+            ),
         },
         json={"Username": username, "Pw": password},
     )
@@ -386,9 +390,15 @@ def _asset_ticket(token: str, user_id: str, *, path: str | None = None, query: l
 
 
 async def _media_ticket(request: Request, lease: str | None) -> tuple[str, dict]:
-    token, payload = await _authenticate(request.headers.get("x-jellyfin-token"), lease or request.query_params.get("access"))
+    access = lease or request.query_params.get("access")
+    # Normal gateway authentication returns the user id. Media URLs also
+    # need the decoded lease to resolve their Jellyfin path and query.
+    payload = _decode(access) if access else {"kind": "resource"}
+    token, user_id = await _authenticate(request.headers.get("x-jellyfin-token"), access)
     if payload.get("kind") not in {"media", "resource"}:
         raise HTTPException(401, "Invalid media ticket.")
+    if payload.get("uid") and payload.get("uid") != user_id:
+        raise HTTPException(403, "Resource ticket does not belong to this user.")
     return token, payload
 
 
@@ -432,6 +442,10 @@ async def _stream_response(
     if _client is None:
         raise HTTPException(503, "Gateway is not ready.")
     headers = _auth_headers(token, request)
+    # Do not reuse an upstream keep-alive socket for long-lived media reads.
+    # The Jellyfin edge occasionally closes a reused socket before the first
+    # chunk, which appears to the browser as an incomplete chunked response.
+    headers["Connection"] = "close"
     for name in ("range", "if-range", "if-none-match", "if-modified-since"):
         if value := request.headers.get(name):
             headers[name.title()] = value
@@ -447,6 +461,15 @@ async def _stream_response(
         for key, value in upstream.headers.items()
         if key.lower() in _PASS_RESPONSE_HEADERS and key.lower() not in _HOP_BY_HOP
     }
+    # A decoded response may not retain the upstream wire length. When there
+    # is no content encoding, however, Jellyfin's length is the exact byte
+    # count that the streaming iterator will yield. Keeping it avoids an
+    # unnecessary chunked wrapper around large media responses.
+    if "content-encoding" not in upstream.headers:
+        if content_length := upstream.headers.get("content-length"):
+            response_headers["content-length"] = content_length
+    else:
+        response_headers.pop("content-length", None)
 
     content_type = upstream.headers.get("content-type", "").lower()
     if manifest_item_id and ("mpegurl" in content_type or ".m3u8" in upstream_url.lower()):
@@ -459,6 +482,23 @@ async def _stream_response(
             headers=response_headers,
         )
 
+    # HLS media segments are finite (normally a few hundred KB), but some
+    # Jellyfin edge responses close a no-range streaming socket before the
+    # first chunk reaches the ASGI server. Buffering only these finite HLS
+    # segments keeps playlist playback reliable without buffering full-file
+    # direct playback, which continues to use range streaming below.
+    if manifest_item_id and content_type in {
+        "video/mp2t",
+        "video/mp4",
+        "audio/mp4",
+        "audio/aac",
+        "audio/mpeg",
+    }:
+        segment = await upstream.aread()
+        await upstream.aclose()
+        response_headers.pop("content-length", None)
+        return Response(segment, status_code=upstream.status_code, headers=response_headers)
+
     async def body() -> AsyncIterator[bytes]:
         try:
             if request.method != "HEAD":
@@ -470,12 +510,51 @@ async def _stream_response(
     return StreamingResponse(body(), status_code=upstream.status_code, headers=response_headers)
 
 
+async def _buffered_asset_response(request: Request, token: str, upstream_url: str) -> Response:
+    """Fetch assets completely before sending them to the browser.
+
+    Jellyfin/CDN image responses can close an idle keep-alive connection while
+    the browser is loading a large batch. Passing that half-read response
+    through as a streaming response turns the failure into a broken image.
+    Assets are small enough to buffer, and a bounded retry makes concurrent
+    home/library grids resilient to a transient upstream connection close.
+    """
+    if _client is None:
+        raise HTTPException(503, "Gateway is not ready.")
+    headers = _auth_headers(token, request)
+    headers["Accept-Encoding"] = "identity"
+    for name in ("if-none-match", "if-modified-since"):
+        if value := request.headers.get(name):
+            headers[name.title()] = value
+
+    async with _asset_limit:
+        for attempt in range(3):
+            try:
+                upstream = await _client.get(upstream_url, headers=headers)
+                response_headers = {
+                    key: value
+                    for key, value in upstream.headers.items()
+                    if key.lower() in _PASS_RESPONSE_HEADERS
+                    and key.lower() not in {"content-encoding", "content-length"}
+                    and key.lower() not in _HOP_BY_HOP
+                }
+                return Response(
+                    upstream.content,
+                    status_code=upstream.status_code,
+                    headers=response_headers,
+                )
+            except (httpx.ReadError, httpx.RemoteProtocolError, httpx.DecodingError):
+                if attempt == 2:
+                    raise HTTPException(502, "The upstream asset could not be loaded.")
+                await asyncio.sleep(0.1 * (attempt + 1))
+
+
 @router.get("/assets/items/{item_id}/images/{image_type}")
 async def item_image(item_id: str, image_type: str, request: Request):
     token, _ = await _authenticate(request.headers.get("x-jellyfin-token"), request.query_params.get("access"))
     index = request.query_params.get("index", "")
     path = f"/Items/{item_id}/Images/{image_type}{('/' + index) if index else ''}"
-    return await _stream_response(request, token, _upstream_url(path, _query(request)))
+    return await _buffered_asset_response(request, token, _upstream_url(path, _query(request)))
 
 
 @router.get("/assets/users/{user_id}/image")
@@ -483,13 +562,13 @@ async def user_image(user_id: str, request: Request):
     token, authenticated_user = await _authenticate(request.headers.get("x-jellyfin-token"), request.query_params.get("access"))
     if user_id != authenticated_user:
         raise HTTPException(403, "User image access denied.")
-    return await _stream_response(request, token, _upstream_url(f"/Users/{user_id}/Images/Primary", _query(request)))
+    return await _buffered_asset_response(request, token, _upstream_url(f"/Users/{user_id}/Images/Primary", _query(request)))
 
 
 @router.get("/assets/people/{person_name}/image")
 async def person_image(person_name: str, request: Request):
     token, _ = await _authenticate(request.headers.get("x-jellyfin-token"), request.query_params.get("access"))
-    return await _stream_response(request, token, _upstream_url(f"/Persons/{person_name}/Images/Primary", _query(request)))
+    return await _buffered_asset_response(request, token, _upstream_url(f"/Persons/{person_name}/Images/Primary", _query(request)))
 
 
 @router.get("/video/{item_id}/subtitles/{source_id}/{stream_index}")
@@ -513,7 +592,7 @@ async def subtitles(item_id: str, source_id: str, stream_index: int, request: Re
 @router.get("/video/{item_id}/trickplay/{width}/{tile_index}")
 async def trickplay(item_id: str, width: str, tile_index: int, request: Request):
     token, _ = await _authenticate(request.headers.get("x-jellyfin-token"), request.query_params.get("access"))
-    return await _stream_response(request, token, _upstream_url(f"/Videos/{item_id}/Trickplay/{width}/{tile_index}.jpg", _query(request)))
+    return await _buffered_asset_response(request, token, _upstream_url(f"/Videos/{item_id}/Trickplay/{width}/{tile_index}.jpg", _query(request)))
 
 
 @router.api_route("/video/{item_id}/stream", methods=["GET", "HEAD"])

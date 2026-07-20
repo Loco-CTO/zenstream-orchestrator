@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from fastapi.responses import FileResponse, Response
 
 from app.config import Config
 from app.library import LibraryRuntime, LibraryStore, runtime
+from app.jobs import scheduler
 from app.models.admin import Admin
 from app.models.metadata import MetadataCache, MetadataCredentials
 from app.providers import MetadataService, ProviderError, choose_image
@@ -42,11 +44,11 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     value = {"id": row[0], "libraryId": row[1], "parentId": row[2], "type": row[3], "relativePath": row[4], "seasonNumber": row[5], "episodeNumber": row[6], "episodeEndNumber": row[7], "discNumber": row[8], "trackNumber": row[9], "matchStatus": row[10], "matchConfidence": row[11], "matchMethod": row[12], "providerIds": _entity_ids(entity_id)}
     value["displayName"] = Path(row[4]).name if row[4] else row[3].replace("_", " ").title()
     if include_metadata:
-        value["metadata"] = _metadata_for(value, locale)
+        value["metadata"] = None
     return value
 
 
-def _metadata_for(item: dict, locale: str) -> dict | None:
+def _metadata_for(item: dict, locale: str, fetch: bool = False) -> dict | None:
     service = MetadataService()
     priorities = {"series": ["tvdb", "tmdb"], "episode": ["tvdb", "tmdb"], "season": ["tvdb", "tmdb"], "movie": ["tmdb", "tvdb"], "artist": ["musicbrainz"], "release": ["musicbrainz"], "track": ["musicbrainz"], "collection": ["tvdb"]}
     merged: dict = {}
@@ -54,7 +56,7 @@ def _metadata_for(item: dict, locale: str) -> dict | None:
         ids = [value for value in item["providerIds"] if value["provider"] == provider]
         if not ids:
             continue
-        cached = service.fetch_fallback(provider, item["type"], ids[0]["id"], locale)
+        cached = service.fetch_fallback(provider, item["type"], ids[0]["id"], locale) if fetch else _cached_provider_metadata(service.cache, provider, item["type"], ids[0]["id"], locale)
         if cached:
             for key, value in cached.items():
                 if key == "images":
@@ -62,6 +64,29 @@ def _metadata_for(item: dict, locale: str) -> dict | None:
                 elif not merged.get(key) and value:
                     merged[key] = value
     return merged or None
+
+
+def _cached_provider_metadata(cache: MetadataCache, provider: str, entity_type: str, provider_id: str, locale: str) -> dict | None:
+    values = []
+    for candidate in dict.fromkeys([locale or "en", "en"]):
+        cached = cache.get(provider, entity_type, provider_id, candidate)
+        if cached:
+            cached.pop("_stale", None)
+            values.append(cached)
+    fallback = cache.any(provider, entity_type, provider_id)
+    if fallback:
+        fallback.pop("_stale", None)
+        values.append(fallback)
+    if not values:
+        return None
+    merged = {}
+    for value in values:
+        for key, field in value.items():
+            if key == "images":
+                merged.setdefault("images", []).extend(field or [])
+            elif not merged.get(key) and field:
+                merged[key] = field
+    return merged
 
 
 @router.get("/metadata/providers")
@@ -94,7 +119,7 @@ async def update_provider(provider: str, request: Request, Username: str | None 
         credential = {"apiKey": value, "pin": str(data.get("pin") or "").strip()}
     if data.get("validate", True):
         try:
-            MetadataService().test(provider, credential, credential_type)
+            await asyncio.to_thread(MetadataService().test, provider, credential, credential_type)
         except ProviderError as error:
             raise HTTPException(400, f"Provider validation failed: {error}") from error
     credentials.set(provider, credential, credential_type)
@@ -108,9 +133,9 @@ async def test_provider(provider: str, request: Request, Username: str | None = 
     try:
         if provider == "tmdb":
             credential = {"value": str(data.get("credential") or "")}
-            MetadataService().test(provider, credential, str(data.get("credentialType") or "api_key"))
+            await asyncio.to_thread(MetadataService().test, provider, credential, str(data.get("credentialType") or "api_key"))
         elif provider == "tvdb":
-            MetadataService().test(provider, {"apiKey": str(data.get("apiKey") or ""), "pin": str(data.get("pin") or "")})
+            await asyncio.to_thread(MetadataService().test, provider, {"apiKey": str(data.get("apiKey") or ""), "pin": str(data.get("pin") or "")})
         else:
             raise ProviderError("Unsupported provider")
     except ProviderError as error:
@@ -137,6 +162,7 @@ async def create_library(request: Request, Username: str | None = Header(None), 
     except (ValueError, TypeError) as error:
         raise HTTPException(400, str(error)) from error
     job = runtime.enqueue(library["id"], "collection_rebuild" if library["type"] == "collection" else "scan")
+    scheduler.refresh_library_definition(library)
     runtime.refresh_watchers()
     library["sourceLibraryIds"] = store.sources(library["id"])
     library["jobId"] = job["id"]
@@ -164,6 +190,7 @@ async def update_library(library_id: str, request: Request, Username: str | None
     except (ValueError, TypeError) as error:
         raise HTTPException(400, str(error)) from error
     runtime.enqueue(library_id, "collection_rebuild" if library["type"] == "collection" else "scan")
+    scheduler.refresh_library_definition(library)
     runtime.refresh_watchers()
     library["sourceLibraryIds"] = store.sources(library_id)
     return library
@@ -174,6 +201,7 @@ async def delete_library(library_id: str, Username: str | None = Header(None), T
     require_admin(Username, TOKEN)
     if not store.delete(library_id):
         raise HTTPException(404, "Library not found.")
+    scheduler.remove_library_definition(library_id)
     runtime.refresh_watchers()
 
 
@@ -195,6 +223,49 @@ async def get_job(job_id: str, Username: str | None = Header(None), TOKEN: str |
     return job
 
 
+@router.get("/jobs")
+async def list_jobs(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    require_admin(Username, TOKEN)
+    definitions = scheduler.store.definitions()
+    values = []
+    for definition in definitions:
+        recent = scheduler.store.runs(definition["id"], 10)
+        if definition["kind"] == "library_scan":
+            recent = scheduler.store.library_runs((definition.get("config") or {}).get("libraryId"), 10)
+        values.append({**definition, "recentRuns": recent})
+    return {"jobs": values}
+
+
+@router.get("/jobs/{job_id}")
+async def get_scheduled_job(job_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    require_admin(Username, TOKEN)
+    definition = scheduler.store.definition(job_id)
+    if not definition:
+        raise HTTPException(404, "Scheduled job not found.")
+    recent = scheduler.store.library_runs((definition.get("config") or {}).get("libraryId"), 50) if definition["kind"] == "library_scan" else scheduler.store.runs(job_id, 50)
+    return {**definition, "recentRuns": recent}
+
+
+@router.patch("/jobs/{job_id}")
+async def update_scheduled_job(job_id: str, request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    require_admin(Username, TOKEN)
+    try:
+        return scheduler.store.update_definition(job_id, await request.json())
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@router.post("/jobs/{job_id}/run", status_code=202)
+async def run_scheduled_job(job_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    require_admin(Username, TOKEN)
+    try:
+        return scheduler.run_now(job_id)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+
+
 @router.get("/libraries/{library_id}/items")
 async def list_items(library_id: str, parentId: str | None = Query(None), locale: str = Query("en"), page: int = Query(1, ge=1), pageSize: int = Query(40, ge=1, le=100), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
     require_admin(Username, TOKEN)
@@ -212,7 +283,9 @@ async def list_items(library_id: str, parentId: str | None = Query(None), locale
 @router.get("/library-items/{entity_id}")
 async def get_item(entity_id: str, locale: str = Query("en"), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
     require_admin(Username, TOKEN)
-    return _entity(entity_id, locale, include_metadata=True)
+    item = _entity(entity_id, locale, include_metadata=True)
+    item["metadata"] = await asyncio.to_thread(_metadata_for, item, locale, True)
+    return item
 
 
 @router.post("/library-items/hydrate")
@@ -224,7 +297,7 @@ async def hydrate_items(request: Request, Username: str | None = Header(None), T
     for entity_id in data.get("entityIds") or []:
         item = _entity(str(entity_id), locale)
         try:
-            payload = _metadata_for(item, locale)
+            payload = await asyncio.to_thread(_metadata_for, item, locale, True)
             if payload:
                 values.append({"entityId": entity_id, "metadata": payload})
         except ProviderError:
@@ -244,7 +317,7 @@ async def find_matches(entity_id: str, query: str | None = Query(None), Username
         try:
             client = service.client(provider)
             if hasattr(client, "search"):
-                matches.extend(client.search(item["type"], search_text))
+                matches.extend(await asyncio.to_thread(client.search, item["type"], search_text))
         except ProviderError:
             continue
     return {"query": search_text, "matches": matches[:50]}
@@ -279,7 +352,7 @@ async def get_image(entity_id: str, imageType: str = Query("poster"), locale: st
         path = Path(library["directory"]) / local[0][0]
         if path.is_file():
             return FileResponse(path)
-    metadata = _metadata_for(item, locale)
+    metadata = await asyncio.to_thread(_metadata_for, item, locale, True)
     if not metadata:
         raise HTTPException(404, "Image metadata is not available yet.")
     image = choose_image(metadata.get("images", []), locale, imageType)
@@ -291,9 +364,10 @@ async def get_image(entity_id: str, imageType: str = Query("poster"), locale: st
     target = cache_root / f"{hashlib.sha256(image['url'].encode()).hexdigest()}{extension}"
     if not target.is_file():
         try:
-            response = httpx.get(image["url"], timeout=20, follow_redirects=True)
-            response.raise_for_status()
-            target.write_bytes(response.content)
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                response = await client.get(image["url"])
+                response.raise_for_status()
+                target.write_bytes(response.content)
         except (httpx.HTTPError, OSError) as error:
             raise HTTPException(502, "Provider image could not be downloaded.") from error
     selected_provider = image.get("provider") or next((value["provider"] for value in item["providerIds"] if value["provider"] in {"tmdb", "tvdb"}), "provider")

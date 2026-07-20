@@ -1,132 +1,31 @@
 "use client";
+
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import {
-	IconArrowUpRight,
-	IconKey,
-	IconServer,
-	IconShieldLock,
-	IconUsers,
-} from "@tabler/icons-react";
+import { IconArrowUpRight, IconClock, IconDatabase, IconLibrary, IconUsers } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "./components/admin-client";
-type Overview = {
-	users: number;
-	active_users: number;
-	disabled_users: number;
-	administrators: number;
-	pending_invites: number;
-};
+
+type Overview = { users: number; active_users: number; disabled_users: number; administrators: number; pending_invites: number };
+type Task = { id: string; name: string; lastState: string; enabled: boolean; nextRunAt?: string | null };
 
 export default function DashboardOverview() {
 	const [session, setSession] = useState<Session | null>(null);
 	const [data, setData] = useState<Overview | null>(null);
+	const [tasks, setTasks] = useState<Task[]>([]);
 	useEffect(() => {
 		const current = readSession();
-		if (current) {
-			setSession(current);
-			adminFetch("/api/admin/overview", current)
-				.then((r) => r.ok && r.json())
-				.then((value) => value && setData(value));
-		}
+		if (!current) return;
+		setSession(current);
+		adminFetch("/api/admin/overview", current).then((response) => response.ok && response.json()).then((value) => value && setData(value));
+		adminFetch("/api/admin/jobs", current).then((response) => response.ok && response.json()).then((value) => value && setTasks((value.jobs || []).slice(0, 5)));
 	}, []);
-	const stats = data
-		? ([
-				["Users", data.users, "/web/dashboard/users", IconUsers],
-				["Active users", data.active_users, "/web/dashboard/users", IconServer],
-				[
-					"Administrators",
-					data.administrators,
-					"/web/dashboard/administrators",
-					IconShieldLock,
-				],
-				[
-					"Pending invites",
-					data.pending_invites,
-					"/web/dashboard/invites",
-					IconKey,
-				],
-			] as const)
-		: [];
-	return (
-		<div>
-			<div className="max-w-3xl">
-				<p className="console-kicker">Overview</p>
-				<h1 className="mt-3 text-4xl font-black tracking-[-.04em] sm:text-5xl">
-					Good to see you,{" "}
-					<span className="text-[#8fe4cf]">{session?.username}</span>.
-				</h1>
-				<p className="mt-4 text-base console-muted">
-					Keep an eye on your library’s people, access, and service health.
-				</p>
-			</div>
-			<section className="mt-10 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-				{stats.map(([label, value, href, Icon]) => (
-					<Link
-						href={href}
-						key={label}
-						className="console-card group rounded-2xl p-5 transition"
-					>
-						<div className="flex items-start justify-between">
-							<span className="rounded-xl bg-[#55c9b0]/10 p-2.5 text-[#8fe4cf]">
-								<Icon size={20} stroke={1.7} />
-							</span>
-							<IconArrowUpRight
-								className="console-muted opacity-40 transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-[#8fe4cf]"
-								size={18}
-							/>
-						</div>
-						<p className="mt-7 text-sm console-muted">{label}</p>
-						<p className="mt-1 text-3xl font-black">{value}</p>
-					</Link>
-				))}
-			</section>
-			<section className="mt-6 grid gap-6 lg:grid-cols-[1.35fr_.9fr]">
-				<div className="console-card rounded-2xl p-6">
-					<div className="flex items-center justify-between">
-						<div>
-							<p className="console-kicker">Shortcuts</p>
-							<h2 className="mt-2 text-xl font-bold">Make a change</h2>
-						</div>
-						<span className="text-xs console-muted">Common actions</span>
-					</div>
-					<div className="mt-6 grid gap-3 sm:grid-cols-3">
-						<Link
-							href="/web/dashboard/users"
-							className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"
-						>
-							<IconUsers className="mb-8 text-[#8fe4cf]" size={20} />
-							<span className="font-semibold">Manage users</span>
-						</Link>
-						<Link
-							href="/web/dashboard/invites"
-							className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"
-						>
-							<IconKey className="mb-8 text-[#8fe4cf]" size={20} />
-							<span className="font-semibold">Create invite</span>
-						</Link>
-						<Link
-							href="/web/dashboard/administrators"
-							className="rounded-xl border console-divider bg-white/[.025] p-4 text-sm transition hover:bg-[#55c9b0]/10"
-						>
-							<IconShieldLock className="mb-8 text-[#8fe4cf]" size={20} />
-							<span className="font-semibold">Access control</span>
-						</Link>
-					</div>
-				</div>
-				<div className="console-card rounded-2xl p-6">
-					<p className="console-kicker">Service health</p>
-					<div className="mt-6 flex items-center gap-3">
-						<span className="h-3 w-3 rounded-full bg-[#55c9b0] shadow-[0_0_16px_#55c9b0]" />
-						<p className="text-lg font-bold">Orchestrator online</p>
-					</div>
-					<p className="mt-3 text-sm leading-6 console-muted">
-						Local authentication and administrative controls are active.
-					</p>
-					<div className="mt-7 border-t console-divider pt-4 text-xs console-muted">
-						All systems operational
-					</div>
-				</div>
-			</section>
+	const stats = data ? [["Users", data.users, "/web/dashboard/users", IconUsers], ["Active", data.active_users, "/web/dashboard/users", IconUsers], ["Administrators", data.administrators, "/web/dashboard/administrators", IconUsers], ["Pending invites", data.pending_invites, "/web/dashboard/invites", IconUsers]] as const : [];
+	return <div className="mx-auto max-w-6xl">
+		<div className="border-b console-divider pb-6"><p className="console-kicker">Overview</p><h1 className="mt-2 text-3xl font-semibold tracking-tight">Dashboard</h1><p className="mt-2 text-sm console-muted">A quiet view of your server, libraries, and background work.</p></div>
+		<section className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{stats.map(([label, value, href, Icon]) => <Link href={href} key={label} className="console-card rounded-xl p-4 transition hover:bg-white/[.045]"><div className="flex items-center justify-between"><span className="text-xs console-muted">{label}</span><Icon size={16} className="console-muted" /></div><p className="mt-4 text-2xl font-semibold">{value}</p></Link>)}</section>
+		<div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+			<section className="console-card rounded-xl"><div className="flex items-center justify-between border-b console-divider px-5 py-4"><div><p className="console-kicker">Scheduler</p><h2 className="mt-1 text-lg font-semibold">Background tasks</h2></div><Link href="/web/dashboard/jobs" className="text-xs text-[#8fe4cf]">Manage all</Link></div>{tasks.map((task) => <Link href={"/web/dashboard/jobs?jobId=" + task.id} key={task.id} className="flex items-center gap-3 border-b console-divider px-5 py-4 last:border-0 hover:bg-white/[.035]"><IconClock size={17} className="text-[#8fe4cf]" /><span className="min-w-0 flex-1"><span className="block truncate text-sm">{task.name}</span><span className="mt-1 block text-xs console-muted">{task.enabled ? task.lastState : "paused"}{task.nextRunAt ? " · next " + new Date(task.nextRunAt).toLocaleString() : ""}</span></span><IconArrowUpRight size={16} className="console-muted" /></Link>)}{!tasks.length && <p className="px-5 py-8 text-sm console-muted">No scheduled work yet.</p>}</section>
+			<section className="console-card rounded-xl p-5"><p className="console-kicker">Shortcuts</p><h2 className="mt-1 text-lg font-semibold">Configuration</h2><div className="mt-5 space-y-2"><Link href="/web/dashboard/libraries" className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"><IconLibrary size={17} className="text-[#8fe4cf]" />Libraries<IconArrowUpRight size={15} className="ml-auto console-muted" /></Link><Link href="/web/dashboard/metadata" className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"><IconDatabase size={17} className="text-[#8fe4cf]" />Metadata<IconArrowUpRight size={15} className="ml-auto console-muted" /></Link><Link href="/web/dashboard/profile" className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"><IconUsers size={17} className="text-[#8fe4cf]" />Account security<IconArrowUpRight size={15} className="ml-auto console-muted" /></Link></div><p className="mt-6 border-t console-divider pt-4 text-xs console-muted">Signed in as {session?.username || "administrator"}</p></section>
 		</div>
-	);
+	</div>;
 }

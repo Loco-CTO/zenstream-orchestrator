@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import {
 	IconAdjustments,
 	IconChartDonut,
+	IconClock,
 	IconDatabase,
 	IconKey,
 	IconLibrary,
@@ -18,6 +19,7 @@ import { clearSession, readSession, adminFetch, Session } from "./admin-client";
 
 const links = [
 	["Overview", "/web/dashboard", IconChartDonut],
+	["Tasks", "/web/dashboard/jobs", IconClock],
 	["Libraries", "/web/dashboard/libraries", IconLibrary],
 	["Metadata", "/web/dashboard/metadata", IconDatabase],
 	["Users", "/web/dashboard/users", IconUsers],
@@ -74,32 +76,32 @@ export default function AdminShell({
 				</button>
 			</header>
 			<aside
-				className={`${open ? "flex" : "hidden"} console-rail fixed inset-y-0 left-0 z-30 w-[270px] flex-col border-r p-6 md:flex`}
+				className={`${open ? "flex" : "hidden"} console-rail fixed inset-y-0 left-0 z-30 w-[220px] flex-col border-r p-4 md:flex`}
 			>
 				<Link
 					href="/web/dashboard"
-					className="flex items-center gap-3 border-b border-white/5 pb-7"
+					className="flex items-center gap-2 border-b border-white/5 pb-5"
 				>
 					<img
 						src="/assets/icons/icon.png"
 						alt="ZenStream"
-						className="h-11 w-11 rounded-xl"
+						className="h-9 w-9 rounded-lg"
 					/>
 					<div>
-						<p className="console-wordmark text-[11px] font-black">ZENSTREAM</p>
-						<p className="mt-1 text-xs console-muted">Orchestrator control</p>
+						<p className="console-wordmark text-[10px] font-black">ZENSTREAM</p>
+						<p className="mt-1 text-[11px] console-muted">Control panel</p>
 					</div>
 				</Link>
-				<div className="mt-6 flex items-center gap-2 text-xs console-muted">
+				<div className="mt-5 flex items-center gap-2 text-[11px] console-muted">
 					<span className="h-2 w-2 rounded-full bg-[#8edbc9]" /> Service online
 				</div>
-				<nav className="mt-7 space-y-1">
+				<nav className="mt-5 space-y-0.5">
 					{links.map(([label, href, Icon]) => (
 						<Link
 							key={href}
 							href={href}
 							onClick={() => setOpen(false)}
-							className={`flex items-center gap-3 rounded-md px-3 py-3 text-sm transition ${pathname === href ? "console-nav-active font-semibold" : "console-nav-link"}`}
+							className={`flex items-center gap-2.5 rounded-md px-2.5 py-2.5 text-[13px] transition ${pathname === href ? "console-nav-active font-semibold" : "console-nav-link"}`}
 						>
 							<Icon size={17} stroke={1.7} />
 							{label}
@@ -119,8 +121,8 @@ export default function AdminShell({
 					</button>
 				</div>
 			</aside>
-			<main className="min-h-screen md:pl-[270px]">
-				<div className="w-full px-5 py-8 sm:px-8 md:px-12 md:py-10">
+			<main className="min-h-screen md:pl-[220px]">
+				<div className="w-full px-5 py-7 sm:px-8 md:px-10 md:py-8">
 					{children}
 				</div>
 			</main>

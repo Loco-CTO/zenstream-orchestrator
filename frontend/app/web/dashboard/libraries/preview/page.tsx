@@ -1,14 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { IconArrowLeft, IconChevronRight, IconPhoto, IconRefresh } from "@tabler/icons-react";
+import { IconAlertCircle, IconArrowLeft, IconChevronLeft, IconChevronRight, IconPhoto, IconRefresh } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../../components/admin-client";
 
-type Item = { id: string; type: string; displayName: string; relativePath?: string; parentId?: string | null; metadata?: { title?: string; overview?: string; images?: unknown[] } | null; matchStatus: string; providerIds: { provider: string; id: string }[] };
+type Item = { id: string; type: string; displayName: string; relativePath?: string; parentId?: string | null; metadata?: { title?: string } | null; matchStatus: string; providerIds: { provider: string; id: string }[] };
+const pageSize = 30;
 
-function PreviewContent() {
+function LibraryViewPage() {
 	const params = useSearchParams();
 	const libraryId = params.get("libraryId") || "";
 	const [session, setSession] = useState<Session | null>(null);
@@ -16,43 +17,83 @@ function PreviewContent() {
 	const [libraryName, setLibraryName] = useState("");
 	const [parent, setParent] = useState<string | null>(null);
 	const [locale, setLocale] = useState("en");
+	const [page, setPage] = useState(1);
+	const [total, setTotal] = useState(0);
 	const [loading, setLoading] = useState(true);
-	const [message, setMessage] = useState("");
+	const [error, setError] = useState("");
+	const requestId = useRef(0);
+	const abortRef = useRef<AbortController | null>(null);
 
-	async function load(current = session, parentId = parent) {
+	async function load(current = session, parentId = parent, currentPage = page) {
 		if (!current || !libraryId) return;
-		setLoading(true);
-		const [libraryResponse, itemsResponse] = await Promise.all([
-			adminFetch(`/api/admin/libraries/${libraryId}`, current),
-			adminFetch(`/api/admin/libraries/${libraryId}/items?parentId=${encodeURIComponent(parentId || "")}&locale=${encodeURIComponent(locale)}`, current),
-		]);
-		if (libraryResponse.ok) setLibraryName((await libraryResponse.json()).name);
-		if (itemsResponse.ok) {
-			const value = await itemsResponse.json();
+		const id = ++requestId.current;
+		abortRef.current?.abort();
+		const controller = new AbortController();
+		abortRef.current = controller;
+		setError("");
+		if (!items.length) setLoading(true);
+		try {
+			const init = { signal: controller.signal };
+			const [libraryResponse, itemsResponse] = await Promise.all([
+				adminFetch("/api/admin/libraries/" + libraryId, current, init),
+				adminFetch("/api/admin/libraries/" + libraryId + "/items?parentId=" + encodeURIComponent(parentId || "") + "&locale=" + encodeURIComponent(locale) + "&page=" + currentPage + "&pageSize=" + pageSize, current, init),
+			]);
+			if (id !== requestId.current) return;
+			if (!libraryResponse.ok || !itemsResponse.ok) throw new Error("The library could not be loaded.");
+			const [library, value] = await Promise.all([libraryResponse.json(), itemsResponse.json()]);
+			if (id !== requestId.current) return;
+			setLibraryName(library.name || "Library");
 			setItems(value.items || []);
-			const missing = (value.items || []).filter((item: Item) => !item.metadata && item.providerIds.length).map((item: Item) => item.id);
-			if (missing.length) {
-				const hydrate = await adminFetch("/api/admin/library-items/hydrate", current, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ entityIds: missing.slice(0, 20), locale }) });
-				if (hydrate.ok) {
-					const hydrated = await hydrate.json();
-					const byId = new Map<string, Item["metadata"]>((hydrated.items || []).map((entry: { entityId: string; metadata: Item["metadata"] }) => [entry.entityId, entry.metadata]));
-					setItems((currentItems) => currentItems.map((item) => byId.has(item.id) ? { ...item, metadata: byId.get(item.id) } : item));
-				}
-			}
+			setTotal(value.total || 0);
+		} catch (caught) {
+			if ((caught as Error).name !== "AbortError" && id === requestId.current) setError(caught instanceof Error ? caught.message : "The library could not be loaded.");
+		} finally {
+			if (id === requestId.current) setLoading(false);
 		}
-		setLoading(false);
-		setMessage("");
 	}
-useEffect(() => { const current = readSession(); setSession(current); if (current) load(current, null); }, [libraryId, locale]);
 
-	if (!libraryId) return <div className="console-card rounded-2xl p-8 text-sm console-muted">Choose a library from the Libraries tab.</div>;
-	return <div><div className="flex flex-wrap items-center justify-between gap-4"><div><Link href="/web/dashboard/libraries" className="flex items-center gap-2 text-sm console-muted hover:text-white"><IconArrowLeft size={16} />Libraries</Link><p className="mt-5 console-kicker">Preview</p><h1 className="mt-2 text-4xl font-black tracking-tight">{libraryName || "Library"}</h1></div><div className="flex items-center gap-2"><select value={locale} onChange={(event) => { setLocale(event.target.value); setParent(null); }} className="console-input h-10 rounded-xl px-3 text-sm outline-none"><option value="en">English</option><option value="ja">日本語</option></select><button onClick={() => load()} className="rounded-xl border console-divider p-2.5 console-muted hover:bg-white/10" aria-label="Refresh"><IconRefresh size={17} /></button></div></div>{parent && <button onClick={() => { setParent(null); load(session, null); }} className="mt-6 flex items-center gap-2 text-sm text-[#8fe4cf]"><IconArrowLeft size={16} />Back to library</button>}{message && <p className="mt-4 text-sm text-[#8fe4cf]">{message}</p>}{loading ? <div className="mt-8 console-card rounded-2xl p-8 text-sm console-muted">Loading preview…</div> : <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">{items.map((item) => <PreviewCard key={item.id} item={item} session={session} locale={locale} onOpen={() => { setParent(item.id); load(session, item.id); }} />)}{!items.length && <div className="console-card col-span-full rounded-2xl p-8 text-sm console-muted">No indexed entries yet. Check the scan job on the Libraries tab.</div>}</div>}</div>;
+	useEffect(() => {
+		const current = readSession();
+		setSession(current);
+		setPage(1);
+		setParent(null);
+		if (current) load(current, null, 1);
+		return () => abortRef.current?.abort();
+	}, [libraryId, locale]);
+
+	useEffect(() => {
+		if (session && page !== 1) load(session, parent, page);
+	}, [page]);
+
+	function openParent(id: string) { setParent(id); setPage(1); load(session, id, 1); }
+	function back() { setParent(null); setPage(1); load(session, null, 1); }
+	const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+	if (!libraryId) return <div className="material-surface rounded-xl p-8 text-sm material-muted">Choose a library from the Libraries tab.</div>;
+	return <div className="mx-auto max-w-6xl">
+		<div className="material-topbar"><div><Link href="/web/dashboard/libraries" className="material-back"><IconArrowLeft size={15} />Libraries</Link><h1 className="mt-4 text-3xl font-semibold tracking-tight">{libraryName || "Library"}</h1><p className="mt-2 text-sm material-muted">{total.toLocaleString()} indexed entries</p></div><div className="flex items-center gap-2"><select value={locale} onChange={(event) => { setLocale(event.target.value); setItems([]); }} className="material-input h-10 rounded-lg px-3 text-sm outline-none"><option value="en">English</option><option value="ja">日本語</option></select><button onClick={() => load()} className="material-icon-button" aria-label="Refresh view"><IconRefresh size={17} /></button></div></div>
+		{parent && <button onClick={back} className="material-back mt-5"><IconArrowLeft size={15} />Back to library</button>}
+		{error && <div className="material-alert mt-6"><IconAlertCircle size={18} /><span className="flex-1">{error}</span><button onClick={() => load()} className="material-text-button">Retry</button></div>}
+		{loading && !items.length && !error && <div className="material-surface mt-7 rounded-xl p-8 text-sm material-muted">Loading entries…</div>}
+		{!loading && !error && <><div className="mt-7 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">{items.map((item) => <ViewCard key={item.id} item={item} session={session} locale={locale} onOpen={() => openParent(item.id)} />)}{!items.length && <div className="material-surface col-span-full rounded-xl p-8 text-sm material-muted">No entries on this page.</div>}</div><div className="mt-6 flex items-center justify-between border-t material-divider pt-4"><span className="text-xs material-muted">Page {page} of {pageCount}</span><div className="flex gap-2"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)} className="material-icon-button disabled:opacity-30" aria-label="Previous page"><IconChevronLeft size={16} /></button><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)} className="material-icon-button disabled:opacity-30" aria-label="Next page"><IconChevronRight size={16} /></button></div></div></>}
+	</div>;
 }
 
-function PreviewCard({ item, session, locale, onOpen }: { item: Item; session: Session | null; locale: string; onOpen: () => void }) {
+function ViewCard({ item, session, locale, onOpen }: { item: Item; session: Session | null; locale: string; onOpen: () => void }) {
 	const [image, setImage] = useState<string | null>(null);
-	useEffect(() => { let url = ""; if (session) adminFetch(`/api/admin/library-items/${item.id}/image?imageType=${item.type === "artist" || item.type === "release" ? "poster" : "poster"}&locale=${encodeURIComponent(locale)}`, session).then(async (response) => { if (response.ok) { url = URL.createObjectURL(await response.blob()); setImage(url); } }); return () => { if (url) URL.revokeObjectURL(url); }; }, [item.id, session, locale, item.type]);
-	return <button onClick={onOpen} className="console-card group overflow-hidden rounded-2xl text-left transition hover:-translate-y-0.5"><div className="flex aspect-[2/3] items-center justify-center bg-black/30">{image ? <img src={image} alt="" className="h-full w-full object-cover transition group-hover:scale-105" /> : <IconPhoto className="console-muted" size={28} />}</div><div className="p-4"><p className="truncate font-semibold">{item.metadata?.title || item.displayName}</p><p className="mt-1 truncate text-xs console-muted">{item.type} · {item.matchStatus}</p><p className="mt-3 flex items-center justify-end text-xs text-[#8fe4cf]"><IconChevronRight size={15} /></p></div></button>;
+	const [imageFailed, setImageFailed] = useState(false);
+	useEffect(() => {
+		const controller = new AbortController();
+		let url = "";
+		if (session) adminFetch("/api/admin/library-items/" + item.id + "/image?imageType=poster&locale=" + encodeURIComponent(locale), session, { signal: controller.signal }).then(async (response) => {
+			if (!response.ok) throw new Error("image");
+			url = URL.createObjectURL(await response.blob());
+			setImage(url);
+		}).catch((caught) => { if ((caught as Error).name !== "AbortError") setImageFailed(true); });
+		return () => { controller.abort(); if (url) URL.revokeObjectURL(url); };
+	}, [item.id, session, locale]);
+	const pending = !item.metadata && item.providerIds.length > 0;
+	return <button onClick={onOpen} className="material-surface group overflow-hidden rounded-xl text-left transition hover:bg-[#292a2f]"><div className="flex aspect-[2/3] items-center justify-center bg-[#0d0e13]">{image ? <img src={image} alt="" loading="lazy" className="h-full w-full object-cover transition group-hover:scale-105" /> : <IconPhoto className={imageFailed ? "material-muted" : "text-[#b9c3ff]"} size={25} />}</div><div className="p-3"><p className="truncate text-sm font-medium">{item.metadata?.title || item.displayName}</p><p className="mt-1 truncate text-[11px] material-muted">{pending ? "Metadata pending scheduled refresh" : item.type + " · " + item.matchStatus}</p></div></button>;
 }
 
-export default function LibraryPreviewPage() { return <Suspense fallback={<div className="console-card rounded-2xl p-8 text-sm console-muted">Loading preview…</div>}><PreviewContent /></Suspense>; }
+export default function LibraryPreviewPage() { return <Suspense fallback={<div className="material-surface rounded-xl p-8 text-sm material-muted">Loading view…</div>}><LibraryViewPage /></Suspense>; }

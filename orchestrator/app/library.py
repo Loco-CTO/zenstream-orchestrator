@@ -525,6 +525,9 @@ class LibraryRuntime:
         self.observer = None
         self._watch_paths: set[str] = set()
         self._reconcile_due: dict[str, float] = {}
+        self._active_jobs: set[str] = set()
+        self._active_lock = threading.RLock()
+        self.max_workers = 4
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -602,11 +605,7 @@ class LibraryRuntime:
                 self.enqueue(library["id"], "scan")
 
     def _run(self):
-        next_repair = 0.0
         while not self.stop_event.is_set():
-            if time.time() >= next_repair:
-                self._schedule_repairs()
-                next_repair = time.time() + 30
             due = [library_id for library_id, deadline in self._reconcile_due.items() if time.monotonic() >= deadline]
             for library_id in due:
                 self.enqueue(library_id, "reconcile")
@@ -617,14 +616,28 @@ class LibraryRuntime:
                     self.condition.wait(timeout=1)
                 continue
             job_id, library_id, kind = rows[0]
-            try:
-                if kind in {"scan", "reconcile", "collection_rebuild"}:
-                    self.scanner.scan(library_id, job_id)
-                else:
-                    self.store.update_job(job_id, state="failed", error=f"Unsupported job kind: {kind}", finished_at=now())
-            except Exception:
-                # The scanner records the durable error; keep the worker alive for later jobs.
-                continue
+            with self._active_lock:
+                if len(self._active_jobs) >= self.max_workers or job_id in self._active_jobs:
+                    with self.condition:
+                        self.condition.wait(timeout=0.2)
+                    continue
+                self._active_jobs.add(job_id)
+            threading.Thread(target=self._execute_job, args=(job_id, library_id, kind), name=f"zenstream-library-{job_id[:8]}", daemon=True).start()
+
+    def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
+        try:
+            if kind in {"scan", "reconcile", "collection_rebuild"}:
+                self.scanner.scan(library_id, job_id)
+            else:
+                self.store.update_job(job_id, state="failed", error=f"Unsupported job kind: {kind}", finished_at=now())
+        except Exception:
+            # The scanner records the durable error; keep the worker alive for later jobs.
+            pass
+        finally:
+            with self._active_lock:
+                self._active_jobs.discard(job_id)
+            with self.condition:
+                self.condition.notify_all()
 
 
 runtime = LibraryRuntime()

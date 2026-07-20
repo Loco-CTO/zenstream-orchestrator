@@ -6,11 +6,16 @@ import json
 import threading
 import time
 import uuid
+import traceback
 from datetime import datetime, timedelta, timezone
 
 from app.config import Config
 from app.library import JobTerminated, runtime as library_runtime
 from app.providers import ProviderError, MetadataService
+from app.logging_config import get_logger
+
+
+logger = get_logger("jobs")
 
 
 def now() -> str:
@@ -44,8 +49,8 @@ class JobStore:
         return {
             "id": row[0], "definitionId": row[1], "libraryId": row[2], "kind": row[3],
             "state": row[4], "progressCurrent": row[5], "progressTotal": row[6],
-            "message": row[7], "error": row[8], "createdAt": row[9],
-            "startedAt": row[10], "finishedAt": row[11], "threadName": row[12],
+            "message": row[7], "error": row[8], "errorDetails": row[9], "createdAt": row[10],
+            "startedAt": row[11], "finishedAt": row[12], "threadName": row[13],
         }
 
     def definitions(self) -> list[dict]:
@@ -99,14 +104,14 @@ class JobStore:
 
     def runs(self, definition_id: str | None = None, limit: int = 100) -> list[dict]:
         if definition_id:
-            rows = self.db.execute("SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,created_at,started_at,finished_at,thread_name FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?", (definition_id, limit))
+            rows = self.db.execute("SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?", (definition_id, limit))
         else:
-            rows = self.db.execute("SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,created_at,started_at,finished_at,thread_name FROM job_runs ORDER BY created_at DESC LIMIT ?", (limit,))
+            rows = self.db.execute("SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name FROM job_runs ORDER BY created_at DESC LIMIT ?", (limit,))
         return [self._run(row) for row in rows]
 
     def library_runs(self, library_id: str, limit: int = 10) -> list[dict]:
-        rows = self.db.execute("SELECT id,library_id,kind,state,progress_current,progress_total,message,error,created_at,started_at,finished_at FROM library_jobs WHERE library_id=? ORDER BY created_at DESC LIMIT ?", (library_id, limit))
-        return [{"id": row[0], "definitionId": None, "libraryId": row[1], "kind": row[2], "state": row[3], "progressCurrent": row[4], "progressTotal": row[5], "message": row[6], "error": row[7], "createdAt": row[8], "startedAt": row[9], "finishedAt": row[10], "threadName": None} for row in rows]
+        rows = self.db.execute("SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at FROM library_jobs WHERE library_id=? ORDER BY created_at DESC LIMIT ?", (library_id, limit))
+        return [{"id": row[0], "definitionId": None, "libraryId": row[1], "kind": row[2], "state": row[3], "progressCurrent": row[4], "progressTotal": row[5], "message": row[6], "error": row[7], "errorDetails": row[8], "createdAt": row[9], "startedAt": row[10], "finishedAt": row[11], "threadName": None} for row in rows]
 
     def create_run(self, definition: dict) -> dict:
         run_id = new_id()
@@ -149,7 +154,7 @@ class JobStore:
         self.db.execute("UPDATE job_definitions SET next_run_at=?,last_run_at=?,last_run_id=?,last_state='queued',last_message=?,updated_at=? WHERE id=?", (next_run, now(), run_id, message, now(), definition_id))
 
     def update_run(self, run_id: str, **values) -> None:
-        allowed = {"state", "progress_current", "progress_total", "message", "error", "started_at", "finished_at", "thread_name"}
+        allowed = {"state", "progress_current", "progress_total", "message", "error", "error_details", "started_at", "finished_at", "thread_name"}
         updates = [(key, value) for key, value in values.items() if key in allowed]
         if updates:
             fields = ",".join(f"{key}=?" for key, _ in updates)
@@ -176,25 +181,35 @@ class MetadataRefreshJob:
         self.store.update_run(run_id, state="running", started_at=now(), thread_name=threading.current_thread().name, progress_total=len(items), message="Refreshing provider metadata")
         service = MetadataService()
         completed = 0
+        failures = []
         for (entity_type, provider_id, locale), providers in items.items():
             if should_terminate():
                 raise JobTerminated()
             for provider in providers:
                 try:
                     service.fetch(provider, entity_type, provider_id, locale, force=True)
-                except (ProviderError, ValueError):
-                    continue
+                except (ProviderError, ValueError) as error:
+                    failure = {"provider": provider, "entityType": entity_type, "providerId": provider_id, "locale": locale, "error": f"{type(error).__name__}: {error}"}
+                    failures.append(failure)
+                    logger.exception("scheduled metadata refresh failed provider=%s entity_type=%s provider_id=%s locale=%s", provider, entity_type, provider_id, locale)
             completed += 1
             if completed % 10 == 0 or completed == len(items):
                 self.store.update_run(run_id, progress_current=completed, message=f"Refreshed {completed} of {len(items)} entities")
-        self.store.update_run(run_id, state="completed", progress_current=completed, progress_total=len(items), finished_at=now(), message=f"Refreshed {completed} entities")
+        if failures:
+            summary = f"Refreshed {completed} entities; {len(failures)} provider refreshes failed"
+            self.store.update_run(run_id, state="failed", progress_current=completed, progress_total=len(items), finished_at=now(), message=summary, error=summary, error_details=json.dumps({"operation": "metadata_refresh", "failures": failures}))
+        else:
+            self.store.update_run(run_id, state="completed", progress_current=completed, progress_total=len(items), finished_at=now(), message=f"Refreshed {completed} entities")
 
 
 def _hydrate_request(db, service: MetadataService, entity_id: str, locale: str) -> None:
+    logger.info("hydration started entity_id=%s locale=%s", entity_id, locale)
     db.execute("UPDATE metadata_hydration_requests SET state='running',attempts=attempts+1,started_at=?,last_error=NULL WHERE entity_id=? AND locale=?", (now(), entity_id, locale))
     entity_rows = db.execute("SELECT entity_type FROM library_entities WHERE id=?", (entity_id,))
-    if not entity_rows:
-        db.execute("UPDATE metadata_hydration_requests SET state='error',last_error=?,finished_at=? WHERE entity_id=? AND locale=?", ("Library entity no longer exists", now(), entity_id, locale))
+    if not entity_rows or isinstance(entity_rows, Exception):
+        reason = "Library entity no longer exists" if not isinstance(entity_rows, Exception) else f"Database lookup failed: {type(entity_rows).__name__}: {entity_rows}"
+        details = {"entityId": entity_id, "locale": locale, "operation": "hydration_entity_lookup", "exception": type(entity_rows).__name__ if isinstance(entity_rows, Exception) else "EntityMissing"}
+        db.execute("UPDATE metadata_hydration_requests SET state='error',last_error=?,error_details=?,finished_at=? WHERE entity_id=? AND locale=?", (reason, json.dumps(details), now(), entity_id, locale))
         return
     entity_type = entity_rows[0][0]
     provider_rows = db.execute("SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider", (entity_id,))
@@ -202,13 +217,21 @@ def _hydrate_request(db, service: MetadataService, entity_id: str, locale: str) 
     errors = []
     priorities = {"series": ["tvdb", "tmdb"], "episode": ["tvdb", "tmdb"], "season": ["tvdb", "tmdb"], "movie": ["tmdb", "tvdb"], "collection": ["tvdb"], "artist": ["musicbrainz"], "release": ["musicbrainz"], "track": ["musicbrainz"]}.get(entity_type, [])
     ordered = sorted(provider_rows, key=lambda value: priorities.index(value[0]) if value[0] in priorities else 99)
+    required = priorities[0] if priorities else None
+    if not provider_rows:
+        errors.append({"provider": required or "unknown", "providerId": None, "error": "No provider ID was resolved during the scan", "required": True})
     for provider, provider_id in ordered:
         try:
             service.fetch(provider, entity_type, provider_id, locale, force=False)
-            succeeded = True
+            if provider == required or required is None:
+                succeeded = True
         except (ProviderError, ValueError) as error:
-            errors.append(f"{provider}: {error}")
-    db.execute("UPDATE metadata_hydration_requests SET state=?,last_error=?,finished_at=? WHERE entity_id=? AND locale=?", ("ready" if succeeded else "error", "; ".join(errors) if errors else None, now(), entity_id, locale))
+            errors.append({"provider": provider, "providerId": provider_id, "error": f"{type(error).__name__}: {error}", "required": provider == required})
+            logger.exception("hydration provider failed entity_id=%s locale=%s provider=%s provider_id=%s", entity_id, locale, provider, provider_id)
+    state = "ready" if succeeded else "error"
+    summary = None if succeeded else f"Metadata hydration failed for {entity_type} '{entity_id}' locale '{locale}': " + "; ".join(value["provider"] + ": " + value["error"] for value in errors)
+    db.execute("UPDATE metadata_hydration_requests SET state=?,last_error=?,error_details=?,finished_at=? WHERE entity_id=? AND locale=?", (state, summary, json.dumps({"entityId": entity_id, "entityType": entity_type, "locale": locale, "errors": errors}), now(), entity_id, locale))
+    logger.info("hydration finished entity_id=%s locale=%s state=%s", entity_id, locale, state)
 
 
 class MetadataHydrationQueue:
@@ -225,6 +248,9 @@ class MetadataHydrationQueue:
         if self.thread and self.thread.is_alive():
             return
         self.stop_event.clear()
+        # Requests claimed by a worker that died with the process are safe to
+        # retry. They are durable requests, not scheduler runs.
+        self.db.execute("UPDATE metadata_hydration_requests SET state='queued',started_at=NULL WHERE state='running'")
         self.thread = threading.Thread(target=self._run, name="zenstream-metadata-hydration", daemon=True)
         self.thread.start()
 
@@ -236,14 +262,23 @@ class MetadataHydrationQueue:
             self.thread.join(timeout=5)
 
     def enqueue(self, entity_ids: list[str], locale: str) -> dict:
+        if not self.thread or not self.thread.is_alive():
+            self.start()
         locale = (locale or "en").strip().lower()
         values = list(dict.fromkeys(str(value) for value in entity_ids if str(value).strip()))
         queued = 0
+        request_ids = []
+        already_ready = 0
+        already_queued = 0
         with self.scheduler.store.db.transaction() as cursor:
             for entity_id in values:
                 cursor.execute("SELECT state FROM metadata_hydration_requests WHERE entity_id=? AND locale=?", (entity_id, locale))
                 existing = cursor.fetchone()
+                if existing and existing[0] == "ready":
+                    already_ready += 1
+                    continue
                 if existing and existing[0] in {"queued", "running"}:
+                    already_queued += 1
                     continue
                 timestamp = now()
                 cursor.execute(
@@ -252,9 +287,11 @@ class MetadataHydrationQueue:
                     (entity_id, locale, timestamp, None),
                 )
                 queued += 1
+                request_ids.append(f"{entity_id}:{locale}")
         with self.condition:
             self.condition.notify_all()
-        return {"locale": locale, "requested": len(values), "queued": queued}
+        worker_state = "running" if self.thread and self.thread.is_alive() else "starting"
+        return {"locale": locale, "requested": len(values), "queued": queued, "alreadyReady": already_ready, "alreadyQueued": already_queued, "requestIds": request_ids, "workerState": worker_state}
 
     def _run(self) -> None:
         while not self.stop_event.is_set():
@@ -270,7 +307,9 @@ class MetadataHydrationQueue:
                 try:
                     _hydrate_request(self.db, service, entity_id, locale)
                 except Exception as error:
-                    self.db.execute("UPDATE metadata_hydration_requests SET state='error',last_error=?,finished_at=? WHERE entity_id=? AND locale=?", (str(error), now(), entity_id, locale))
+                    details = {"entityId": entity_id, "locale": locale, "exception": type(error).__name__, "traceback": traceback.format_exc()}
+                    logger.exception("unhandled hydration failure entity_id=%s locale=%s", entity_id, locale)
+                    self.db.execute("UPDATE metadata_hydration_requests SET state='error',last_error=?,error_details=?,finished_at=? WHERE entity_id=? AND locale=?", (f"Metadata hydration worker failed: {type(error).__name__}: {error}", json.dumps(details), now(), entity_id, locale))
 
 
 class JobScheduler:
@@ -428,14 +467,14 @@ class JobScheduler:
             definition = self.store.definition(definition_id) or {"id": definition_id, "kind": kind, "config": config, "name": name}
             if kind == "metadata_refresh":
                 MetadataRefreshJob(self.store).run(run_id, definition, self.cancel_events[run_id].is_set)
-            elif kind == "metadata_hydration":
-                MetadataHydrationJob(self.store).run(run_id, definition, self.cancel_events[run_id].is_set)
             else:
                 self.store.update_run(run_id, state="failed", error=f"Unsupported job kind: {kind}", finished_at=now())
         except JobTerminated:
             self.store.update_run(run_id, state="terminated", message="Terminated by administrator", error=None, finished_at=now())
         except Exception as error:
-            self.store.update_run(run_id, state="failed", error=str(error), finished_at=now())
+            details = {"operation": "scheduled_job", "runId": run_id, "exception": type(error).__name__, "traceback": traceback.format_exc()}
+            logger.exception("scheduled job failed run_id=%s", run_id)
+            self.store.update_run(run_id, state="failed", error=f"{type(error).__name__}: {error}", error_details=json.dumps(details), finished_at=now())
         finally:
             with self.active_lock:
                 self.active.discard(run_id)

@@ -8,7 +8,7 @@ from unittest.mock import patch
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import LibraryRuntime, LibraryStore, guess_media, provider_ids
-from app.providers import MetadataService, ProviderError, TMDBClient, _select_match, choose_image
+from app.providers import BANNER, PRIMARY, MetadataService, ProviderError, TMDBClient, TVDBClient, _select_match, choose_image, _tvdb_images
 
 
 class LibraryMetadataTest(unittest.TestCase):
@@ -28,13 +28,15 @@ class LibraryMetadataTest(unittest.TestCase):
 
     def test_image_fallback_order_is_requested_no_language_english_any(self):
         images = [
-            {"type": "poster", "language": "fr", "url": "fr"},
-            {"type": "poster", "language": "en", "url": "en"},
-            {"type": "poster", "language": None, "url": "neutral"},
-            {"type": "poster", "language": "ja", "url": "ja"},
+            {"type": PRIMARY, "language": "fr", "url": "fr"},
+            {"type": PRIMARY, "language": "en", "url": "en"},
+            {"type": PRIMARY, "language": None, "url": "neutral"},
+            {"type": PRIMARY, "language": "ja", "url": "ja"},
         ]
-        self.assertEqual(choose_image(images, "ja-JP", "poster")["url"], "ja")
-        self.assertEqual(choose_image(images, "de-DE", "poster")["url"], "neutral")
+        self.assertEqual(choose_image(images, "ja-JP", PRIMARY)["url"], "ja")
+        self.assertEqual(choose_image(images, "de-DE", PRIMARY)["url"], "neutral")
+        with self.assertRaises(ValueError):
+            choose_image(images, "en", "Thumb")
 
     def test_preview_image_cache_miss_does_not_hydrate_provider_metadata(self):
         item = {
@@ -58,7 +60,7 @@ class LibraryMetadataTest(unittest.TestCase):
             response = asyncio.run(
                 library_routes.get_image(
                     "entity-1",
-                    imageType="poster",
+                    imageType=PRIMARY,
                     locale="en",
                     Username="admin",
                     TOKEN="token",
@@ -66,7 +68,7 @@ class LibraryMetadataTest(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.headers["retry-after"], "10")
+        self.assertEqual(response.headers["retry-after"], "2")
         metadata.assert_called_once_with(item, "en", False, False)
         hydration.assert_called_once_with(["entity-1"], "en")
 
@@ -96,8 +98,15 @@ class LibraryMetadataTest(unittest.TestCase):
         )
         self.assertEqual(value["year"], "2020")
         self.assertEqual(value["tags"], ["Drama"])
+        self.assertEqual(value["images"], [])
         self.assertEqual({item["provider"] for item in value["ids"]}, {"tvdb", "imdb"})
 
+    def test_provider_artwork_uses_canonical_categories(self):
+        tmdb = TMDBClient({}, "api_key").normalize("episode", "10:1:2", {"name": "Episode", "images": {"stills": [{"file_path": "/still.jpg"}], "backdrops": [{"file_path": "/backdrop.jpg"}], "logos": [{"file_path": "/logo.png"}]}})
+        self.assertEqual({value["type"] for value in tmdb["images"]}, {PRIMARY, "Backdrop", "Logo"})
+        tvdb, extras = _tvdb_images({"artworks": [{"type": "banner", "image": "banner"}, {"type": "episode still", "image": "still"}, {"type": "unknown", "image": "other", "width": 100, "height": 100}]})
+        self.assertEqual({value["type"] for value in tvdb}, {BANNER, PRIMARY})
+        self.assertEqual(extras[0]["sourceType"], "unknown")
     def test_primary_provider_is_required_but_secondary_provider_is_optional(self):
         service = MetadataService.__new__(MetadataService)
         service.fetch = lambda provider, entity_type, provider_id, locale, force=False: {"provider": provider, "providerId": provider_id, "title": "Example"}
@@ -122,7 +131,7 @@ class LibraryMetadataTest(unittest.TestCase):
 class LibraryJobControlTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
-        self.db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)")
+        self.db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)")
         store = LibraryStore.__new__(LibraryStore)
         store.db = self.db
         self.runtime = LibraryRuntime.__new__(LibraryRuntime)

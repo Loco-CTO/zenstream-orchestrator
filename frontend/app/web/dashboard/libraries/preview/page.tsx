@@ -8,6 +8,7 @@ import {
 	IconArrowLeft,
 	IconChevronLeft,
 	IconChevronRight,
+	IconX,
 	IconPhoto,
 	IconRefresh,
 } from "@tabler/icons-react";
@@ -23,10 +24,36 @@ type Item = {
 	displayName: string;
 	relativePath?: string;
 	parentId?: string | null;
-	metadata?: { title?: string } | null;
+	metadata?: Metadata | null;
 	metadataState?: "ready" | "queued" | "running" | "error";
+	metadataError?: string | null;
+	hydration?: { state?: string; error?: string | null; details?: string | null; attempts?: number };
 	matchStatus: string;
 	providerIds: { provider: string; id: string }[];
+	children?: { id: string; type: string; relativePath?: string; seasonNumber?: number; episodeNumber?: number; trackNumber?: number }[];
+};
+type MetadataPerson = { name?: string; role?: string };
+type MetadataTrailer = { name?: string; key?: string };
+type MetadataTrack = { title?: string };
+type Metadata = {
+	title?: string;
+	description?: string;
+	overview?: string;
+	status?: string;
+	date?: string;
+	releaseDate?: string;
+	runtimeMinutes?: number;
+	airTime?: string;
+	tags?: string[];
+	genres?: string[];
+	studios?: string[];
+	networks?: string[];
+	originalCountry?: string;
+	originalLanguage?: string;
+	albumArtist?: string;
+	trailers?: MetadataTrailer[];
+	people?: MetadataPerson[];
+	tracks?: MetadataTrack[];
 };
 const pageSize = 30;
 
@@ -42,6 +69,7 @@ function LibraryViewPage() {
 	const [total, setTotal] = useState(0);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
+	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const requestId = useRef(0);
 	const abortRef = useRef<AbortController | null>(null);
 
@@ -104,6 +132,7 @@ function LibraryViewPage() {
 		setSession(current);
 		setPage(1);
 		setParent(null);
+		setSelectedId(null);
 		if (current) load(current, null, 1);
 		return () => abortRef.current?.abort();
 	}, [libraryId, locale]);
@@ -119,11 +148,6 @@ function LibraryViewPage() {
 		return () => window.clearInterval(timer);
 	}, [session, parent, page, locale, hydrationSignature]);
 
-	function openParent(id: string) {
-		setParent(id);
-		setPage(1);
-		load(session, id, 1);
-	}
 	function back() {
 		setParent(null);
 		setPage(1);
@@ -198,20 +222,31 @@ function LibraryViewPage() {
 			)}
 			{!loading && !error && (
 				<>
-					<div className="mt-7 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+					<div className="mt-7 flex flex-col gap-5 lg:flex-row">
+					<div className="min-w-0 flex-1 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
 						{items.map((item) => (
 							<ViewCard
 								key={item.id}
 								item={item}
 								session={session}
 								locale={locale}
-								onOpen={() => openParent(item.id)}
+								onOpen={() => setSelectedId(item.id)}
 							/>
 						))}
 						{!items.length && (
 							<div className="material-surface col-span-full rounded-xl p-8 text-sm material-muted">
 								No entries on this page.
 							</div>
+						)}
+					</div>
+						{selectedId && session && (
+							<DetailPanel
+								entityId={selectedId}
+								session={session}
+								locale={locale}
+								onClose={() => setSelectedId(null)}
+								onSelectChild={setSelectedId}
+							/>
 						)}
 					</div>
 					<div className="mt-6 flex items-center justify-between border-t material-divider pt-4">
@@ -262,6 +297,7 @@ function ViewCard({
 		const controller = new AbortController();
 		let url = "";
 		let retryTimer: number | undefined;
+		let attempts = 0;
 		setImage(null);
 		setImageFailed(false);
 		setImagePending(false);
@@ -272,7 +308,7 @@ function ViewCard({
 			adminFetch(
 				"/api/admin/library-items/" +
 					item.id +
-					"/image?imageType=poster&locale=" +
+					"/image?imageType=Primary&locale=" +
 					encodeURIComponent(locale),
 				session,
 				{ signal: controller.signal },
@@ -281,7 +317,8 @@ function ViewCard({
 					if (response.status === 202) {
 						setImagePending(true);
 						inFlight = false;
-						retryTimer = window.setTimeout(fetchImage, 3000);
+						if (++attempts < 20) retryTimer = window.setTimeout(fetchImage, 2000);
+						else setImageFailed(true);
 						return;
 					}
 					if (!response.ok) throw new Error("image");
@@ -350,12 +387,149 @@ function ViewCard({
 					{pending
 						? "Loading metadata…"
 						: item.metadataState === "error"
-							? "Metadata unavailable; retry scan"
+							? item.metadataError || "Metadata unavailable; retry hydration"
 						: item.type + " · " + item.matchStatus}
 				</p>
 			</div>
 		</button>
 	);
+}
+
+function DetailPanel({
+	entityId,
+	session,
+	locale,
+	onClose,
+	onSelectChild,
+}: {
+	entityId: string;
+	session: Session;
+	locale: string;
+	onClose: () => void;
+	onSelectChild: (id: string) => void;
+}) {
+	const [detail, setDetail] = useState<Item | null>(null);
+	const [error, setError] = useState("");
+	const [timedOut, setTimedOut] = useState(false);
+	const [retry, setRetry] = useState(0);
+	useEffect(() => {
+		const controller = new AbortController();
+		let timer: number | undefined;
+		let polls = 0;
+		let cancelled = false;
+		setDetail(null);
+		setError("");
+		setTimedOut(false);
+		async function load() {
+			try {
+				const response = await adminFetch(
+					"/api/admin/library-items/" + entityId + "?locale=" + encodeURIComponent(locale),
+					session,
+					{ signal: controller.signal },
+				);
+				if (!response.ok) throw new Error("The item could not be loaded.");
+				const value = (await response.json()) as Item;
+				if (cancelled) return;
+				setDetail(value);
+				const state = value.hydration?.state || value.metadataState;
+				if ((state === "queued" || state === "running") && ++polls < 40) {
+					timer = window.setTimeout(load, 1500);
+				} else if (state === "queued" || state === "running") {
+					setTimedOut(true);
+				}
+			} catch (caught) {
+				if (!cancelled && (caught as Error).name !== "AbortError") setError(caught instanceof Error ? caught.message : "The item could not be loaded.");
+			}
+		}
+		load();
+		return () => {
+			cancelled = true;
+			controller.abort();
+			if (timer) window.clearTimeout(timer);
+		};
+	}, [entityId, locale, retry, session]);
+
+	async function requestRetry() {
+		await adminFetch("/api/admin/library-items/hydrate", session, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ entityIds: [entityId], locale }),
+		});
+		setRetry((value) => value + 1);
+	}
+
+	const metadata: Metadata = detail?.metadata || {};
+	const list = (value: unknown) => Array.isArray(value) ? value.filter((entry): entry is string | number => typeof entry === "string" || typeof entry === "number").join(", ") || "—" : typeof value === "string" || typeof value === "number" ? value : "—";
+	const trailers = metadata.trailers || [];
+	const people = metadata.people || [];
+	const tracks = metadata.tracks || [];
+	return (
+		<aside className="material-surface w-full shrink-0 rounded-xl p-4 lg:w-[390px]">
+			<div className="flex items-start justify-between gap-3">
+				<div>
+					<p className="text-xs uppercase tracking-wide material-muted">{detail?.type || "Item"}</p>
+					<h2 className="mt-1 text-lg font-semibold">{metadata.title || detail?.displayName || "Loading…"}</h2>
+				</div>
+				<button onClick={onClose} className="material-icon-button" aria-label="Close details"><IconX size={17} /></button>
+			</div>
+			{error && <div className="material-alert mt-4 text-xs"><IconAlertCircle size={16} />{error}</div>}
+			{detail && (detail.metadataState === "queued" || detail.metadataState === "running") && !metadata.title && (
+				<div className="mt-4 rounded-lg bg-[#0d0e13] p-3 text-xs material-muted">Hydrating {locale} metadata…</div>
+			)}
+			{(detail?.metadataState === "error" || timedOut) && (
+				<div className="mt-4 rounded-lg border border-red-900/60 bg-red-950/20 p-3 text-xs text-red-200">
+					<p>{detail?.metadataError || (timedOut ? "Hydration is taking longer than expected." : "Metadata hydration failed.")}</p>
+					<button onClick={requestRetry} className="material-text-button mt-2">Retry hydration</button>
+				</div>
+			)}
+			<div className="mt-4 grid grid-cols-2 gap-2">
+				{(["Primary", "Backdrop", "Logo", "Banner"] as const).map((type) => (
+					<PanelImage key={type} entityId={entityId} type={type} locale={locale} session={session} />
+				))}
+			</div>
+			<div className="mt-5 space-y-2 text-xs">
+				<p className="font-medium">{metadata.description || metadata.overview || "No description cached for this language."}</p>
+				<p><span className="material-muted">Provider IDs:</span> {detail?.providerIds.map((value) => `${value.provider}:${value.id}`).join(" · ") || "—"}</p>
+				<p><span className="material-muted">Status:</span> {metadata.status || "—"} · <span className="material-muted">Date:</span> {metadata.date || metadata.releaseDate || "—"}</p>
+				<p><span className="material-muted">Runtime:</span> {metadata.runtimeMinutes ? `${metadata.runtimeMinutes} min` : "—"} · <span className="material-muted">Air time:</span> {metadata.airTime || "—"}</p>
+				<p><span className="material-muted">Genres:</span> {list(metadata.tags || metadata.genres)}</p>
+				<p><span className="material-muted">Studios:</span> {list(metadata.studios)} · <span className="material-muted">Networks:</span> {list(metadata.networks)}</p>
+				<p><span className="material-muted">Country/language:</span> {metadata.originalCountry || "—"} / {metadata.originalLanguage || "—"}</p>
+				{metadata.albumArtist && <p><span className="material-muted">Album artist:</span> {metadata.albumArtist}</p>}
+				{trailers.length > 0 && <p><span className="material-muted">Trailers:</span> {trailers.map((value) => value.name || value.key).filter(Boolean).join(", ")}</p>}
+				{people.length > 0 && <p><span className="material-muted">Credits:</span> {people.map((value) => value.name).filter(Boolean).join(", ")}</p>}
+				{tracks.length > 0 && <p><span className="material-muted">Tracks:</span> {tracks.map((value) => value.title).filter(Boolean).join(", ")}</p>}
+			</div>
+			{detail?.children?.length ? (
+				<div className="mt-5 border-t material-divider pt-4">
+					<p className="mb-2 text-xs font-medium">Children</p>
+					<div className="space-y-1">{detail.children.map((child) => <button key={child.id} onClick={() => onSelectChild(child.id)} className="block w-full truncate rounded px-2 py-1 text-left text-xs hover:bg-white/10">{child.type} · {child.relativePath || child.id}</button>)}</div>
+				</div>
+			) : null}
+		</aside>
+	);
+}
+
+function PanelImage({ entityId, type, locale, session }: { entityId: string; type: "Primary" | "Backdrop" | "Logo" | "Banner"; locale: string; session: Session }) {
+	const [url, setUrl] = useState<string | null>(null);
+	useEffect(() => {
+		const controller = new AbortController();
+		setUrl(null);
+		let objectUrl = "";
+		let timer: number | undefined;
+		let attempts = 0;
+		const load = () => adminFetch(`/api/admin/library-items/${entityId}/image?imageType=${type}&locale=${encodeURIComponent(locale)}`, session, { signal: controller.signal })
+			.then(async (response) => {
+				if (response.status === 202 && ++attempts < 20) { timer = window.setTimeout(load, 2000); return; }
+				if (!response.ok) return;
+				objectUrl = URL.createObjectURL(await response.blob());
+				setUrl(objectUrl);
+			})
+			.catch(() => undefined);
+		load();
+		return () => { controller.abort(); if (timer) window.clearTimeout(timer); if (objectUrl) URL.revokeObjectURL(objectUrl); };
+	}, [entityId, locale, session, type]);
+	return <div className="flex aspect-video items-center justify-center overflow-hidden rounded bg-[#0d0e13] text-[10px] material-muted">{url ? <img src={url} alt={type} className="h-full w-full object-cover" /> : type}</div>;
 }
 
 export default function LibraryPreviewPage() {

@@ -127,7 +127,7 @@ class MetadataCache:
                 payload = json.loads(payload_text)
             except json.JSONDecodeError:
                 continue
-            if payload.get("title") or payload.get("overview") or payload.get("images"):
+            if payload.get("title") or payload.get("overview") or payload.get("description") or payload.get("images") or payload.get("extraImages") or payload.get("tracks"):
                 payload["_stale"] = expires_at <= iso_now()
                 return payload
         return None

@@ -17,10 +17,12 @@ from app.library import LibraryRuntime, LibraryStore, runtime
 from app.jobs import scheduler
 from app.models.admin import Admin
 from app.models.metadata import MetadataCache, MetadataCredentials
-from app.providers import MetadataService, ProviderError, choose_image
+from app.providers import IMAGE_TYPES, MetadataService, ProviderError, choose_image
+from app.logging_config import get_logger
 
 
 router = APIRouter(prefix="/api/admin")
+logger = get_logger("library_api")
 store = LibraryStore()
 credentials = MetadataCredentials()
 
@@ -43,6 +45,8 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     row = rows[0]
     value = {"id": row[0], "libraryId": row[1], "parentId": row[2], "type": row[3], "relativePath": row[4], "seasonNumber": row[5], "episodeNumber": row[6], "episodeEndNumber": row[7], "discNumber": row[8], "trackNumber": row[9], "matchStatus": row[10], "matchConfidence": row[11], "matchMethod": row[12], "providerIds": _entity_ids(entity_id)}
     value["displayName"] = Path(row[4]).name if row[4] else row[3].replace("_", " ").title()
+    children = store.db.execute("SELECT id,entity_type,relative_path,season_number,episode_number,track_number FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE", (entity_id,))
+    value["children"] = [{"id": child[0], "type": child[1], "relativePath": child[2], "seasonNumber": child[3], "episodeNumber": child[4], "trackNumber": child[5]} for child in children]
     if include_metadata:
         value["metadata"] = None
     return value
@@ -59,8 +63,8 @@ def _metadata_for(item: dict, locale: str, fetch: bool = False, fallback: bool =
         cached = service.fetch_fallback(provider, item["type"], ids[0]["id"], locale) if fetch else _cached_provider_metadata(service.cache, provider, item["type"], ids[0]["id"], locale, fallback)
         if cached:
             for key, value in cached.items():
-                if key == "images":
-                    merged.setdefault("images", []).extend(value or [])
+                if key in {"images", "extraImages"}:
+                    merged.setdefault(key, []).extend(value or [])
                 elif not merged.get(key) and value:
                     merged[key] = value
     return merged or None
@@ -84,22 +88,26 @@ def _cached_provider_metadata(cache: MetadataCache, provider: str, entity_type: 
     merged = {}
     for value in values:
         for key, field in value.items():
-            if key == "images":
-                merged.setdefault("images", []).extend(field or [])
+            if key in {"images", "extraImages"}:
+                merged.setdefault(key, []).extend(field or [])
             elif not merged.get(key) and field:
                 merged[key] = field
     return merged
 
 
-def _metadata_state(item: dict, locale: str, metadata: dict | None) -> str:
+def _hydration(item: dict, locale: str, metadata: dict | None) -> dict:
+    locale = (locale or "en").lower()
+    rows = store.db.execute("SELECT state,last_error,error_details,attempts,requested_at,started_at,finished_at FROM metadata_hydration_requests WHERE entity_id=? AND locale=?", (item["id"], locale))
+    if rows:
+        row = rows[0]
+        return {"state": "ready" if metadata else row[0], "error": row[1], "details": row[2], "attempts": row[3], "requestedAt": row[4], "startedAt": row[5], "finishedAt": row[6]}
     if metadata:
-        return "ready"
-    rows = store.db.execute("SELECT state FROM metadata_hydration_requests WHERE entity_id=? AND locale=?", (item["id"], (locale or "en").lower()))
-    if rows and rows[0][0] in {"queued", "running"}:
-        return rows[0][0]
-    if rows and rows[0][0] == "error":
-        return "error"
-    return "queued" if item.get("providerIds") else "error"
+        return {"state": "ready", "error": None, "details": None, "attempts": 0}
+    return {"state": "queued" if item.get("providerIds") else "error", "error": None if item.get("providerIds") else "No provider IDs were resolved during the scan.", "details": None, "attempts": 0}
+
+
+def _metadata_state(item: dict, locale: str, metadata: dict | None) -> str:
+    return _hydration(item, locale, metadata)["state"]
 
 
 @router.get("/metadata/providers")
@@ -319,6 +327,14 @@ async def list_items(library_id: str, parentId: str | None = Query(None), locale
         items.append(item)
     if missing:
         scheduler.enqueue_metadata_hydration(missing, locale)
+        for item in items:
+            item["hydration"] = _hydration(item, locale, item["metadata"])
+            item["metadataState"] = item["hydration"]["state"]
+            item["metadataError"] = item["hydration"].get("error")
+    else:
+        for item in items:
+            item["hydration"] = _hydration(item, locale, item["metadata"])
+            item["metadataError"] = item["hydration"].get("error")
     return {"items": items, "page": page, "pageSize": pageSize, "total": total}
 
 
@@ -327,9 +343,17 @@ async def get_item(entity_id: str, locale: str = Query("en"), Username: str | No
     require_admin(Username, TOKEN)
     item = _entity(entity_id, locale, include_metadata=True)
     item["metadata"] = await asyncio.to_thread(_metadata_for, item, locale, False, False)
-    item["metadataState"] = _metadata_state(item, locale, item["metadata"])
-    if not item["metadata"] and item["providerIds"]:
-        scheduler.enqueue_metadata_hydration([entity_id], locale)
+    if item["providerIds"] or item.get("children"):
+        # Opening a detail view hydrates the selected item and its visible
+        # direct children immediately. The queue owns the worker; this is not
+        # represented as a scheduled task. Ready rows are coalesced by the
+        # queue and are not refetched.
+        requested = ([entity_id] if item["providerIds"] and not item["metadata"] else []) + [child["id"] for child in item.get("children", [])]
+        if requested:
+            scheduler.enqueue_metadata_hydration(requested, locale)
+    item["hydration"] = _hydration(item, locale, item["metadata"])
+    item["metadataState"] = item["hydration"]["state"]
+    item["metadataError"] = item["hydration"].get("error")
     return item
 
 
@@ -377,8 +401,10 @@ async def set_match(entity_id: str, request: Request, Username: str | None = Hea
 
 
 @router.get("/library-items/{entity_id}/image")
-async def get_image(entity_id: str, imageType: str = Query("poster"), locale: str = Query("en"), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def get_image(entity_id: str, imageType: str = Query("Primary"), locale: str = Query("en"), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
     require_admin(Username, TOKEN)
+    if imageType not in IMAGE_TYPES:
+        raise HTTPException(400, f"Unsupported image type '{imageType}'. Expected one of: {', '.join(sorted(IMAGE_TYPES))}")
     item = _entity(entity_id, locale)
     library = store.get(item["libraryId"])
     if not library:
@@ -395,10 +421,13 @@ async def get_image(entity_id: str, imageType: str = Query("poster"), locale: st
     if not metadata:
         if item.get("providerIds"):
             scheduler.enqueue_metadata_hydration([entity_id], locale)
-        return Response(status_code=202, headers={"Retry-After": "10"})
+            logger.info("image pending entity_id=%s locale=%s image_type=%s", entity_id, locale, imageType)
+            return Response(status_code=202, headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"})
+        logger.warning("image unavailable because entity has no provider IDs entity_id=%s image_type=%s", entity_id, imageType)
+        return Response(status_code=404, headers={"X-ZenStream-Image-State": "error"})
     image = choose_image(metadata.get("images", []), locale, imageType)
     if not image:
-        return Response(status_code=202, headers={"Retry-After": "10"})
+        return Response(status_code=404, headers={"X-ZenStream-Image-State": "missing"})
     cache_root = Path(store.db.db_file).parent / "metadata-cache" / "images"
     cache_root.mkdir(parents=True, exist_ok=True)
     extension = Path(image["url"].split("?", 1)[0]).suffix.lower() or ".jpg"
@@ -410,7 +439,8 @@ async def get_image(entity_id: str, imageType: str = Query("poster"), locale: st
                 response.raise_for_status()
                 target.write_bytes(response.content)
         except (httpx.HTTPError, OSError) as error:
-            raise HTTPException(502, "Provider image could not be downloaded.") from error
+            logger.exception("image download failed entity_id=%s image_type=%s url=%s", entity_id, imageType, image.get("url"))
+            raise HTTPException(502, f"Provider image could not be downloaded: {type(error).__name__}: {error}") from error
     selected_provider = image.get("provider") or next((value["provider"] for value in item["providerIds"] if value["provider"] in {"tmdb", "tvdb"}), "provider")
     selected_id = next((value["id"] for value in item["providerIds"] if value["provider"] == selected_provider), "")
     cached_file = store.db.execute("SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=?", (selected_provider, item["type"], selected_id, imageType, image["url"]))

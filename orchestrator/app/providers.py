@@ -6,17 +6,56 @@ import threading
 import time
 import re
 import unicodedata
+from typing import Any
 from pathlib import Path
 from urllib.parse import quote
 
 import httpx
 
 from app.models.metadata import MetadataCache, MetadataCredentials
+from app.logging_config import get_logger
 from version import __version__
 
 
 class ProviderError(RuntimeError):
     pass
+
+
+logger = get_logger("providers")
+
+
+PRIMARY = "Primary"
+BACKDROP = "Backdrop"
+LOGO = "Logo"
+BANNER = "Banner"
+IMAGE_TYPES = {PRIMARY, BACKDROP, LOGO, BANNER}
+
+
+def _image(image_type: str, url: str, *, language: str | None = None, provider: str,
+           source_type: str | None = None, score: float = 0, width: int = 0,
+           height: int = 0) -> dict:
+    value = {
+        "type": image_type,
+        "language": language,
+        "url": url,
+        "score": score or 0,
+        "width": width or 0,
+        "height": height or 0,
+        "provider": provider,
+    }
+    if source_type is not None:
+        value["sourceType"] = source_type
+    return value
+
+
+def _name(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return value.get("name") or value.get("title") or value.get("value")
+    return str(value) if value else None
+
+
+def _names(values: Any) -> list[str]:
+    return [value for value in (_name(item) for item in values or []) if value]
 
 
 class ProviderClient:
@@ -29,7 +68,7 @@ class ProviderClient:
             response.raise_for_status()
             return response.json()
         except (httpx.HTTPError, ValueError) as error:
-            raise ProviderError(str(error)) from error
+            raise ProviderError(f"provider request failed: {type(error).__name__}: {error}") from error
 
 
 class TMDBClient(ProviderClient):
@@ -66,30 +105,60 @@ class TMDBClient(ProviderClient):
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
         if entity_type == "season":
             series_id, season = provider_id.split(":", 1)
-            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}", params={"language": locale, "append_to_response": "images,external_ids"})
+            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}", params={"language": locale, "append_to_response": "images,external_ids,videos"})
         if entity_type == "episode":
             series_id, season, episode = provider_id.split(":", 2)
-            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}", params={"language": locale, "append_to_response": "images,external_ids"})
+            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}", params={"language": locale, "append_to_response": "images,external_ids,videos"})
         kind = "tv" if entity_type == "series" else "movie"
-        return self._request(f"/{kind}/{quote(provider_id)}", params={"language": locale, "append_to_response": "images,external_ids"})
+        return self._request(f"/{kind}/{quote(provider_id)}", params={"language": locale, "append_to_response": "images,external_ids,credits,videos"})
 
     def normalize(self, entity_type: str, provider_id: str, payload: dict) -> dict:
         title = payload.get("title") or payload.get("name") or payload.get("original_title") or payload.get("original_name")
         external = payload.get("external_ids") or {}
         ids = []
         if external.get("tvdb_id"):
-            ids.append({"provider": "tvdb", "identifierType": "movie" if entity_type == "movie" else "series", "id": str(external["tvdb_id"])})
+            ids.append({"provider": "tvdb", "identifierType": entity_type, "id": str(external["tvdb_id"])})
         if external.get("imdb_id"):
             ids.append({"provider": "imdb", "identifierType": "imdb", "id": str(external["imdb_id"])})
         dates = payload.get("release_date") or payload.get("first_air_date") or payload.get("air_date")
         genres = payload.get("genres") or payload.get("tags") or []
+        credits = payload.get("credits") or {}
+        people = []
+        for person in (credits.get("cast") or []) + (credits.get("crew") or []):
+            profile = person.get("profile_path")
+            entry = {
+                "id": str(person.get("id")) if person.get("id") is not None else None,
+                "name": person.get("name"),
+                "role": person.get("character") or person.get("job") or person.get("known_for_department"),
+                "department": person.get("known_for_department") or person.get("department"),
+            }
+            if profile:
+                entry["image"] = _image(PRIMARY, f"https://image.tmdb.org/t/p/w500{profile}", provider="tmdb", source_type="profile", width=500)
+            if entry["name"]:
+                people.append(entry)
+        videos = [
+            {"name": video.get("name"), "key": video.get("key"), "language": video.get("iso_639_1"), "type": video.get("type"), "site": video.get("site")}
+            for video in (payload.get("videos") or {}).get("results", []) or []
+            if video.get("key") and video.get("site")
+        ]
         return {
             "title": title,
             "overview": payload.get("overview"),
+            "description": payload.get("overview"),
             "date": dates or None,
+            "firstAired": payload.get("first_air_date"),
+            "lastAired": payload.get("last_air_date"),
+            "status": payload.get("status"),
+            "runtimeMinutes": payload.get("runtime") or ((payload.get("episode_run_time") or [None])[0]),
+            "studios": _names(payload.get("production_companies")),
+            "networks": _names(payload.get("networks")),
+            "productionCompanies": _names(payload.get("production_companies")),
+            "originalCountry": (payload.get("origin_country") or [None])[0],
             "year": (dates or "")[:4] or None,
-            "tags": [value.get("name") if isinstance(value, dict) else str(value) for value in genres if value],
+            "tags": _names(genres),
             "originalLanguage": payload.get("original_language"),
+            "trailers": videos,
+            "people": people,
             "provider": "tmdb",
             "providerId": provider_id,
             "ids": ids,
@@ -101,11 +170,18 @@ class TMDBClient(ProviderClient):
     def _images(payload: dict) -> list[dict]:
         images = payload.get("images") or {}
         values = []
-        for image_type, key in (("poster", "posters"), ("backdrop", "backdrops"), ("logo", "logos")):
+        for image_type, key in ((PRIMARY, "posters"), (BACKDROP, "backdrops"), (LOGO, "logos")):
             for image in images.get(key, []) or []:
                 path = image.get("file_path")
                 if path:
-                    values.append({"type": image_type, "language": image.get("iso_639_1"), "url": f"https://image.tmdb.org/t/p/w1280{path}", "score": image.get("vote_average", 0), "width": image.get("width", 0), "provider": "tmdb"})
+                    values.append(_image(image_type, f"https://image.tmdb.org/t/p/w1280{path}", language=image.get("iso_639_1"), provider="tmdb", source_type=key, score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
+        # TMDB calls episode artwork "stills". A screencap belongs to the
+        # entity's primary artwork category; it must not be treated as a
+        # landscape thumbnail or silently substituted for a banner.
+        for image in images.get("stills", []) or []:
+            path = image.get("file_path")
+            if path:
+                values.append(_image(PRIMARY, f"https://image.tmdb.org/t/p/w1280{path}", language=image.get("iso_639_1"), provider="tmdb", source_type="stills", score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
         return values
 
 
@@ -183,23 +259,47 @@ class TVDBClient(ProviderClient):
             if not value:
                 continue
             if "tmdb" in source:
-                ids.append({"provider": "tmdb", "identifierType": "movie" if entity_type == "movie" else "series", "id": str(value)})
+                ids.append({"provider": "tmdb", "identifierType": entity_type, "id": str(value)})
             elif "imdb" in source:
                 ids.append({"provider": "imdb", "identifierType": "imdb", "id": str(value)})
         genres = data.get("genres") or data.get("tags") or []
         dates = data.get("firstAired") or data.get("lastAired") or data.get("releaseDate")
+        trailers = data.get("trailers") or data.get("videos") or []
+        people = []
+        for person in data.get("characters", []) or data.get("people", []) or []:
+            image = person.get("image") or person.get("imageUrl")
+            entry = {"id": str(person.get("id")) if person.get("id") is not None else None, "name": person.get("name") or person.get("personName"), "role": person.get("role") or person.get("character")}
+            if image:
+                entry["image"] = _image(PRIMARY, image, provider="tvdb", source_type="person")
+            if entry["name"]:
+                people.append(entry)
+        images, extra_images = _tvdb_images(data)
+        overview_translations = data.get("overviewTranslations") or []
         return {
             "title": translation.get("name") or data.get("name") or data.get("title"),
-            "overview": translation.get("overview") or data.get("overview") or data.get("overviewTranslations", [None])[0],
+            "overview": translation.get("overview") or data.get("overview") or (overview_translations[0] if overview_translations else None),
+            "description": translation.get("overview") or data.get("overview"),
             "date": dates or None,
+            "firstAired": data.get("firstAired"),
+            "lastAired": data.get("lastAired"),
+            "airTime": data.get("airs", {}).get("time") if isinstance(data.get("airs"), dict) else data.get("airTime"),
+            "status": _name(data.get("status")),
+            "studios": _names(data.get("studios")),
+            "networks": _names(data.get("networks") or data.get("network")),
+            "productionCompanies": _names(data.get("productionCompanies") or data.get("companies")),
+            "runtimeMinutes": data.get("averageRuntime") or data.get("runtime"),
+            "originalCountry": _name(data.get("originalCountry") or data.get("originalCountryName")),
             "year": str(data.get("year") or dates or "")[:4] or None,
-            "tags": [value.get("name") if isinstance(value, dict) else str(value) for value in genres if value],
+            "tags": _names(genres),
             "originalLanguage": data.get("originalLanguage"),
+            "trailers": trailers,
+            "people": people,
             "provider": "tvdb",
             "providerId": provider_id,
             "ids": ids,
             "children": _tvdb_children(data),
-            "images": _tvdb_images(data),
+            "images": images,
+            "extraImages": extra_images,
         }
 
 
@@ -219,8 +319,14 @@ class MusicBrainzClient(ProviderClient):
         return self._get(f"{self.base_url}{path}", params=params, headers={"User-Agent": f"ZenStream/{__version__} (https://zenstream.amai.space)", "Accept": "application/json"})
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
-        endpoint = {"artist": "artist", "release": "release", "release_group": "release-group", "recording": "recording", "work": "work"}.get(entity_type, "release")
-        return self._request(f"/{endpoint}/{quote(provider_id)}", {"inc": "artist-credits+aliases+releases+release-groups+recordings"})
+        endpoint = {"artist": "artist", "release": "release", "release_group": "release-group", "track": "recording", "recording": "recording", "work": "work"}.get(entity_type, "release")
+        payload = self._request(f"/{endpoint}/{quote(provider_id)}", {"inc": "artist-credits+aliases+releases+release-groups+recordings+relationships+tags+media"})
+        if endpoint in {"release", "release-group"}:
+            try:
+                payload["_coverArt"] = self._get(f"https://coverartarchive.org/{endpoint}/{quote(provider_id)}", headers={"Accept": "application/json"})
+            except ProviderError:
+                payload["_coverArt"] = {}
+        return payload
 
     def search(self, entity_type: str, query: str) -> list[dict]:
         endpoint = {"artist": "artist", "release": "release", "track": "recording", "recording": "recording"}.get(entity_type, "release")
@@ -231,32 +337,77 @@ class MusicBrainzClient(ProviderClient):
 
     def normalize(self, entity_type: str, provider_id: str, payload: dict) -> dict:
         images = []
+        extra_images = []
         if entity_type in {"release", "release_group"}:
             archive_key = payload.get("cover-art-archive") or {}
-            if archive_key.get("front") or entity_type == "release":
-                endpoint = "release-group" if entity_type == "release_group" else "release"
-                images.append({"type": "poster", "language": None, "url": f"https://coverartarchive.org/{endpoint}/{quote(provider_id)}/front-500", "score": 0, "width": 500, "provider": "musicbrainz"})
+            endpoint = "release-group" if entity_type == "release_group" else "release"
+            cover_art = payload.get("_coverArt") or {}
+            for artwork in cover_art.get("images", []) or []:
+                image_type = PRIMARY if artwork.get("front") else None
+                image_url = artwork.get("image") or artwork.get("thumbnails", {}).get("500")
+                if not image_url:
+                    continue
+                value = _image(image_type, image_url, provider="musicbrainz", source_type=", ".join(artwork.get("types", []) or []) or "cover-art", width=artwork.get("width", 0), height=artwork.get("height", 0)) if image_type else {"sourceType": ", ".join(artwork.get("types", []) or []) or "cover-art", "url": image_url, "provider": "musicbrainz"}
+                (images if image_type else extra_images).append(value)
+            if not images and (archive_key.get("front") or entity_type == "release"):
+                images.append(_image(PRIMARY, f"https://coverartarchive.org/{endpoint}/{quote(provider_id)}/front-500", provider="musicbrainz", source_type="front", width=500))
+        external_ids = []
+        for relationship in payload.get("relations", []) or payload.get("relationships", []) or []:
+            resource = ((relationship.get("url") or {}).get("resource") or "") if isinstance(relationship, dict) else ""
+            match = re.search(r"(?:themoviedb\.org/(?:movie|tv)|thetvdb\.com/(?:series|movies)|imdb\.com/title)/(?:.*?/)?(\d+|tt\d+)", resource, re.I)
+            if not match:
+                continue
+            provider = "imdb" if "imdb.com" in resource.lower() else "tmdb" if "themoviedb.org" in resource.lower() else "tvdb"
+            external_ids.append({"provider": provider, "identifierType": entity_type, "id": match.group(1)})
         date = payload.get("first-release-date") or payload.get("date")
-        tags = [value.get("name") for value in payload.get("tags", []) or [] if value.get("name")]
-        return {"title": payload.get("name") or payload.get("title"), "overview": None, "date": date, "year": str(date or "")[:4] or None, "tags": tags, "originalLanguage": None, "provider": "musicbrainz", "providerId": provider_id, "ids": [], "images": images}
+        tags = _names(payload.get("tags"))
+        credits = []
+        for value in payload.get("artist-credit", []) or []:
+            artist = value.get("artist") or {}
+            if artist.get("id") or artist.get("name"):
+                credits.append({"id": artist.get("id"), "name": artist.get("name"), "joinPhrase": value.get("joinphrase")})
+        tracks = []
+        for medium in payload.get("media", []) or []:
+            for position, track in enumerate(medium.get("tracks", []) or [], start=1):
+                recording = track.get("recording") or {}
+                tracks.append({"id": recording.get("id") or track.get("id"), "title": track.get("title") or recording.get("title"), "position": track.get("position") or position, "disc": medium.get("position"), "length": track.get("length") or recording.get("length")})
+        if entity_type == "track" and not tracks:
+            tracks = [{"id": provider_id, "title": payload.get("title") or payload.get("name"), "position": payload.get("position")}]
+        return {"title": payload.get("name") or payload.get("title"), "overview": None, "description": None, "date": date, "releaseDate": date, "year": str(date or "")[:4] or None, "tags": tags, "originalLanguage": None, "albumArtist": credits[0]["name"] if credits else None, "artists": credits, "tracks": tracks, "provider": "musicbrainz", "providerId": provider_id, "ids": external_ids, "images": images, "extraImages": extra_images}
 
 
 def _tvdb_language(locale: str) -> str:
     return {"en": "eng", "en-us": "eng", "ja": "jpn", "ja-jp": "jpn", "zh": "zho", "ko": "kor"}.get(locale.lower(), locale.split("-")[0])
 
 
-def _tvdb_images(data: dict) -> list[dict]:
+def _tvdb_images(data: dict) -> tuple[list[dict], list[dict]]:
     values = []
+    extras = []
     for artwork in data.get("artworks", []) or data.get("artwork", []) or []:
         url = artwork.get("image") or artwork.get("thumbnail") or artwork.get("imageUrl")
         if not url:
             continue
-        kind = str(artwork.get("type", "")).lower()
-        image_type = "backdrop" if "background" in kind or "backdrop" in kind else "poster"
-        values.append({"type": image_type, "language": artwork.get("language") or artwork.get("lang"), "url": url, "score": artwork.get("score", 0), "width": artwork.get("width", 0), "provider": "tvdb"})
+        raw_type = artwork.get("type", "")
+        kind = str(raw_type).lower()
+        if any(value in kind for value in ("background", "backdrop")):
+            image_type = BACKDROP
+        elif any(value in kind for value in ("clearlogo", "clear logo", "logo")):
+            image_type = LOGO
+        elif any(value in kind for value in ("banner", "thumbnail", "thumb")):
+            image_type = BANNER
+        elif any(value in kind for value in ("still", "episode", "screencap")):
+            image_type = PRIMARY
+        elif any(value in kind for value in ("poster", "series", "movie", "season", "box", "cover")):
+            image_type = PRIMARY
+        else:
+            width = artwork.get("width") or 0
+            height = artwork.get("height") or 0
+            image_type = BANNER if width and height and float(width) / float(height) > 1.45 else None
+        value = _image(image_type, url, language=artwork.get("language") or artwork.get("lang"), provider="tvdb", source_type=str(raw_type), score=artwork.get("score", 0), width=artwork.get("width", 0), height=artwork.get("height", 0)) if image_type else {"sourceType": str(raw_type), "url": url, "provider": "tvdb"}
+        (values if image_type else extras).append(value)
     if data.get("image"):
-        values.append({"type": "poster", "language": None, "url": data["image"], "score": 0, "width": 0, "provider": "tvdb"})
-    return values
+        values.append(_image(PRIMARY, data["image"], provider="tvdb", source_type="image"))
+    return values, extras
 
 
 def _tvdb_children(data: dict) -> list[dict]:
@@ -292,6 +443,8 @@ class MetadataService:
             return lock
 
     def client(self, provider: str):
+        if provider == "musicbrainz":
+            return MusicBrainzClient()
         credential = self.credentials.get(provider)
         if not credential:
             raise ProviderError(f"{provider.upper()} is not configured")
@@ -299,7 +452,7 @@ class MetadataService:
             return TMDBClient(credential, self.credentials.configured()[provider].get("credentialType", "api_key"))
         if provider == "tvdb":
             return TVDBClient(credential)
-        return MusicBrainzClient()
+        raise ProviderError(f"Unsupported metadata provider '{provider}'")
 
     def test(self, provider: str, credential: dict | None = None, credential_type: str = "api_key") -> None:
         if provider == "tmdb":
@@ -319,10 +472,18 @@ class MetadataService:
             cached = self.cache.get(provider, entity_type, provider_id, locale)
             if cached and not force and not cached.pop("_stale", False):
                 return cached
+            logger.debug("metadata fetch provider=%s entity_type=%s provider_id=%s locale=%s force=%s", provider, entity_type, provider_id, locale, force)
             client = self.client(provider)
-            payload = client.details(entity_type, provider_id, locale)
-            normalized = client.normalize(entity_type, provider_id, payload)
+            try:
+                payload = client.details(entity_type, provider_id, locale)
+                normalized = client.normalize(entity_type, provider_id, payload)
+            except Exception as error:
+                logger.exception("metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s", provider, entity_type, provider_id, locale)
+                if isinstance(error, ProviderError):
+                    raise
+                raise ProviderError(f"{provider} {entity_type} {provider_id} details normalization failed: {type(error).__name__}: {error}") from error
             self.cache.put(provider, entity_type, provider_id, locale, normalized)
+            logger.info("metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d", provider, entity_type, provider_id, locale, len(normalized.get("images", [])))
             return normalized
 
     def fetch_fallback(self, provider: str, entity_type: str, provider_id: str, locale: str, force: bool = False) -> dict | None:
@@ -348,9 +509,9 @@ class MetadataService:
         merged: dict = {}
         for value in values:
             for key, field in value.items():
-                if key == "images":
-                    merged.setdefault("images", [])
-                    merged["images"].extend(field or [])
+                if key in {"images", "extraImages"}:
+                    merged.setdefault(key, [])
+                    merged[key].extend(field or [])
                 elif not merged.get(key) and field:
                     merged[key] = field
         return merged
@@ -413,6 +574,8 @@ def _select_match(candidates: list[dict], query: str, year: str | None = None) -
 
 
 def choose_image(images: list[dict], requested: str, image_type: str) -> dict | None:
+    if image_type not in IMAGE_TYPES:
+        raise ValueError(f"Unsupported image type '{image_type}'. Expected one of: {', '.join(sorted(IMAGE_TYPES))}")
     values = [image for image in images if image.get("type") == image_type]
     if not values:
         return None

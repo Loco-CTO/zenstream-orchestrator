@@ -21,7 +21,7 @@ class JobMappingTest(unittest.TestCase):
         self.assertTrue(value["enabled"])
 
     def test_run_mapping_preserves_progress_and_thread(self):
-        row = ("run", "definition", None, "metadata_refresh", "running", 4, 10, "Working", None, "created", "started", None, "worker")
+        row = ("run", "definition", None, "metadata_refresh", "running", 4, 10, "Working", None, None, "created", "started", None, "worker")
         value = JobStore._run(row)
         self.assertEqual(value["progressCurrent"], 4)
         self.assertEqual(value["threadName"], "worker")
@@ -31,7 +31,7 @@ class JobLockingTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
         self.db.execute("CREATE TABLE job_definitions (id TEXT PRIMARY KEY, last_state TEXT, last_message TEXT, updated_at TEXT)")
-        self.db.execute("CREATE TABLE job_runs (id TEXT PRIMARY KEY, definition_id TEXT, library_id TEXT, kind TEXT, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, thread_name TEXT)")
+        self.db.execute("CREATE TABLE job_runs (id TEXT PRIMARY KEY, definition_id TEXT, library_id TEXT, kind TEXT, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, thread_name TEXT)")
         self.store = JobStore.__new__(JobStore)
         self.store.db = self.db
 
@@ -59,7 +59,9 @@ class JobLockingTest(unittest.TestCase):
 class MetadataHydrationQueueTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
-        self.db.execute("CREATE TABLE metadata_hydration_requests (entity_id TEXT NOT NULL, locale TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, requested_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, PRIMARY KEY(entity_id, locale))")
+        self.db.execute("CREATE TABLE metadata_hydration_requests (entity_id TEXT NOT NULL, locale TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, error_details TEXT, requested_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, PRIMARY KEY(entity_id, locale))")
+        self.db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT NOT NULL, provider TEXT NOT NULL, provider_id TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0)")
         self.db.execute("CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
         self.db.execute("CREATE TABLE job_runs (id TEXT PRIMARY KEY, definition_id TEXT, library_id TEXT, kind TEXT, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, thread_name TEXT)")
         store = JobStore.__new__(JobStore)

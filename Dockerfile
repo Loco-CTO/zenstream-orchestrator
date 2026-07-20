@@ -2,7 +2,7 @@ FROM node:26-slim AS dashboard-build
 WORKDIR /frontend
 COPY frontend/package.json ./
 COPY frontend/package-lock.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
+RUN npm ci --include=dev --ignore-scripts --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 

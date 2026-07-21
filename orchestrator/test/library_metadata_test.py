@@ -3,7 +3,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
@@ -52,10 +52,12 @@ class LibraryMetadataTest(unittest.TestCase):
             specials.mkdir(parents=True)
             (season / "Example - S101E289.mkv").touch()
             (specials / "Example - S00E12345.mkv").touch()
-            scanner._scan_series("library-1", root, "job-1", lambda: False)
+            with patch("app.providers.MetadataService", return_value=MagicMock()), patch.object(scanner, "_resolve_series_immediately") as resolve:
+                scanner._scan_series("library-1", root, "job-1", lambda: False, resolve_immediately=True)
 
         rows = db.execute("SELECT e.season_number,e.episode_number,s.season_number FROM library_entities e JOIN library_entities s ON s.id=e.parent_id WHERE e.entity_type='episode' ORDER BY e.episode_number")
         self.assertEqual(rows, [(1, 289, 1), (0, 12345, 0)])
+        self.assertEqual(resolve.call_count, 1)
         db.close()
 
     def test_image_fallback_order_is_requested_no_language_english_any(self):
@@ -142,9 +144,21 @@ class LibraryMetadataTest(unittest.TestCase):
     def test_provider_artwork_uses_canonical_categories(self):
         tmdb = TMDBClient({}, "api_key").normalize("episode", "10:1:2", {"name": "Episode", "images": {"stills": [{"file_path": "/still.jpg"}], "backdrops": [{"file_path": "/backdrop.jpg"}], "logos": [{"file_path": "/logo.png"}]}})
         self.assertEqual({value["type"] for value in tmdb["images"]}, {PRIMARY, "Backdrop", "Logo"})
-        tvdb, extras = _tvdb_images({"artworks": [{"type": "banner", "image": "banner"}, {"type": "episode still", "image": "still"}, {"type": "unknown", "image": "other", "width": 100, "height": 100}]})
+        tvdb, extras = _tvdb_images("episode", {"artworks": [{"type": "banner", "image": "banner"}, {"type": "episode still", "image": "still"}, {"type": "unknown", "image": "other", "width": 100, "height": 100}]})
         self.assertEqual({value["type"] for value in tvdb}, {BANNER, PRIMARY})
         self.assertEqual(extras[0]["sourceType"], "unknown")
+
+        season, season_extras = _tvdb_images("season", {"artworks": [{"type": "episode still", "image": "still"}, {"type": "background", "image": "backdrop"}]})
+        self.assertEqual({value["type"] for value in season}, {"Backdrop"})
+        self.assertEqual(season_extras[0]["sourceType"], "episode still")
+
+        season_with_poster, _ = _tvdb_images("season", {"artworks": [{"type": "poster", "image": "poster"}]})
+        self.assertEqual({value["type"] for value in season_with_poster}, {PRIMARY})
+
+        tmdb_season = TMDBClient({}, "api_key").normalize("season", "10:1", {"name": "Season", "images": {"stills": [{"file_path": "/still.jpg"}], "backdrops": [{"file_path": "/backdrop.jpg"}]}})
+        self.assertEqual({value["type"] for value in tmdb_season["images"]}, {"Backdrop"})
+        tmdb_episode = TMDBClient({}, "api_key").normalize("episode", "10:1:2", {"name": "Episode", "still_path": "/still.jpg"})
+        self.assertEqual({value["type"] for value in tmdb_episode["images"]}, {PRIMARY})
 
     def test_primary_provider_flags_follow_entity_type(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
@@ -195,6 +209,54 @@ class LibraryMetadataTest(unittest.TestCase):
                 {"type": "episode", "season": 0, "episode": 1, "id": "456"},
             ],
         )
+
+    def test_tvdb_series_hierarchy_follows_pagination(self):
+        client = TVDBClient({"apiKey": "test"})
+        responses = [
+            {"data": {"seasons": [{"id": 1, "number": 0, "type": {"type": "official"}}]}, "links": {}},
+            {"data": {"episodes": [{"id": 10, "seasonNumber": 0, "number": 12345}]}, "links": {"next": 1}},
+            {"data": {"episodes": [{"id": 11, "seasonNumber": 101, "number": 289}]}, "links": {"next": None}},
+        ]
+        with patch.object(client, "_request", side_effect=responses) as request:
+            value = client.series_hierarchy("series-1")
+        self.assertEqual([item["id"] for item in value["episodes"]], [10, 11])
+        self.assertEqual(request.call_args_list[1].kwargs["params"], {"page": 0})
+        self.assertEqual(request.call_args_list[2].kwargs["params"], {"page": 1})
+
+    def test_series_aggregation_maps_children_without_name_resolution(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, parent_id TEXT, season_number INTEGER, episode_number INTEGER, relative_path TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT, updated_at TEXT)")
+        db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER)")
+        store = LibraryStore.__new__(LibraryStore)
+        store.db = db
+        scanner = LibraryScanner(store)
+        db.execute("INSERT INTO library_entities(id,entity_type) VALUES('series-1','series')")
+        db.execute("INSERT INTO library_entities(id,entity_type,parent_id,season_number,relative_path) VALUES('season-0','season','series-1',0,'Specials')")
+        db.execute("INSERT INTO library_entities(id,entity_type,parent_id,season_number,episode_number,relative_path) VALUES('episode-1','episode','season-0',0,12345,'S00E12345')")
+        scanner._ids("series-1", [("tvdb", "series", "tvdb-series"), ("tmdb", "series", "tmdb-series")])
+
+        class FakeService:
+            def __init__(self):
+                self.resolve_called = False
+
+            def aggregate_series(self, provider, provider_id, locale):
+                if provider == "tvdb":
+                    return {
+                        "seasons": [{"providerId": "tvdb-season-0", "seasonNumber": 0, "ids": [], "children": [], "images": []}],
+                        "episodes": [{"providerId": "tvdb-episode-12345", "seasonNumber": 0, "episodeNumber": 12345, "ids": [], "children": [], "images": []}],
+                    }
+                return {"seasons": [{"providerId": "tmdb-series:0", "seasonNumber": 0, "ids": [], "children": [], "images": []}], "episodes": [{"providerId": "tmdb-series:0:12345", "seasonNumber": 0, "episodeNumber": 12345, "ids": [], "children": [], "images": []}]}
+
+            def resolve_inventory_entity(self, *args, **kwargs):
+                self.resolve_called = True
+                raise AssertionError("child names must not be resolved")
+
+        service = FakeService()
+        scanner._aggregate_series_children("series-1", service)
+        self.assertFalse(service.resolve_called)
+        self.assertEqual(db.execute("SELECT provider,provider_id,is_primary FROM entity_provider_ids WHERE entity_id='season-0' ORDER BY provider"), [("tmdb", "tmdb-series:0", 0), ("tvdb", "tvdb-season-0", 1)])
+        self.assertEqual(db.execute("SELECT provider,provider_id,is_primary FROM entity_provider_ids WHERE entity_id='episode-1' ORDER BY provider"), [("tmdb", "tmdb-series:0:12345", 0), ("tvdb", "tvdb-episode-12345", 1)])
+        db.close()
 
     def test_provider_child_ids_attach_specials_season_zero(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")

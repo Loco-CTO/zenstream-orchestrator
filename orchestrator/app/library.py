@@ -297,10 +297,11 @@ class LibraryScanner:
             if library["type"] == "movies":
                 count = self._scan_movies(library_id, root, job_id, should_terminate)
             elif library["type"] == "tv_series":
-                count = self._scan_series(library_id, root, job_id, should_terminate)
+                count = self._scan_series(library_id, root, job_id, should_terminate, resolve_immediately=True)
             else:
                 count = self._scan_music(library_id, root, job_id, should_terminate)
-            self._resolve_and_seed(library_id, library["type"], job_id, should_terminate)
+            if library["type"] != "tv_series":
+                self._resolve_and_seed(library_id, library["type"], job_id, should_terminate)
             finished = now()
             self.store.update_job(job_id, state="completed", progress_current=count, progress_total=count, finished_at=finished, message=f"Indexed {count} entries")
             self.store.set_scan_state(library_id, "ready", finished=finished)
@@ -394,14 +395,117 @@ class LibraryScanner:
             self.store.update_job(job_id, progress_current=index, message=f"Resolved {query}")
         self._seed_all_children(library_id, service, job_id, should_terminate)
 
-    def _seed_all_children(self, library_id: str, service, job_id: str, should_terminate: Callable[[], bool]) -> None:
+    def _resolve_series_immediately(self, library_id: str, series_id: str, relative_path: str, service, job_id: str, should_terminate: Callable[[], bool]) -> None:
+        """Resolve one discovered series and all of its children before continuing."""
+        from app.providers import ProviderError
+
+        self._check_termination(should_terminate)
+        query, year = _inventory_query(relative_path or "")
+        explicit = [
+            {"provider": row[0], "id": row[2]}
+            for row in self.db.execute("SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?", (series_id,))
+        ]
+        try:
+            result = service.resolve_inventory_entity("series", query, year, explicit)
+        except ProviderError as error:
+            self.db.execute("UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
+            raise ValueError(f"Metadata resolution failed for series '{query}' at '{relative_path}': {error}") from error
+        self._ids(series_id, [(value["provider"], "series", value["id"]) for value in result["providerIds"]])
+        self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
+        self._aggregate_series_children(series_id, service)
+        self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE parent_id=? AND match_status='unresolved'", (now(), series_id))
+        self._seed_all_children(library_id, service, job_id, should_terminate, parent_id=series_id)
+
+    def _aggregate_series_children(self, series_id: str, service) -> None:
+        """Map all discovered seasons and episodes from resolved parent IDs."""
+        from app.providers import ProviderError
+
+        provider_rows = self.db.execute(
+            "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
+            (series_id,),
+        )
+        primary_provider = "tvdb"
+        child_rows = self.db.execute(
+            "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=? AND entity_type='season' ORDER BY season_number",
+            (series_id,),
+        )
+        seasons = list(child_rows)
+        season_ids = [row[0] for row in seasons]
+        episodes = []
+        if season_ids:
+            episodes = self.db.execute(
+                "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id IN ({}) AND entity_type='episode' ORDER BY season_number,episode_number".format(",".join("?" * len(season_ids))),
+                season_ids,
+            )
+        by_provider = {row[0]: row[1] for row in provider_rows}
+        if not by_provider.get(primary_provider):
+            raise ProviderError(f"Resolved series {series_id} has no TVDB ID")
+        for provider, provider_id in by_provider.items():
+            if provider not in {"tvdb", "tmdb"}:
+                continue
+            try:
+                aggregate = service.aggregate_series(provider, provider_id, "en")
+            except Exception as error:
+                if provider == primary_provider:
+                    raise
+                logger.warning("secondary series aggregation failed series_id=%s provider=%s: %s", series_id, provider, error)
+                continue
+            mapped_seasons = {}
+            for metadata in aggregate.get("seasons", []):
+                child_number = next((value.get("season") for value in metadata.get("children", []) if value.get("type") == "episode"), None)
+                if child_number is None:
+                    # Season metadata itself does not always echo its number;
+                    # provider IDs for TMDB encode it, while TVDB payloads do.
+                    provider_value = str(metadata.get("providerId") or "")
+                    child_number = provider_value.rsplit(":", 1)[-1] if provider == "tmdb" and ":" in provider_value else None
+                if child_number is None:
+                    child_number = metadata.get("seasonNumber")
+                if child_number is None:
+                    continue
+                mapped_seasons[int(child_number)] = metadata
+            for child_id, entity_type, season_number, episode_number in seasons:
+                metadata = mapped_seasons.get(int(season_number))
+                if not metadata:
+                    continue
+                self._ids(child_id, [(provider, "season", str(metadata["providerId"]))])
+                self._persist_normalized_ids(child_id, "season", metadata)
+            mapped_episodes = {}
+            for metadata in aggregate.get("episodes", []):
+                provider_value = str(metadata.get("providerId") or "")
+                if provider == "tmdb" and provider_value.count(":") >= 2:
+                    parts = provider_value.split(":")
+                    key = (int(parts[-2]), int(parts[-1]))
+                else:
+                    episode_child = next((value for value in metadata.get("children", []) if value.get("type") == "episode"), None)
+                    season_value = episode_child.get("season") if episode_child else metadata.get("seasonNumber")
+                    episode_value = episode_child.get("episode") if episode_child else metadata.get("episodeNumber")
+                    if season_value is None or episode_value is None:
+                        continue
+                    key = (int(season_value), int(episode_value))
+                mapped_episodes[key] = metadata
+            for child_id, entity_type, season_number, episode_number in episodes:
+                metadata = mapped_episodes.get((int(season_number), int(episode_number)))
+                if not metadata:
+                    continue
+                self._ids(child_id, [(provider, "episode", str(metadata["providerId"]))])
+                self._persist_normalized_ids(child_id, "episode", metadata)
+
+    def _seed_all_children(self, library_id: str, service, job_id: str, should_terminate: Callable[[], bool], parent_id: str | None = None) -> None:
         """Fetch common metadata and IDs for every season, episode, release, and track."""
-        rows = self.db.execute("SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND parent_id IS NOT NULL ORDER BY length(relative_path),relative_path", (library_id,))
+        if parent_id:
+            rows = self.db.execute(
+                "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season')) ORDER BY length(relative_path),relative_path",
+                (library_id, parent_id, parent_id),
+            )
+        else:
+            rows = self.db.execute("SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND parent_id IS NOT NULL ORDER BY length(relative_path),relative_path", (library_id,))
         self.store.update_job(job_id, progress_total=len(rows), progress_current=0, message="Seeding child metadata")
-        for index, (entity_id, entity_type, relative_path, parent_id, season_number, episode_number) in enumerate(rows, start=1):
+        for index, (entity_id, entity_type, relative_path, row_parent_id, season_number, episode_number) in enumerate(rows, start=1):
             self._check_termination(should_terminate)
             provider_rows = self.db.execute("SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider", (entity_id,))
             if not provider_rows:
+                if entity_type in {"season", "episode"} and parent_id:
+                    raise ValueError(f"No provider ID was aggregated for {entity_type} '{relative_path}'")
                 query, year = _inventory_query(relative_path or "")
                 try:
                     result = service.resolve_inventory_entity(entity_type, query, year, [])
@@ -421,7 +525,7 @@ class LibraryScanner:
                 if not provider_id:
                     continue
                 try:
-                    normalized = service.fetch(provider, entity_type, provider_id, "en", force=True)
+                    normalized = service.fetch(provider, entity_type, provider_id, "en", force=False)
                     fetched = True
                     if provider == required:
                         required_succeeded = True
@@ -554,10 +658,13 @@ class LibraryScanner:
             self.store.update_job(job_id, progress_current=count, message=f"Indexed {entry.name}")
         return count
 
-    def _scan_series(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool]) -> int:
+    def _scan_series(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool], resolve_immediately: bool = False) -> int:
+        from app.providers import MetadataService
+
         series_dirs = [path for path in root.iterdir() if path.is_dir()]
         self.store.update_job(job_id, progress_total=len(series_dirs))
         episode_count = 0
+        service = MetadataService() if resolve_immediately else None
         for series_index, series_dir in enumerate(series_dirs, start=1):
             self._check_termination(should_terminate)
             series = self._entity(library_id, None, "series", relative(str(root), str(series_dir)))
@@ -590,6 +697,8 @@ class LibraryScanner:
                     self._files(episode, root, [media] + [sidecar for sidecar in media.parent.iterdir() if sidecar.is_file() and sidecar.stem.startswith(media.stem) and sidecar != media])
                     episode_count += 1
             self._files(series, root, [path for path in series_dir.iterdir() if path.is_file()])
+            if service:
+                self._resolve_series_immediately(library_id, series, relative(str(root), str(series_dir)), service, job_id, should_terminate)
             self.store.update_job(job_id, progress_current=series_index, message=f"Indexed {series_dir.name} ({episode_count} episodes)")
         return len(series_dirs)
 

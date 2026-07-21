@@ -128,6 +128,18 @@ class TMDBClient(ProviderClient):
         kind = "tv" if entity_type == "series" else "movie"
         return self._request(f"/{kind}/{quote(provider_id)}", params={"language": locale, "append_to_response": "images,external_ids,credits,videos"})
 
+    def series_hierarchy(self, provider_id: str, locale: str) -> dict:
+        """Fetch season details, whose responses include their episode lists."""
+        series = self.details("series", provider_id, locale)
+        seasons = []
+        for summary in series.get("seasons", []) or []:
+            season_number = summary.get("season_number")
+            if season_number is None:
+                continue
+            season_id = f"{provider_id}:{season_number}"
+            seasons.append({"summary": summary, "details": self.details("season", season_id, locale)})
+        return {"series": series, "seasons": seasons}
+
     def normalize(self, entity_type: str, provider_id: str, payload: dict) -> dict:
         title = payload.get("title") or payload.get("name") or payload.get("original_title") or payload.get("original_name")
         external = payload.get("external_ids") or {}
@@ -166,6 +178,8 @@ class TMDBClient(ProviderClient):
             "lastAired": payload.get("last_air_date"),
             "status": payload.get("status"),
             "runtimeMinutes": payload.get("runtime") or ((payload.get("episode_run_time") or [None])[0]),
+            "seasonNumber": payload.get("season_number"),
+            "episodeNumber": payload.get("episode_number"),
             "studios": _names(payload.get("production_companies")),
             "networks": _names(payload.get("networks")),
             "productionCompanies": _names(payload.get("production_companies")),
@@ -179,11 +193,11 @@ class TMDBClient(ProviderClient):
             "providerId": provider_id,
             "ids": ids,
             "children": [{"type": "season", "season": value.get("season_number"), "id": str(value.get("id"))} for value in payload.get("seasons", []) or [] if value.get("id") is not None and value.get("season_number") is not None],
-            "images": self._images(payload),
+            "images": self._images(entity_type, payload),
         }
 
     @staticmethod
-    def _images(payload: dict) -> list[dict]:
+    def _images(entity_type: str, payload: dict) -> list[dict]:
         images = payload.get("images") or {}
         values = []
         for image_type, key in ((PRIMARY, "posters"), (BACKDROP, "backdrops"), (LOGO, "logos")):
@@ -191,13 +205,16 @@ class TMDBClient(ProviderClient):
                 path = image.get("file_path")
                 if path:
                     values.append(_image(image_type, f"https://image.tmdb.org/t/p/w1280{path}", language=image.get("iso_639_1"), provider="tmdb", source_type=key, score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
-        # TMDB calls episode artwork "stills". A screencap belongs to the
-        # entity's primary artwork category; it must not be treated as a
-        # landscape thumbnail or silently substituted for a banner.
-        for image in images.get("stills", []) or []:
-            path = image.get("file_path")
-            if path:
-                values.append(_image(PRIMARY, f"https://image.tmdb.org/t/p/w1280{path}", language=image.get("iso_639_1"), provider="tmdb", source_type="stills", score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
+        # TMDB calls episode artwork "stills". Stills are primary only for
+        # episodes; season artwork must remain poster-only.
+        if entity_type == "episode":
+            still_path = payload.get("still_path")
+            if still_path:
+                values.append(_image(PRIMARY, f"https://image.tmdb.org/t/p/w1280{still_path}", provider="tmdb", source_type="still_path", width=payload.get("width", 0), height=payload.get("height", 0)))
+            for image in images.get("stills", []) or []:
+                path = image.get("file_path")
+                if path:
+                    values.append(_image(PRIMARY, f"https://image.tmdb.org/t/p/w1280{path}", language=image.get("iso_639_1"), provider="tmdb", source_type="stills", score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
         return values
 
 
@@ -269,6 +286,21 @@ class TVDBClient(ProviderClient):
             payload["translation"] = translated.get("data")
         return payload
 
+    def series_hierarchy(self, provider_id: str, season_type: str = "default") -> dict:
+        """Fetch a series and all episode identities from TVDB's hierarchy API."""
+        extended = self._request(f"/series/{quote(provider_id)}/extended")
+        episodes = []
+        page = 0
+        while True:
+            payload = self._request(f"/series/{quote(provider_id)}/episodes/{quote(season_type)}", params={"page": page})
+            data = payload.get("data") or {}
+            episodes.extend(data.get("episodes") or [])
+            links = payload.get("links") or {}
+            if not links.get("next"):
+                break
+            page += 1
+        return {"extended": extended, "episodes": episodes}
+
     def normalize(self, entity_type: str, provider_id: str, payload: dict) -> dict:
         data = payload.get("data", payload)
         translation = payload.get("translation") or {}
@@ -293,7 +325,7 @@ class TVDBClient(ProviderClient):
                 entry["image"] = _image(PRIMARY, image, provider="tvdb", source_type="person")
             if entry["name"]:
                 people.append(entry)
-        images, extra_images = _tvdb_images(data)
+        images, extra_images = _tvdb_images(entity_type, data)
         overview_translations = data.get("overviewTranslations") or []
         return {
             "title": translation.get("name") or data.get("name") or data.get("title"),
@@ -308,6 +340,8 @@ class TVDBClient(ProviderClient):
             "networks": _names(data.get("networks") or data.get("network")),
             "productionCompanies": _names(data.get("productionCompanies") or data.get("companies")),
             "runtimeMinutes": data.get("averageRuntime") or data.get("runtime"),
+            "seasonNumber": data.get("seasonNumber") if data.get("seasonNumber") is not None else data.get("number") if entity_type == "season" else data.get("season"),
+            "episodeNumber": data.get("number") if entity_type == "episode" else data.get("episodeNumber"),
             "originalCountry": _name(data.get("originalCountry") or data.get("originalCountryName")),
             "year": str(data.get("year") or dates or "")[:4] or None,
             "tags": _names(genres),
@@ -400,7 +434,7 @@ def _tvdb_language(locale: str) -> str:
     return {"en": "eng", "en-us": "eng", "ja": "jpn", "ja-jp": "jpn", "zh": "zho", "ko": "kor"}.get(locale.lower(), locale.split("-")[0])
 
 
-def _tvdb_images(data: dict) -> tuple[list[dict], list[dict]]:
+def _tvdb_images(entity_type: str, data: dict) -> tuple[list[dict], list[dict]]:
     values = []
     extras = []
     for artwork in data.get("artworks", []) or data.get("artwork", []) or []:
@@ -415,7 +449,7 @@ def _tvdb_images(data: dict) -> tuple[list[dict], list[dict]]:
             image_type = LOGO
         elif any(value in kind for value in ("banner", "thumbnail", "thumb")):
             image_type = BANNER
-        elif any(value in kind for value in ("still", "episode", "screencap")):
+        elif entity_type == "episode" and any(value in kind for value in ("still", "episode", "screencap")):
             image_type = PRIMARY
         elif any(value in kind for value in ("poster", "series", "movie", "season", "box", "cover")):
             image_type = PRIMARY
@@ -425,7 +459,7 @@ def _tvdb_images(data: dict) -> tuple[list[dict], list[dict]]:
             image_type = BANNER if width and height and float(width) / float(height) > 1.45 else None
         value = _image(image_type, url, language=artwork.get("language") or artwork.get("lang"), provider="tvdb", source_type=str(raw_type), score=artwork.get("score", 0), width=artwork.get("width", 0), height=artwork.get("height", 0)) if image_type else {"sourceType": str(raw_type), "url": url, "provider": "tvdb"}
         (values if image_type else extras).append(value)
-    if data.get("image"):
+    if data.get("image") and entity_type in {"series", "season", "episode", "movie"}:
         values.append(_image(PRIMARY, data["image"], provider="tvdb", source_type="image"))
     return values, extras
 
@@ -511,6 +545,87 @@ class MetadataService:
             self.cache.put(provider, entity_type, provider_id, locale, normalized)
             logger.info("metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d", provider, entity_type, provider_id, locale, len(normalized.get("images", [])))
             return normalized
+
+    def _cache_normalized(self, provider: str, entity_type: str, provider_id: str, locale: str, client, payload: dict) -> dict:
+        normalized = client.normalize(entity_type, provider_id, payload)
+        self.cache.put(provider, entity_type, provider_id, locale, normalized)
+        logger.info("metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d", provider, entity_type, provider_id, locale, len(normalized.get("images", [])))
+        return normalized
+
+    def aggregate_series(self, provider: str, provider_id: str, locale: str = "en", force: bool = False) -> dict:
+        """Cache a resolved series and its season/episode hierarchy in batches."""
+        client = self.client(provider)
+        records = {"series": None, "seasons": [], "episodes": []}
+        if provider == "tvdb":
+            hierarchy = client.series_hierarchy(provider_id)
+            records["series"] = self._cache_normalized(provider, "series", provider_id, locale, client, hierarchy["extended"])
+            seasons = (hierarchy["extended"].get("data") or {}).get("seasons") or []
+            for season in seasons:
+                season_type = season.get("type")
+                if isinstance(season_type, dict):
+                    season_type = season_type.get("type")
+                if season_type and str(season_type).lower() not in {"official", "aired", "default"}:
+                    continue
+                number = season.get("seasonNumber")
+                if number is None:
+                    number = season.get("number")
+                if season.get("id") is None or number is None:
+                    continue
+                season_id = str(season["id"])
+                normalized = self._cache_normalized(provider, "season", season_id, locale, client, {"data": season})
+                if not any(image.get("type") == PRIMARY for image in normalized.get("images", [])):
+                    try:
+                        normalized = self.fetch(provider, "season", season_id, locale, force=True)
+                    except ProviderError:
+                        if not normalized.get("title"):
+                            raise
+                records["seasons"].append(normalized)
+            for episode in hierarchy["episodes"]:
+                episode_id = episode.get("id")
+                season_number = episode.get("seasonNumber")
+                if season_number is None:
+                    season_number = episode.get("season")
+                episode_number = episode.get("number")
+                if episode_number is None:
+                    episode_number = episode.get("episodeNumber")
+                if episode_id is None or season_number is None or episode_number is None:
+                    continue
+                normalized = self._cache_normalized(provider, "episode", str(episode_id), locale, client, {"data": episode})
+                if not normalized.get("title") or not any(image.get("type") == PRIMARY for image in normalized.get("images", [])):
+                    try:
+                        normalized = self.fetch(provider, "episode", str(episode_id), locale, force=True)
+                    except ProviderError:
+                        if not normalized.get("title"):
+                            raise
+                records["episodes"].append(normalized)
+            return records
+        if provider == "tmdb":
+            hierarchy = client.series_hierarchy(provider_id, locale)
+            records["series"] = self._cache_normalized(provider, "series", provider_id, locale, client, hierarchy["series"])
+            for value in hierarchy["seasons"]:
+                details = value["details"]
+                season_number = details.get("season_number")
+                if season_number is None:
+                    season_number = value["summary"].get("season_number")
+                if season_number is None:
+                    continue
+                season_id = f"{provider_id}:{season_number}"
+                records["seasons"].append(self._cache_normalized(provider, "season", season_id, locale, client, details))
+                for episode in details.get("episodes", []) or []:
+                    episode_number = episode.get("episode_number")
+                    if episode_number is None:
+                        continue
+                    episode_id = f"{provider_id}:{season_number}:{episode_number}"
+                    normalized = self._cache_normalized(provider, "episode", episode_id, locale, client, episode)
+                    if not normalized.get("title") or not any(image.get("type") == PRIMARY for image in normalized.get("images", [])):
+                        try:
+                            normalized = self.fetch(provider, "episode", episode_id, locale, force=True)
+                        except ProviderError:
+                            if not normalized.get("title"):
+                                raise
+                    records["episodes"].append(normalized)
+            return records
+        raise ProviderError(f"Series aggregation is unsupported for {provider}")
 
     def fetch_fallback(self, provider: str, entity_type: str, provider_id: str, locale: str, force: bool = False) -> dict | None:
         """Resolve requested locale, then English, then any cached translation."""

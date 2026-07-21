@@ -1,22 +1,28 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
 	IconAlertCircle,
 	IconArrowLeft,
 	IconChevronLeft,
 	IconChevronRight,
-	IconX,
 	IconPhoto,
 	IconRefresh,
+	IconX,
 } from "@tabler/icons-react";
-import {
-	adminFetch,
-	readSession,
-	Session,
-} from "../../components/admin-client";
+import { adminFetch, readSession, Session } from "../../components/admin-client";
+
+type Child = {
+	id: string;
+	type: string;
+	displayName?: string;
+	relativePath?: string;
+	seasonNumber?: number;
+	episodeNumber?: number;
+	trackNumber?: number;
+};
 
 type Item = {
 	id: string;
@@ -31,8 +37,9 @@ type Item = {
 	matchStatus: string;
 	providerIds: { provider: string; id: string; primary?: boolean; role?: string }[];
 	primaryProvider?: string | null;
-	children?: { id: string; type: string; relativePath?: string; seasonNumber?: number; episodeNumber?: number; trackNumber?: number }[];
+	children?: Child[];
 };
+
 type MetadataPerson = { name?: string; role?: string };
 type MetadataTrailer = { name?: string; key?: string };
 type MetadataTrack = { title?: string };
@@ -56,11 +63,17 @@ type Metadata = {
 	people?: MetadataPerson[];
 	tracks?: MetadataTrack[];
 };
+
+type NavigationEntry = { id: string; type: string; label: string };
 const pageSize = 30;
 
 function LibraryViewPage() {
 	const params = useSearchParams();
+	const router = useRouter();
+	const pathname = usePathname();
 	const libraryId = params.get("libraryId") || "";
+	const urlEntityId = params.get("entityId");
+	const urlEntityPath = (params.get("entityPath") || "").split(",").filter(Boolean);
 	const [session, setSession] = useState<Session | null>(null);
 	const [items, setItems] = useState<Item[]>([]);
 	const [libraryName, setLibraryName] = useState("");
@@ -70,15 +83,11 @@ function LibraryViewPage() {
 	const [total, setTotal] = useState(0);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
-	const [selectedId, setSelectedId] = useState<string | null>(null);
+	const [navigation, setNavigation] = useState<NavigationEntry[]>([]);
 	const requestId = useRef(0);
 	const abortRef = useRef<AbortController | null>(null);
 
-	async function load(
-		current = session,
-		parentId = parent,
-		currentPage = page,
-	) {
+	const load = useCallback(async (current: Session | null, parentId: string | null, currentPage: number) => {
 		if (!current || !libraryId) return;
 		const id = ++requestId.current;
 		abortRef.current?.abort();
@@ -91,481 +100,177 @@ function LibraryViewPage() {
 			const [libraryResponse, itemsResponse] = await Promise.all([
 				adminFetch("/api/admin/libraries/" + libraryId, current, init),
 				adminFetch(
-					"/api/admin/libraries/" +
-						libraryId +
-						"/items?parentId=" +
-						encodeURIComponent(parentId || "") +
-						"&locale=" +
-						encodeURIComponent(locale) +
-						"&page=" +
-						currentPage +
-						"&pageSize=" +
-						pageSize,
+					"/api/admin/libraries/" + libraryId + "/items?parentId=" + encodeURIComponent(parentId || "") + "&locale=" + encodeURIComponent(locale) + "&page=" + currentPage + "&pageSize=" + pageSize,
 					current,
 					init,
 				),
 			]);
 			if (id !== requestId.current) return;
-			if (!libraryResponse.ok || !itemsResponse.ok)
-				throw new Error("The library could not be loaded.");
-			const [library, value] = await Promise.all([
-				libraryResponse.json(),
-				itemsResponse.json(),
-			]);
+			if (!libraryResponse.ok || !itemsResponse.ok) throw new Error("The library could not be loaded.");
+			const [library, value] = await Promise.all([libraryResponse.json(), itemsResponse.json()]);
 			if (id !== requestId.current) return;
 			setLibraryName(library.name || "Library");
 			setItems(value.items || []);
 			setTotal(value.total || 0);
 		} catch (caught) {
-			if ((caught as Error).name !== "AbortError" && id === requestId.current)
-				setError(
-					caught instanceof Error
-						? caught.message
-						: "The library could not be loaded.",
-				);
+			if ((caught as Error).name !== "AbortError" && id === requestId.current) setError(caught instanceof Error ? caught.message : "The library could not be loaded.");
 		} finally {
 			if (id === requestId.current) setLoading(false);
 		}
-	}
+	}, [items.length, libraryId, locale]);
 
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
 		setPage(1);
 		setParent(null);
-		setSelectedId(null);
-		if (current) load(current, null, 1);
+		setNavigation([]);
+		if (current) void load(current, null, 1);
 		return () => abortRef.current?.abort();
-	}, [libraryId, locale]);
+	}, [libraryId, locale, load]);
 
 	useEffect(() => {
-		if (session && page !== 1) load(session, parent, page);
-	}, [page]);
+		if (!urlEntityId && !urlEntityPath.length) {
+			setNavigation([]);
+			return;
+		}
+		const ids = urlEntityPath.length ? urlEntityPath : [urlEntityId as string];
+		setNavigation((current) => current.length && current[current.length - 1].id === ids[ids.length - 1]
+			? current
+			: ids.map((id) => ({ id, type: "item", label: "Library item" })));
+	}, [urlEntityId, urlEntityPath.join(",")]);
 
-	const hydrationSignature = items.map((item) => item.id + ":" + item.metadataState).join(",");
 	useEffect(() => {
-		if (!session || !items.some((item) => item.metadataState === "queued" || item.metadataState === "running")) return;
-		const timer = window.setInterval(() => load(session, parent, page), 3000);
+		if (session && page !== 1 && navigation.length === 0) void load(session, parent, page);
+	}, [load, navigation.length, page, parent, session]);
+
+	useEffect(() => {
+		if (!session || navigation.length > 0 || !items.some((item) => item.metadataState === "queued" || item.metadataState === "running")) return;
+		const timer = window.setInterval(() => void load(session, parent, page), 3000);
 		return () => window.clearInterval(timer);
-	}, [session, parent, page, locale, hydrationSignature]);
+	}, [items, load, navigation.length, page, parent, session]);
+
+	useEffect(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape" && navigation.length > 0) setNavigation((current) => current.slice(0, -1));
+		};
+		window.addEventListener("keydown", onKeyDown);
+		return () => window.removeEventListener("keydown", onKeyDown);
+	}, [navigation.length]);
+
+	function openItem(item: Pick<Item, "id" | "type" | "displayName"> | Child) {
+		const nextStack = [...navigation, { id: item.id, type: item.type, label: item.displayName || item.relativePath || item.type }];
+		setNavigation(nextStack);
+		const next = new URLSearchParams(params.toString());
+		next.set("entityId", item.id);
+		next.set("entityPath", nextStack.map((value) => value.id).join(","));
+		router.push(`${pathname}?${next.toString()}`);
+	}
 
 	function back() {
-		setParent(null);
-		setPage(1);
-		load(session, null, 1);
+		const previous = navigation.slice(0, -1);
+		setNavigation(previous);
+		const next = new URLSearchParams(params.toString());
+		if (previous.length) {
+			next.set("entityId", previous[previous.length - 1].id);
+			next.set("entityPath", previous.map((value) => value.id).join(","));
+		} else {
+			next.delete("entityId");
+			next.delete("entityPath");
+		}
+		router.replace(`${pathname}${next.toString() ? `?${next.toString()}` : ""}`);
 	}
-	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
-	if (!libraryId)
-		return (
-			<div className="material-surface rounded-xl p-8 text-sm material-muted">
-				Choose a library from the Libraries tab.
-			</div>
-		);
+	const pageCount = Math.max(1, Math.ceil(total / pageSize));
+	if (!libraryId) return <div className="material-surface rounded-xl p-8 text-sm material-muted">Choose a library from the Libraries tab.</div>;
 	return (
 		<div className="w-full max-w-none">
-			<div className="material-topbar">
-				<div>
-					<Link href="/web/dashboard/libraries" className="material-back">
-						<IconArrowLeft size={15} />
-						Libraries
-					</Link>
-					<div className="mt-4 flex items-center gap-3">
-						<h1 className="text-3xl font-semibold tracking-tight">
-							{libraryName || "Library"}
-						</h1>
-						<button
-							onClick={() => load()}
-							className="material-icon-button"
-							aria-label="Refresh view"
-							title="Refresh view"
-						>
-							<IconRefresh size={17} />
-						</button>
-					</div>
-					<p className="mt-2 text-sm material-muted">
-						{total.toLocaleString()} indexed entries
-					</p>
-				</div>
-				<div className="flex items-center gap-2">
-					<select
-						value={locale}
-						onChange={(event) => {
-							setLocale(event.target.value);
-							setItems([]);
-						}}
-						className="material-input h-10 rounded-lg px-3 text-sm outline-none"
-					>
-						<option value="en">English</option>
-						<option value="ja">日本語</option>
-					</select>
-				</div>
-			</div>
-			{parent && (
-				<button onClick={back} className="material-back mt-5">
-					<IconArrowLeft size={15} />
-					Back to library
-				</button>
-			)}
-			{error && (
-				<div className="material-alert mt-6">
-					<IconAlertCircle size={18} />
-					<span className="flex-1">{error}</span>
-					<button onClick={() => load()} className="material-text-button">
-						Retry
-					</button>
-				</div>
-			)}
-			{loading && !items.length && !error && (
-				<div className="material-surface mt-7 rounded-xl p-8 text-sm material-muted">
-					Loading entries…
-				</div>
-			)}
-			{!loading && !error && (
+			{navigation.length === 0 ? (
 				<>
-					<div className="relative mt-7 w-full">
-					<div
-						className="grid w-full gap-4"
-						style={{ gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))" }}
-					>
-						{items.map((item) => (
-							<ViewCard
-								key={item.id}
-								item={item}
-								session={session}
-								locale={locale}
-								onOpen={() => setSelectedId(item.id)}
-							/>
-						))}
-						{!items.length && (
-							<div className="material-surface col-span-full rounded-xl p-8 text-sm material-muted">
-								No entries on this page.
-							</div>
-						)}
-					</div>
-					</div>
-					{selectedId && session && (
-						<>
-							<button
-								type="button"
-								aria-label="Close details"
-								onClick={() => setSelectedId(null)}
-								className="fixed inset-0 z-40 cursor-default bg-black/65 backdrop-blur-[2px]"
-							/>
-							<DetailPanel
-								entityId={selectedId}
-								session={session}
-								locale={locale}
-								onClose={() => setSelectedId(null)}
-								onSelectChild={setSelectedId}
-							/>
-						</>
-					)}
-					<div className="mt-6 flex items-center justify-between border-t material-divider pt-4">
-						<span className="text-xs material-muted">
-							Page {page} of {pageCount}
-						</span>
-						<div className="flex gap-2">
-							<button
-								disabled={page <= 1}
-								onClick={() => setPage((value) => value - 1)}
-								className="material-icon-button disabled:opacity-30"
-								aria-label="Previous page"
-							>
-								<IconChevronLeft size={16} />
-							</button>
-							<button
-								disabled={page >= pageCount}
-								onClick={() => setPage((value) => value + 1)}
-								className="material-icon-button disabled:opacity-30"
-								aria-label="Next page"
-							>
-								<IconChevronRight size={16} />
-							</button>
+					<div className="material-topbar">
+						<div>
+							<Link href="/web/dashboard/libraries" className="material-back"><IconArrowLeft size={15} />Libraries</Link>
+							<div className="mt-4 flex items-center gap-3"><h1 className="text-3xl font-semibold tracking-tight">{libraryName || "Library"}</h1><button onClick={() => load(session, parent, page)} className="material-icon-button" aria-label="Refresh view" title="Refresh view"><IconRefresh size={17} /></button></div>
+							<p className="mt-2 text-sm material-muted">{total.toLocaleString()} indexed entries</p>
 						</div>
+						<select value={locale} onChange={(event) => { setLocale(event.target.value); setItems([]); }} className="material-input h-10 rounded-lg px-3 text-sm outline-none"><option value="en">English</option><option value="ja">日本語</option></select>
 					</div>
+					{parent && <button onClick={() => { setParent(null); setPage(1); void load(session, null, 1); }} className="material-back mt-5"><IconArrowLeft size={15} />Back to library</button>}
+					{error && <div className="material-alert mt-6"><IconAlertCircle size={18} /><span className="flex-1">{error}</span><button onClick={() => void load(session, parent, page)} className="material-text-button">Retry</button></div>}
+					{loading && !items.length && !error && <div className="material-surface mt-7 rounded-xl p-8 text-sm material-muted">Loading entries…</div>}
+					{!loading && !error && <>
+						<div className="mt-7 grid w-full gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(150px, 220px))" }}>{items.map((item) => <EntityCard key={item.id} item={item} session={session} locale={locale} onOpen={() => openItem(item)} />)}{!items.length && <div className="material-surface col-span-full rounded-xl p-8 text-sm material-muted">No entries on this page.</div>}</div>
+						<div className="mt-6 flex items-center justify-between border-t material-divider pt-4"><span className="text-xs material-muted">Page {page} of {pageCount}</span><div className="flex gap-2"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)} className="material-icon-button disabled:opacity-30" aria-label="Previous page"><IconChevronLeft size={16} /></button><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)} className="material-icon-button disabled:opacity-30" aria-label="Next page"><IconChevronRight size={16} /></button></div></div>
+					</>}
 				</>
-			)}
+			) : session ? <EntityDetailView entry={navigation[navigation.length - 1]} session={session} locale={locale} onBack={back} onOpen={openItem} /> : null}
 		</div>
 	);
 }
 
-function ViewCard({
-	item,
-	session,
-	locale,
-	onOpen,
-}: {
-	item: Item;
-	session: Session | null;
-	locale: string;
-	onOpen: () => void;
-}) {
-	const cardRef = useRef<HTMLButtonElement | null>(null);
-	const [image, setImage] = useState<string | null>(null);
-	const [imageFailed, setImageFailed] = useState(false);
-	const [imagePending, setImagePending] = useState(false);
-	useEffect(() => {
-		const controller = new AbortController();
-		let url = "";
-		let retryTimer: number | undefined;
-		let attempts = 0;
-		setImage(null);
-		setImageFailed(false);
-		setImagePending(false);
-		let inFlight = false;
-		const fetchImage = () => {
-			if (inFlight || !session) return;
-			inFlight = true;
-			adminFetch(
-				"/api/admin/library-items/" +
-					item.id +
-					"/image?imageType=Primary&locale=" +
-					encodeURIComponent(locale),
-				session,
-				{ signal: controller.signal },
-			)
-				.then(async (response) => {
-					if (response.status === 202) {
-						setImagePending(true);
-						inFlight = false;
-						if (++attempts < 20) retryTimer = window.setTimeout(fetchImage, 2000);
-						else setImageFailed(true);
-						return;
-					}
-					if (!response.ok) throw new Error("image");
-					setImagePending(false);
-					url = URL.createObjectURL(await response.blob());
-					setImage(url);
-				})
-				.catch((caught) => {
-					inFlight = false;
-					if ((caught as Error).name !== "AbortError") setImageFailed(true);
-				});
-		};
-		const node = cardRef.current;
-		if (!node || typeof IntersectionObserver === "undefined") fetchImage();
-		else {
-			const observer = new IntersectionObserver(
-				(entries) => {
-					if (entries.some((entry) => entry.isIntersecting)) {
-						fetchImage();
-						observer.disconnect();
-					}
-				},
-				{ rootMargin: "320px" },
-			);
-			observer.observe(node);
-			return () => {
-				observer.disconnect();
-				controller.abort();
-				if (retryTimer) window.clearTimeout(retryTimer);
-				if (url) URL.revokeObjectURL(url);
-			};
-		}
-		return () => {
-			controller.abort();
-			if (retryTimer) window.clearTimeout(retryTimer);
-			if (url) URL.revokeObjectURL(url);
-		};
-	}, [item.id, session, locale]);
-	const pending = item.metadataState === "queued" || item.metadataState === "running" || imagePending;
-	return (
-		<button
-			ref={cardRef}
-			onClick={onOpen}
-		className="material-surface group mx-auto w-full max-w-[240px] overflow-hidden rounded-xl text-left transition hover:bg-[#282828]"
-		>
-			<div className="flex aspect-[2/3] items-center justify-center bg-[#0d0e13]">
-				{image ? (
-					<img
-						src={image}
-						alt=""
-						loading="lazy"
-						className="h-full w-full object-cover transition group-hover:scale-105"
-					/>
-				) : (
-					<IconPhoto
-						className={imageFailed ? "material-muted" : "text-[#b9c3ff]"}
-						size={25}
-					/>
-				)}
-			</div>
-			<div className="p-3">
-				<p className="truncate text-sm font-medium">
-					{item.metadata?.title || item.displayName}
-				</p>
-				<p className="mt-1 truncate text-[11px] material-muted">
-					{pending
-						? "Loading metadata…"
-						: item.metadataState === "error"
-							? item.metadataError || "Metadata unavailable; retry hydration"
-						: item.type + " · " + item.matchStatus}
-				</p>
-			</div>
-		</button>
-	);
+function EntityCard({ item, session, locale, onOpen }: { item: Pick<Item, "id" | "type" | "displayName" | "metadata" | "metadataState" | "metadataError" | "matchStatus"> | Child; session: Session | null; locale: string; onOpen: () => void }) {
+	const label = item.displayName || item.relativePath || item.type;
+	return <button type="button" onClick={onOpen} className="material-surface group w-full max-w-[220px] overflow-hidden rounded-xl text-left transition hover:-translate-y-0.5 hover:bg-[#282828] hover:shadow-xl hover:shadow-black/30"><EntityPoster entityId={item.id} session={session} locale={locale} alt="" /><div className="p-3"><p className="truncate text-sm font-medium">{item.metadata?.title || label}</p><p className="mt-1 truncate text-[11px] material-muted">{item.type === "episode" && item.seasonNumber != null ? `S${item.seasonNumber}E${item.episodeNumber ?? "—"}` : item.type} · {"matchStatus" in item ? item.matchStatus : "ready"}</p></div></button>;
 }
 
-function DetailPanel({
-	entityId,
-	session,
-	locale,
-	onClose,
-	onSelectChild,
-}: {
-	entityId: string;
-	session: Session;
-	locale: string;
-	onClose: () => void;
-	onSelectChild: (id: string) => void;
-}) {
+function EpisodeCard({ item, session, locale, onOpen }: { item: Child; session: Session; locale: string; onOpen: () => void }) {
+	const label = item.displayName || item.relativePath || `Episode ${item.episodeNumber ?? "—"}`;
+	return <button type="button" onClick={onOpen} className="material-surface group flex min-w-0 w-full overflow-hidden rounded-xl text-left transition hover:-translate-y-0.5 hover:bg-[#282828] hover:shadow-xl hover:shadow-black/30"><EntityPoster entityId={item.id} session={session} locale={locale} alt="" landscape /><div className="min-w-0 flex-1 p-4"><p className="truncate text-sm font-semibold">{label}</p><p className="mt-2 text-xs material-muted">S{item.seasonNumber ?? "—"}E{item.episodeNumber ?? "—"}</p><p className="mt-1 text-[11px] material-muted">Open episode details</p></div></button>;
+}
+
+function EntityPoster({ entityId, session, locale, alt, landscape = false }: { entityId: string; session: Session | null; locale: string; alt: string; landscape?: boolean }) {
+	const [url, setUrl] = useState<string | null>(null);
+	const [state, setState] = useState<"loading" | "ready" | "missing">("loading");
+	useEffect(() => {
+		if (!session) return;
+		const controller = new AbortController();
+		let objectUrl = "";
+		let timer: number | undefined;
+		let attempts = 0;
+		const load = () => adminFetch(`/api/admin/library-items/${entityId}/image?imageType=Primary&locale=${encodeURIComponent(locale)}`, session, { signal: controller.signal }).then(async (response) => {
+			if (response.status === 202 && attempts++ < 20) { timer = window.setTimeout(load, 1500); return; }
+			if (!response.ok) { setState("missing"); return; }
+			objectUrl = URL.createObjectURL(await response.blob());
+			setUrl(objectUrl);
+			setState("ready");
+		}).catch((caught) => { if ((caught as Error).name !== "AbortError") setState("missing"); });
+		load();
+		return () => { controller.abort(); if (timer) window.clearTimeout(timer); if (objectUrl) URL.revokeObjectURL(objectUrl); };
+	}, [entityId, locale, session]);
+	return <div className={`flex ${landscape ? "aspect-video w-40 shrink-0" : "aspect-[2/3]"} items-center justify-center overflow-hidden bg-[#0d0e13]`}>{url && state === "ready" ? <img src={url} alt={alt} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-105" /> : <IconPhoto className={state === "missing" ? "material-muted" : "text-[#b9c3ff]"} size={28} />}</div>;
+}
+
+function EntityDetailView({ entry, session, locale, onBack, onOpen }: { entry: NavigationEntry; session: Session; locale: string; onBack: () => void; onOpen: (item: Child) => void }) {
 	const [detail, setDetail] = useState<Item | null>(null);
 	const [error, setError] = useState("");
-	const [timedOut, setTimedOut] = useState(false);
 	const [retry, setRetry] = useState(0);
 	useEffect(() => {
 		const controller = new AbortController();
 		let timer: number | undefined;
-		let polls = 0;
 		let cancelled = false;
-		setDetail(null);
-		setError("");
-		setTimedOut(false);
-		async function load() {
-			try {
-				const response = await adminFetch(
-					"/api/admin/library-items/" + entityId + "?locale=" + encodeURIComponent(locale),
-					session,
-					{ signal: controller.signal },
-				);
-				if (!response.ok) throw new Error("The item could not be loaded.");
-				const value = (await response.json()) as Item;
-				if (cancelled) return;
-				setDetail(value);
-				const state = value.hydration?.state || value.metadataState;
-				if ((state === "queued" || state === "running") && ++polls < 40) {
-					timer = window.setTimeout(load, 1500);
-				} else if (state === "queued" || state === "running") {
-					setTimedOut(true);
-				}
-			} catch (caught) {
-				if (!cancelled && (caught as Error).name !== "AbortError") setError(caught instanceof Error ? caught.message : "The item could not be loaded.");
-			}
-		}
-		load();
-		return () => {
-			cancelled = true;
-			controller.abort();
-			if (timer) window.clearTimeout(timer);
-		};
-	}, [entityId, locale, retry, session]);
-
-	async function requestRetry() {
-		await adminFetch("/api/admin/library-items/hydrate", session, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ entityIds: [entityId], locale }),
-		});
-		setRetry((value) => value + 1);
-	}
-
-	const metadata: Metadata = detail?.metadata || {};
-	const list = (value: unknown) => Array.isArray(value) ? value.filter((entry): entry is string | number => typeof entry === "string" || typeof entry === "number").join(", ") || "—" : typeof value === "string" || typeof value === "number" ? value : "—";
-	const trailers = metadata.trailers || [];
-	const people = metadata.people || [];
-	const tracks = metadata.tracks || [];
-	return (
-		<aside className="material-surface fixed inset-x-3 bottom-3 top-3 z-50 overflow-y-auto rounded-xl p-4 shadow-2xl shadow-black/70 sm:inset-x-auto sm:left-1/2 sm:w-[min(720px,calc(100vw-2rem))] sm:-translate-x-1/2 lg:inset-y-6 lg:left-auto lg:right-6 lg:translate-x-0">
-			<div className="flex items-start justify-between gap-3">
-				<div>
-					<p className="text-xs uppercase tracking-wide material-muted">{detail?.type || "Item"}</p>
-					<h2 className="mt-1 text-lg font-semibold">{metadata.title || detail?.displayName || "Loading…"}</h2>
-				</div>
-				<button onClick={onClose} className="material-icon-button" aria-label="Close details"><IconX size={17} /></button>
-			</div>
-			{detail?.type === "series" && detail.children?.length ? (
-				<nav className="mt-5 rounded-lg border border-white/10 bg-[#0d0e13] p-2 lg:float-left lg:mr-5 lg:w-44" aria-label="Series seasons">
-					<p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[.16em] material-muted">Seasons</p>
-					<div className="max-h-56 space-y-1 overflow-y-auto">
-						{detail.children.map((child) => (
-							<button key={child.id} onClick={() => onSelectChild(child.id)} className="block w-full truncate rounded px-2 py-1.5 text-left text-xs hover:bg-white/10">
-								{child.relativePath || child.id}
-							</button>
-						))}
-					</div>
-				</nav>
-			) : null}
-			{error && <div className="material-alert mt-4 text-xs"><IconAlertCircle size={16} />{error}</div>}
-			{detail && (detail.metadataState === "queued" || detail.metadataState === "running") && !metadata.title && (
-				<div className="mt-4 rounded-lg bg-[#0d0e13] p-3 text-xs material-muted">Hydrating {locale} metadata…</div>
-			)}
-			{(detail?.metadataState === "error" || timedOut) && (
-				<div className="mt-4 rounded-lg border border-red-900/60 bg-red-950/20 p-3 text-xs text-red-200">
-					<p>{detail?.metadataError || (timedOut ? "Hydration is taking longer than expected." : "Metadata hydration failed.")}</p>
-					<button onClick={requestRetry} className="material-text-button mt-2">Retry hydration</button>
-				</div>
-			)}
-			<div className="mt-4 grid grid-cols-2 gap-2">
-				{(["Primary", "Backdrop", "Logo", "Banner"] as const).map((type) => (
-					<PanelImage key={type} entityId={entityId} type={type} locale={locale} session={session} />
-				))}
-			</div>
-			<div className="mt-5 space-y-2 text-xs">
-				<p className="font-medium">{metadata.description || metadata.overview || "No description cached for this language."}</p>
-				<p><span className="material-muted">Provider IDs:</span> {detail?.providerIds.map((value) => `${value.provider}:${value.id}${value.primary ? " (primary)" : " (secondary)"}`).join(" · ") || "—"}</p>
-				<p><span className="material-muted">Status:</span> {metadata.status || "—"} · <span className="material-muted">Date:</span> {metadata.date || metadata.releaseDate || "—"}</p>
-				<p><span className="material-muted">Runtime:</span> {metadata.runtimeMinutes ? `${metadata.runtimeMinutes} min` : "—"} · <span className="material-muted">Air time:</span> {metadata.airTime || "—"}</p>
-				<p><span className="material-muted">Genres:</span> {list(metadata.tags || metadata.genres)}</p>
-				<p><span className="material-muted">Studios:</span> {list(metadata.studios)} · <span className="material-muted">Networks:</span> {list(metadata.networks)}</p>
-				<p><span className="material-muted">Country/language:</span> {metadata.originalCountry || "—"} / {metadata.originalLanguage || "—"}</p>
-				{metadata.albumArtist && <p><span className="material-muted">Album artist:</span> {metadata.albumArtist}</p>}
-				{trailers.length > 0 && <p><span className="material-muted">Trailers:</span> {trailers.map((value) => value.name || value.key).filter(Boolean).join(", ")}</p>}
-				{people.length > 0 && <p><span className="material-muted">Credits:</span> {people.map((value) => value.name).filter(Boolean).join(", ")}</p>}
-				{tracks.length > 0 && <p><span className="material-muted">Tracks:</span> {tracks.map((value) => value.title).filter(Boolean).join(", ")}</p>}
-			</div>
-			{detail?.children?.length ? (
-				<div className="mt-5 border-t material-divider pt-4">
-					<p className="mb-2 text-xs font-medium">Children</p>
-					<div className="space-y-1">{detail.children.map((child) => <button key={child.id} onClick={() => onSelectChild(child.id)} className="block w-full truncate rounded px-2 py-1 text-left text-xs hover:bg-white/10">{child.type} · {child.relativePath || child.id}</button>)}</div>
-				</div>
-			) : null}
-		</aside>
-	);
+		const load = () => adminFetch(`/api/admin/library-items/${entry.id}?locale=${encodeURIComponent(locale)}`, session, { signal: controller.signal }).then(async (response) => {
+			if (!response.ok) throw new Error("The item could not be loaded.");
+			const value = await response.json() as Item;
+			if (cancelled) return;
+			setDetail(value);
+			const state = value.hydration?.state || value.metadataState;
+			if ((state === "queued" || state === "running") && !cancelled) timer = window.setTimeout(load, 1500);
+		}).catch((caught) => { if (!cancelled && (caught as Error).name !== "AbortError") setError(caught instanceof Error ? caught.message : "The item could not be loaded."); });
+		setDetail(null); setError(""); load();
+		return () => { cancelled = true; controller.abort(); if (timer) window.clearTimeout(timer); };
+	}, [entry.id, locale, retry, session]);
+	const children = detail?.children || [];
+	const childLabel = detail?.type === "series" ? "Seasons" : detail?.type === "season" ? "Episodes" : detail?.type === "artist" ? "Releases" : detail?.type === "release" ? "Tracks" : detail?.type === "collection" ? "Items" : "";
+	const episodeView = detail?.type === "season";
+	return <div className="min-h-[calc(100vh-7rem)]"><button onClick={onBack} className="material-back"><IconArrowLeft size={17} />Back</button><div className="mt-6 flex items-start justify-between gap-4"><div><p className="text-xs uppercase tracking-[.18em] material-muted">{detail?.type || entry.type}</p><h1 className="mt-2 text-3xl font-semibold tracking-tight">{detail?.metadata?.title || entry.label}</h1></div><button onClick={onBack} className="material-icon-button" aria-label="Close detail"><IconX size={17} /></button></div>{error && <div className="material-alert mt-5"><IconAlertCircle size={18} />{error}<button onClick={() => setRetry((value) => value + 1)} className="material-text-button ml-auto">Retry</button></div>}{detail && <div className="mt-7 grid items-start gap-8 lg:grid-cols-[240px_minmax(0,1fr)]"><div className="space-y-5"><div className="overflow-hidden rounded-2xl border border-white/10 bg-[#0d0e13]"><EntityPoster entityId={entry.id} session={session} locale={locale} alt={detail.metadata?.title || entry.label} /></div><MetadataSummary detail={detail} /></div><div className="min-w-0">{childLabel && <div className="mb-5"><p className="text-xs uppercase tracking-[.18em] material-muted">{childLabel}</p><p className="mt-1 text-sm material-muted">Choose an item to continue</p></div>}{children.length ? <div className={episodeView ? "grid gap-3 sm:grid-cols-2" : "grid justify-start gap-4"} style={episodeView ? undefined : { gridTemplateColumns: "repeat(auto-fill, minmax(180px, 220px))" }}>{children.map((child) => episodeView ? <EpisodeCard key={child.id} item={child} session={session} locale={locale} onOpen={() => onOpen(child)} /> : <EntityCard key={child.id} item={child} session={session} locale={locale} onOpen={() => onOpen(child)} />)}</div> : <div className="material-surface rounded-xl p-6 text-sm material-muted">No child entries available.</div>}</div></div>}</div>;
 }
 
-function PanelImage({ entityId, type, locale, session }: { entityId: string; type: "Primary" | "Backdrop" | "Logo" | "Banner"; locale: string; session: Session }) {
-	const [url, setUrl] = useState<string | null>(null);
-	useEffect(() => {
-		const controller = new AbortController();
-		setUrl(null);
-		let objectUrl = "";
-		let timer: number | undefined;
-		let attempts = 0;
-		const load = () => adminFetch(`/api/admin/library-items/${entityId}/image?imageType=${type}&locale=${encodeURIComponent(locale)}`, session, { signal: controller.signal })
-			.then(async (response) => {
-				if (response.status === 202 && ++attempts < 20) { timer = window.setTimeout(load, 2000); return; }
-				if (!response.ok) return;
-				objectUrl = URL.createObjectURL(await response.blob());
-				setUrl(objectUrl);
-			})
-			.catch(() => undefined);
-		load();
-		return () => { controller.abort(); if (timer) window.clearTimeout(timer); if (objectUrl) URL.revokeObjectURL(objectUrl); };
-	}, [entityId, locale, session, type]);
-	return <div className="flex aspect-video items-center justify-center overflow-hidden rounded bg-[#0d0e13] text-[10px] material-muted">{url ? <img src={url} alt={type} className="h-full w-full object-cover" /> : type}</div>;
+function MetadataSummary({ detail }: { detail: Item }) {
+	const metadata = detail.metadata || {};
+	const list = (value: unknown) => Array.isArray(value) ? value.filter((entry): entry is string | number => typeof entry === "string" || typeof entry === "number").join(", ") || "—" : typeof value === "string" || typeof value === "number" ? value : "—";
+	return <div className="space-y-2 text-xs"><p className="leading-5">{metadata.description || metadata.overview || "No description cached for this language."}</p><p><span className="material-muted">Status:</span> {metadata.status || "—"} · <span className="material-muted">Date:</span> {metadata.date || metadata.releaseDate || "—"}</p><p><span className="material-muted">Runtime:</span> {metadata.runtimeMinutes ? `${metadata.runtimeMinutes} min` : "—"}</p><p><span className="material-muted">Genres:</span> {list(metadata.tags || metadata.genres)}</p><p><span className="material-muted">Studios:</span> {list(metadata.studios)}</p><p><span className="material-muted">Provider IDs:</span> {detail.providerIds.map((value) => `${value.provider}:${value.id}${value.primary ? " (primary)" : ""}`).join(" · ") || "—"}</p></div>;
 }
 
 export default function LibraryPreviewPage() {
-	return (
-		<Suspense
-			fallback={
-				<div className="material-surface rounded-xl p-8 text-sm material-muted">
-					Loading view…
-				</div>
-			}
-		>
-			<LibraryViewPage />
-		</Suspense>
-	);
+	return <Suspense fallback={<div className="material-surface rounded-xl p-8 text-sm material-muted">Loading view…</div>}><LibraryViewPage /></Suspense>;
 }

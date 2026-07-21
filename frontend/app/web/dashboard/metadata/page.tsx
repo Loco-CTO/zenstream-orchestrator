@@ -76,11 +76,11 @@ export default function MetadataPage() {
 					<ProviderStatus state={providers.tmdb} />
 					<div className="mt-5 flex gap-3"><button className="console-button rounded-xl px-4 py-3 text-sm font-semibold">Save and validate</button>{providers.tmdb?.configured && <button type="button" onClick={() => clear("tmdb")} className="rounded-xl border console-divider px-4 py-3 text-sm console-muted">Clear</button>}</div>
 				</form>
-				<form onSubmit={(event) => save(event, "tvdb")} className="console-card rounded-2xl p-6">
+				<form onSubmit={(event) => save(event, "tvdb")} autoComplete="off" className="console-card rounded-2xl p-6">
 					<div className="flex items-start justify-between"><div><p className="console-kicker">Series and collection metadata</p><h2 className="mt-2 text-xl font-bold">TheTVDB</h2></div><IconKey className="text-[#8fe4cf]" size={22} /></div>
 					<p className="mt-3 text-sm console-muted">A subscriber PIN is optional for licensed keys and required for some user-supported keys.</p>
-					<input value={tvdb} onChange={(event) => setTvdb(event.target.value)} required={!providers.tvdb?.configured} placeholder="v4 API key" type="text" className="console-input mt-5 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
-					<input value={pin} onChange={(event) => setPin(event.target.value)} placeholder="Subscriber PIN (optional)" type="password" className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
+					<input name="tvdb-api-key" autoComplete="off" value={tvdb} onChange={(event) => setTvdb(event.target.value)} required={!providers.tvdb?.configured} placeholder="v4 API key" type="text" className="console-input mt-5 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
+					<input name="tvdb-subscriber-pin" autoComplete="one-time-code" value={pin} onChange={(event) => setPin(event.target.value)} placeholder="Subscriber PIN (optional)" type="password" className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
 					<ProviderStatus state={providers.tvdb} />
 					<div className="mt-5 flex gap-3"><button className="console-button rounded-xl px-4 py-3 text-sm font-semibold">Save and validate</button>{providers.tvdb?.configured && <button type="button" onClick={() => clear("tvdb")} className="rounded-xl border console-divider px-4 py-3 text-sm console-muted">Clear</button>}</div>
 				</form>

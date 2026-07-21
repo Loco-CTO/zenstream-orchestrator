@@ -31,8 +31,8 @@ SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
 LYRIC_EXTENSIONS = {".lrc", ".elrc", ".txt"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
 ID_RE = re.compile(r"\[(?P<provider>tmdbid|tvdbid|imdbid)-(?P<id>[^\]]+)\]", re.IGNORECASE)
-EPISODE_RE = re.compile(r"(?i)(?:^|[^A-Z0-9])S(?P<season>\d{1,3})E(?P<episode>\d{1,4})(?:[-.]?E(?P<end>\d{1,4}))?")
-SEASON_RE = re.compile(r"(?i)^(?:season\s*|s)(\d{1,3})$")
+EPISODE_RE = re.compile(r"(?i)(?:^|[^A-Z0-9])S(?P<season>\d+)E(?P<episode>\d+)(?:[-.]?E(?P<end>\d+))?")
+SEASON_RE = re.compile(r"(?i)^(?:season\s*|s)(\d+)$")
 ACTIVE_JOB_STATES = ("queued", "running", "terminating")
 logger = get_logger("library")
 
@@ -567,8 +567,8 @@ class LibraryScanner:
                 season_dirs.append(series_dir)
             for season_dir in season_dirs:
                 match = SEASON_RE.match(season_dir.name)
-                season_number = int(match.group(1)) if match else (0 if season_dir.name.lower() == "specials" else 1)
-                season = self._entity(library_id, series, "season", relative(str(root), str(season_dir)), season_number=season_number)
+                season_folder_number = int(match.group(1)) if match else (0 if season_dir.name.lower() == "specials" else 1)
+                season = self._entity(library_id, series, "season", relative(str(root), str(season_dir)), season_number=season_folder_number)
                 episode_paths = season_dir.iterdir() if season_dir == series_dir else season_dir.rglob("*")
                 for media in episode_paths:
                     self._check_termination(should_terminate)
@@ -578,10 +578,14 @@ class LibraryScanner:
                     guessed = guess_media(media) if not episode_match else {}
                     if not episode_match and not (guessed.get("season") and guessed.get("episode")):
                         continue
-                    season_number = int(episode_match.group("season")) if episode_match else int(guessed["season"])
+                    filename_season_number = int(episode_match.group("season")) if episode_match else int(guessed["season"])
                     episode_number = int(episode_match.group("episode")) if episode_match else int(guessed["episode"] if not isinstance(guessed["episode"], list) else guessed["episode"][0])
                     end_number = int(episode_match.group("end")) if episode_match and episode_match.group("end") else None
-                    episode = self._entity(library_id, season, "episode", relative(str(root), str(media)), season_number=season_number, episode_number=episode_number, episode_end_number=end_number)
+                    # The directory establishes the season hierarchy. Keep the
+                    # filename season only for loose episodes stored directly
+                    # under the series directory.
+                    episode_season_number = filename_season_number if season_dir == series_dir else season_folder_number
+                    episode = self._entity(library_id, season, "episode", relative(str(root), str(media)), season_number=episode_season_number, episode_number=episode_number, episode_end_number=end_number)
                     self._ids(episode, provider_ids(media.name))
                     self._files(episode, root, [media] + [sidecar for sidecar in media.parent.iterdir() if sidecar.is_file() and sidecar.stem.startswith(media.stem) and sidecar != media])
                     episode_count += 1

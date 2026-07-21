@@ -226,6 +226,10 @@ class TVDBClient(ProviderClient):
             response = httpx.post(f"{self.base_url}/login", json=body, timeout=self.timeout)
             response.raise_for_status()
             token = response.json()["data"]["token"]
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {401, 403}:
+                raise ProviderError("TheTVDB rejected the API key or subscriber PIN. Use a v4 project API key; user-supported keys also require the matching subscriber PIN.") from error
+            raise ProviderError(str(error)) from error
         except (httpx.HTTPError, KeyError, ValueError) as error:
             raise ProviderError(str(error)) from error
         with self._lock:

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
-from app.library import LibraryRuntime, LibraryScanner, LibraryStore, guess_media, provider_ids
+from app.library import EPISODE_RE, LibraryRuntime, LibraryScanner, LibraryStore, guess_media, provider_ids
 from app.providers import BANNER, PRIMARY, MetadataService, ProviderError, TMDBClient, TVDBClient, _select_match, choose_image, _tvdb_children, _tvdb_images
 
 
@@ -25,6 +25,38 @@ class LibraryMetadataTest(unittest.TestCase):
             parsed = guess_media(path)
             self.assertEqual(int(parsed["season"]), 2)
             self.assertEqual(int(parsed["episode"]), 3)
+
+    def test_episode_names_support_arbitrarily_long_season_and_episode_numbers(self):
+        match = EPISODE_RE.search("Example - S101E289.mkv")
+        self.assertIsNotNone(match)
+        self.assertEqual((match.group("season"), match.group("episode")), ("101", "289"))
+        match = EPISODE_RE.search("Example - S12345E67890-E67891.mkv")
+        self.assertIsNotNone(match)
+        self.assertEqual((match.group("season"), match.group("episode"), match.group("end")), ("12345", "67890", "67891"))
+
+    def test_series_scan_maps_episode_files_to_parent_season_directories(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, parent_id TEXT, entity_type TEXT NOT NULL, relative_path TEXT, season_number INTEGER, episode_number INTEGER, episode_end_number INTEGER, disc_number INTEGER, track_number INTEGER, created_at TEXT, updated_at TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT)")
+        db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER)")
+        db.execute("CREATE TABLE media_files (id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT, language TEXT, flags TEXT, size INTEGER, modified_ns INTEGER)")
+        db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, progress_current INTEGER, progress_total INTEGER, message TEXT)")
+        db.execute("INSERT INTO library_jobs(id) VALUES('job-1')")
+        store = LibraryStore.__new__(LibraryStore)
+        store.db = db
+        scanner = LibraryScanner(store)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            season = root / "Example" / "Season 1"
+            specials = root / "Example" / "Specials"
+            season.mkdir(parents=True)
+            specials.mkdir(parents=True)
+            (season / "Example - S101E289.mkv").touch()
+            (specials / "Example - S00E12345.mkv").touch()
+            scanner._scan_series("library-1", root, "job-1", lambda: False)
+
+        rows = db.execute("SELECT e.season_number,e.episode_number,s.season_number FROM library_entities e JOIN library_entities s ON s.id=e.parent_id WHERE e.entity_type='episode' ORDER BY e.episode_number")
+        self.assertEqual(rows, [(1, 289, 1), (0, 12345, 0)])
+        db.close()
 
     def test_image_fallback_order_is_requested_no_language_english_any(self):
         images = [

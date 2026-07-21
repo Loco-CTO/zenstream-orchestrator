@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
 	IconAlertCircle,
@@ -65,6 +65,7 @@ type Metadata = {
 };
 
 type NavigationEntry = { id: string; type: string; label: string };
+type Navigable = { id: string; type: string; displayName?: string; relativePath?: string };
 const pageSize = 30;
 
 function LibraryViewPage() {
@@ -73,7 +74,8 @@ function LibraryViewPage() {
 	const pathname = usePathname();
 	const libraryId = params.get("libraryId") || "";
 	const urlEntityId = params.get("entityId");
-	const urlEntityPath = (params.get("entityPath") || "").split(",").filter(Boolean);
+	const urlEntityPathValue = params.get("entityPath") || "";
+	const urlEntityPath = urlEntityPathValue.split(",").filter(Boolean);
 	const [session, setSession] = useState<Session | null>(null);
 	const [items, setItems] = useState<Item[]>([]);
 	const [libraryName, setLibraryName] = useState("");
@@ -138,7 +140,7 @@ function LibraryViewPage() {
 		setNavigation((current) => current.length && current[current.length - 1].id === ids[ids.length - 1]
 			? current
 			: ids.map((id) => ({ id, type: "item", label: "Library item" })));
-	}, [urlEntityId, urlEntityPath.join(",")]);
+	}, [urlEntityId, urlEntityPathValue]);
 
 	useEffect(() => {
 		if (session && page !== 1 && navigation.length === 0) void load(session, parent, page);
@@ -158,7 +160,7 @@ function LibraryViewPage() {
 		return () => window.removeEventListener("keydown", onKeyDown);
 	}, [navigation.length]);
 
-	function openItem(item: Pick<Item, "id" | "type" | "displayName"> & Partial<Pick<Child, "relativePath">>) {
+	function openItem(item: Navigable) {
 		const nextStack = [...navigation, { id: item.id, type: item.type, label: item.displayName || item.relativePath || item.type }];
 		setNavigation(nextStack);
 		const next = new URLSearchParams(params.toString());
@@ -240,7 +242,7 @@ function EntityPoster({ entityId, session, locale, alt, landscape = false }: { e
 	return <div className={`flex ${landscape ? "aspect-video w-40 shrink-0" : "aspect-[2/3]"} items-center justify-center overflow-hidden bg-[#0d0e13]`}>{url && state === "ready" ? <img src={url} alt={alt} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-105" /> : <IconPhoto className={state === "missing" ? "material-muted" : "text-[#b9c3ff]"} size={28} />}</div>;
 }
 
-function EntityDetailView({ entry, session, locale, onBack, onOpen }: { entry: NavigationEntry; session: Session; locale: string; onBack: () => void; onOpen: (item: Child) => void }) {
+function EntityDetailView({ entry, session, locale, onBack, onOpen }: { entry: NavigationEntry; session: Session; locale: string; onBack: () => void; onOpen: (item: Navigable) => void }) {
 	const [detail, setDetail] = useState<Item | null>(null);
 	const [error, setError] = useState("");
 	const [retry, setRetry] = useState(0);

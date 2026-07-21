@@ -275,6 +275,8 @@ class LibraryScanner:
     def __init__(self, store: LibraryStore | None = None):
         self.store = store or LibraryStore()
         self.db = self.store.db
+        self._scan_seen_ids: set[str] = set()
+        self._scan_created_ids: list[str] = []
 
     def scan(self, library_id: str, job_id: str, should_terminate: Callable[[], bool] | None = None) -> None:
         should_terminate = should_terminate or (lambda: False)
@@ -290,9 +292,9 @@ class LibraryScanner:
         started = now()
         self.store.set_scan_state(library_id, "scanning", started=started, error=None)
         self.store.update_job(job_id, state="running", started_at=started, message="Discovering media")
+        self._scan_seen_ids = set()
+        self._scan_created_ids = []
         try:
-            with self.db.transaction() as cursor:
-                cursor.execute("DELETE FROM library_entities WHERE library_id=?", (library_id,))
             self._check_termination(should_terminate)
             if library["type"] == "movies":
                 count = self._scan_movies(library_id, root, job_id, should_terminate)
@@ -302,6 +304,7 @@ class LibraryScanner:
                 count = self._scan_music(library_id, root, job_id, should_terminate)
             if library["type"] != "tv_series":
                 self._resolve_and_seed(library_id, library["type"], job_id, should_terminate)
+            self._prune_missing_entities(library_id)
             finished = now()
             self.store.update_job(job_id, state="completed", progress_current=count, progress_total=count, finished_at=finished, message=f"Indexed {count} entries")
             self.store.set_scan_state(library_id, "ready", finished=finished)
@@ -310,6 +313,7 @@ class LibraryScanner:
             self.store.update_job(job_id, state="terminated", message="Terminated by administrator", error=None, finished_at=finished)
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except Exception as error:
+            self._remove_created_entities()
             details = {"libraryId": library_id, "jobId": job_id, "exception": type(error).__name__, "traceback": traceback.format_exc()}
             summary = f"Library scan failed for '{library.get('name', library_id)}': {type(error).__name__}: {error}"
             logger.exception("library scan failed library_id=%s job_id=%s", library_id, job_id)
@@ -323,15 +327,50 @@ class LibraryScanner:
             raise JobTerminated()
 
     def _entity(self, library_id: str, parent_id: str | None, entity_type: str, path: str | None, **numbers) -> str:
-        entity_id = new_id()
         timestamp = now()
         fields = {"season_number": None, "episode_number": None, "episode_end_number": None, "disc_number": None, "track_number": None}
         fields.update(numbers)
-        self.db.execute(
-            "INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,disc_number,track_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (entity_id, library_id, parent_id, entity_type, path, fields["season_number"], fields["episode_number"], fields["episode_end_number"], fields["disc_number"], fields["track_number"], timestamp, timestamp),
+        existing = self.db.execute(
+            "SELECT id FROM library_entities WHERE library_id=? AND entity_type=? AND relative_path IS ?",
+            (library_id, entity_type, path),
         )
+        if existing:
+            entity_id = existing[0][0]
+            self.db.execute(
+                "UPDATE library_entities SET parent_id=?,season_number=?,episode_number=?,episode_end_number=?,disc_number=?,track_number=?,updated_at=? WHERE id=?",
+                (parent_id, fields["season_number"], fields["episode_number"], fields["episode_end_number"], fields["disc_number"], fields["track_number"], timestamp, entity_id),
+            )
+        else:
+            entity_id = new_id()
+            self.db.execute(
+                "INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,disc_number,track_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (entity_id, library_id, parent_id, entity_type, path, fields["season_number"], fields["episode_number"], fields["episode_end_number"], fields["disc_number"], fields["track_number"], timestamp, timestamp),
+            )
+            self._scan_created_ids.append(entity_id)
+        self._scan_seen_ids.add(entity_id)
         return entity_id
+
+    def _prune_missing_entities(self, library_id: str) -> None:
+        rows = self.db.execute("SELECT id FROM library_entities WHERE library_id=?", (library_id,))
+        missing = [row[0] for row in rows if row[0] not in self._scan_seen_ids]
+        if not missing:
+            return
+        with self.db.transaction() as cursor:
+            cursor.executemany("DELETE FROM library_entities WHERE id=?", [(entity_id,) for entity_id in missing])
+
+    def _remove_created_entities(self) -> None:
+        if not self._scan_created_ids:
+            return
+        with self.db.transaction() as cursor:
+            for entity_id in reversed(self._scan_created_ids):
+                cursor.execute("DELETE FROM library_entities WHERE id=?", (entity_id,))
+        self._scan_created_ids = []
+
+    def _needs_metadata(self, entity_id: str) -> bool:
+        row = self.db.execute("SELECT match_status FROM library_entities WHERE id=?", (entity_id,))
+        if not row or row[0][0] in {"unresolved", "failed"}:
+            return True
+        return not bool(self.db.execute("SELECT 1 FROM entity_provider_ids WHERE entity_id=? LIMIT 1", (entity_id,)))
 
     def _ids(self, entity_id: str, values: Iterable[tuple[str, str, str]]) -> None:
         from app.providers import PRIMARY_PROVIDER_BY_ENTITY
@@ -366,6 +405,8 @@ class LibraryScanner:
             "SELECT id,entity_type,relative_path,season_number,episode_number FROM library_entities WHERE library_id=?{} AND entity_type IN ({}) ORDER BY relative_path".format(parent_filter, ",".join("?" * len(entity_types))),
             [library_id, *sorted(entity_types)],
         )
+        created_ids = set(self._scan_created_ids)
+        rows = [row for row in rows if row[0] in self._scan_seen_ids and (row[0] in created_ids or self._needs_metadata(row[0]))]
         self.store.update_job(job_id, progress_total=len(rows), progress_current=0, message="Resolving provider metadata")
         service = MetadataService()
         for index, (entity_id, entity_type, relative_path, _season, _episode) in enumerate(rows, start=1):
@@ -400,18 +441,19 @@ class LibraryScanner:
         from app.providers import ProviderError
 
         self._check_termination(should_terminate)
-        query, year = _inventory_query(relative_path or "")
-        explicit = [
-            {"provider": row[0], "id": row[2]}
-            for row in self.db.execute("SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?", (series_id,))
-        ]
-        try:
-            result = service.resolve_inventory_entity("series", query, year, explicit)
-        except ProviderError as error:
-            self.db.execute("UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
-            raise ValueError(f"Metadata resolution failed for series '{query}' at '{relative_path}': {error}") from error
-        self._ids(series_id, [(value["provider"], "series", value["id"]) for value in result["providerIds"]])
-        self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
+        if self._needs_metadata(series_id):
+            query, year = _inventory_query(relative_path or "")
+            explicit = [
+                {"provider": row[0], "id": row[2]}
+                for row in self.db.execute("SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?", (series_id,))
+            ]
+            try:
+                result = service.resolve_inventory_entity("series", query, year, explicit)
+            except ProviderError as error:
+                self.db.execute("UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
+                raise ValueError(f"Metadata resolution failed for series '{query}' at '{relative_path}': {error}") from error
+            self._ids(series_id, [(value["provider"], "series", value["id"]) for value in result["providerIds"]])
+            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
         self._aggregate_series_children(series_id, service)
         self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE parent_id=? AND match_status='unresolved'", (now(), series_id))
         self._seed_all_children(library_id, service, job_id, should_terminate, parent_id=series_id)
@@ -499,6 +541,8 @@ class LibraryScanner:
             )
         else:
             rows = self.db.execute("SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND parent_id IS NOT NULL ORDER BY length(relative_path),relative_path", (library_id,))
+        created_ids = set(self._scan_created_ids)
+        rows = [row for row in rows if row[0] in self._scan_seen_ids and (row[0] in created_ids or self._needs_metadata(row[0]))]
         self.store.update_job(job_id, progress_total=len(rows), progress_current=0, message="Seeding child metadata")
         for index, (entity_id, entity_type, relative_path, row_parent_id, season_number, episode_number) in enumerate(rows, start=1):
             self._check_termination(should_terminate)
@@ -625,6 +669,7 @@ class LibraryScanner:
                 self._ids(episode_id, [("tvdb", "episode", str(match["id"]))])
 
     def _files(self, entity_id: str, root: Path, files: Iterable[Path]) -> None:
+        self.db.execute("DELETE FROM media_files WHERE entity_id=?", (entity_id,))
         for path in files:
             role = media_role(path)
             if not role:
@@ -697,7 +742,12 @@ class LibraryScanner:
                     self._files(episode, root, [media] + [sidecar for sidecar in media.parent.iterdir() if sidecar.is_file() and sidecar.stem.startswith(media.stem) and sidecar != media])
                     episode_count += 1
             self._files(series, root, [path for path in series_dir.iterdir() if path.is_file()])
-            if service:
+            children = self.db.execute(
+                "SELECT id FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season'))",
+                (library_id, series),
+            )
+            needs_resolution = self._needs_metadata(series) or any(self._needs_metadata(row[0]) for row in children if row[0] in self._scan_seen_ids)
+            if service and needs_resolution:
                 self._resolve_series_immediately(library_id, series, relative(str(root), str(series_dir)), service, job_id, should_terminate)
             self.store.update_job(job_id, progress_current=series_index, message=f"Indexed {series_dir.name} ({episode_count} episodes)")
         return len(series_dirs)

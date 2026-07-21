@@ -66,6 +66,7 @@ type Metadata = {
 
 type NavigationEntry = { id: string; type: string; label: string };
 type Navigable = { id: string; type: string; displayName?: string; relativePath?: string };
+type CardItem = Navigable & { metadata?: Metadata | null; matchStatus?: string; seasonNumber?: number; episodeNumber?: number };
 const pageSize = 30;
 
 function LibraryViewPage() {
@@ -210,9 +211,9 @@ function LibraryViewPage() {
 	);
 }
 
-function EntityCard({ item, session, locale, onOpen }: { item: Pick<Item, "id" | "type" | "displayName" | "metadata" | "metadataState" | "metadataError" | "matchStatus"> | Child; session: Session | null; locale: string; onOpen: () => void }) {
+function EntityCard({ item, session, locale, onOpen }: { item: CardItem; session: Session | null; locale: string; onOpen: () => void }) {
 	const label = item.displayName || item.relativePath || item.type;
-	return <button type="button" onClick={onOpen} className="material-surface group w-full max-w-[220px] overflow-hidden rounded-xl text-left transition hover:-translate-y-0.5 hover:bg-[#282828] hover:shadow-xl hover:shadow-black/30"><EntityPoster entityId={item.id} session={session} locale={locale} alt="" /><div className="p-3"><p className="truncate text-sm font-medium">{item.metadata?.title || label}</p><p className="mt-1 truncate text-[11px] material-muted">{item.type === "episode" && item.seasonNumber != null ? `S${item.seasonNumber}E${item.episodeNumber ?? "—"}` : item.type} · {"matchStatus" in item ? item.matchStatus : "ready"}</p></div></button>;
+	return <button type="button" onClick={onOpen} className="material-surface group w-full max-w-[220px] overflow-hidden rounded-xl text-left transition hover:-translate-y-0.5 hover:bg-[#282828] hover:shadow-xl hover:shadow-black/30"><EntityPoster entityId={item.id} session={session} locale={locale} alt="" /><div className="p-3"><p className="truncate text-sm font-medium">{item.metadata?.title || label}</p><p className="mt-1 truncate text-[11px] material-muted">{item.type === "episode" && item.seasonNumber != null ? `S${item.seasonNumber}E${item.episodeNumber ?? "—"}` : item.type} · {item.matchStatus || "ready"}</p></div></button>;
 }
 
 function EpisodeCard({ item, session, locale, onOpen }: { item: Child; session: Session; locale: string; onOpen: () => void }) {

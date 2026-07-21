@@ -11,3 +11,4 @@ cryptography>=46.0.0
 mutagen>=1.48.1
 watchdog>=6.0.0
 guessit>=4.1.0
+pycountry>=24.6.1

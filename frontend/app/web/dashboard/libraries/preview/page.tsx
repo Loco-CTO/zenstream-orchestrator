@@ -226,6 +226,9 @@ function EntityPoster({ entityId, session, locale, alt, landscape = false }: { e
 	const [state, setState] = useState<"loading" | "ready" | "missing">("loading");
 	useEffect(() => {
 		if (!session) return;
+		// Do not display the previous locale's artwork while the new request is pending.
+		setUrl(null);
+		setState("loading");
 		const controller = new AbortController();
 		let objectUrl = "";
 		let timer: number | undefined;

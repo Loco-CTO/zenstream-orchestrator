@@ -17,7 +17,7 @@ class LibraryMetadataTest(unittest.TestCase):
         db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, parent_id TEXT, entity_type TEXT NOT NULL, relative_path TEXT, season_number INTEGER, episode_number INTEGER, episode_end_number INTEGER, disc_number INTEGER, track_number INTEGER, created_at TEXT, updated_at TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT, UNIQUE(library_id, entity_type, relative_path))")
         db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER, PRIMARY KEY(entity_id, provider, identifier_type))")
         db.execute("CREATE TABLE media_files (id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT, language TEXT, flags TEXT, size INTEGER, modified_ns INTEGER, UNIQUE(entity_id, relative_path, role))")
-        db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT, kind TEXT, state TEXT)")
+        db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT, kind TEXT, state TEXT, progress_current INTEGER DEFAULT 0, progress_total INTEGER DEFAULT 0, message TEXT)")
         db.execute("INSERT INTO library_jobs(id, library_id, kind, state) VALUES('job-1','library-1','scan','queued')")
         store = LibraryStore.__new__(LibraryStore)
         store.db = db
@@ -170,11 +170,12 @@ class LibraryMetadataTest(unittest.TestCase):
     def test_image_fallback_order_is_requested_no_language_english_any(self):
         images = [
             {"type": PRIMARY, "language": "fr", "url": "fr"},
-            {"type": PRIMARY, "language": "en", "url": "en"},
+            {"type": PRIMARY, "language": "eng", "url": "en"},
             {"type": PRIMARY, "language": None, "url": "neutral"},
-            {"type": PRIMARY, "language": "ja", "url": "ja"},
+            {"type": PRIMARY, "language": "jpn", "url": "ja"},
         ]
         self.assertEqual(choose_image(images, "ja-JP", PRIMARY)["url"], "ja")
+        self.assertEqual(choose_image(images, "en", PRIMARY)["url"], "en")
         self.assertEqual(choose_image(images, "de-DE", PRIMARY)["url"], "neutral")
         with self.assertRaises(ValueError):
             choose_image(images, "en", "Thumb")

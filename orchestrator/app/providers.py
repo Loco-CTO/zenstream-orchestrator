@@ -729,14 +729,28 @@ def choose_image(images: list[dict], requested: str, image_type: str) -> dict | 
     values = [image for image in images if image.get("type") == image_type]
     if not values:
         return None
-    requested = requested.lower()
+    requested = (requested or "en").lower()
+    requested_language = _language_family(requested)
+
     def bucket(image: dict) -> int:
         lang = (image.get("language") or "").lower()
-        if lang == requested or lang.startswith(requested.split("-")[0]):
+        image_language = _language_family(lang)
+        if image_language == requested_language:
             return 0
         if not lang:
             return 1
-        if lang in {"en", "eng", "en-us"}:
+        if _language_family(lang) == "en":
             return 2
         return 3
     return sorted(values, key=lambda image: (bucket(image), -(image.get("score") or 0), -(image.get("width") or 0), image.get("url", "")))[0]
+
+
+def _language_family(value: str) -> str:
+    """Normalize locale and provider ISO-639-2 language codes for artwork selection."""
+    code = (value or "").lower().split("-", 1)[0].split("_", 1)[0]
+    return {
+        "eng": "en",
+        "jpn": "ja",
+        "zho": "zh",
+        "kor": "ko",
+    }.get(code, code)

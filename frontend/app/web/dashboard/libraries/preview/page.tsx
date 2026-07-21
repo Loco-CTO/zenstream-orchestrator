@@ -158,7 +158,7 @@ function LibraryViewPage() {
 		return () => window.removeEventListener("keydown", onKeyDown);
 	}, [navigation.length]);
 
-	function openItem(item: Pick<Item, "id" | "type" | "displayName"> | Child) {
+	function openItem(item: Pick<Item, "id" | "type" | "displayName"> & Partial<Pick<Child, "relativePath">>) {
 		const nextStack = [...navigation, { id: item.id, type: item.type, label: item.displayName || item.relativePath || item.type }];
 		setNavigation(nextStack);
 		const next = new URLSearchParams(params.toString());

@@ -12,6 +12,113 @@ from app.providers import BANNER, PRIMARY, MetadataService, ProviderError, TMDBC
 
 
 class LibraryMetadataTest(unittest.TestCase):
+    def _scanner_db(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, parent_id TEXT, entity_type TEXT NOT NULL, relative_path TEXT, season_number INTEGER, episode_number INTEGER, episode_end_number INTEGER, disc_number INTEGER, track_number INTEGER, created_at TEXT, updated_at TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT, UNIQUE(library_id, entity_type, relative_path))")
+        db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER, PRIMARY KEY(entity_id, provider, identifier_type))")
+        db.execute("CREATE TABLE media_files (id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT, language TEXT, flags TEXT, size INTEGER, modified_ns INTEGER, UNIQUE(entity_id, relative_path, role))")
+        db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT, kind TEXT, state TEXT)")
+        db.execute("INSERT INTO library_jobs(id, library_id, kind, state) VALUES('job-1','library-1','scan','queued')")
+        store = LibraryStore.__new__(LibraryStore)
+        store.db = db
+        return db, LibraryScanner(store)
+
+    @staticmethod
+    def _prepare_incremental_scan(scanner):
+        scanner._scan_seen_ids = set()
+        scanner._scan_created_ids = []
+
+    def test_incremental_movie_scan_preserves_ids_and_reconciles_files(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                movie = root / "Movie (2020)"
+                movie.mkdir()
+                video = movie / "Movie.mkv"
+                subtitle = movie / "Movie.en.srt"
+                video.touch()
+                subtitle.touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                scanner._prune_missing_entities("library-1")
+                entity_id = db.execute("SELECT id FROM library_entities")[0][0]
+                db.execute("INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)", (entity_id, "tmdb", "movie", "123", 1))
+
+                subtitle.unlink()
+                new_movie = root / "New Movie"
+                new_movie.mkdir()
+                (new_movie / "New.mkv").touch()
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                scanner._prune_missing_entities("library-1")
+
+                self.assertEqual(db.execute("SELECT id FROM library_entities WHERE relative_path='Movie (2020)'")[0][0], entity_id)
+                self.assertEqual(db.execute("SELECT provider_id FROM entity_provider_ids WHERE entity_id=?", (entity_id,))[0][0], "123")
+                self.assertEqual(db.execute("SELECT relative_path FROM media_files WHERE entity_id=?", (entity_id,)), [("Movie (2020)/Movie.mkv",)])
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 2)
+        finally:
+            db.close()
+
+    def test_incremental_series_scan_preserves_hierarchy_and_removes_missing_episode(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                season = root / "Example" / "Season 1"
+                season.mkdir(parents=True)
+                first = season / "Example - S01E01.mkv"
+                first.touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_series("library-1", root, "job-1", lambda: False)
+                scanner._prune_missing_entities("library-1")
+                original = dict((row[1], row[0]) for row in db.execute("SELECT id,relative_path FROM library_entities"))
+
+                second = season / "Example - S01E02.mkv"
+                second.touch()
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_series("library-1", root, "job-1", lambda: False)
+                scanner._prune_missing_entities("library-1")
+                self.assertEqual(db.execute("SELECT id FROM library_entities WHERE relative_path='Example'")[0][0], original["Example"])
+                self.assertEqual(db.execute("SELECT id FROM library_entities WHERE relative_path='Example/Season 1'")[0][0], original["Example/Season 1"])
+
+                first.unlink()
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_series("library-1", root, "job-1", lambda: False)
+                scanner._prune_missing_entities("library-1")
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities WHERE entity_type='episode'")[0][0], 1)
+                self.assertEqual(db.execute("SELECT relative_path FROM library_entities WHERE entity_type='episode'"), [("Example/Season 1/Example - S01E02.mkv",)])
+        finally:
+            db.close()
+
+    def test_incremental_music_scan_removes_stale_track_without_resetting_release(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                album = root / "Artist" / "Album"
+                album.mkdir(parents=True)
+                first = album / "01 - First.mp3"
+                second = album / "02 - Second.mp3"
+                first.touch()
+                second.touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_music("library-1", root, "job-1", lambda: False)
+                scanner._prune_missing_entities("library-1")
+                release_id = db.execute("SELECT id FROM library_entities WHERE entity_type='release'")[0][0]
+
+                second.unlink()
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_music("library-1", root, "job-1", lambda: False)
+                scanner._prune_missing_entities("library-1")
+                self.assertEqual(db.execute("SELECT id FROM library_entities WHERE entity_type='release'")[0][0], release_id)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities WHERE entity_type='track'")[0][0], 1)
+        finally:
+            db.close()
+
     def test_jellyfin_style_provider_ids_are_extracted(self):
         self.assertEqual(
             provider_ids("The Matrix (1999) [tmdbid-603] [tvdbid-Movie-123]"),

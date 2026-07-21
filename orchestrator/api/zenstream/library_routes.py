@@ -17,7 +17,7 @@ from app.library import LibraryRuntime, LibraryStore, runtime
 from app.jobs import scheduler
 from app.models.admin import Admin
 from app.models.metadata import MetadataCache, MetadataCredentials
-from app.providers import IMAGE_TYPES, MetadataService, ProviderError, choose_image
+from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY, MetadataService, ProviderError, choose_image
 from app.logging_config import get_logger
 
 
@@ -34,8 +34,11 @@ def require_admin(username: str | None, token: str | None) -> str:
 
 
 def _entity_ids(entity_id: str) -> list[dict]:
-    rows = store.db.execute("SELECT provider,identifier_type,provider_id,is_primary FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC, provider", (entity_id,))
-    return [{"provider": row[0], "type": row[1], "id": row[2], "primary": bool(row[3])} for row in rows]
+    entity_rows = store.db.execute("SELECT entity_type FROM library_entities WHERE id=?", (entity_id,))
+    entity_type = entity_rows[0][0] if entity_rows else ""
+    primary_provider = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
+    rows = store.db.execute("SELECT provider,identifier_type,provider_id,is_primary FROM entity_provider_ids WHERE entity_id=? ORDER BY CASE WHEN provider=? THEN 0 ELSE 1 END, provider", (entity_id, primary_provider))
+    return [{"provider": row[0], "type": row[1], "id": row[2], "primary": row[0] == primary_provider, "role": "primary" if row[0] == primary_provider else "secondary"} for row in rows]
 
 
 def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) -> dict:
@@ -43,7 +46,7 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     if not rows:
         raise HTTPException(404, "Library item not found.")
     row = rows[0]
-    value = {"id": row[0], "libraryId": row[1], "parentId": row[2], "type": row[3], "relativePath": row[4], "seasonNumber": row[5], "episodeNumber": row[6], "episodeEndNumber": row[7], "discNumber": row[8], "trackNumber": row[9], "matchStatus": row[10], "matchConfidence": row[11], "matchMethod": row[12], "providerIds": _entity_ids(entity_id)}
+    value = {"id": row[0], "libraryId": row[1], "parentId": row[2], "type": row[3], "primaryProvider": PRIMARY_PROVIDER_BY_ENTITY.get(row[3]), "relativePath": row[4], "seasonNumber": row[5], "episodeNumber": row[6], "episodeEndNumber": row[7], "discNumber": row[8], "trackNumber": row[9], "matchStatus": row[10], "matchConfidence": row[11], "matchMethod": row[12], "providerIds": _entity_ids(entity_id)}
     value["displayName"] = Path(row[4]).name if row[4] else row[3].replace("_", " ").title()
     children = store.db.execute("SELECT id,entity_type,relative_path,season_number,episode_number,track_number FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE", (entity_id,))
     value["children"] = [{"id": child[0], "type": child[1], "relativePath": child[2], "seasonNumber": child[3], "episodeNumber": child[4], "trackNumber": child[5]} for child in children]
@@ -93,6 +96,18 @@ def _cached_provider_metadata(cache: MetadataCache, provider: str, entity_type: 
             elif not merged.get(key) and field:
                 merged[key] = field
     return merged
+
+
+def _local_image_for_type(relative_path: str, image_type: str) -> bool:
+    """Match conventional local artwork names to their canonical category."""
+    stem = Path(relative_path).stem.lower()
+    names = {
+        "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
+        "Backdrop": {"backdrop", "fanart", "background"},
+        "Logo": {"logo", "clearlogo", "clear-logo"},
+        "Banner": {"banner"},
+    }
+    return stem in names.get(image_type, set())
 
 
 def _hydration(item: dict, locale: str, metadata: dict | None) -> dict:
@@ -395,7 +410,7 @@ async def set_match(entity_id: str, request: Request, Username: str | None = Hea
     entity_type = _entity(entity_id)["type"]
     identifier_type = "movie" if entity_type == "movie" else "series" if entity_type in {"series", "episode", "season"} else entity_type
     store.db.execute("DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,))
-    store.db.execute("INSERT INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,1)", (entity_id, provider, identifier_type, provider_id))
+    store.db.execute("INSERT INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)", (entity_id, provider, identifier_type, provider_id, int(PRIMARY_PROVIDER_BY_ENTITY.get(entity_type) == provider)))
     store.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='manual',updated_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), entity_id))
     return _entity(entity_id)
 
@@ -409,11 +424,14 @@ async def get_image(entity_id: str, imageType: str = Query("Primary"), locale: s
     library = store.get(item["libraryId"])
     if not library:
         raise HTTPException(404, "Library not found.")
-    local = store.db.execute("SELECT relative_path FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path LIMIT 1", (entity_id,))
-    if local and library["directory"]:
-        path = Path(library["directory"]) / local[0][0]
-        if path.is_file():
-            return FileResponse(path)
+    local = store.db.execute("SELECT relative_path FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path", (entity_id,))
+    if library["directory"]:
+        for relative_path, in local:
+            if not _local_image_for_type(relative_path, imageType):
+                continue
+            path = Path(library["directory"]) / relative_path
+            if path.is_file():
+                return FileResponse(path)
     # Library previews must never turn a cache miss into inline provider work.
     # A page can request dozens of images at once; slow provider hydration would
     # occupy the browser's connection pool and make dashboard navigation wait.

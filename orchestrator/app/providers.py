@@ -30,6 +30,22 @@ LOGO = "Logo"
 BANNER = "Banner"
 IMAGE_TYPES = {PRIMARY, BACKDROP, LOGO, BANNER}
 
+# The first provider is authoritative for identity and hierarchy resolution.
+# Secondary providers may enrich the same entity but must never be flagged as
+# the entity's primary ID.
+PRIMARY_PROVIDER_BY_ENTITY = {
+    "series": "tvdb",
+    "season": "tvdb",
+    "episode": "tvdb",
+    "movie": "tmdb",
+    "artist": "musicbrainz",
+    "release": "musicbrainz",
+    "release_group": "musicbrainz",
+    "track": "musicbrainz",
+    "recording": "musicbrainz",
+    "collection": "tvdb",
+}
+
 
 def _image(image_type: str, url: str, *, language: str | None = None, provider: str,
            source_type: str | None = None, score: float = 0, width: int = 0,
@@ -413,12 +429,18 @@ def _tvdb_images(data: dict) -> tuple[list[dict], list[dict]]:
 def _tvdb_children(data: dict) -> list[dict]:
     values = []
     for season in data.get("seasons", []) or []:
-        season_number = season.get("seasonNumber") or season.get("number")
+        season_number = season.get("seasonNumber")
+        if season_number is None:
+            season_number = season.get("number")
         if season.get("id") is not None and season_number is not None:
             values.append({"type": "season", "season": season_number, "id": str(season["id"])})
     for episode in data.get("episodes", []) or []:
-        season_number = episode.get("seasonNumber") or episode.get("season")
-        episode_number = episode.get("number") or episode.get("episodeNumber")
+        season_number = episode.get("seasonNumber")
+        if season_number is None:
+            season_number = episode.get("season")
+        episode_number = episode.get("number")
+        if episode_number is None:
+            episode_number = episode.get("episodeNumber")
         if episode.get("id") is not None and season_number is not None and episode_number is not None:
             values.append({"type": "episode", "season": season_number, "episode": episode_number, "id": str(episode["id"])})
     return values
@@ -517,7 +539,13 @@ class MetadataService:
         return merged
 
     def resolve_inventory_entity(self, entity_type: str, query: str, year: str | None = None, explicit_ids: list[dict] | None = None) -> dict:
-        """Resolve an inventory entity and seed its English/common provider cache."""
+        """Resolve an inventory entity from its authoritative provider.
+
+        Series and movies must be matched by TVDB and TMDB respectively. The
+        selected primary record is then the only source of secondary IDs via
+        its external/remote database links; searching secondary providers by
+        title can match a different entity with the same name.
+        """
         priorities = {
             "series": ["tvdb", "tmdb"], "movie": ["tmdb", "tvdb"],
             "artist": ["musicbrainz"], "release": ["musicbrainz"],
@@ -525,29 +553,32 @@ class MetadataService:
         }.get(entity_type, [])
         if not priorities:
             raise ProviderError(f"No provider resolution strategy exists for {entity_type}")
-        explicit_by_provider = {value["provider"]: value["id"] for value in (explicit_ids or []) if value.get("provider") in priorities}
-        selected: dict | None = None
+        primary_provider = priorities[0]
+        explicit_by_provider = {
+            value["provider"]: value["id"]
+            for value in (explicit_ids or [])
+            if value.get("provider") == primary_provider and value.get("id")
+        }
         errors: list[str] = []
-        for provider in priorities:
-            try:
-                client = self.client(provider)
-                provider_id = explicit_by_provider.get(provider)
-                if not provider_id:
-                    candidates = client.search(entity_type, query, year) if provider == "tmdb" else client.search(entity_type, query)
-                    provider_id = _select_match(candidates, query, year)
-                normalized = self.fetch(provider, entity_type, str(provider_id), "en", force=True)
-                explicit_by_provider.setdefault(provider, str(provider_id))
-                selected = selected or normalized
-                for value in normalized.get("ids", []) or []:
-                    explicit_by_provider.setdefault(value["provider"], value["id"])
-            except (ProviderError, ValueError, KeyError) as error:
-                errors.append(f"{provider}: {error}")
-        if not selected:
+        normalized: dict | None = None
+        try:
+            client = self.client(primary_provider)
+            provider_id = explicit_by_provider.get(primary_provider)
+            if not provider_id:
+                candidates = client.search(entity_type, query, year) if primary_provider == "tmdb" else client.search(entity_type, query)
+                provider_id = _select_match(candidates, query, year)
+            normalized = self.fetch(primary_provider, entity_type, str(provider_id), "en", force=True)
+            explicit_by_provider[primary_provider] = str(provider_id)
+            for value in normalized.get("ids", []) or []:
+                provider = value.get("provider")
+                if provider in {"tmdb", "tvdb", "imdb"} and value.get("id"):
+                    explicit_by_provider.setdefault(provider, str(value["id"]))
+        except (ProviderError, ValueError, KeyError) as error:
+            errors.append(f"{primary_provider}: {error}")
+        if not normalized or primary_provider not in explicit_by_provider:
             detail = "; ".join(errors) or "no matching provider result"
             raise ProviderError(f"Could not resolve {entity_type} '{query}': {detail}")
-        if entity_type in {"series", "movie"} and priorities[0] not in explicit_by_provider:
-            raise ProviderError(f"Could not resolve the required primary provider ID for '{query}'; missing {priorities[0]}")
-        return {"metadata": selected, "providerIds": [{"provider": provider, "id": provider_id} for provider, provider_id in explicit_by_provider.items()]}
+        return {"metadata": normalized, "providerIds": [{"provider": provider, "id": provider_id} for provider, provider_id in explicit_by_provider.items()]}
 
 
 def _normalized_match_text(value: str) -> str:

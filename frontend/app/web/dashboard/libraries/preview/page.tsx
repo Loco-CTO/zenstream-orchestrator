@@ -29,7 +29,8 @@ type Item = {
 	metadataError?: string | null;
 	hydration?: { state?: string; error?: string | null; details?: string | null; attempts?: number };
 	matchStatus: string;
-	providerIds: { provider: string; id: string }[];
+	providerIds: { provider: string; id: string; primary?: boolean; role?: string }[];
+	primaryProvider?: string | null;
 	children?: { id: string; type: string; relativePath?: string; seasonNumber?: number; episodeNumber?: number; trackNumber?: number }[];
 };
 type MetadataPerson = { name?: string; role?: string };
@@ -489,7 +490,7 @@ function DetailPanel({
 			</div>
 			<div className="mt-5 space-y-2 text-xs">
 				<p className="font-medium">{metadata.description || metadata.overview || "No description cached for this language."}</p>
-				<p><span className="material-muted">Provider IDs:</span> {detail?.providerIds.map((value) => `${value.provider}:${value.id}`).join(" · ") || "—"}</p>
+				<p><span className="material-muted">Provider IDs:</span> {detail?.providerIds.map((value) => `${value.provider}:${value.id}${value.primary ? " (primary)" : " (secondary)"}`).join(" · ") || "—"}</p>
 				<p><span className="material-muted">Status:</span> {metadata.status || "—"} · <span className="material-muted">Date:</span> {metadata.date || metadata.releaseDate || "—"}</p>
 				<p><span className="material-muted">Runtime:</span> {metadata.runtimeMinutes ? `${metadata.runtimeMinutes} min` : "—"} · <span className="material-muted">Air time:</span> {metadata.airTime || "—"}</p>
 				<p><span className="material-muted">Genres:</span> {list(metadata.tags || metadata.genres)}</p>

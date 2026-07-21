@@ -333,13 +333,16 @@ class LibraryScanner:
         return entity_id
 
     def _ids(self, entity_id: str, values: Iterable[tuple[str, str, str]]) -> None:
+        from app.providers import PRIMARY_PROVIDER_BY_ENTITY
+
         row = self.db.execute("SELECT entity_type FROM library_entities WHERE id=?", (entity_id,))
         entity_type = row[0][0] if row else ""
+        primary_provider = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
         found = False
         for provider, identifier_type, value in values:
             if provider in {"tmdb", "tvdb"} and entity_type in {"movie", "series"}:
                 identifier_type = "movie" if entity_type == "movie" else "series"
-            self.db.execute("INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)", (entity_id, provider, identifier_type, value, int(provider in {"tmdb", "tvdb", "musicbrainz"})))
+            self.db.execute("INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)", (entity_id, provider, identifier_type, value, int(provider == primary_provider)))
             found = True
         if found:
             self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='explicit_id',updated_at=? WHERE id=?", (now(), entity_id))
@@ -386,6 +389,7 @@ class LibraryScanner:
             if entity_type == "series":
                 self._derive_tmdb_child_ids(entity_id)
                 self._derive_provider_child_ids(entity_id, result["metadata"])
+                self._derive_tvdb_episode_ids(entity_id, service)
                 self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE parent_id=? AND match_status='unresolved'", (now(), entity_id))
             self.store.update_job(job_id, progress_current=index, message=f"Resolved {query}")
         self._seed_all_children(library_id, service, job_id, should_terminate)
@@ -479,12 +483,42 @@ class LibraryScanner:
             children.extend(self.db.execute("SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id IN ({}) AND entity_type='episode'".format(",".join("?" * len(season_ids))), season_ids))
         for child_id, entity_type, season_number, episode_number in children:
             for value in metadata.get("children", []) or []:
-                if value.get("type") != entity_type or int(value.get("season", -1)) != int(season_number or -2):
+                if value.get("type") != entity_type or int(value.get("season", -1)) != int(season_number if season_number is not None else -2):
                     continue
-                if entity_type == "episode" and int(value.get("episode", -1)) != int(episode_number or -2):
+                if entity_type == "episode" and int(value.get("episode", -1)) != int(episode_number if episode_number is not None else -2):
                     continue
                 self._ids(child_id, [(metadata.get("provider", ""), entity_type, str(value["id"]))])
                 break
+
+    def _derive_tvdb_episode_ids(self, series_id: str, service) -> None:
+        """Fetch TVDB season details and attach exact TVDB episode IDs."""
+        seasons = self.db.execute(
+            "SELECT id,season_number,relative_path FROM library_entities WHERE parent_id=? AND entity_type='season' ORDER BY season_number",
+            (series_id,),
+        )
+        for season_id, season_number, season_path in seasons:
+            provider_rows = self.db.execute(
+                "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='tvdb'",
+                (season_id,),
+            )
+            if not provider_rows:
+                raise ValueError(f"TVDB season ID could not be resolved for season {season_number} at '{season_path}'")
+            season_provider_id = str(provider_rows[0][0])
+            try:
+                normalized = service.fetch("tvdb", "season", season_provider_id, "en", force=True)
+            except Exception as error:
+                raise ValueError(f"TVDB season details failed for season {season_number} at '{season_path}' (ID {season_provider_id}): {type(error).__name__}: {error}") from error
+            self._persist_normalized_ids(season_id, "season", normalized)
+            episodes = self.db.execute(
+                "SELECT id,episode_number,relative_path FROM library_entities WHERE parent_id=? AND entity_type='episode' ORDER BY episode_number,relative_path",
+                (season_id,),
+            )
+            tvdb_children = [value for value in normalized.get("children", []) or [] if value.get("type") == "episode" and value.get("id") is not None]
+            for episode_id, episode_number, episode_path in episodes:
+                match = next((value for value in tvdb_children if int(value.get("season", season_number)) == int(season_number) and int(value.get("episode", -1)) == int(episode_number)), None)
+                if not match:
+                    raise ValueError(f"TVDB episode ID could not be resolved for S{int(season_number):02d}E{int(episode_number):02d} at '{episode_path}'")
+                self._ids(episode_id, [("tvdb", "episode", str(match["id"]))])
 
     def _files(self, entity_id: str, root: Path, files: Iterable[Path]) -> None:
         for path in files:

@@ -49,7 +49,7 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     value = {"id": row[0], "libraryId": row[1], "parentId": row[2], "type": row[3], "primaryProvider": PRIMARY_PROVIDER_BY_ENTITY.get(row[3]), "relativePath": row[4], "seasonNumber": row[5], "episodeNumber": row[6], "episodeEndNumber": row[7], "discNumber": row[8], "trackNumber": row[9], "matchStatus": row[10], "matchConfidence": row[11], "matchMethod": row[12], "providerIds": _entity_ids(entity_id)}
     value["displayName"] = Path(row[4]).name if row[4] else row[3].replace("_", " ").title()
     children = store.db.execute("SELECT id,entity_type,relative_path,season_number,episode_number,track_number FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE", (entity_id,))
-    value["children"] = [{"id": child[0], "type": child[1], "relativePath": child[2], "seasonNumber": child[3], "episodeNumber": child[4], "trackNumber": child[5]} for child in children]
+    value["children"] = [{"id": child[0], "type": child[1], "relativePath": child[2], "displayName": Path(child[2]).stem if child[2] else child[1].replace("_", " ").title(), "seasonNumber": child[3], "episodeNumber": child[4], "trackNumber": child[5]} for child in children]
     if include_metadata:
         value["metadata"] = None
     return value

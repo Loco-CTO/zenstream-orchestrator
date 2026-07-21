@@ -163,7 +163,7 @@ function LibraryViewPage() {
 			</div>
 		);
 	return (
-		<div className="max-w-6xl">
+		<div className="w-full max-w-none">
 			<div className="material-topbar">
 				<div>
 					<Link href="/web/dashboard/libraries" className="material-back">
@@ -223,8 +223,11 @@ function LibraryViewPage() {
 			)}
 			{!loading && !error && (
 				<>
-					<div className="mt-7 flex flex-col gap-5 lg:flex-row">
-					<div className="min-w-0 flex-1 grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+					<div className="relative mt-7 w-full">
+					<div
+						className="grid w-full gap-4"
+						style={{ gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))" }}
+					>
 						{items.map((item) => (
 							<ViewCard
 								key={item.id}
@@ -240,7 +243,15 @@ function LibraryViewPage() {
 							</div>
 						)}
 					</div>
-						{selectedId && session && (
+					</div>
+					{selectedId && session && (
+						<>
+							<button
+								type="button"
+								aria-label="Close details"
+								onClick={() => setSelectedId(null)}
+								className="fixed inset-0 z-40 cursor-default bg-black/65 backdrop-blur-[2px]"
+							/>
 							<DetailPanel
 								entityId={selectedId}
 								session={session}
@@ -248,8 +259,8 @@ function LibraryViewPage() {
 								onClose={() => setSelectedId(null)}
 								onSelectChild={setSelectedId}
 							/>
-						)}
-					</div>
+						</>
+					)}
 					<div className="mt-6 flex items-center justify-between border-t material-divider pt-4">
 						<span className="text-xs material-muted">
 							Page {page} of {pageCount}
@@ -363,7 +374,7 @@ function ViewCard({
 		<button
 			ref={cardRef}
 			onClick={onOpen}
-			className="material-surface group overflow-hidden rounded-xl text-left transition hover:bg-[#282828]"
+		className="material-surface group mx-auto w-full max-w-[240px] overflow-hidden rounded-xl text-left transition hover:bg-[#282828]"
 		>
 			<div className="flex aspect-[2/3] items-center justify-center bg-[#0d0e13]">
 				{image ? (
@@ -465,7 +476,7 @@ function DetailPanel({
 	const people = metadata.people || [];
 	const tracks = metadata.tracks || [];
 	return (
-		<aside className="material-surface w-full shrink-0 rounded-xl p-4 lg:w-[390px]">
+		<aside className="material-surface fixed inset-x-3 bottom-3 top-3 z-50 overflow-y-auto rounded-xl p-4 shadow-2xl shadow-black/70 sm:inset-x-auto sm:left-1/2 sm:w-[min(720px,calc(100vw-2rem))] sm:-translate-x-1/2 lg:inset-y-6 lg:left-auto lg:right-6 lg:translate-x-0">
 			<div className="flex items-start justify-between gap-3">
 				<div>
 					<p className="text-xs uppercase tracking-wide material-muted">{detail?.type || "Item"}</p>
@@ -473,6 +484,18 @@ function DetailPanel({
 				</div>
 				<button onClick={onClose} className="material-icon-button" aria-label="Close details"><IconX size={17} /></button>
 			</div>
+			{detail?.type === "series" && detail.children?.length ? (
+				<nav className="mt-5 rounded-lg border border-white/10 bg-[#0d0e13] p-2 lg:float-left lg:mr-5 lg:w-44" aria-label="Series seasons">
+					<p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[.16em] material-muted">Seasons</p>
+					<div className="max-h-56 space-y-1 overflow-y-auto">
+						{detail.children.map((child) => (
+							<button key={child.id} onClick={() => onSelectChild(child.id)} className="block w-full truncate rounded px-2 py-1.5 text-left text-xs hover:bg-white/10">
+								{child.relativePath || child.id}
+							</button>
+						))}
+					</div>
+				</nav>
+			) : null}
 			{error && <div className="material-alert mt-4 text-xs"><IconAlertCircle size={16} />{error}</div>}
 			{detail && (detail.metadataState === "queued" || detail.metadataState === "running") && !metadata.title && (
 				<div className="mt-4 rounded-lg bg-[#0d0e13] p-3 text-xs material-muted">Hydrating {locale} metadata…</div>

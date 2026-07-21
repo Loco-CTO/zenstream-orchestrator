@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { IconCheck, IconKey, IconMusic, IconRefresh, IconX } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 
-type ProviderState = { configured: boolean; credentialType?: string; validatedAt?: string | null };
+type ProviderState = { configured: boolean; credential?: string; credentialType?: string; validatedAt?: string | null };
 type ProviderMap = Record<string, ProviderState>;
 
 export default function MetadataPage() {
@@ -18,7 +18,13 @@ export default function MetadataPage() {
 
 	async function load(current: Session) {
 		const response = await adminFetch("/api/admin/metadata/providers", current);
-		if (response.ok) setProviders(await response.json());
+		if (response.ok) {
+			const nextProviders = await response.json();
+			setProviders(nextProviders);
+			setTmdb(nextProviders.tmdb?.credential || "");
+			setTmdbType(nextProviders.tmdb?.credentialType || "api_key");
+			setTvdb(nextProviders.tvdb?.credential || "");
+		}
 	}
 	useEffect(() => {
 		const current = readSession();
@@ -66,14 +72,14 @@ export default function MetadataPage() {
 					<div className="flex items-start justify-between"><div><p className="console-kicker">Movies and secondary TV metadata</p><h2 className="mt-2 text-xl font-bold">TMDB</h2></div><IconKey className="text-[#8fe4cf]" size={22} /></div>
 					<p className="mt-3 text-sm console-muted">Use a TMDB v3 API key or v4 read access token.</p>
 					<select value={tmdbType} onChange={(event) => setTmdbType(event.target.value)} className="console-input mt-5 h-11 w-full rounded-xl px-4 text-sm outline-none"><option value="api_key">v3 API key</option><option value="read_access_token">v4 read access token</option></select>
-					<input value={tmdb} onChange={(event) => setTmdb(event.target.value)} required={!providers.tmdb?.configured} placeholder="Credential" type="password" className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
+					<input value={tmdb} onChange={(event) => setTmdb(event.target.value)} required={!providers.tmdb?.configured} placeholder="Credential" type="text" className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
 					<ProviderStatus state={providers.tmdb} />
 					<div className="mt-5 flex gap-3"><button className="console-button rounded-xl px-4 py-3 text-sm font-semibold">Save and validate</button>{providers.tmdb?.configured && <button type="button" onClick={() => clear("tmdb")} className="rounded-xl border console-divider px-4 py-3 text-sm console-muted">Clear</button>}</div>
 				</form>
 				<form onSubmit={(event) => save(event, "tvdb")} className="console-card rounded-2xl p-6">
 					<div className="flex items-start justify-between"><div><p className="console-kicker">Series and collection metadata</p><h2 className="mt-2 text-xl font-bold">TheTVDB</h2></div><IconKey className="text-[#8fe4cf]" size={22} /></div>
 					<p className="mt-3 text-sm console-muted">A subscriber PIN is optional for licensed keys and required for some user-supported keys.</p>
-					<input value={tvdb} onChange={(event) => setTvdb(event.target.value)} required={!providers.tvdb?.configured} placeholder="v4 API key" type="password" className="console-input mt-5 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
+					<input value={tvdb} onChange={(event) => setTvdb(event.target.value)} required={!providers.tvdb?.configured} placeholder="v4 API key" type="text" className="console-input mt-5 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
 					<input value={pin} onChange={(event) => setPin(event.target.value)} placeholder="Subscriber PIN (optional)" type="password" className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30" />
 					<ProviderStatus state={providers.tvdb} />
 					<div className="mt-5 flex gap-3"><button className="console-button rounded-xl px-4 py-3 text-sm font-semibold">Save and validate</button>{providers.tvdb?.configured && <button type="button" onClick={() => clear("tvdb")} className="rounded-xl border console-divider px-4 py-3 text-sm console-muted">Clear</button>}</div>

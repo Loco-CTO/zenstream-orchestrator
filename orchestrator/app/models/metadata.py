@@ -40,15 +40,16 @@ class MetadataCredentials:
         rows = self.db.execute(
             "SELECT provider, credential_type, validated_at, updated_at FROM metadata_credentials ORDER BY provider"
         )
-        values = {
-            provider: {
+        values = {}
+        for provider, credential_type, validated_at, updated_at in rows:
+            credential = self.get(provider) or {}
+            values[provider] = {
                 "configured": True,
                 "credentialType": credential_type,
+                "credential": credential.get("value") or credential.get("apiKey") or "",
                 "validatedAt": validated_at,
                 "updatedAt": updated_at,
             }
-            for provider, credential_type, validated_at, updated_at in rows
-        }
         for provider in sorted(PROVIDERS):
             values.setdefault(provider, {"configured": False, "validatedAt": None})
         values["musicbrainz"] = {

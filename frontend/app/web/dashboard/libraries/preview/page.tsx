@@ -76,7 +76,6 @@ function LibraryViewPage() {
 	const libraryId = params.get("libraryId") || "";
 	const urlEntityId = params.get("entityId");
 	const urlEntityPathValue = params.get("entityPath") || "";
-	const urlEntityPath = urlEntityPathValue.split(",").filter(Boolean);
 	const [session, setSession] = useState<Session | null>(null);
 	const [items, setItems] = useState<Item[]>([]);
 	const [libraryName, setLibraryName] = useState("");
@@ -133,14 +132,15 @@ function LibraryViewPage() {
 	}, [libraryId, locale, load]);
 
 	useEffect(() => {
-		if (!urlEntityId && !urlEntityPath.length) {
+		const ids = urlEntityPathValue.split(",").filter(Boolean);
+		if (!urlEntityId && !ids.length) {
 			setNavigation([]);
 			return;
 		}
-		const ids = urlEntityPath.length ? urlEntityPath : [urlEntityId as string];
-		setNavigation((current) => current.length && current[current.length - 1].id === ids[ids.length - 1]
+		const path = ids.length ? ids : [urlEntityId as string];
+		setNavigation((current) => current.length && current[current.length - 1].id === path[path.length - 1]
 			? current
-			: ids.map((id) => ({ id, type: "item", label: "Library item" })));
+			: path.map((id) => ({ id, type: "item", label: "Library item" })));
 	}, [urlEntityId, urlEntityPathValue]);
 
 	useEffect(() => {

@@ -114,21 +114,6 @@ def _local_image_for_type(relative_path: str, image_type: str) -> bool:
     return stem in names.get(image_type, set())
 
 
-def _hydration(item: dict, locale: str, metadata: dict | None) -> dict:
-    locale = (locale or "en").lower()
-    rows = store.db.execute("SELECT state,last_error,error_details,attempts,requested_at,started_at,finished_at FROM metadata_hydration_requests WHERE entity_id=? AND locale=?", (item["id"], locale))
-    if rows:
-        row = rows[0]
-        return {"state": "ready" if metadata else row[0], "error": row[1], "details": row[2], "attempts": row[3], "requestedAt": row[4], "startedAt": row[5], "finishedAt": row[6]}
-    if metadata:
-        return {"state": "ready", "error": None, "details": None, "attempts": 0}
-    return {"state": "unavailable" if item.get("providerIds") else "error", "error": None if item.get("providerIds") else "No provider IDs were resolved during the scan.", "details": None, "attempts": 0}
-
-
-def _metadata_state(item: dict, locale: str, metadata: dict | None) -> str:
-    return _hydration(item, locale, metadata)["state"]
-
-
 def _search_text(value: str | None) -> str:
     normalized = unicodedata.normalize("NFKC", value or "").casefold()
     return " ".join("".join(character if character.isalnum() else " " for character in normalized).split())
@@ -435,11 +420,7 @@ async def list_items(library_id: str, parentId: str | None = Query(None), locale
     for row in rows:
         item = _entity(row[0], locale)
         item["metadata"] = _metadata_for(item, locale, False, fallback=False)
-        item["metadataState"] = _metadata_state(item, locale, item["metadata"])
         items.append(item)
-    for item in items:
-        item["hydration"] = _hydration(item, locale, item["metadata"])
-        item["metadataError"] = item["hydration"].get("error")
     return {"items": items, "page": page, "pageSize": pageSize, "total": total, "query": query}
 
 
@@ -448,18 +429,7 @@ async def get_item(entity_id: str, locale: str = Query("en"), Username: str | No
     require_admin(Username, TOKEN)
     item = _entity(entity_id, locale, include_metadata=True)
     item["metadata"] = await asyncio.to_thread(_metadata_for, item, locale, False, False)
-    item["hydration"] = _hydration(item, locale, item["metadata"])
-    item["metadataState"] = item["hydration"]["state"]
-    item["metadataError"] = item["hydration"].get("error")
     return item
-
-
-@router.post("/library-items/hydrate")
-async def hydrate_items(request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
-    require_admin(Username, TOKEN)
-    data = await request.json()
-    locale = str(data.get("locale") or "en")
-    return scheduler.enqueue_metadata_hydration([str(value) for value in data.get("entityIds") or []], locale)
 
 
 @router.get("/library-items/{entity_id}/matches")

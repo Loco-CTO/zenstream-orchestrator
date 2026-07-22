@@ -224,6 +224,29 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(current["_imageLanguageSchema"], IMAGE_LANGUAGE_SCHEMA)
         db.close()
 
+    def test_library_search_uses_trigrams_and_requested_locale_titles(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, parent_id TEXT, entity_type TEXT NOT NULL, relative_path TEXT)")
+        db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER)")
+        db.execute("CREATE TABLE metadata_cache (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT, PRIMARY KEY(provider,entity_type,provider_id,locale))")
+        db.execute("INSERT INTO library_entities VALUES(?,?,?,?,?)", ("gintama", "library-1", None, "series", "shows/entry-001"))
+        db.execute("INSERT INTO library_entities VALUES(?,?,?,?,?)", ("ghost", "library-1", None, "series", "shows/entry-002"))
+        db.execute("INSERT INTO library_entities VALUES(?,?,?,?,?)", ("child", "library-1", "gintama", "season", "shows/entry-001/season-1"))
+        db.execute("INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)", ("gintama", "tvdb", "series", "1", 1))
+        db.execute("INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)", ("ghost", "tvdb", "series", "2", 1))
+        cache = MetadataCache.__new__(MetadataCache)
+        cache.db = db
+        cache.put("tvdb", "series", "1", "en", {"title": "Gintama - Mr. Ginpachi's Zany Class", "images": []})
+        cache.put("tvdb", "series", "1", "ja", {"title": "銀魂", "images": []})
+        cache.put("tvdb", "series", "2", "en", {"title": "07-Ghost", "images": []})
+
+        self.assertEqual(library_routes._rank_library_item_ids(db, "library-1", None, "en", "gintma"), ["gintama"])
+        self.assertEqual(library_routes._rank_library_item_ids(db, "library-1", None, "en", "07 ghost"), ["ghost"])
+        self.assertEqual(library_routes._rank_library_item_ids(db, "library-1", None, "ja", "銀魂"), ["gintama"])
+        self.assertEqual(library_routes._rank_library_item_ids(db, "library-1", None, "en", "銀魂"), [])
+        self.assertNotIn("child", library_routes._rank_library_item_ids(db, "library-1", None, "en", "season"))
+        db.close()
+
     def test_preview_image_cache_miss_does_not_hydrate_provider_metadata(self):
         item = {
             "id": "entity-1",

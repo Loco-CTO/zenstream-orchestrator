@@ -10,6 +10,7 @@ import {
 	IconChevronRight,
 	IconPhoto,
 	IconRefresh,
+	IconSearch,
 	IconX,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../../components/admin-client";
@@ -81,6 +82,8 @@ function LibraryViewPage() {
 	const [libraryName, setLibraryName] = useState("");
 	const [parent, setParent] = useState<string | null>(null);
 	const [locale, setLocale] = useState("en");
+	const [searchInput, setSearchInput] = useState("");
+	const [searchQuery, setSearchQuery] = useState("");
 	const [page, setPage] = useState(1);
 	const [total, setTotal] = useState(0);
 	const [loading, setLoading] = useState(true);
@@ -96,13 +99,13 @@ function LibraryViewPage() {
 		const controller = new AbortController();
 		abortRef.current = controller;
 		setError("");
-		if (!items.length) setLoading(true);
+		setLoading(true);
 		try {
 			const init = { signal: controller.signal };
 			const [libraryResponse, itemsResponse] = await Promise.all([
 				adminFetch("/api/admin/libraries/" + libraryId, current, init),
 				adminFetch(
-					"/api/admin/libraries/" + libraryId + "/items?parentId=" + encodeURIComponent(parentId || "") + "&locale=" + encodeURIComponent(locale) + "&page=" + currentPage + "&pageSize=" + pageSize,
+					"/api/admin/libraries/" + libraryId + "/items?parentId=" + encodeURIComponent(parentId || "") + "&locale=" + encodeURIComponent(locale) + "&query=" + encodeURIComponent(searchQuery) + "&page=" + currentPage + "&pageSize=" + pageSize,
 					current,
 					init,
 				),
@@ -119,7 +122,12 @@ function LibraryViewPage() {
 		} finally {
 			if (id === requestId.current) setLoading(false);
 		}
-	}, [items.length, libraryId, locale]);
+	}, [libraryId, locale, searchQuery]);
+
+	useEffect(() => {
+		const timer = window.setTimeout(() => setSearchQuery(searchInput.trim()), 300);
+		return () => window.clearTimeout(timer);
+	}, [searchInput]);
 
 	useEffect(() => {
 		const current = readSession();
@@ -127,6 +135,7 @@ function LibraryViewPage() {
 		setPage(1);
 		setParent(null);
 		setNavigation([]);
+		setItems([]);
 		if (current) void load(current, null, 1);
 		return () => abortRef.current?.abort();
 	}, [libraryId, locale, load]);
@@ -194,15 +203,22 @@ function LibraryViewPage() {
 						<div>
 							<Link href="/web/dashboard/libraries" className="material-back"><IconArrowLeft size={15} />Libraries</Link>
 							<div className="mt-4 flex items-center gap-3"><h1 className="text-3xl font-semibold tracking-tight">{libraryName || "Library"}</h1><button onClick={() => load(session, parent, page)} className="material-icon-button" aria-label="Refresh view" title="Refresh view"><IconRefresh size={17} /></button></div>
-							<p className="mt-2 text-sm material-muted">{total.toLocaleString()} indexed entries</p>
+							<p className="mt-2 text-sm material-muted">{total.toLocaleString()} {searchQuery ? "matching" : "indexed"} entries</p>
 						</div>
-						<select value={locale} onChange={(event) => { setLocale(event.target.value); setItems([]); }} className="material-input h-10 rounded-lg px-3 text-sm outline-none"><option value="en">English</option><option value="ja">日本語</option></select>
+						<div className="flex items-center gap-3">
+							<label className="material-input flex h-10 min-w-64 items-center gap-2 rounded-lg px-3">
+								<IconSearch size={16} className="material-muted" />
+								<input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Search library" aria-label="Search library" className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
+								{searchInput && <button type="button" onClick={() => setSearchInput("")} aria-label="Clear search" className="material-muted transition hover:text-white"><IconX size={15} /></button>}
+							</label>
+							<select value={locale} onChange={(event) => { setLocale(event.target.value); setItems([]); }} className="material-input h-10 rounded-lg px-3 text-sm outline-none"><option value="en">English</option><option value="ja">日本語</option></select>
+						</div>
 					</div>
 					{parent && <button onClick={() => { setParent(null); setPage(1); void load(session, null, 1); }} className="material-back mt-5"><IconArrowLeft size={15} />Back to library</button>}
 					{error && <div className="material-alert mt-6"><IconAlertCircle size={18} /><span className="flex-1">{error}</span><button onClick={() => void load(session, parent, page)} className="material-text-button">Retry</button></div>}
 					{loading && !items.length && !error && <div className="material-surface mt-7 rounded-xl p-8 text-sm material-muted">Loading entries…</div>}
 					{!loading && !error && <>
-						<div className="mt-7 grid w-full gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(150px, 220px))" }}>{items.map((item) => <EntityCard key={item.id} item={item} session={session} locale={locale} onOpen={() => openItem(item)} />)}{!items.length && <div className="material-surface col-span-full rounded-xl p-8 text-sm material-muted">No entries on this page.</div>}</div>
+						<div className="mt-7 grid w-full gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(150px, 220px))" }}>{items.map((item) => <EntityCard key={item.id} item={item} session={session} locale={locale} onOpen={() => openItem(item)} />)}{!items.length && <div className="material-surface col-span-full rounded-xl p-8 text-sm material-muted">{searchQuery ? "No matching entries." : "No entries on this page."}</div>}</div>
 						<div className="mt-6 flex items-center justify-between border-t material-divider pt-4"><span className="text-xs material-muted">Page {page} of {pageCount}</span><div className="flex gap-2"><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)} className="material-icon-button disabled:opacity-30" aria-label="Previous page"><IconChevronLeft size={16} /></button><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)} className="material-icon-button disabled:opacity-30" aria-label="Next page"><IconChevronRight size={16} /></button></div></div>
 					</>}
 				</>

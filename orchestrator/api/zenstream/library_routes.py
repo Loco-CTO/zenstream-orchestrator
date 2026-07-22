@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from app.config import Config
 from app.library import LibraryRuntime, LibraryStore, runtime
 from app.jobs import scheduler
 from app.models.admin import Admin
-from app.models.metadata import MetadataCache, MetadataCredentials
+from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, MetadataCredentials
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY, MetadataService, ProviderError, choose_image
 from app.logging_config import get_logger
 
@@ -123,6 +125,69 @@ def _hydration(item: dict, locale: str, metadata: dict | None) -> dict:
 
 def _metadata_state(item: dict, locale: str, metadata: dict | None) -> str:
     return _hydration(item, locale, metadata)["state"]
+
+
+def _search_text(value: str | None) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "").casefold()
+    return " ".join("".join(character if character.isalnum() else " " for character in normalized).split())
+
+
+def _trigrams(value: str) -> set[str]:
+    padded = f"  {value} "
+    return {padded[index:index + 3] for index in range(max(1, len(padded) - 2))}
+
+
+def _trigram_score(query: str, candidate: str) -> float:
+    query = _search_text(query)
+    candidate = _search_text(candidate)
+    if not query or not candidate:
+        return 0.0
+    query_grams = _trigrams(query)
+    candidate_grams = _trigrams(candidate)
+    score = (2 * len(query_grams & candidate_grams)) / (len(query_grams) + len(candidate_grams))
+    if query == candidate:
+        return 1.0
+    if candidate.startswith(query):
+        return max(score, 0.96)
+    if query in candidate:
+        return max(score, 0.9)
+    return score
+
+
+def _rank_library_item_ids(db, library_id: str, parent_id: str | None, locale: str, query: str) -> list[str]:
+    """Rank one library level using fuzzy trigrams over paths and localized titles."""
+    rows = db.execute(
+        """SELECT e.id,e.entity_type,e.relative_path,m.payload
+           FROM library_entities e
+           LEFT JOIN entity_provider_ids p ON p.entity_id=e.id
+           LEFT JOIN metadata_cache m ON m.provider=p.provider
+             AND m.entity_type=e.entity_type AND m.provider_id=p.provider_id AND m.locale=?
+           WHERE e.library_id=? AND e.parent_id IS ?""",
+        ((locale or "en").lower(), library_id, parent_id),
+    )
+    candidates: dict[str, dict] = {}
+    for entity_id, entity_type, relative_path, payload_text in rows:
+        candidate = candidates.setdefault(entity_id, {"type": entity_type, "path": relative_path or "", "values": []})
+        if payload_text:
+            try:
+                payload = json.loads(payload_text)
+            except (TypeError, ValueError):
+                payload = {}
+            if payload.get("_imageLanguageSchema") == IMAGE_LANGUAGE_SCHEMA and payload.get("title"):
+                candidate["values"].append(str(payload["title"]))
+    normalized_query = _search_text(query)
+    if not normalized_query:
+        return []
+    threshold = 0.18 if len(normalized_query) <= 4 else 0.24
+    ranked = []
+    for entity_id, candidate in candidates.items():
+        path = candidate["path"]
+        values = [path, Path(path).stem, *candidate["values"]]
+        score = max((_trigram_score(normalized_query, value) for value in values), default=0.0)
+        if score >= threshold:
+            ranked.append((-score, candidate["type"], path.casefold(), entity_id))
+    ranked.sort()
+    return [value[3] for value in ranked]
 
 
 @router.get("/metadata/providers")
@@ -322,15 +387,21 @@ async def terminate_scheduled_job(job_id: str, run_id: str, Username: str | None
 
 
 @router.get("/libraries/{library_id}/items")
-async def list_items(library_id: str, parentId: str | None = Query(None), locale: str = Query("en"), page: int = Query(1, ge=1), pageSize: int = Query(40, ge=1, le=100), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def list_items(library_id: str, parentId: str | None = Query(None), locale: str = Query("en"), query: str = Query("", max_length=200), page: int = Query(1, ge=1), pageSize: int = Query(40, ge=1, le=100), Username: str | None = Header(None), TOKEN: str | None = Header(None)):
     require_admin(Username, TOKEN)
     if not store.get(library_id):
         raise HTTPException(404, "Library not found.")
     parentId = parentId or None
-    params = [library_id, parentId]
-    where = "library_id=? AND parent_id IS ?"
-    total = store.db.execute(f"SELECT COUNT(*) FROM library_entities WHERE {where}", params)[0][0]
-    rows = store.db.execute(f"SELECT id FROM library_entities WHERE {where} ORDER BY entity_type, relative_path COLLATE NOCASE LIMIT ? OFFSET ?", params + [pageSize, (page - 1) * pageSize])
+    query = query.strip()
+    if query:
+        ranked_ids = _rank_library_item_ids(store.db, library_id, parentId, locale, query)
+        total = len(ranked_ids)
+        rows = [(entity_id,) for entity_id in ranked_ids[(page - 1) * pageSize:page * pageSize]]
+    else:
+        params = [library_id, parentId]
+        where = "library_id=? AND parent_id IS ?"
+        total = store.db.execute(f"SELECT COUNT(*) FROM library_entities WHERE {where}", params)[0][0]
+        rows = store.db.execute(f"SELECT id FROM library_entities WHERE {where} ORDER BY entity_type, relative_path COLLATE NOCASE LIMIT ? OFFSET ?", params + [pageSize, (page - 1) * pageSize])
     items = []
     missing = []
     for row in rows:
@@ -350,7 +421,7 @@ async def list_items(library_id: str, parentId: str | None = Query(None), locale
         for item in items:
             item["hydration"] = _hydration(item, locale, item["metadata"])
             item["metadataError"] = item["hydration"].get("error")
-    return {"items": items, "page": page, "pageSize": pageSize, "total": total}
+    return {"items": items, "page": page, "pageSize": pageSize, "total": total, "query": query}
 
 
 @router.get("/library-items/{entity_id}")

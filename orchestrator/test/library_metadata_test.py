@@ -53,7 +53,9 @@ class LibraryMetadataTest(unittest.TestCase):
             MetadataLanguageSettings.normalize(["ja", "zh_tw", "en", "ja"]),
             ["ja", "zh-TW", "en"],
         )
-        self.assertEqual(MetadataLanguageSettings.normalize(["ja", "zh_tw"]), ["ja", "zh-TW"])
+        self.assertEqual(
+            MetadataLanguageSettings.normalize(["ja", "zh_tw"]), ["ja", "zh-TW"]
+        )
         with self.assertRaises(ValueError):
             MetadataLanguageSettings.normalize([])
 
@@ -157,6 +159,75 @@ class LibraryMetadataTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 2
+                )
+        finally:
+            db.close()
+
+    def test_media_file_hash_reuses_row_and_only_content_changes_probe(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                movie = root / "Movie"
+                movie.mkdir()
+                video = movie / "Movie.mkv"
+                video.write_bytes(b"same content")
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                file_id, first_hash, first_mtime = db.execute(
+                    "SELECT id,file_hash,modified_ns FROM media_files"
+                )[0]
+
+                with patch("app.playback.PlaybackManager") as playback:
+                    os.utime(video, ns=(first_mtime + 1, first_mtime + 1))
+                    self._prepare_incremental_scan(scanner)
+                    scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                    self.assertEqual(
+                        db.execute("SELECT id,file_hash FROM media_files")[0],
+                        (file_id, first_hash),
+                    )
+                    playback.return_value.probe_entity.assert_not_called()
+
+                    video.write_bytes(b"changed content")
+                    self._prepare_incremental_scan(scanner)
+                    scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                    self.assertEqual(
+                        db.execute("SELECT id FROM media_files")[0][0], file_id
+                    )
+                    playback.return_value.probe_entity.assert_called_once()
+        finally:
+            db.close()
+
+    def test_renamed_movie_preserves_entity_and_file_identity(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                original = root / "Original"
+                original.mkdir()
+                video = original / "Movie.mkv"
+                video.write_bytes(b"stable identity")
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                old_entity, old_file = db.execute(
+                    "SELECT e.id,f.id FROM library_entities e JOIN media_files f ON f.entity_id=e.id"
+                )[0]
+
+                renamed = root / "Renamed"
+                original.rename(renamed)
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                scanner._reconcile_moved_entities("library-1", root)
+                scanner._prune_missing_entities("library-1", root)
+
+                self.assertEqual(
+                    db.execute("SELECT id,relative_path FROM library_entities")[0],
+                    (old_entity, "Renamed"),
+                )
+                self.assertEqual(
+                    db.execute("SELECT id,relative_path FROM media_files")[0],
+                    (old_file, "Renamed/Movie.mkv"),
                 )
         finally:
             db.close()
@@ -846,11 +917,21 @@ class LibraryMetadataTest(unittest.TestCase):
             "en",
             {"title": "Gintama - Mr. Ginpachi's Zany Class", "images": []},
         )
-        MetadataSearchProjection(db).project("tvdb", "series", "1", "en", {"title": "Gintama - Mr. Ginpachi's Zany Class"})
+        MetadataSearchProjection(db).project(
+            "tvdb",
+            "series",
+            "1",
+            "en",
+            {"title": "Gintama - Mr. Ginpachi's Zany Class"},
+        )
         cache.put("tvdb", "series", "1", "ja", {"title": "銀魂", "images": []})
-        MetadataSearchProjection(db).project("tvdb", "series", "1", "ja", {"title": "銀魂"})
+        MetadataSearchProjection(db).project(
+            "tvdb", "series", "1", "ja", {"title": "銀魂"}
+        )
         cache.put("tvdb", "series", "2", "en", {"title": "07-Ghost", "images": []})
-        MetadataSearchProjection(db).project("tvdb", "series", "2", "en", {"title": "07-Ghost"})
+        MetadataSearchProjection(db).project(
+            "tvdb", "series", "2", "en", {"title": "07-Ghost"}
+        )
 
         self.assertEqual(
             library_routes._rank_library_item_ids(

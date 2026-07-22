@@ -272,6 +272,32 @@ async def admin_logout(
     Admin(username).logout(token)
 
 
+@app.get("/api/admin/profile")
+async def admin_profile(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    username, _ = _admin_headers(Username, TOKEN)
+    profile = Admin(username).profile()
+    if not profile:
+        raise HTTPException(404, "Administrator account not found.")
+    return profile
+
+
+@app.patch("/api/admin/profile")
+async def admin_update_profile(
+    New_Username: str | None = Header(None),
+    New_Password: str | None = Header(None),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    username, token = _admin_headers(Username, TOKEN)
+    try:
+        result = Admin(username).update_profile(New_Username, New_Password, token)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return {"username": result["username"]}
+
+
 @app.get("/api/admin/overview")
 async def admin_overview(
     Username: str | None = Header(None), TOKEN: str | None = Header(None)

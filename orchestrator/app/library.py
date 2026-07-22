@@ -728,25 +728,50 @@ class LibraryScanner:
                         "UPDATE library_entities SET relative_path=?,parent_id=?,season_number=?,episode_number=?,episode_end_number=?,disc_number=?,track_number=?,updated_at=? WHERE id=?",
                         (*new_values, now(), old_id),
                     )
-                    # New rows contain the current path. Keep the old entity's
-                    # provider IDs and playback state, but attach its files to
-                    # the stable entity identity.
-                    cursor.execute("DELETE FROM media_files WHERE entity_id=?", (old_id,))
-                    cursor.execute("UPDATE media_files SET entity_id=? WHERE entity_id=?", (old_id, new_id))
                     tables = {
                         row[0]
                         for row in cursor.execute(
                             "SELECT name FROM sqlite_master WHERE type='table'"
                         )
                     }
+                    old_files = list(
+                        cursor.execute(
+                            "SELECT id,relative_path,role,language,flags,size,modified_ns,file_hash FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
+                            (old_id,),
+                        )
+                    ) if "media_files" in tables else []
+                    new_files = list(
+                        cursor.execute(
+                            "SELECT id,relative_path,role,language,flags,size,modified_ns,file_hash FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
+                            (new_id,),
+                        )
+                    ) if "media_files" in tables else []
+                    # Keep media-file IDs where the moved entity has the same
+                    # role inventory. This also keeps existing probe sources
+                    # attached to the stable file identity.
+                    paired = min(len(old_files), len(new_files))
+                    for index in range(paired):
+                        old_file, new_file = old_files[index], new_files[index]
+                        if old_file[2] != new_file[2]:
+                            continue
+                        cursor.execute(
+                            "UPDATE media_files SET relative_path=?,role=?,language=?,flags=?,size=?,modified_ns=?,file_hash=? WHERE id=?",
+                            (*new_file[1:8], old_file[0]),
+                        )
+                        if "media_sources" in tables:
+                            cursor.execute("DELETE FROM media_sources WHERE media_file_id=?", (new_file[0],))
+                        cursor.execute("DELETE FROM media_files WHERE id=?", (new_file[0],))
+                    for old_file in old_files[paired:]:
+                        cursor.execute("DELETE FROM media_files WHERE id=?", (old_file[0],))
+                    for new_file in new_files[paired:]:
+                        cursor.execute("UPDATE media_files SET entity_id=? WHERE id=?", (old_id, new_file[0]))
                     if "media_sources" in tables:
-                        cursor.execute("DELETE FROM media_sources WHERE entity_id=?", (old_id,))
                         cursor.execute("UPDATE media_sources SET entity_id=? WHERE entity_id=?", (old_id, new_id))
                     if "collection_members" in tables:
                         cursor.execute("UPDATE collection_members SET source_entity_id=? WHERE source_entity_id=?", (old_id, new_id))
                     if "user_item_state" in tables:
                         cursor.execute(
-                            "DELETE FROM user_item_state WHERE entity_id=? AND EXISTS (SELECT 1 FROM user_item_state current WHERE current.entity_id=? AND current.user_id=user_item_state.user_id)",
+                            "DELETE FROM user_item_state WHERE entity_id=? AND user_id IN (SELECT user_id FROM user_item_state WHERE entity_id=?)",
                             (new_id, old_id),
                         )
                         cursor.execute("UPDATE user_item_state SET entity_id=? WHERE entity_id=?", (old_id, new_id))

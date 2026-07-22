@@ -36,14 +36,6 @@ type Item = {
 	relativePath?: string;
 	parentId?: string | null;
 	metadata?: Metadata | null;
-	metadataState?: "ready" | "queued" | "running" | "error";
-	metadataError?: string | null;
-	hydration?: {
-		state?: string;
-		error?: string | null;
-		details?: string | null;
-		attempts?: number;
-	};
 	matchStatus: string;
 	providerIds: {
 		provider: string;
@@ -88,7 +80,6 @@ type Navigable = {
 };
 type CardItem = Navigable & {
 	metadata?: Metadata | null;
-	metadataState?: Item["metadataState"];
 	matchStatus?: string;
 	seasonNumber?: number;
 	episodeNumber?: number;
@@ -258,23 +249,6 @@ function LibraryViewPage() {
 		if (session && page !== 1 && navigation.length === 0)
 			void load(session, parent, page);
 	}, [load, navigation.length, page, parent, session]);
-
-	useEffect(() => {
-		if (
-			!session ||
-			navigation.length > 0 ||
-			!items.some(
-				(item) =>
-					item.metadataState === "queued" || item.metadataState === "running",
-			)
-		)
-			return;
-		const timer = window.setInterval(
-			() => void load(session, parent, page),
-			3000,
-		);
-		return () => window.clearInterval(timer);
-	}, [items, load, navigation.length, page, parent, session]);
 
 	useEffect(() => {
 		const onKeyDown = (event: KeyboardEvent) => {
@@ -502,9 +476,7 @@ function EntityCard({
 	onOpen: () => void;
 }) {
 	const label = item.displayName || item.relativePath || item.type;
-	const metadataPending = Boolean(
-		item.metadataState && item.metadataState !== "ready",
-	);
+	const metadataPending = !item.metadata;
 	return (
 		<button
 			type="button"
@@ -688,7 +660,6 @@ function EntityDetailView({
 	const [retry, setRetry] = useState(0);
 	useEffect(() => {
 		const controller = new AbortController();
-		let timer: number | undefined;
 		let cancelled = false;
 		const load = () =>
 			adminFetch(
@@ -701,9 +672,6 @@ function EntityDetailView({
 					const value = (await response.json()) as Item;
 					if (cancelled) return;
 					setDetail(value);
-					const state = value.hydration?.state || value.metadataState;
-					if ((state === "queued" || state === "running") && !cancelled)
-						timer = window.setTimeout(load, 1500);
 				})
 				.catch((caught) => {
 					if (!cancelled && (caught as Error).name !== "AbortError")
@@ -719,14 +687,10 @@ function EntityDetailView({
 		return () => {
 			cancelled = true;
 			controller.abort();
-			if (timer) window.clearTimeout(timer);
 		};
 	}, [entry.id, locale, retry, session]);
 	const children = detail?.children || [];
-	const metadataPending =
-		!detail?.metadata ||
-		detail.metadataState === "queued" ||
-		detail.metadataState === "running";
+	const metadataPending = !detail?.metadata;
 	const childLabel =
 		detail?.type === "series"
 			? "Seasons"

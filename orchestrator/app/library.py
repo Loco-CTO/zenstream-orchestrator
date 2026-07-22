@@ -663,6 +663,10 @@ class LibraryScanner:
         self._scan_delta["removed"].update(missing)
 
     def _entity_fingerprint(self, entity_id: str) -> str | None:
+        if "file_hash" not in {
+            row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
+        }:
+            return None
         rows = self.db.execute(
             "SELECT role,file_hash FROM media_files WHERE entity_id=? AND role IN ('video','audio') ORDER BY role,relative_path",
             (entity_id,),
@@ -673,6 +677,10 @@ class LibraryScanner:
 
     def _reconcile_moved_entities(self, library_id: str, root: Path) -> None:
         """Match newly discovered leaf entities to vanished paths by unique hash."""
+        if "file_hash" not in {
+            row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
+        }:
+            return
         leaf_types = {"movie", "episode", "track", "release"}
         new_ids = [
             entity_id
@@ -835,14 +843,14 @@ class LibraryScanner:
             for locale in locales:
                 cached = self.db.execute(
                     "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
-                    (provider, identifier_type, str(provider_id), locale),
+                    (provider, entity_type, str(provider_id), locale),
                 )
-                if cached and entity_id not in self._scan_provider_identity_changed and entity_id not in self._scan_delta["added"] and entity_id not in self._scan_delta["changed"]:
+                if cached and entity_id not in self._scan_provider_identity_changed and entity_id not in self._scan_delta["added"]:
                     continue
                 try:
                     ingest.ingest_locale(
                         provider,
-                        identifier_type,
+                        entity_type,
                         str(provider_id),
                         locale,
                         force=False,
@@ -910,7 +918,7 @@ class LibraryScanner:
                 (entity_id,),
             )
         ]
-        if normalized != current:
+        if set(normalized) != set(current):
             self.db.execute("DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,))
             for provider, identifier_type, value in normalized:
                 self.db.execute(
@@ -1649,6 +1657,16 @@ class LibraryScanner:
             PlaybackManager().probe_entity(entity_id)
         return result
 
+    @staticmethod
+    def _walk_paths(directory: Path):
+        def traversal_error(error):
+            raise error
+
+        for current, directories, filenames in os.walk(directory, onerror=traversal_error):
+            current_path = Path(current)
+            yield from (current_path / name for name in directories)
+            yield from (current_path / name for name in filenames)
+
     def _scan_movies(
         self,
         library_id: str,
@@ -1668,7 +1686,7 @@ class LibraryScanner:
             entity = self._entity(
                 library_id, None, "movie", relative(str(root), str(entry))
             )
-            files = list(entry.rglob("*")) if entry.is_dir() else [entry]
+            files = list(self._walk_paths(entry)) if entry.is_dir() else [entry]
             discovered_ids = list(provider_ids(entry.name))
             for nfo in (path for path in files if path.suffix.lower() == ".nfo"):
                 discovered_ids.extend(parse_nfo_ids(nfo))
@@ -1732,7 +1750,7 @@ class LibraryScanner:
                 episode_paths = (
                     season_dir.iterdir()
                     if season_dir == series_dir
-                    else season_dir.rglob("*")
+                    else self._walk_paths(season_dir)
                 )
                 for media in episode_paths:
                     self._check_termination(should_terminate)

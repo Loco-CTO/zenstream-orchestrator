@@ -18,7 +18,7 @@ from app.config import Config
 from app.library import LibraryRuntime, LibraryStore, runtime
 from app.jobs import scheduler
 from app.models.admin import Admin
-from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, MetadataCredentials
+from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, MetadataCredentials, MetadataLanguageSettings
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY, MetadataService, ProviderError, choose_image
 from app.logging_config import get_logger
 
@@ -120,7 +120,7 @@ def _hydration(item: dict, locale: str, metadata: dict | None) -> dict:
         return {"state": "ready" if metadata else row[0], "error": row[1], "details": row[2], "attempts": row[3], "requestedAt": row[4], "startedAt": row[5], "finishedAt": row[6]}
     if metadata:
         return {"state": "ready", "error": None, "details": None, "attempts": 0}
-    return {"state": "queued" if item.get("providerIds") else "error", "error": None if item.get("providerIds") else "No provider IDs were resolved during the scan.", "details": None, "attempts": 0}
+    return {"state": "unavailable" if item.get("providerIds") else "error", "error": None if item.get("providerIds") else "No provider IDs were resolved during the scan.", "details": None, "attempts": 0}
 
 
 def _metadata_state(item: dict, locale: str, metadata: dict | None) -> str:
@@ -194,6 +194,24 @@ def _rank_library_item_ids(db, library_id: str, parent_id: str | None, locale: s
 async def provider_status(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
     require_admin(Username, TOKEN)
     return credentials.configured()
+
+
+@router.get("/metadata/languages")
+async def metadata_languages(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    require_admin(Username, TOKEN)
+    return {"locales": MetadataLanguageSettings().get(), "options": await asyncio.to_thread(MetadataService().language_options)}
+
+
+@router.put("/metadata/languages")
+async def update_metadata_languages(request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    require_admin(Username, TOKEN)
+    data = await request.json()
+    try:
+        locales = MetadataLanguageSettings().set(data.get("locales"))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    run = scheduler.enqueue_metadata_refresh()
+    return {"locales": locales, "backfill": run}
 
 
 @router.put("/metadata/providers/{provider}")
@@ -403,24 +421,14 @@ async def list_items(library_id: str, parentId: str | None = Query(None), locale
         total = store.db.execute(f"SELECT COUNT(*) FROM library_entities WHERE {where}", params)[0][0]
         rows = store.db.execute(f"SELECT id FROM library_entities WHERE {where} ORDER BY entity_type, relative_path COLLATE NOCASE LIMIT ? OFFSET ?", params + [pageSize, (page - 1) * pageSize])
     items = []
-    missing = []
     for row in rows:
         item = _entity(row[0], locale)
         item["metadata"] = _metadata_for(item, locale, False, fallback=False)
         item["metadataState"] = _metadata_state(item, locale, item["metadata"])
-        if not item["metadata"] and item["providerIds"]:
-            missing.append(item["id"])
         items.append(item)
-    if missing:
-        scheduler.enqueue_metadata_hydration(missing, locale)
-        for item in items:
-            item["hydration"] = _hydration(item, locale, item["metadata"])
-            item["metadataState"] = item["hydration"]["state"]
-            item["metadataError"] = item["hydration"].get("error")
-    else:
-        for item in items:
-            item["hydration"] = _hydration(item, locale, item["metadata"])
-            item["metadataError"] = item["hydration"].get("error")
+    for item in items:
+        item["hydration"] = _hydration(item, locale, item["metadata"])
+        item["metadataError"] = item["hydration"].get("error")
     return {"items": items, "page": page, "pageSize": pageSize, "total": total, "query": query}
 
 
@@ -429,14 +437,6 @@ async def get_item(entity_id: str, locale: str = Query("en"), Username: str | No
     require_admin(Username, TOKEN)
     item = _entity(entity_id, locale, include_metadata=True)
     item["metadata"] = await asyncio.to_thread(_metadata_for, item, locale, False, False)
-    if item["providerIds"] or item.get("children"):
-        # Opening a detail view hydrates the selected item and its visible
-        # direct children immediately. The queue owns the worker; this is not
-        # represented as a scheduled task. Ready rows are coalesced by the
-        # queue and are not refetched.
-        requested = ([entity_id] if item["providerIds"] and not item["metadata"] else []) + [child["id"] for child in item.get("children", [])]
-        if requested:
-            scheduler.enqueue_metadata_hydration(requested, locale)
     item["hydration"] = _hydration(item, locale, item["metadata"])
     item["metadataState"] = item["hydration"]["state"]
     item["metadataError"] = item["hydration"].get("error")
@@ -503,13 +503,11 @@ async def get_image(entity_id: str, imageType: str = Query("Primary"), locale: s
             path = Path(library["directory"]) / relative_path
             if path.is_file():
                 return FileResponse(path)
-    # Library previews must never turn a cache miss into inline provider work.
-    # A page can request dozens of images at once; slow provider hydration would
-    # occupy the browser's connection pool and make dashboard navigation wait.
+    # Library previews must never turn a cache miss into provider work. Scans
+    # and the administrator-triggered backfill own metadata population.
     metadata = await asyncio.to_thread(_metadata_for, item, locale, False, False)
     if not metadata:
         if item.get("providerIds"):
-            scheduler.enqueue_metadata_hydration([entity_id], locale)
             logger.info("image pending entity_id=%s locale=%s image_type=%s", entity_id, locale, imageType)
             return Response(status_code=202, headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"})
         else:

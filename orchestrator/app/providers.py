@@ -717,6 +717,18 @@ class MetadataService:
         self.credentials = MetadataCredentials()
         self.cache = MetadataCache()
 
+    def language_options(self) -> list[dict[str, str]]:
+        """Return canonical metadata locales known by configured providers."""
+        values = {"en", "ja", "zh-CN", "zh-TW", "ko", "fr", "de", "es", "it", "pt", "ru"}
+        for provider, client_type in (("tmdb", TMDBClient), ("tvdb", TVDBClient)):
+            try:
+                client = self.client(provider)
+                client._language_code("en")
+                values.update(client_type._language_catalog.provider_to_canonical.values())
+            except Exception:
+                logger.debug("metadata language catalog unavailable provider=%s", provider, exc_info=True)
+        return [{"value": value, "label": value} for value in sorted(values, key=lambda item: (item != "en", item.lower()))]
+
     @classmethod
     def _lock_for(cls, provider: str, entity_type: str, provider_id: str, locale: str) -> threading.Lock:
         key = (provider, entity_type, provider_id, locale or "en")

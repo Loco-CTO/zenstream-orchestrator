@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from app.config import Config
 from app.library import JobTerminated, runtime as library_runtime
 from app.providers import ProviderError, MetadataService
+from app.models.metadata import MetadataLanguageSettings
 from app.logging_config import get_logger
 
 
@@ -171,13 +172,16 @@ class MetadataRefreshJob:
 
     def run(self, run_id: str, definition: dict, should_terminate=None) -> None:
         should_terminate = should_terminate or (lambda: False)
+        locales = MetadataLanguageSettings().get()
         rows = self.db.execute(
-            "SELECT DISTINCT provider,entity_type,provider_id,locale FROM metadata_cache "
-            "WHERE provider IN ('tmdb','tvdb','musicbrainz') ORDER BY provider,entity_type,provider_id,locale"
+            "SELECT DISTINCT p.provider,e.entity_type,p.provider_id "
+            "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
+            "WHERE p.provider IN ('tmdb','tvdb','musicbrainz') ORDER BY p.provider,e.entity_type,p.provider_id"
         )
         items = {}
-        for provider, entity_type, provider_id, locale in rows:
-            items.setdefault((entity_type, provider_id, locale), []).append(provider)
+        for provider, entity_type, provider_id in rows:
+            for locale in locales:
+                items.setdefault((entity_type, provider_id, locale), []).append(provider)
         self.store.update_run(run_id, state="running", started_at=now(), thread_name=threading.current_thread().name, progress_total=len(items), message="Refreshing provider metadata")
         service = MetadataService()
         completed = 0
@@ -377,6 +381,16 @@ class JobScheduler:
 
     def enqueue_metadata_hydration(self, entity_ids: list[str], locale: str) -> dict:
         return self.hydration.enqueue(entity_ids, locale)
+
+    def enqueue_metadata_refresh(self) -> dict:
+        definition = self.store.by_key("metadata_refresh")
+        if not definition:
+            self.store.ensure_defaults()
+            definition = self.store.by_key("metadata_refresh")
+        run, _ = self.store.create_or_get_active_run(definition)
+        with self.condition:
+            self.condition.notify_all()
+        return run
 
     def terminate(self, definition_id: str, run_id: str) -> dict | None:
         runs = [run for run in self.store.runs(definition_id, 100) if run["id"] == run_id]

@@ -427,6 +427,8 @@ class LibraryScanner:
                 identifier_type = "movie" if entity_type == "movie" else "series" if entity_type == "series" else entity_type
                 values.append((value["provider"], identifier_type, value["id"]))
             self._ids(entity_id, values)
+            for value in result["providerIds"]:
+                self._fetch_configured_locales(service, value["provider"], entity_type, str(value["id"]), required=True)
             self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), entity_id))
             if entity_type == "series":
                 self._derive_tmdb_child_ids(entity_id)
@@ -486,15 +488,25 @@ class LibraryScanner:
         by_provider = {row[0]: row[1] for row in provider_rows}
         if not by_provider.get(primary_provider):
             raise ProviderError(f"Resolved series {series_id} has no TVDB ID")
+        from app.models.metadata import MetadataLanguageSettings
+        locales = MetadataLanguageSettings().get()
         for provider, provider_id in by_provider.items():
             if provider not in {"tvdb", "tmdb"}:
                 continue
-            try:
-                aggregate = service.aggregate_series(provider, provider_id, "en")
-            except Exception as error:
-                if provider == primary_provider:
-                    raise
-                logger.warning("secondary series aggregation failed series_id=%s provider=%s: %s", series_id, provider, error)
+            aggregate = None
+            for locale in locales:
+                try:
+                    current = service.aggregate_series(provider, provider_id, locale)
+                    aggregate = aggregate or current
+                except Exception as error:
+                    if locale == "en" and provider == primary_provider:
+                        raise
+                    logger.warning("series aggregation failed series_id=%s provider=%s locale=%s: %s", series_id, provider, locale, error)
+                    continue
+                if locale != "en":
+                    continue
+                aggregate = current
+            if not aggregate:
                 continue
             mapped_seasons = {}
             for metadata in aggregate.get("seasons", []):
@@ -574,20 +586,39 @@ class LibraryScanner:
                 provider_id = next((row[1] for row in provider_rows if row[0] == provider), None)
                 if not provider_id:
                     continue
-                try:
-                    normalized = service.fetch(provider, entity_type, provider_id, "en", force=False)
-                    fetched = True
-                    if provider == required:
-                        required_succeeded = True
-                    self._persist_normalized_ids(entity_id, entity_type, normalized)
-                    self._persist_child_ids(entity_id, normalized)
-                except Exception as error:
-                    errors.append(f"{provider}: {type(error).__name__}: {error}")
-                    logger.exception("child metadata seed failed entity_id=%s type=%s provider=%s provider_id=%s", entity_id, entity_type, provider, provider_id)
+                from app.models.metadata import MetadataLanguageSettings
+                for locale in MetadataLanguageSettings().get():
+                    try:
+                        normalized = service.fetch(provider, entity_type, provider_id, locale, force=False)
+                        fetched = True
+                        if provider == required and locale == "en":
+                            required_succeeded = True
+                        self._persist_normalized_ids(entity_id, entity_type, normalized)
+                        self._persist_child_ids(entity_id, normalized)
+                    except Exception as error:
+                        errors.append(f"{provider}/{locale}: {type(error).__name__}: {error}")
+                        logger.warning("child metadata seed failed entity_id=%s type=%s provider=%s provider_id=%s locale=%s: %s", entity_id, entity_type, provider, provider_id, locale, error)
             if not fetched or (required and not required_succeeded):
                 raise ValueError(f"Metadata resolution failed for {entity_type} '{relative_path}': required provider {required or 'provider'} could not be seeded; {'; '.join(errors) or 'no usable provider metadata'}")
             self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?", (now(), entity_id))
             self.store.update_job(job_id, progress_current=index, message=f"Seeded {entity_type} {relative_path}")
+
+    @staticmethod
+    def _fetch_configured_locales(service, provider: str, entity_type: str, provider_id: str, required: bool = False) -> None:
+        from app.models.metadata import MetadataLanguageSettings
+
+        if provider not in {"tmdb", "tvdb", "musicbrainz"}:
+            return
+
+        errors = []
+        for locale in MetadataLanguageSettings().get():
+            try:
+                service.fetch(provider, entity_type, provider_id, locale, force=False)
+            except Exception as error:
+                errors.append(f"{locale}: {type(error).__name__}: {error}")
+                logger.warning("localized metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s: %s", provider, entity_type, provider_id, locale, error)
+        if required and errors and len(errors) == len(MetadataLanguageSettings().get()):
+            raise ValueError(f"No metadata locale could be fetched for {provider} {entity_type} {provider_id}: {'; '.join(errors)}")
 
     def _persist_normalized_ids(self, entity_id: str, entity_type: str, normalized: dict) -> None:
         values = []
@@ -845,7 +876,13 @@ class LibraryScanner:
                     self.db.execute("INSERT INTO collection_members(collection_entity_id,source_entity_id,position) VALUES(?,?,?)", (collection, source_entity, position))
                 # Store a lightweight localized seed; full metadata remains the provider cache.
                 title = base.get("name") or data.get("name") or f"Collection {list_id}"
-                service.cache.put("tvdb", "collection", list_id, "en", {"title": title, "overview": data.get("overview"), "provider": "tvdb", "providerId": list_id, "images": []})
+                from app.models.metadata import MetadataLanguageSettings
+                for locale in MetadataLanguageSettings().get():
+                    try:
+                        normalized = service.fetch("tvdb", "collection", list_id, locale, force=False)
+                    except Exception:
+                        normalized = {"title": title, "overview": data.get("overview"), "provider": "tvdb", "providerId": list_id, "images": []}
+                    service.cache.put("tvdb", "collection", list_id, locale, normalized)
                 count += 1
                 self.store.update_job(job_id, progress_current=count, message=f"Derived {title}")
             self.store.update_job(job_id, state="completed", progress_current=count, progress_total=len(lists), finished_at=now(), message=f"Derived {count} official collections")

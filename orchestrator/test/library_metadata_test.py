@@ -8,11 +8,16 @@ from unittest.mock import MagicMock, patch
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import EPISODE_RE, LibraryRuntime, LibraryScanner, LibraryStore, guess_media, provider_ids
-from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache
+from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, MetadataLanguageSettings
 from app.providers import BANNER, PRIMARY, MetadataService, ProviderError, ProviderLanguageCatalog, TMDBClient, TVDBClient, _select_match, choose_image, _tvdb_children, _tvdb_images
 
 
 class LibraryMetadataTest(unittest.TestCase):
+    def test_metadata_languages_normalize_and_keep_english_first(self):
+        self.assertEqual(MetadataLanguageSettings.normalize(["ja", "zh_tw", "en", "ja"]), ["en", "ja", "zh-TW"])
+        with self.assertRaises(ValueError):
+            MetadataLanguageSettings.normalize([])
+
     def _scanner_db(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, parent_id TEXT, entity_type TEXT NOT NULL, relative_path TEXT, season_number INTEGER, episode_number INTEGER, episode_end_number INTEGER, disc_number INTEGER, track_number INTEGER, created_at TEXT, updated_at TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT, UNIQUE(library_id, entity_type, relative_path))")
@@ -297,7 +302,7 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.headers["retry-after"], "2")
         metadata.assert_called_once_with(item, "en", False, False)
-        hydration.assert_called_once_with(["entity-1"], "en")
+        hydration.assert_not_called()
 
     def test_local_image_names_are_matched_to_canonical_artwork_types(self):
         self.assertTrue(library_routes._local_image_for_type("Series/poster.jpg", "Primary"))

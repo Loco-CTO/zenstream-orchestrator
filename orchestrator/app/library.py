@@ -234,11 +234,9 @@ class LibraryStore:
         return self.get(library_id)  # type: ignore[return-value]
 
     def delete(self, library_id: str) -> bool:
-        library = self.get(library_id)
-        if not library:
-            return False
-        self.db.execute("DELETE FROM libraries WHERE id=?", (library_id,))
-        return True
+        from app.library_cleanup import cleanup_library
+
+        return cleanup_library(self.db, library_id)
 
     def set_scan_state(self, library_id: str, state: str, error: str | None = None, started: str | None = None, finished: str | None = None) -> None:
         self.db.execute(
@@ -304,6 +302,7 @@ class LibraryScanner:
                 count = self._scan_music(library_id, root, job_id, should_terminate)
             if library["type"] != "tv_series":
                 self._resolve_and_seed(library_id, library["type"], job_id, should_terminate)
+            self._fetch_seen_locales(should_terminate)
             self._prune_missing_entities(library_id)
             finished = now()
             self.store.update_job(job_id, state="completed", progress_current=count, progress_total=count, finished_at=finished, message=f"Indexed {count} entries")
@@ -355,15 +354,16 @@ class LibraryScanner:
         missing = [row[0] for row in rows if row[0] not in self._scan_seen_ids]
         if not missing:
             return
-        with self.db.transaction() as cursor:
-            cursor.executemany("DELETE FROM library_entities WHERE id=?", [(entity_id,) for entity_id in missing])
+        from app.library_cleanup import cleanup_entities
+
+        cleanup_entities(self.db, missing)
 
     def _remove_created_entities(self) -> None:
         if not self._scan_created_ids:
             return
-        with self.db.transaction() as cursor:
-            for entity_id in reversed(self._scan_created_ids):
-                cursor.execute("DELETE FROM library_entities WHERE id=?", (entity_id,))
+        from app.library_cleanup import cleanup_entities
+
+        cleanup_entities(self.db, list(reversed(self._scan_created_ids)))
         self._scan_created_ids = []
 
     def _needs_metadata(self, entity_id: str) -> bool:
@@ -371,6 +371,27 @@ class LibraryScanner:
         if not row or row[0][0] in {"unresolved", "failed"}:
             return True
         return not bool(self.db.execute("SELECT 1 FROM entity_provider_ids WHERE entity_id=? LIMIT 1", (entity_id,)))
+
+    def _fetch_seen_locales(self, should_terminate: Callable[[], bool]) -> None:
+        """Ensure rescans also populate newly configured locales for existing IDs."""
+        from app.models.metadata import MetadataLanguageSettings
+        from app.providers import MetadataService
+
+        service = MetadataService()
+        locales = MetadataLanguageSettings().get()
+        rows = self.db.execute(
+            "SELECT e.entity_type,p.provider,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.id IN ({})".format(",".join("?" * len(self._scan_seen_ids))),
+            list(self._scan_seen_ids),
+        ) if self._scan_seen_ids else []
+        for entity_type, provider, provider_id in rows:
+            self._check_termination(should_terminate)
+            if provider not in {"tmdb", "tvdb", "musicbrainz"}:
+                continue
+            for locale in locales:
+                try:
+                    service.fetch(provider, entity_type, str(provider_id), locale, force=False)
+                except Exception as error:
+                    logger.warning("rescan localized metadata failed entity_type=%s provider=%s provider_id=%s locale=%s: %s", entity_type, provider, provider_id, locale, error)
 
     def _ids(self, entity_id: str, values: Iterable[tuple[str, str, str]]) -> None:
         from app.providers import PRIMARY_PROVIDER_BY_ENTITY
@@ -557,8 +578,7 @@ class LibraryScanner:
             )
         else:
             rows = self.db.execute("SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND parent_id IS NOT NULL ORDER BY length(relative_path),relative_path", (library_id,))
-        created_ids = set(self._scan_created_ids)
-        rows = [row for row in rows if row[0] in self._scan_seen_ids and (row[0] in created_ids or self._needs_metadata(row[0]))]
+        rows = [row for row in rows if row[0] in self._scan_seen_ids]
         self.store.update_job(job_id, progress_total=len(rows), progress_current=0, message="Seeding child metadata")
         for index, (entity_id, entity_type, relative_path, row_parent_id, season_number, episode_number) in enumerate(rows, start=1):
             self._check_termination(should_terminate)
@@ -829,8 +849,9 @@ class LibraryScanner:
         sources = self.store.sources(library_id)
         self.store.set_scan_state(library_id, "scanning", started=now(), error=None)
         self.store.update_job(job_id, state="running", started_at=now(), message="Deriving collections")
-        with self.db.transaction() as cursor:
-            cursor.execute("DELETE FROM library_entities WHERE library_id=?", (library_id,))
+        from app.library_cleanup import cleanup_entities
+
+        cleanup_entities(self.db, [row[0] for row in self.db.execute("SELECT id FROM library_entities WHERE library_id=?", (library_id,))])
         try:
             from app.providers import MetadataService, ProviderError, TVDBClient
 

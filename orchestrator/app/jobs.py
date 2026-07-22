@@ -81,7 +81,7 @@ class JobStore:
         definition = self.ensure("metadata_refresh", "Refresh metadata", "Fetch provider metadata and artwork for indexed IDs.", "metadata_refresh", 1440, {"locales": ["en"], "batchSize": 50})
         if definition["lastRunAt"] is None:
             self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (now(), now(), definition["id"]))
-        cleanup = self.ensure("metadata_cleanup", "Clean orphaned library data", "Remove deleted-library inventory, metadata, hydration, and cached artwork leftovers.", "metadata_cleanup", 10080, {})
+        cleanup = self.ensure("metadata_cleanup", "Clean orphaned library data", "Remove deleted-library inventory, metadata, and cached artwork leftovers.", "metadata_cleanup", 10080, {})
         if cleanup["lastRunAt"] is None:
             self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (now(), now(), cleanup["id"]))
 
@@ -224,116 +224,6 @@ class MetadataCleanupJob:
         self.store.update_run(run_id, state="completed", progress_current=1, progress_total=1, finished_at=now(), message="Orphaned library data cleaned")
 
 
-def _hydrate_request(db, service: MetadataService, entity_id: str, locale: str) -> None:
-    logger.info("hydration started entity_id=%s locale=%s", entity_id, locale)
-    db.execute("UPDATE metadata_hydration_requests SET state='running',attempts=attempts+1,started_at=?,last_error=NULL WHERE entity_id=? AND locale=?", (now(), entity_id, locale))
-    entity_rows = db.execute("SELECT entity_type FROM library_entities WHERE id=?", (entity_id,))
-    if not entity_rows or isinstance(entity_rows, Exception):
-        reason = "Library entity no longer exists" if not isinstance(entity_rows, Exception) else f"Database lookup failed: {type(entity_rows).__name__}: {entity_rows}"
-        details = {"entityId": entity_id, "locale": locale, "operation": "hydration_entity_lookup", "exception": type(entity_rows).__name__ if isinstance(entity_rows, Exception) else "EntityMissing"}
-        db.execute("UPDATE metadata_hydration_requests SET state='error',last_error=?,error_details=?,finished_at=? WHERE entity_id=? AND locale=?", (reason, json.dumps(details), now(), entity_id, locale))
-        return
-    entity_type = entity_rows[0][0]
-    provider_rows = db.execute("SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider", (entity_id,))
-    succeeded = False
-    errors = []
-    priorities = {"series": ["tvdb", "tmdb"], "episode": ["tvdb", "tmdb"], "season": ["tvdb", "tmdb"], "movie": ["tmdb", "tvdb"], "collection": ["tvdb"], "artist": ["musicbrainz"], "release": ["musicbrainz"], "track": ["musicbrainz"]}.get(entity_type, [])
-    ordered = sorted(provider_rows, key=lambda value: priorities.index(value[0]) if value[0] in priorities else 99)
-    required = priorities[0] if priorities else None
-    if not provider_rows:
-        errors.append({"provider": required or "unknown", "providerId": None, "error": "No provider ID was resolved during the scan", "required": True})
-    for provider, provider_id in ordered:
-        try:
-            service.fetch(provider, entity_type, provider_id, locale, force=False)
-            if provider == required or required is None:
-                succeeded = True
-        except (ProviderError, ValueError) as error:
-            errors.append({"provider": provider, "providerId": provider_id, "error": f"{type(error).__name__}: {error}", "required": provider == required})
-            logger.exception("hydration provider failed entity_id=%s locale=%s provider=%s provider_id=%s", entity_id, locale, provider, provider_id)
-    state = "ready" if succeeded else "error"
-    summary = None if succeeded else f"Metadata hydration failed for {entity_type} '{entity_id}' locale '{locale}': " + "; ".join(value["provider"] + ": " + value["error"] for value in errors)
-    db.execute("UPDATE metadata_hydration_requests SET state=?,last_error=?,error_details=?,finished_at=? WHERE entity_id=? AND locale=?", (state, summary, json.dumps({"entityId": entity_id, "entityType": entity_type, "locale": locale, "errors": errors}), now(), entity_id, locale))
-    logger.info("hydration finished entity_id=%s locale=%s state=%s", entity_id, locale, state)
-
-
-class MetadataHydrationQueue:
-    """Dedicated on-demand worker; localized requests are never scheduler tasks."""
-
-    def __init__(self, scheduler: "JobScheduler"):
-        self.scheduler = scheduler
-        self.db = scheduler.store.db
-        self.condition = threading.Condition()
-        self.stop_event = threading.Event()
-        self.thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self.thread and self.thread.is_alive():
-            return
-        self.stop_event.clear()
-        # Requests claimed by a worker that died with the process are safe to
-        # retry. They are durable requests, not scheduler runs.
-        self.db.execute("UPDATE metadata_hydration_requests SET state='queued',started_at=NULL WHERE state='running'")
-        self.thread = threading.Thread(target=self._run, name="zenstream-metadata-hydration", daemon=True)
-        self.thread.start()
-
-    def stop(self) -> None:
-        self.stop_event.set()
-        with self.condition:
-            self.condition.notify_all()
-        if self.thread:
-            self.thread.join(timeout=5)
-
-    def enqueue(self, entity_ids: list[str], locale: str) -> dict:
-        if not self.thread or not self.thread.is_alive():
-            self.start()
-        locale = (locale or "en").strip().lower()
-        values = list(dict.fromkeys(str(value) for value in entity_ids if str(value).strip()))
-        queued = 0
-        request_ids = []
-        already_ready = 0
-        already_queued = 0
-        with self.scheduler.store.db.transaction() as cursor:
-            for entity_id in values:
-                cursor.execute("SELECT state FROM metadata_hydration_requests WHERE entity_id=? AND locale=?", (entity_id, locale))
-                existing = cursor.fetchone()
-                if existing and existing[0] == "ready":
-                    already_ready += 1
-                    continue
-                if existing and existing[0] in {"queued", "running"}:
-                    already_queued += 1
-                    continue
-                timestamp = now()
-                cursor.execute(
-                    "INSERT INTO metadata_hydration_requests(entity_id,locale,state,attempts,last_error,requested_at,started_at,finished_at) VALUES(?,?, 'queued',0,NULL,?,?,NULL) "
-                    "ON CONFLICT(entity_id,locale) DO UPDATE SET state='queued',last_error=NULL,requested_at=excluded.requested_at,started_at=NULL,finished_at=NULL",
-                    (entity_id, locale, timestamp, None),
-                )
-                queued += 1
-                request_ids.append(f"{entity_id}:{locale}")
-        with self.condition:
-            self.condition.notify_all()
-        worker_state = "running" if self.thread and self.thread.is_alive() else "starting"
-        return {"locale": locale, "requested": len(values), "queued": queued, "alreadyReady": already_ready, "alreadyQueued": already_queued, "requestIds": request_ids, "workerState": worker_state}
-
-    def _run(self) -> None:
-        while not self.stop_event.is_set():
-            rows = self.db.execute("SELECT entity_id,locale FROM metadata_hydration_requests WHERE state='queued' ORDER BY requested_at LIMIT 50")
-            if not rows:
-                with self.condition:
-                    self.condition.wait(timeout=1)
-                continue
-            service = MetadataService()
-            for entity_id, locale in rows:
-                if self.stop_event.is_set():
-                    break
-                try:
-                    _hydrate_request(self.db, service, entity_id, locale)
-                except Exception as error:
-                    details = {"entityId": entity_id, "locale": locale, "exception": type(error).__name__, "traceback": traceback.format_exc()}
-                    logger.exception("unhandled hydration failure entity_id=%s locale=%s", entity_id, locale)
-                    self.db.execute("UPDATE metadata_hydration_requests SET state='error',last_error=?,error_details=?,finished_at=? WHERE entity_id=? AND locale=?", (f"Metadata hydration worker failed: {type(error).__name__}: {error}", json.dumps(details), now(), entity_id, locale))
-
-
 class JobScheduler:
     """Dispatches every scheduled run on its own worker thread."""
 
@@ -347,7 +237,6 @@ class JobScheduler:
         self.active_definitions: set[str] = set()
         self.cancel_events: dict[str, threading.Event] = {}
         self.active_lock = threading.RLock()
-        self.hydration = MetadataHydrationQueue(self)
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -361,13 +250,11 @@ class JobScheduler:
             self.store.ensure_library(library)
         self._recover_active_runs()
         self.stop_event.clear()
-        self.hydration.start()
         self.thread = threading.Thread(target=self._dispatch, name="zenstream-job-scheduler", daemon=True)
         self.thread.start()
 
     def stop(self):
         self.stop_event.set()
-        self.hydration.stop()
         with self.condition:
             self.condition.notify_all()
         if self.thread:
@@ -396,9 +283,6 @@ class JobScheduler:
         with self.condition:
             self.condition.notify_all()
         return run
-
-    def enqueue_metadata_hydration(self, entity_ids: list[str], locale: str) -> dict:
-        return self.hydration.enqueue(entity_ids, locale)
 
     def enqueue_metadata_refresh(self) -> dict:
         definition = self.store.by_key("metadata_refresh")

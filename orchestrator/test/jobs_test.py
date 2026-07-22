@@ -6,6 +6,20 @@ from app.database import DatabaseHandler
 from app.jobs import JobScheduler, JobStore, MetadataHydrationQueue
 
 
+class DatabaseRollbackTest(unittest.TestCase):
+    def test_failed_statement_rolls_back_connection_before_next_transaction(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            db.execute("CREATE TABLE parent (id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE child (parent_id TEXT NOT NULL REFERENCES parent(id))")
+            self.assertIsInstance(db.execute("INSERT INTO child VALUES('missing')"), Exception)
+            with db.transaction() as cursor:
+                cursor.execute("INSERT INTO parent VALUES('valid')")
+            self.assertEqual(db.execute("SELECT id FROM parent"), [("valid",)])
+        finally:
+            db.close()
+
+
 class JobMappingTest(unittest.TestCase):
     def test_definition_mapping_uses_all_persisted_columns(self):
         row = ("id", "key", "Name", "Description", "kind", 60, 1, '{"libraryId":"library-1"}', "next", "last", "run", "completed", "done", "created", "updated")

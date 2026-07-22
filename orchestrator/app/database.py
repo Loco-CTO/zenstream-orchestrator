@@ -42,6 +42,10 @@ class DatabaseHandler:
                 self.connection.commit()
                 return cursor.fetchall()
             except sqlite3.Error as e:
+                # sqlite3 leaves the connection inside the failed transaction
+                # after constraint/locking errors. Always roll it back before
+                # returning so the next serialized operation can begin cleanly.
+                self.connection.rollback()
                 print(f"Database error: {e}")
                 return e
             finally:

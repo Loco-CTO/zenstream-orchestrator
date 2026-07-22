@@ -758,6 +758,22 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(request.call_args_list[1].kwargs["params"], {"page": 0})
         self.assertEqual(request.call_args_list[2].kwargs["params"], {"page": 1})
 
+    def test_tvdb_series_aggregation_fetches_series_in_requested_locale(self):
+        class FakeClient:
+            def series_hierarchy(self, provider_id):
+                return {"extended": {"data": {"seasons": []}}, "episodes": []}
+
+        service = MetadataService.__new__(MetadataService)
+        service.cache = MagicMock()
+        service.cache.get.return_value = {"title": "Legacy default-language title"}
+        service.client = MagicMock(return_value=FakeClient())
+        service.fetch = MagicMock(return_value={"title": "English title", "images": []})
+
+        records = service.aggregate_series("tvdb", "series-1", "en")
+
+        self.assertEqual(records["series"]["title"], "English title")
+        service.fetch.assert_called_once_with("tvdb", "series", "series-1", "en", force=True)
+
     def test_series_aggregation_maps_children_without_name_resolution(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, parent_id TEXT, season_number INTEGER, episode_number INTEGER, relative_path TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT, updated_at TEXT)")

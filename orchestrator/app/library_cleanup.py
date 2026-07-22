@@ -1,4 +1,4 @@
-"""Atomic relationship-aware cleanup for native library inventory and metadata."""
+"""Atomic relationship-aware cleanup for library inventory and metadata."""
 
 from __future__ import annotations
 

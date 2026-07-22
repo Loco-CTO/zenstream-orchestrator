@@ -819,7 +819,24 @@ class MetadataService:
         records = {"series": None, "seasons": [], "episodes": []}
         if provider == "tvdb":
             hierarchy = client.series_hierarchy(provider_id)
-            records["series"] = self._cache_normalized(provider, "series", provider_id, locale, client, hierarchy["extended"])
+            # TVDB's hierarchy endpoint has no locale parameter and its
+            # extended series record is commonly returned in the catalogue's
+            # default language.  Caching that record under every configured
+            # locale makes a Japanese title appear in the English cache until
+            # a manual metadata refresh runs.  Fetch the series through the
+            # locale-aware translation endpoint instead.  Legacy hierarchy
+            # rows without the provenance marker are deliberately refreshed
+            # once so existing libraries repair themselves on their next
+            # series scan.
+            cached = self.cache.get(provider, "series", provider_id, locale)
+            cache_matches_locale = cached and cached.get("_metadataLocale") == locale
+            records["series"] = self.fetch(
+                provider,
+                "series",
+                provider_id,
+                locale,
+                force=force or not cache_matches_locale,
+            )
             seasons = (hierarchy["extended"].get("data") or {}).get("seasons") or []
             for season in seasons:
                 season_type = season.get("type")

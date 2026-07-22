@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException
 
-from app import app as app_module
+from api.zenstream import application_routes as app_module
 
 
 class AdminProfileRouteTest(unittest.TestCase):

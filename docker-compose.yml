@@ -7,7 +7,10 @@ services:
       - "${ORCHESTRATOR_PORT:-9088}:9088"
     environment:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY}
-      JELLYFIN_URL: ${JELLYFIN_URL:?Set JELLYFIN_URL}
+      FFMPEG_PATH: "${FFMPEG_PATH:-ffmpeg}"
+      FFPROBE_PATH: "${FFPROBE_PATH:-ffprobe}"
+      MAX_TRANSCODES: "${MAX_TRANSCODES:-2}"
+      MAX_TRANSCODES_PER_USER: "${MAX_TRANSCODES_PER_USER:-1}"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}"
       ORCHESTRATOR_HOST: 0.0.0.0
       ORCHESTRATOR_PORT: 9088

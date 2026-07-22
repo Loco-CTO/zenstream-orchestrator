@@ -1,6 +1,5 @@
 from .database import DatabaseHandler
 import os
-from hashlib import sha256
 from pathlib import Path
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -74,62 +73,6 @@ class Config:
                             )""",
                         "columns": {"url": "TEXT UNIQUE NOT NULL"},
                     },
-                    "settings": {
-                        "create": """
-                        CREATE TABLE IF NOT EXISTS settings (
-                            servername TEXT NOT NULL, 
-                            origin_type INTEGER NOT NULL,
-                            origin_url TEXT NOT NULL,
-                            api_key TEXT NOT NULL
-                        )
-                        """,
-                        "columns": {
-                            "servername": "TEXT NOT NULL",
-                            "origin_type": "INTEGER NOT NULL",
-                            "origin_url": "TEXT NOT NULL",
-                            "api_key": "TEXT NOT NULL",
-                        },
-                    },
-                    "client_secrets": {
-                        "create": """
-                        CREATE TABLE IF NOT EXISTS client_secrets (
-                            username TEXT NOT NULL,
-                            client_secret TEXT NOT NULL,
-                            expiration TEXT NOT NULL
-                        )""",
-                        "columns": {
-                            "username": "TEXT NOT NULL",
-                            "client_secret": "TEXT NOT NULL",
-                            "expiration": "TEXT NOT NULL",
-                        },
-                    },
-                    "user_preferences": {
-                        "create": """
-                        CREATE TABLE IF NOT EXISTS user_preferences (
-                            jellyfin_user_id TEXT PRIMARY KEY NOT NULL,
-                            locale TEXT NOT NULL DEFAULT 'en',
-                            subtitle_font_family TEXT NOT NULL DEFAULT 'sans',
-                            subtitle_bold INTEGER NOT NULL DEFAULT 0,
-                            subtitle_text_scale REAL NOT NULL DEFAULT 100,
-                            subtitle_font_color TEXT NOT NULL DEFAULT '#ffffff',
-                            subtitle_border_size REAL NOT NULL DEFAULT 0,
-                            subtitle_border_color TEXT NOT NULL DEFAULT '#000000',
-                            subtitle_background_color TEXT NOT NULL DEFAULT '#000000',
-                            subtitle_background_opacity REAL NOT NULL DEFAULT 0
-                        )""",
-                        "columns": {
-                            "jellyfin_user_id": "TEXT NOT NULL",
-                            "locale": "TEXT NOT NULL DEFAULT 'en'",
-                            "subtitle_font_family": "TEXT NOT NULL DEFAULT 'sans'",
-                            "subtitle_bold": "INTEGER NOT NULL DEFAULT 0",
-                            "subtitle_text_scale": "REAL NOT NULL DEFAULT 100",
-                            "subtitle_font_color": "TEXT NOT NULL DEFAULT '#ffffff'",
-                            "subtitle_border_size": "REAL NOT NULL DEFAULT 0",
-                            "subtitle_border_color": "TEXT NOT NULL DEFAULT '#000000'",
-                            "subtitle_background_color": "TEXT NOT NULL DEFAULT '#000000'",
-                            "subtitle_background_opacity": "REAL NOT NULL DEFAULT 0",
-                        },
-                    },
                     "syncplay_groups": {
                         "create": """CREATE TABLE IF NOT EXISTS syncplay_groups (id TEXT PRIMARY KEY, host_user_id TEXT NOT NULL, host_name TEXT NOT NULL, allow_controls INTEGER NOT NULL DEFAULT 0, item_id TEXT, position REAL NOT NULL DEFAULT 0, playing INTEGER NOT NULL DEFAULT 0, resume INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, timeline_revision INTEGER NOT NULL DEFAULT 0, media_generation INTEGER NOT NULL DEFAULT 0, anchor_position REAL NOT NULL DEFAULT 0, anchor_time REAL NOT NULL DEFAULT 0, effective_at REAL NOT NULL DEFAULT 0, playback_state TEXT NOT NULL DEFAULT 'paused', pause_reason TEXT, host_disconnected_at REAL, ended INTEGER NOT NULL DEFAULT 0, updated REAL NOT NULL)""",
                         "columns": {
@@ -183,10 +126,6 @@ class Config:
         )
 
         self._run_migrations()
-        self.database.execute(
-            "INSERT OR IGNORE INTO users (username, password) VALUES ('admin', ?)",
-            (sha256("admin".encode()).hexdigest(),),
-        )
 
     @property
     def database(self):

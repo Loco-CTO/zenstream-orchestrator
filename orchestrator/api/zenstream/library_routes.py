@@ -1,4 +1,4 @@
-"""Administrator APIs for provider settings and native library previews."""
+"""Administrator APIs for provider settings and library previews."""
 
 from __future__ import annotations
 
@@ -68,6 +68,8 @@ def _metadata_for(item: dict, locale: str, fetch: bool = False, fallback: bool =
         cached = service.fetch_fallback(provider, item["type"], ids[0]["id"], locale) if fetch else _cached_provider_metadata(service.cache, provider, item["type"], ids[0]["id"], locale, fallback)
         if cached:
             for key, value in cached.items():
+                if key.startswith("_"):
+                    continue
                 if key in {"images", "extraImages"}:
                     merged.setdefault(key, []).extend(value or [])
                 elif not merged.get(key) and value:
@@ -325,6 +327,8 @@ async def update_library(library_id: str, request: Request, Username: str | None
 @router.delete("/libraries/{library_id}", status_code=204)
 async def delete_library(library_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
     require_admin(Username, TOKEN)
+    if not runtime.terminate_library(library_id):
+        raise HTTPException(409, "Library jobs are still stopping; try again shortly.")
     if not store.delete(library_id):
         raise HTTPException(404, "Library not found.")
     scheduler.remove_library_definition(library_id)

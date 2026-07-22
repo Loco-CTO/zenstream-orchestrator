@@ -1,7 +1,15 @@
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from pathlib import Path
 
 config = context.config
+
+# Keep migrations pointed at the service-owned database regardless of the
+# caller's working directory.  Deployments can still override the URL with
+# Alembic's standard ``sqlalchemy.url`` option.
+if not config.get_main_option("sqlalchemy.url"):
+    database_path = (Path(config.config_file_name or __file__).resolve().parent / "sqlite" / "orchestrator.db").resolve()
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path.as_posix()}")
 
 
 def run_migrations_online():

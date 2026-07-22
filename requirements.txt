@@ -8,6 +8,7 @@ termcolor>=3.3.0
 nodeenv>=1.10.0
 alembic>=1.18.5
 cryptography>=46.0.0
+argon2-cffi>=25.1.0
 mutagen>=1.48.1
 watchdog>=6.0.0
 guessit>=4.1.0

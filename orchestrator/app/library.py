@@ -1,4 +1,4 @@
-"""Native media-library inventory and background job runtime."""
+"""Media-library inventory and background job runtime."""
 
 from __future__ import annotations
 
@@ -614,6 +614,7 @@ class LibraryScanner:
             fetched = False
             required_succeeded = False
             errors = []
+            original_locales = set()
             for provider in priorities:
                 provider_id = next((row[1] for row in provider_rows if row[0] == provider), None)
                 if not provider_id:
@@ -622,6 +623,8 @@ class LibraryScanner:
                 for locale in MetadataLanguageSettings().get():
                     try:
                         normalized = service.fetch(provider, entity_type, provider_id, locale, force=False)
+                        if normalized.get("originalLanguage"):
+                            original_locales.add(str(normalized["originalLanguage"]))
                         fetched = True
                         if provider == required and locale == "en":
                             required_succeeded = True
@@ -630,6 +633,11 @@ class LibraryScanner:
                     except Exception as error:
                         errors.append(f"{provider}/{locale}: {type(error).__name__}: {error}")
                         logger.warning("child metadata seed failed entity_id=%s type=%s provider=%s provider_id=%s locale=%s: %s", entity_id, entity_type, provider, provider_id, locale, error)
+                for original_locale in sorted(original_locales - set(MetadataLanguageSettings().get())):
+                    try:
+                        service.fetch(provider, entity_type, provider_id, original_locale, force=False)
+                    except Exception as error:
+                        logger.warning("original metadata seed failed entity_id=%s provider=%s locale=%s: %s", entity_id, provider, original_locale, error)
             if not fetched or (required and not required_succeeded):
                 raise ValueError(f"Metadata resolution failed for {entity_type} '{relative_path}': required provider {required or 'provider'} could not be seeded; {'; '.join(errors) or 'no usable provider metadata'}")
             self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?", (now(), entity_id))
@@ -643,12 +651,20 @@ class LibraryScanner:
             return
 
         errors = []
+        original_locales = set()
         for locale in MetadataLanguageSettings().get():
             try:
-                service.fetch(provider, entity_type, provider_id, locale, force=False)
+                normalized = service.fetch(provider, entity_type, provider_id, locale, force=False)
+                if normalized.get("originalLanguage"):
+                    original_locales.add(str(normalized["originalLanguage"]))
             except Exception as error:
                 errors.append(f"{locale}: {type(error).__name__}: {error}")
                 logger.warning("localized metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s: %s", provider, entity_type, provider_id, locale, error)
+        for original_locale in sorted(original_locales - set(MetadataLanguageSettings().get())):
+            try:
+                service.fetch(provider, entity_type, provider_id, original_locale, force=False)
+            except Exception as error:
+                logger.warning("original metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s: %s", provider, entity_type, provider_id, original_locale, error)
         if required and errors and len(errors) == len(MetadataLanguageSettings().get()):
             raise ValueError(f"No metadata locale could be fetched for {provider} {entity_type} {provider_id}: {'; '.join(errors)}")
 
@@ -740,6 +756,7 @@ class LibraryScanner:
                 self._ids(episode_id, [("tvdb", "episode", str(match["id"]))])
 
     def _files(self, entity_id: str, root: Path, files: Iterable[Path]) -> None:
+        files = list(files)
         self.db.execute("DELETE FROM media_files WHERE entity_id=?", (entity_id,))
         for path in files:
             role = media_role(path)
@@ -757,6 +774,12 @@ class LibraryScanner:
                 "INSERT OR REPLACE INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
                 (new_id(), entity_id, relative(str(root), str(path)), role, language, None, stat.st_size, stat.st_mtime_ns),
             )
+        # Probe after the file rows are reconciled so playback never
+        # depends on a media-source probe response.
+        if any(path.suffix.lower() in VIDEO_EXTENSIONS for path in files):
+            from app.playback import PlaybackManager
+
+            PlaybackManager().probe_entity(entity_id)
 
     def _scan_movies(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool]) -> int:
         entries = [path for path in root.iterdir() if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS]
@@ -1070,6 +1093,29 @@ class LibraryRuntime:
         with self.condition:
             self.condition.notify_all()
         return self.store.job(job_id)
+
+    def terminate_library(self, library_id: str, timeout: float = 30.0) -> bool:
+        """Stop all inventory jobs for a library before relationship cleanup.
+
+        Deleting the parent row while a scanner is still writing entities can
+        race SQLite foreign-key enforcement.  Cancellation is cooperative,
+        so wait for workers to leave the active set and refuse deletion if a
+        provider call does not return within the bounded timeout.
+        """
+        jobs = [job for job in self.store.jobs(library_id) if job and job["state"] in ACTIVE_JOB_STATES]
+        for job in jobs:
+            self.terminate(job["id"])
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._active_lock:
+                active = {job_id for job_id in self._active_jobs if (self.store.job(job_id) or {}).get("libraryId") == library_id}
+            if not active:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            with self.condition:
+                self.condition.wait(timeout=min(0.25, remaining))
 
     def _recover_active_jobs(self) -> None:
         """Resume one interrupted run per library and collapse stale duplicates."""

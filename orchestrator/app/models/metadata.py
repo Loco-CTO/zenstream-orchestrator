@@ -55,9 +55,11 @@ class MetadataLanguageSettings:
                 result.append(locale)
         if not result:
             raise ValueError("At least one metadata language is required.")
+        # English is the guaranteed public fallback and therefore cannot be
+        # removed from the administrator-selected language set.
         if "en" in result:
             result.remove("en")
-            result.insert(0, "en")
+        result.insert(0, "en")
         return result
 
     def set(self, values) -> list[str]:
@@ -66,6 +68,14 @@ class MetadataLanguageSettings:
             "INSERT INTO metadata_settings(key,value,updated_at) VALUES('locales',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
             (json.dumps(locales, ensure_ascii=False), iso_now()),
         )
+        # An explicit user preference may only point at a configured
+        # language. Removed languages fall back to automatic selection.
+        if self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='account_preferences'"):
+            placeholders = ",".join("?" for _ in locales)
+            self.db.execute(
+                f"UPDATE account_preferences SET metadata_language=NULL WHERE metadata_language IS NOT NULL AND metadata_language NOT IN ({placeholders})",
+                locales,
+            )
         return locales
 
 
@@ -193,12 +203,32 @@ class MetadataCache:
     def put(self, provider: str, entity_type: str, provider_id: str, locale: str, payload: dict, days: int = 7) -> None:
         payload = dict(payload)
         payload["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
+        # Keep the locale used for the provider request inside the cache
+        # payload.  This lets bulk series aggregation distinguish a payload
+        # fetched for the requested locale from legacy hierarchy data that was
+        # copied into every locale bucket.
+        payload["_metadataLocale"] = locale
         now = utc_now()
-        self.db.execute(
-            "INSERT INTO metadata_cache(provider, entity_type, provider_id, locale, payload, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?) "
-            "ON CONFLICT(provider, entity_type, provider_id, locale) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
-            (provider, entity_type, provider_id, locale, json.dumps(payload, ensure_ascii=False), now.isoformat(), (now + timedelta(days=days)).isoformat()),
-        )
+        encoded = json.dumps(payload, ensure_ascii=False)
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "INSERT INTO metadata_cache(provider, entity_type, provider_id, locale, payload, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(provider, entity_type, provider_id, locale) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
+                (provider, entity_type, provider_id, locale, encoded, now.isoformat(), (now + timedelta(days=days)).isoformat()),
+            )
+            search_exists = cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_search'").fetchone()
+            if search_exists:
+                entities = cursor.execute(
+                    "SELECT e.id,e.library_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? AND p.provider_id=? AND e.entity_type=?",
+                    (provider, provider_id, entity_type),
+                ).fetchall()
+                for entity_id, library_id in entities:
+                    cursor.execute("DELETE FROM catalog_search WHERE entity_id=? AND locale=?", (entity_id, locale))
+                    if payload.get("title"):
+                        cursor.execute("INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)", (entity_id, library_id, locale, str(payload["title"])))
+                    if payload.get("originalTitle"):
+                        cursor.execute("DELETE FROM catalog_search WHERE entity_id=? AND locale='original'", (entity_id,))
+                        cursor.execute("INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)", (entity_id, library_id, "original", str(payload["originalTitle"])))
 
     def put_image(self, provider: str, entity_type: str, provider_id: str, locale: str | None, image_type: str, image_url: str, local_path: str | None = None) -> None:
         now = utc_now()

@@ -56,7 +56,15 @@ def normalized_path(path: str) -> str:
     raw = path.strip().replace("\u00a5", "\\").replace("\uffe5", "\\")
     value = os.path.abspath(os.path.expanduser(raw))
     if not os.path.isdir(value):
-        raise ValueError("Library directory does not exist or is not a directory.")
+        codepoints = " ".join(f"U+{ord(char):04X}" for char in raw)
+        logger.warning(
+            "library directory rejected raw=%r resolved=%r cwd=%r codepoints=%s",
+            path,
+            value,
+            os.getcwd(),
+            codepoints,
+        )
+        raise ValueError(f"Library directory does not exist or is not a directory: {value}")
     return os.path.normcase(os.path.normpath(value))
 
 

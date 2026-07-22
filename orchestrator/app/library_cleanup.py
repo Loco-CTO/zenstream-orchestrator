@@ -97,6 +97,11 @@ def _delete_entity_rows(cursor, tables: set[str], entity_ids: list[str]) -> None
                 f"DELETE FROM collection_members WHERE collection_entity_id IN ({placeholders}) OR source_entity_id IN ({placeholders})",
                 batch + batch,
             )
+        if "catalog_search" in tables:
+            cursor.execute(
+                f"DELETE FROM catalog_search WHERE entity_id IN ({placeholders})",
+                batch,
+            )
         if "media_files" in tables:
             cursor.execute(
                 f"DELETE FROM media_files WHERE entity_id IN ({placeholders})", batch

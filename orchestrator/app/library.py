@@ -1884,19 +1884,13 @@ class LibraryScanner:
         self.store.update_job(
             job_id, state="running", started_at=now(), message="Deriving collections"
         )
-        from app.library_cleanup import cleanup_entities
-
-        cleanup_entities(
-            self.db,
-            [
-                row[0]
-                for row in self.db.execute(
-                    "SELECT id FROM library_entities WHERE library_id=?", (library_id,)
-                )
-            ],
-        )
+        self._scan_seen_ids = set()
+        self._scan_created_ids = []
+        self._scan_delta = {"added": set(), "changed": set(), "unchanged": set(), "removed": set()}
+        self._scan_complete = False
         try:
             from app.providers import MetadataService, ProviderError, TVDBClient
+            from app.library_cleanup import cleanup_entities
 
             service = MetadataService()
             client = service.client("tvdb")
@@ -1924,13 +1918,13 @@ class LibraryScanner:
                 if len(page_values) < 100:
                     break
             self.store.update_job(job_id, progress_total=len(lists))
-            count = 0
+            discovered: dict[str, dict] = {}
             for list_id, base in lists.items():
                 self._check_termination(should_terminate)
                 try:
                     payload = client.list_details(list_id)
                 except ProviderError:
-                    continue
+                    raise
                 data = payload.get("data", payload)
                 members = []
                 for entity in data.get("entities", []) or []:
@@ -1946,20 +1940,44 @@ class LibraryScanner:
                 members = list(dict.fromkeys(members))
                 if len(members) < 2:
                     continue
+                title = base.get("name") or data.get("name") or f"Collection {list_id}"
+                discovered[list_id] = {"members": members, "title": title, "data": data}
+
+            # Provider enumeration is complete at this point. Only now mutate
+            # the collection inventory, so a partial/failing provider response
+            # cannot erase the previous catalog.
+            from app.metadata_services import MetadataIngestService
+
+            ingest = MetadataIngestService(service)
+            count = 0
+            for list_id, value in discovered.items():
+                self._check_termination(should_terminate)
                 collection = self._entity(
                     library_id, None, "collection", f"tvdb-list-{list_id}"
                 )
-                self._ids(collection, [("tvdb", "collection", list_id)])
-                for position, source_entity in enumerate(members):
-                    self.db.execute(
-                        "INSERT INTO collection_members(collection_entity_id,source_entity_id,position) VALUES(?,?,?)",
-                        (collection, source_entity, position),
+                self._replace_ids(collection, [("tvdb", "collection", list_id)])
+                current_members = [
+                    (row[0], row[1])
+                    for row in self.db.execute(
+                        "SELECT source_entity_id,position FROM collection_members WHERE collection_entity_id=? ORDER BY position,source_entity_id",
+                        (collection,),
                     )
-                # Store a lightweight localized seed; full metadata remains the provider cache.
-                title = base.get("name") or data.get("name") or f"Collection {list_id}"
-                from app.metadata_services import MetadataIngestService
-
-                ingest = MetadataIngestService(service)
+                ]
+                next_members = [
+                    (source_entity, position)
+                    for position, source_entity in enumerate(value["members"])
+                ]
+                if current_members != next_members:
+                    self.db.execute(
+                        "DELETE FROM collection_members WHERE collection_entity_id=?",
+                        (collection,),
+                    )
+                    for source_entity, position in next_members:
+                        self.db.execute(
+                            "INSERT INTO collection_members(collection_entity_id,source_entity_id,position) VALUES(?,?,?)",
+                            (collection, source_entity, position),
+                        )
+                    self._mark_changed(collection)
                 for locale in ingest.locales():
                     try:
                         normalized = ingest.ingest_locale(
@@ -1973,11 +1991,26 @@ class LibraryScanner:
                             "providerId": list_id,
                             "images": [],
                         }
-                    service.cache.put("tvdb", "collection", list_id, locale, normalized)
+                        service.cache.put("tvdb", "collection", list_id, locale, normalized)
                 count += 1
                 self.store.update_job(
-                    job_id, progress_current=count, message=f"Derived {title}"
+                    job_id, progress_current=count, message=f"Derived {value['title']}"
                 )
+            stale = [
+                row[0]
+                for row in self.db.execute(
+                    "SELECT e.id FROM library_entities e WHERE e.library_id=? AND e.entity_type='collection' AND e.id NOT IN ({})".format(
+                        ",".join("?" * len(self._scan_seen_ids))
+                        if self._scan_seen_ids
+                        else "SELECT NULL"
+                    ),
+                    [library_id, *self._scan_seen_ids] if self._scan_seen_ids else [library_id],
+                )
+            ]
+            if stale:
+                cleanup_entities(self.db, stale)
+                self._scan_delta["removed"].update(stale)
+            self._scan_complete = True
             self.store.update_job(
                 job_id,
                 state="completed",

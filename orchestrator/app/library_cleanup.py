@@ -21,7 +21,10 @@ def _table_names(db) -> set[str]:
     DatabaseHandler.execute commits after every call, so this must never be
     called while DatabaseHandler.transaction() is active.
     """
-    return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return {
+        row[0]
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
 
 
 def _entity_closure(db, entity_ids: list[str]) -> list[str]:
@@ -54,12 +57,16 @@ def _provider_keys(db, entity_ids: list[str]) -> list[tuple[str, str, str]]:
     return list(keys)
 
 
-def _image_paths(db, tables: set[str], provider_keys: list[tuple[str, str, str]]) -> set[str]:
+def _image_paths(
+    db, tables: set[str], provider_keys: list[tuple[str, str, str]]
+) -> set[str]:
     if "metadata_images" not in tables:
         return set()
     paths = {
         row[0]
-        for row in db.execute("SELECT DISTINCT local_path FROM metadata_images WHERE local_path IS NOT NULL")
+        for row in db.execute(
+            "SELECT DISTINCT local_path FROM metadata_images WHERE local_path IS NOT NULL"
+        )
         if row[0]
     }
     if not provider_keys:
@@ -81,16 +88,26 @@ def _delete_entity_rows(cursor, tables: set[str], entity_ids: list[str]) -> None
     for batch in _chunks(entity_ids):
         placeholders = _placeholders(batch)
         if "metadata_hydration_requests" in tables:
-            cursor.execute(f"DELETE FROM metadata_hydration_requests WHERE entity_id IN ({placeholders})", batch)
+            cursor.execute(
+                f"DELETE FROM metadata_hydration_requests WHERE entity_id IN ({placeholders})",
+                batch,
+            )
         if "collection_members" in tables:
             cursor.execute(
                 f"DELETE FROM collection_members WHERE collection_entity_id IN ({placeholders}) OR source_entity_id IN ({placeholders})",
                 batch + batch,
             )
         if "media_files" in tables:
-            cursor.execute(f"DELETE FROM media_files WHERE entity_id IN ({placeholders})", batch)
-        cursor.execute(f"DELETE FROM entity_provider_ids WHERE entity_id IN ({placeholders})", batch)
-        cursor.execute(f"DELETE FROM library_entities WHERE id IN ({placeholders})", batch)
+            cursor.execute(
+                f"DELETE FROM media_files WHERE entity_id IN ({placeholders})", batch
+            )
+        cursor.execute(
+            f"DELETE FROM entity_provider_ids WHERE entity_id IN ({placeholders})",
+            batch,
+        )
+        cursor.execute(
+            f"DELETE FROM library_entities WHERE id IN ({placeholders})", batch
+        )
 
 
 def _purge_orphan_metadata(cursor, tables: set[str]) -> None:
@@ -109,10 +126,13 @@ def _purge_orphan_metadata(cursor, tables: set[str]) -> None:
 
 def _purge_orphan_inventory(cursor, tables: set[str]) -> None:
     """Remove inventory rows whose owning library/entity no longer exists."""
+
     def valid_entity(column: str) -> str:
         library_clause = ""
         if "libraries" in tables:
-            library_clause = " AND EXISTS (SELECT 1 FROM libraries l WHERE l.id=e.library_id)"
+            library_clause = (
+                " AND EXISTS (SELECT 1 FROM libraries l WHERE l.id=e.library_id)"
+            )
         return f"EXISTS (SELECT 1 FROM library_entities e WHERE e.id={column}{library_clause})"
 
     if "collection_members" in tables:
@@ -158,7 +178,9 @@ def _remove_cached_files(db, tables: set[str], paths: set[str]) -> None:
             path = Path(raw_path)
             resolved = path.resolve()
             resolved.relative_to(cache_root)
-            if not db.execute("SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1", (str(path),)):
+            if not db.execute(
+                "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1", (str(path),)
+            ):
                 resolved.unlink(missing_ok=True)
         except (OSError, ValueError):
             continue
@@ -169,7 +191,9 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
     if "library_entities" not in tables or "entity_provider_ids" not in tables:
         raise RuntimeError("Library inventory schema is incomplete.")
 
-    entity_ids = _entity_closure(db, list(dict.fromkeys(entity_ids))) if entity_ids else []
+    entity_ids = (
+        _entity_closure(db, list(dict.fromkeys(entity_ids))) if entity_ids else []
+    )
     provider_keys = _provider_keys(db, entity_ids)
     image_paths = _image_paths(db, tables, provider_keys)
 
@@ -180,11 +204,18 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
             # The library relationship is authoritative. The ID list above
             # is batched for dependent cleanup, while this final predicate
             # guarantees no inventory row for the library can survive.
-            cursor.execute("DELETE FROM library_entities WHERE library_id=?", (library_id,))
+            cursor.execute(
+                "DELETE FROM library_entities WHERE library_id=?", (library_id,)
+            )
             if "library_sources" in tables:
-                cursor.execute("DELETE FROM library_sources WHERE library_id=? OR source_library_id=?", (library_id, library_id))
+                cursor.execute(
+                    "DELETE FROM library_sources WHERE library_id=? OR source_library_id=?",
+                    (library_id, library_id),
+                )
             if "library_jobs" in tables:
-                cursor.execute("DELETE FROM library_jobs WHERE library_id=?", (library_id,))
+                cursor.execute(
+                    "DELETE FROM library_jobs WHERE library_id=?", (library_id,)
+                )
             cursor.execute("DELETE FROM libraries WHERE id=?", (library_id,))
         _purge_orphan_inventory(cursor, tables)
         _purge_orphan_metadata(cursor, tables)
@@ -203,7 +234,12 @@ def cleanup_library(db, library_id: str) -> bool:
     """Atomically remove a library and every artifact owned by it."""
     if not db.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,)):
         return False
-    entity_ids = [row[0] for row in db.execute("SELECT id FROM library_entities WHERE library_id=?", (library_id,))]
+    entity_ids = [
+        row[0]
+        for row in db.execute(
+            "SELECT id FROM library_entities WHERE library_id=?", (library_id,)
+        )
+    ]
     return _cleanup(db, entity_ids, library_id)
 
 

@@ -54,7 +54,9 @@ class Account:
     def create(self, username: str, password: str) -> dict:
         username = username.strip()
         if not username or len(password) < 8:
-            raise ValueError("A username and password of at least 8 characters are required.")
+            raise ValueError(
+                "A username and password of at least 8 characters are required."
+            )
         user_id = str(uuid.uuid4())
         try:
             with self.db.transaction() as cursor:
@@ -78,7 +80,9 @@ class Account:
             except (VerifyMismatchError, InvalidHashError):
                 valid = False
         else:
-            valid = secrets.compare_digest(row[2], hashlib.sha256(password.encode("utf-8")).hexdigest())
+            valid = secrets.compare_digest(
+                row[2], hashlib.sha256(password.encode("utf-8")).hexdigest()
+            )
         if not valid:
             return None
         if scheme != "argon2id" or _hasher.check_needs_rehash(row[2]):
@@ -96,7 +100,14 @@ class Account:
         expires = now + timedelta(days=self.SESSION_DAYS)
         self.db.execute(
             "INSERT INTO user_sessions(id,user_id,token_hash,expires_at,created_at,last_seen_at) VALUES(?,?,?,?,?,?)",
-            (session_id, user_id, _token_hash(token), _iso(expires), _iso(now), _iso(now)),
+            (
+                session_id,
+                user_id,
+                _token_hash(token),
+                _iso(expires),
+                _iso(now),
+                _iso(now),
+            ),
         )
         return {"token": token, "expiresAt": _iso(expires)}
 
@@ -113,11 +124,15 @@ class Account:
         )
         if not rows:
             return None
-        self.db.execute("UPDATE user_sessions SET last_seen_at=? WHERE id=?", (now, rows[0][5]))
+        self.db.execute(
+            "UPDATE user_sessions SET last_seen_at=? WHERE id=?", (now, rows[0][5])
+        )
         return self._public(rows[0])
 
     def revoke(self, token: str) -> None:
-        self.db.execute("DELETE FROM user_sessions WHERE token_hash=?", (_token_hash(token),))
+        self.db.execute(
+            "DELETE FROM user_sessions WHERE token_hash=?", (_token_hash(token),)
+        )
 
     def revoke_user(self, user_id: str) -> None:
         self.db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
@@ -147,7 +162,9 @@ class Account:
     def set_disabled(self, user_id: str, disabled: bool) -> dict:
         if not self._row(user_id=user_id):
             raise KeyError("User not found.")
-        self.db.execute("UPDATE users SET disabled=? WHERE id=?", (int(disabled), user_id))
+        self.db.execute(
+            "UPDATE users SET disabled=? WHERE id=?", (int(disabled), user_id)
+        )
         if disabled:
             self.revoke_user(user_id)
         return self._public(self._row(user_id=user_id))
@@ -158,24 +175,32 @@ class Account:
             return cursor.rowcount == 1
 
     def library_ids(self, user_id: str) -> list[str]:
-        return [row[0] for row in self.db.execute(
-            "SELECT library_id FROM user_library_access WHERE user_id=? ORDER BY library_id",
-            (user_id,),
-        )]
+        return [
+            row[0]
+            for row in self.db.execute(
+                "SELECT library_id FROM user_library_access WHERE user_id=? ORDER BY library_id",
+                (user_id,),
+            )
+        ]
 
     def set_library_ids(self, user_id: str, library_ids: list[str]) -> list[str]:
         if not self._row(user_id=user_id):
             raise KeyError("User not found.")
         requested = list(dict.fromkeys(str(value) for value in library_ids))
         if requested:
-            found = {row[0] for row in self.db.execute(
-                f"SELECT id FROM libraries WHERE id IN ({','.join('?' for _ in requested)})",
-                requested,
-            )}
+            found = {
+                row[0]
+                for row in self.db.execute(
+                    f"SELECT id FROM libraries WHERE id IN ({','.join('?' for _ in requested)})",
+                    requested,
+                )
+            }
             if found != set(requested):
                 raise ValueError("One or more libraries do not exist.")
         with self.db.transaction() as cursor:
-            cursor.execute("DELETE FROM user_library_access WHERE user_id=?", (user_id,))
+            cursor.execute(
+                "DELETE FROM user_library_access WHERE user_id=?", (user_id,)
+            )
             cursor.executemany(
                 "INSERT INTO user_library_access(user_id,library_id,created_at) VALUES(?,?,?)",
                 [(user_id, library_id, _iso()) for library_id in requested],

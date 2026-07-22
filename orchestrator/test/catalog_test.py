@@ -26,8 +26,12 @@ class CatalogTest(unittest.TestCase):
         ]
         for statement in statements:
             self.db.execute(statement)
-        self.db.execute("INSERT INTO libraries VALUES('allowed','Allowed','movies','ready',NULL,NULL)")
-        self.db.execute("INSERT INTO libraries VALUES('hidden','Hidden','movies','ready',NULL,NULL)")
+        self.db.execute(
+            "INSERT INTO libraries VALUES('allowed','Allowed','movies','ready',NULL,NULL)"
+        )
+        self.db.execute(
+            "INSERT INTO libraries VALUES('hidden','Hidden','movies','ready',NULL,NULL)"
+        )
 
     def tearDown(self):
         self.db.close()
@@ -43,36 +47,84 @@ class CatalogTest(unittest.TestCase):
         return value
 
     def seed_item(self):
-        self.db.execute("INSERT INTO library_entities VALUES('movie','allowed',NULL,'movie','Movie',NULL,NULL,NULL,NULL,'2026','2026')")
-        self.db.execute("INSERT INTO entity_provider_ids VALUES('movie','tmdb','movie','10',1)")
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('movie','allowed',NULL,'movie','Movie',NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('movie','tmdb','movie','10',1)"
+        )
         for locale, payload in {
-            "en": {"title": "English", "overview": "English overview", "originalLanguage": "ja", "images": [{"type": "Primary", "url": "en.jpg", "language": "en", "provider": "tmdb"}]},
-            "ja": {"title": "Japanese", "originalLanguage": "ja", "images": [{"type": "Primary", "url": "neutral.jpg", "language": None, "provider": "tmdb"}]},
+            "en": {
+                "title": "English",
+                "overview": "English overview",
+                "originalLanguage": "ja",
+                "trailers": [{"url": "https://youtube.com/en", "language": "en"}],
+                "images": [
+                    {
+                        "type": "Primary",
+                        "url": "en.jpg",
+                        "language": "en",
+                        "provider": "tmdb",
+                    }
+                ],
+            },
+            "ja": {
+                "title": "Japanese",
+                "originalLanguage": "ja",
+                "trailers": [{"url": "https://youtube.com/ja", "language": "ja"}],
+                "images": [
+                    {
+                        "type": "Primary",
+                        "url": "neutral.jpg",
+                        "language": None,
+                        "provider": "tmdb",
+                    }
+                ],
+            },
         }.items():
             payload["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
-            self.db.execute("INSERT INTO metadata_cache VALUES('tmdb','movie','10',?,?,?,?)", (locale, json.dumps(payload), "now", "later"))
+            self.db.execute(
+                "INSERT INTO metadata_cache VALUES('tmdb','movie','10',?,?,?,?)",
+                (locale, json.dumps(payload), "now", "later"),
+            )
 
     def test_argon_session_revocation_and_legacy_password_upgrade(self):
         account = self.account()
         created = account.create("local", "password-123")
         session = account.create_session(created["id"])
-        self.assertEqual(account.authenticate_token(session["token"])["id"], created["id"])
+        self.assertEqual(
+            account.authenticate_token(session["token"])["id"], created["id"]
+        )
         account.revoke(session["token"])
         self.assertIsNone(account.authenticate_token(session["token"]))
 
         legacy_id = "legacy-id"
-        self.db.execute("INSERT INTO users VALUES(?,?,?,?,0)", (legacy_id, "legacy", hashlib.sha256(b"legacy-pass").hexdigest(), "sha256"))
-        self.assertEqual(account.authenticate_password("legacy", "legacy-pass")["id"], legacy_id)
-        self.assertEqual(self.db.execute("SELECT password_scheme FROM users WHERE id=?", (legacy_id,))[0][0], "argon2id")
+        self.db.execute(
+            "INSERT INTO users VALUES(?,?,?,?,0)",
+            (legacy_id, "legacy", hashlib.sha256(b"legacy-pass").hexdigest(), "sha256"),
+        )
+        self.assertEqual(
+            account.authenticate_password("legacy", "legacy-pass")["id"], legacy_id
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT password_scheme FROM users WHERE id=?", (legacy_id,)
+            )[0][0],
+            "argon2id",
+        )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
     def test_permissions_and_field_level_language_fallback(self, _languages):
         account = self.account().create("viewer", "password-123")
-        self.db.execute("INSERT INTO user_library_access VALUES(?,?,?)", (account["id"], "allowed", "now"))
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
         self.seed_item()
         metadata = self.catalog().metadata(account["id"], "movie", "ja")["metadata"]
         self.assertEqual(metadata["title"], "Japanese")
         self.assertEqual(metadata["overview"], "English overview")
+        self.assertEqual(metadata["trailers"][0]["url"], "https://youtube.com/ja")
         self.assertEqual(metadata["images"]["Primary"]["language"], None)
         with self.assertRaises(HTTPException) as hidden:
             self.catalog().require_library(account["id"], "hidden")
@@ -84,9 +136,14 @@ class CatalogTest(unittest.TestCase):
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
     def test_progress_marks_played_at_ninety_percent(self, _languages):
         account = self.account().create("progress", "password-123")
-        self.db.execute("INSERT INTO user_library_access VALUES(?,?,?)", (account["id"], "allowed", "now"))
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
         self.seed_item()
-        state = self.catalog().update_state(account["id"], "movie", {"positionSeconds": 90, "durationSeconds": 100})
+        state = self.catalog().update_state(
+            account["id"], "movie", {"positionSeconds": 90, "durationSeconds": 100}
+        )
         self.assertTrue(state["played"])
         self.assertEqual(state["playCount"], 1)
         self.assertEqual(state["positionSeconds"], 0)

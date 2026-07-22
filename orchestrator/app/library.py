@@ -25,13 +25,44 @@ except ImportError:  # pragma: no cover - optional in minimal installations
 
 
 LIBRARY_TYPES = {"tv_series", "movies", "music", "collection"}
-VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".webm", ".mpg", ".mpeg", ".vob"}
-AUDIO_EXTENSIONS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".wma", ".aiff", ".aif", ".ape", ".wv"}
+VIDEO_EXTENSIONS = {
+    ".mkv",
+    ".mp4",
+    ".m4v",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".ts",
+    ".m2ts",
+    ".webm",
+    ".mpg",
+    ".mpeg",
+    ".vob",
+}
+AUDIO_EXTENSIONS = {
+    ".mp3",
+    ".flac",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".oga",
+    ".opus",
+    ".wav",
+    ".wma",
+    ".aiff",
+    ".aif",
+    ".ape",
+    ".wv",
+}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
 LYRIC_EXTENSIONS = {".lrc", ".elrc", ".txt"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
-ID_RE = re.compile(r"\[(?P<provider>tmdbid|tvdbid|imdbid)-(?P<id>[^\]]+)\]", re.IGNORECASE)
-EPISODE_RE = re.compile(r"(?i)(?:^|[^A-Z0-9])S(?P<season>\d+)E(?P<episode>\d+)(?:[-.]?E(?P<end>\d+))?")
+ID_RE = re.compile(
+    r"\[(?P<provider>tmdbid|tvdbid|imdbid)-(?P<id>[^\]]+)\]", re.IGNORECASE
+)
+EPISODE_RE = re.compile(
+    r"(?i)(?:^|[^A-Z0-9])S(?P<season>\d+)E(?P<episode>\d+)(?:[-.]?E(?P<end>\d+))?"
+)
 SEASON_RE = re.compile(r"(?i)^(?:season\s*|s)(\d+)$")
 ACTIVE_JOB_STATES = ("queued", "running", "terminating")
 logger = get_logger("library")
@@ -64,7 +95,9 @@ def normalized_path(path: str) -> str:
             os.getcwd(),
             codepoints,
         )
-        raise ValueError(f"Library directory does not exist or is not a directory: {value}")
+        raise ValueError(
+            f"Library directory does not exist or is not a directory: {value}"
+        )
     return os.path.normcase(os.path.normpath(value))
 
 
@@ -167,10 +200,18 @@ class LibraryStore:
     @staticmethod
     def _row(row) -> dict:
         return {
-            "id": row[0], "name": row[1], "type": row[2], "directory": row[3],
-            "watchEnabled": bool(row[4]), "scanIntervalMinutes": row[5], "scanState": row[6],
-            "scanError": row[7], "lastScanStartedAt": row[8], "lastScanFinishedAt": row[9],
-            "createdAt": row[10], "updatedAt": row[11],
+            "id": row[0],
+            "name": row[1],
+            "type": row[2],
+            "directory": row[3],
+            "watchEnabled": bool(row[4]),
+            "scanIntervalMinutes": row[5],
+            "scanState": row[6],
+            "scanError": row[7],
+            "lastScanStartedAt": row[8],
+            "lastScanFinishedAt": row[9],
+            "createdAt": row[10],
+            "updatedAt": row[11],
         }
 
     def get(self, library_id: str) -> dict | None:
@@ -181,9 +222,23 @@ class LibraryStore:
         return self._row(rows[0]) if rows else None
 
     def sources(self, library_id: str) -> list[str]:
-        return [row[0] for row in self.db.execute("SELECT source_library_id FROM library_sources WHERE library_id=? ORDER BY source_library_id", (library_id,))]
+        return [
+            row[0]
+            for row in self.db.execute(
+                "SELECT source_library_id FROM library_sources WHERE library_id=? ORDER BY source_library_id",
+                (library_id,),
+            )
+        ]
 
-    def create(self, name: str, library_type: str, directory: str | None, watch_enabled: bool = True, interval: int = 1440, source_ids: Iterable[str] = ()) -> dict:
+    def create(
+        self,
+        name: str,
+        library_type: str,
+        directory: str | None,
+        watch_enabled: bool = True,
+        interval: int = 1440,
+        source_ids: Iterable[str] = (),
+    ) -> dict:
         name = name.strip()
         if not name or library_type not in LIBRARY_TYPES:
             raise ValueError("A name and supported library type are required.")
@@ -191,7 +246,9 @@ class LibraryStore:
             directory = None
             source_ids = list(dict.fromkeys(source_ids))
             if not source_ids:
-                raise ValueError("A Collection library needs at least one Movie or TV source library.")
+                raise ValueError(
+                    "A Collection library needs at least one Movie or TV source library."
+                )
         else:
             if not directory:
                 raise ValueError("A directory is required for physical libraries.")
@@ -200,23 +257,41 @@ class LibraryStore:
         library_id = new_id()
         timestamp = now()
         with self.db.transaction() as cursor:
-            cursor.execute("SELECT 1 FROM libraries WHERE name=? COLLATE NOCASE", (name,))
+            cursor.execute(
+                "SELECT 1 FROM libraries WHERE name=? COLLATE NOCASE", (name,)
+            )
             if cursor.fetchone():
                 raise ValueError("A library with that name already exists.")
             if directory:
-                cursor.execute("SELECT 1 FROM libraries WHERE directory=?", (directory,))
+                cursor.execute(
+                    "SELECT 1 FROM libraries WHERE directory=?", (directory,)
+                )
                 if cursor.fetchone():
                     raise ValueError("A library already uses that directory.")
             cursor.execute(
                 "INSERT INTO libraries(id,name,type,directory,watch_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                (library_id, name, library_type, directory, int(watch_enabled), interval, timestamp, timestamp),
+                (
+                    library_id,
+                    name,
+                    library_type,
+                    directory,
+                    int(watch_enabled),
+                    interval,
+                    timestamp,
+                    timestamp,
+                ),
             )
             for source_id in source_ids:
                 cursor.execute("SELECT type FROM libraries WHERE id=?", (source_id,))
                 source = cursor.fetchone()
                 if not source or source[0] not in {"movies", "tv_series"}:
-                    raise ValueError("Collections can source only Movie and TV libraries.")
-                cursor.execute("INSERT INTO library_sources(library_id,source_library_id) VALUES(?,?)", (library_id, source_id))
+                    raise ValueError(
+                        "Collections can source only Movie and TV libraries."
+                    )
+                cursor.execute(
+                    "INSERT INTO library_sources(library_id,source_library_id) VALUES(?,?)",
+                    (library_id, source_id),
+                )
         return self.get(library_id)  # type: ignore[return-value]
 
     def update(self, library_id: str, values: dict) -> dict:
@@ -224,7 +299,16 @@ class LibraryStore:
         if not current:
             raise KeyError("Library not found")
         name = str(values.get("name", current["name"])).strip()
-        interval = max(15, min(43200, int(values.get("scanIntervalMinutes", current["scanIntervalMinutes"]) or 1440)))
+        interval = max(
+            15,
+            min(
+                43200,
+                int(
+                    values.get("scanIntervalMinutes", current["scanIntervalMinutes"])
+                    or 1440
+                ),
+            ),
+        )
         directory = current["directory"]
         if current["type"] != "collection" and "directory" in values:
             directory = normalized_path(str(values["directory"]))
@@ -236,13 +320,22 @@ class LibraryStore:
         if current["type"] == "collection" and "sourceLibraryIds" in values:
             source_ids = list(dict.fromkeys(values["sourceLibraryIds"]))
             with self.db.transaction() as cursor:
-                cursor.execute("DELETE FROM library_sources WHERE library_id=?", (library_id,))
+                cursor.execute(
+                    "DELETE FROM library_sources WHERE library_id=?", (library_id,)
+                )
                 for source_id in source_ids:
-                    cursor.execute("SELECT type FROM libraries WHERE id=?", (source_id,))
+                    cursor.execute(
+                        "SELECT type FROM libraries WHERE id=?", (source_id,)
+                    )
                     source = cursor.fetchone()
                     if not source or source[0] not in {"movies", "tv_series"}:
-                        raise ValueError("Collections can source only Movie and TV libraries.")
-                    cursor.execute("INSERT INTO library_sources(library_id,source_library_id) VALUES(?,?)", (library_id, source_id))
+                        raise ValueError(
+                            "Collections can source only Movie and TV libraries."
+                        )
+                    cursor.execute(
+                        "INSERT INTO library_sources(library_id,source_library_id) VALUES(?,?)",
+                        (library_id, source_id),
+                    )
         return self.get(library_id)  # type: ignore[return-value]
 
     def delete(self, library_id: str) -> bool:
@@ -250,7 +343,14 @@ class LibraryStore:
 
         return cleanup_library(self.db, library_id)
 
-    def set_scan_state(self, library_id: str, state: str, error: str | None = None, started: str | None = None, finished: str | None = None) -> None:
+    def set_scan_state(
+        self,
+        library_id: str,
+        state: str,
+        error: str | None = None,
+        started: str | None = None,
+        finished: str | None = None,
+    ) -> None:
         self.db.execute(
             "UPDATE libraries SET scan_state=?,scan_error=?,last_scan_started_at=COALESCE(?,last_scan_started_at),last_scan_finished_at=COALESCE(?,last_scan_finished_at),updated_at=? WHERE id=?",
             (state, error, started, finished, now(), library_id),
@@ -259,26 +359,64 @@ class LibraryStore:
     def create_job(self, library_id: str, kind: str) -> dict:
         job_id = new_id()
         timestamp = now()
-        self.db.execute("INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)", (job_id, library_id, kind, timestamp))
+        self.db.execute(
+            "INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)",
+            (job_id, library_id, kind, timestamp),
+        )
         return self.job(job_id)  # type: ignore[return-value]
 
     def job(self, job_id: str) -> dict | None:
-        rows = self.db.execute("SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at FROM library_jobs WHERE id=?", (job_id,))
+        rows = self.db.execute(
+            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at FROM library_jobs WHERE id=?",
+            (job_id,),
+        )
         if not rows:
             return None
         row = rows[0]
-        return {"id": row[0], "libraryId": row[1], "kind": row[2], "state": row[3], "progressCurrent": row[4], "progressTotal": row[5], "message": row[6], "error": row[7], "errorDetails": row[8], "createdAt": row[9], "startedAt": row[10], "finishedAt": row[11]}
+        return {
+            "id": row[0],
+            "libraryId": row[1],
+            "kind": row[2],
+            "state": row[3],
+            "progressCurrent": row[4],
+            "progressTotal": row[5],
+            "message": row[6],
+            "error": row[7],
+            "errorDetails": row[8],
+            "createdAt": row[9],
+            "startedAt": row[10],
+            "finishedAt": row[11],
+        }
 
     def jobs(self, library_id: str) -> list[dict]:
-        return [self.job(row[0]) for row in self.db.execute("SELECT id FROM library_jobs WHERE library_id=? ORDER BY created_at DESC LIMIT 50", (library_id,)) if self.job(row[0])]  # type: ignore[list-item]
+        return [
+            self.job(row[0])
+            for row in self.db.execute(
+                "SELECT id FROM library_jobs WHERE library_id=? ORDER BY created_at DESC LIMIT 50",
+                (library_id,),
+            )
+            if self.job(row[0])
+        ]  # type: ignore[list-item]
 
     def update_job(self, job_id: str, **values) -> None:
-        allowed = {"state", "progress_current", "progress_total", "message", "error", "error_details", "started_at", "finished_at"}
+        allowed = {
+            "state",
+            "progress_current",
+            "progress_total",
+            "message",
+            "error",
+            "error_details",
+            "started_at",
+            "finished_at",
+        }
         updates = [(key, value) for key, value in values.items() if key in allowed]
         if not updates:
             return
         fields = ",".join(f"{key}=?" for key, _ in updates)
-        self.db.execute(f"UPDATE library_jobs SET {fields} WHERE id=?", [value for _, value in updates] + [job_id])
+        self.db.execute(
+            f"UPDATE library_jobs SET {fields} WHERE id=?",
+            [value for _, value in updates] + [job_id],
+        )
 
 
 class LibraryScanner:
@@ -288,7 +426,12 @@ class LibraryScanner:
         self._scan_seen_ids: set[str] = set()
         self._scan_created_ids: list[str] = []
 
-    def scan(self, library_id: str, job_id: str, should_terminate: Callable[[], bool] | None = None) -> None:
+    def scan(
+        self,
+        library_id: str,
+        job_id: str,
+        should_terminate: Callable[[], bool] | None = None,
+    ) -> None:
         should_terminate = should_terminate or (lambda: False)
         library = self.store.get(library_id)
         if not library:
@@ -301,7 +444,9 @@ class LibraryScanner:
             raise ValueError("Library directory is no longer available")
         started = now()
         self.store.set_scan_state(library_id, "scanning", started=started, error=None)
-        self.store.update_job(job_id, state="running", started_at=started, message="Discovering media")
+        self.store.update_job(
+            job_id, state="running", started_at=started, message="Discovering media"
+        )
         self._scan_seen_ids = set()
         self._scan_created_ids = []
         try:
@@ -309,27 +454,59 @@ class LibraryScanner:
             if library["type"] == "movies":
                 count = self._scan_movies(library_id, root, job_id, should_terminate)
             elif library["type"] == "tv_series":
-                count = self._scan_series(library_id, root, job_id, should_terminate, resolve_immediately=True)
+                count = self._scan_series(
+                    library_id, root, job_id, should_terminate, resolve_immediately=True
+                )
             else:
                 count = self._scan_music(library_id, root, job_id, should_terminate)
             if library["type"] != "tv_series":
-                self._resolve_and_seed(library_id, library["type"], job_id, should_terminate)
+                self._resolve_and_seed(
+                    library_id, library["type"], job_id, should_terminate
+                )
             self._fetch_seen_locales(should_terminate)
             self._prune_missing_entities(library_id)
             finished = now()
-            self.store.update_job(job_id, state="completed", progress_current=count, progress_total=count, finished_at=finished, message=f"Indexed {count} entries")
+            self.store.update_job(
+                job_id,
+                state="completed",
+                progress_current=count,
+                progress_total=count,
+                finished_at=finished,
+                message=f"Indexed {count} entries",
+            )
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except JobTerminated:
             finished = now()
-            self.store.update_job(job_id, state="terminated", message="Terminated by administrator", error=None, finished_at=finished)
+            self.store.update_job(
+                job_id,
+                state="terminated",
+                message="Terminated by administrator",
+                error=None,
+                finished_at=finished,
+            )
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except Exception as error:
             self._remove_created_entities()
-            details = {"libraryId": library_id, "jobId": job_id, "exception": type(error).__name__, "traceback": traceback.format_exc()}
+            details = {
+                "libraryId": library_id,
+                "jobId": job_id,
+                "exception": type(error).__name__,
+                "traceback": traceback.format_exc(),
+            }
             summary = f"Library scan failed for '{library.get('name', library_id)}': {type(error).__name__}: {error}"
-            logger.exception("library scan failed library_id=%s job_id=%s", library_id, job_id)
-            self.store.update_job(job_id, state="failed", error=summary, error_details=json.dumps(details), finished_at=now())
-            self.store.set_scan_state(library_id, "error", error=summary, finished=now())
+            logger.exception(
+                "library scan failed library_id=%s job_id=%s", library_id, job_id
+            )
+            self.store.update_job(
+                job_id,
+                state="failed",
+                error=summary,
+                error_details=json.dumps(details),
+                finished_at=now(),
+            )
+            self.store.set_scan_state(
+                library_id, "error", error=summary, finished=now()
+            )
             raise
 
     @staticmethod
@@ -337,9 +514,22 @@ class LibraryScanner:
         if should_terminate():
             raise JobTerminated()
 
-    def _entity(self, library_id: str, parent_id: str | None, entity_type: str, path: str | None, **numbers) -> str:
+    def _entity(
+        self,
+        library_id: str,
+        parent_id: str | None,
+        entity_type: str,
+        path: str | None,
+        **numbers,
+    ) -> str:
         timestamp = now()
-        fields = {"season_number": None, "episode_number": None, "episode_end_number": None, "disc_number": None, "track_number": None}
+        fields = {
+            "season_number": None,
+            "episode_number": None,
+            "episode_end_number": None,
+            "disc_number": None,
+            "track_number": None,
+        }
         fields.update(numbers)
         existing = self.db.execute(
             "SELECT id FROM library_entities WHERE library_id=? AND entity_type=? AND relative_path IS ?",
@@ -349,20 +539,44 @@ class LibraryScanner:
             entity_id = existing[0][0]
             self.db.execute(
                 "UPDATE library_entities SET parent_id=?,season_number=?,episode_number=?,episode_end_number=?,disc_number=?,track_number=?,updated_at=? WHERE id=?",
-                (parent_id, fields["season_number"], fields["episode_number"], fields["episode_end_number"], fields["disc_number"], fields["track_number"], timestamp, entity_id),
+                (
+                    parent_id,
+                    fields["season_number"],
+                    fields["episode_number"],
+                    fields["episode_end_number"],
+                    fields["disc_number"],
+                    fields["track_number"],
+                    timestamp,
+                    entity_id,
+                ),
             )
         else:
             entity_id = new_id()
             self.db.execute(
                 "INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,disc_number,track_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, library_id, parent_id, entity_type, path, fields["season_number"], fields["episode_number"], fields["episode_end_number"], fields["disc_number"], fields["track_number"], timestamp, timestamp),
+                (
+                    entity_id,
+                    library_id,
+                    parent_id,
+                    entity_type,
+                    path,
+                    fields["season_number"],
+                    fields["episode_number"],
+                    fields["episode_end_number"],
+                    fields["disc_number"],
+                    fields["track_number"],
+                    timestamp,
+                    timestamp,
+                ),
             )
             self._scan_created_ids.append(entity_id)
         self._scan_seen_ids.add(entity_id)
         return entity_id
 
     def _prune_missing_entities(self, library_id: str) -> None:
-        rows = self.db.execute("SELECT id FROM library_entities WHERE library_id=?", (library_id,))
+        rows = self.db.execute(
+            "SELECT id FROM library_entities WHERE library_id=?", (library_id,)
+        )
         missing = [row[0] for row in rows if row[0] not in self._scan_seen_ids]
         if not missing:
             return
@@ -379,48 +593,91 @@ class LibraryScanner:
         self._scan_created_ids = []
 
     def _needs_metadata(self, entity_id: str) -> bool:
-        row = self.db.execute("SELECT match_status FROM library_entities WHERE id=?", (entity_id,))
+        row = self.db.execute(
+            "SELECT match_status FROM library_entities WHERE id=?", (entity_id,)
+        )
         if not row or row[0][0] in {"unresolved", "failed"}:
             return True
-        return not bool(self.db.execute("SELECT 1 FROM entity_provider_ids WHERE entity_id=? LIMIT 1", (entity_id,)))
+        return not bool(
+            self.db.execute(
+                "SELECT 1 FROM entity_provider_ids WHERE entity_id=? LIMIT 1",
+                (entity_id,),
+            )
+        )
 
     def _fetch_seen_locales(self, should_terminate: Callable[[], bool]) -> None:
         """Ensure rescans also populate newly configured locales for existing IDs."""
-        from app.models.metadata import MetadataLanguageSettings
+        from app.metadata_services import MetadataIngestService
         from app.providers import MetadataService
 
-        service = MetadataService()
-        locales = MetadataLanguageSettings().get()
-        rows = self.db.execute(
-            "SELECT e.entity_type,p.provider,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.id IN ({})".format(",".join("?" * len(self._scan_seen_ids))),
-            list(self._scan_seen_ids),
-        ) if self._scan_seen_ids else []
+        ingest = MetadataIngestService(MetadataService())
+        rows = (
+            self.db.execute(
+                "SELECT e.entity_type,p.provider,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.id IN ({})".format(
+                    ",".join("?" * len(self._scan_seen_ids))
+                ),
+                list(self._scan_seen_ids),
+            )
+            if self._scan_seen_ids
+            else []
+        )
         for entity_type, provider, provider_id in rows:
             self._check_termination(should_terminate)
             if provider not in {"tmdb", "tvdb", "musicbrainz"}:
                 continue
-            for locale in locales:
-                try:
-                    service.fetch(provider, entity_type, str(provider_id), locale, force=False)
-                except Exception as error:
-                    logger.warning("rescan localized metadata failed entity_type=%s provider=%s provider_id=%s locale=%s: %s", entity_type, provider, provider_id, locale, error)
+            try:
+                ingest.ingest(
+                    provider,
+                    entity_type,
+                    str(provider_id),
+                    force=False,
+                    should_terminate=should_terminate,
+                )
+            except Exception as error:
+                logger.warning(
+                    "rescan localized metadata failed entity_type=%s provider=%s provider_id=%s: %s",
+                    entity_type,
+                    provider,
+                    provider_id,
+                    error,
+                )
 
     def _ids(self, entity_id: str, values: Iterable[tuple[str, str, str]]) -> None:
         from app.providers import PRIMARY_PROVIDER_BY_ENTITY
 
-        row = self.db.execute("SELECT entity_type FROM library_entities WHERE id=?", (entity_id,))
+        row = self.db.execute(
+            "SELECT entity_type FROM library_entities WHERE id=?", (entity_id,)
+        )
         entity_type = row[0][0] if row else ""
         primary_provider = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
         found = False
         for provider, identifier_type, value in values:
             if provider in {"tmdb", "tvdb"} and entity_type in {"movie", "series"}:
                 identifier_type = "movie" if entity_type == "movie" else "series"
-            self.db.execute("INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)", (entity_id, provider, identifier_type, value, int(provider == primary_provider)))
+            self.db.execute(
+                "INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)",
+                (
+                    entity_id,
+                    provider,
+                    identifier_type,
+                    value,
+                    int(provider == primary_provider),
+                ),
+            )
             found = True
         if found:
-            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='explicit_id',updated_at=? WHERE id=?", (now(), entity_id))
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='explicit_id',updated_at=? WHERE id=?",
+                (now(), entity_id),
+            )
 
-    def _resolve_and_seed(self, library_id: str, library_type: str, job_id: str, should_terminate: Callable[[], bool]) -> None:
+    def _resolve_and_seed(
+        self,
+        library_id: str,
+        library_type: str,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> None:
         """Resolve top-level inventory entities and seed English/common metadata."""
         from app.providers import MetadataService, ProviderError
 
@@ -435,43 +692,105 @@ class LibraryScanner:
         # artist/release parents have supplied stable MusicBrainz IDs.
         parent_filter = " AND parent_id IS NULL"
         rows = self.db.execute(
-            "SELECT id,entity_type,relative_path,season_number,episode_number FROM library_entities WHERE library_id=?{} AND entity_type IN ({}) ORDER BY relative_path".format(parent_filter, ",".join("?" * len(entity_types))),
+            "SELECT id,entity_type,relative_path,season_number,episode_number FROM library_entities WHERE library_id=?{} AND entity_type IN ({}) ORDER BY relative_path".format(
+                parent_filter, ",".join("?" * len(entity_types))
+            ),
             [library_id, *sorted(entity_types)],
         )
         created_ids = set(self._scan_created_ids)
-        rows = [row for row in rows if row[0] in self._scan_seen_ids and (row[0] in created_ids or self._needs_metadata(row[0]))]
-        self.store.update_job(job_id, progress_total=len(rows), progress_current=0, message="Resolving provider metadata")
+        rows = [
+            row
+            for row in rows
+            if row[0] in self._scan_seen_ids
+            and (row[0] in created_ids or self._needs_metadata(row[0]))
+        ]
+        self.store.update_job(
+            job_id,
+            progress_total=len(rows),
+            progress_current=0,
+            message="Resolving provider metadata",
+        )
         service = MetadataService()
-        for index, (entity_id, entity_type, relative_path, _season, _episode) in enumerate(rows, start=1):
+        for index, (
+            entity_id,
+            entity_type,
+            relative_path,
+            _season,
+            _episode,
+        ) in enumerate(rows, start=1):
             self._check_termination(should_terminate)
             query, year = _inventory_query(relative_path or "")
             explicit = [
                 {"provider": row[0], "id": row[2]}
-                for row in self.db.execute("SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?", (entity_id,))
+                for row in self.db.execute(
+                    "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                    (entity_id,),
+                )
             ]
             try:
-                result = service.resolve_inventory_entity(entity_type, query, year, explicit)
+                result = service.resolve_inventory_entity(
+                    entity_type, query, year, explicit
+                )
             except ProviderError as error:
-                self.db.execute("UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), entity_id))
-                logger.exception("scan resolution failed library_id=%s entity_id=%s entity_type=%s path=%s", library_id, entity_id, entity_type, relative_path)
-                raise ValueError(f"Metadata resolution failed for {entity_type} '{query}' at '{relative_path}': {error}") from error
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
+                    (now(), entity_id),
+                )
+                logger.exception(
+                    "scan resolution failed library_id=%s entity_id=%s entity_type=%s path=%s",
+                    library_id,
+                    entity_id,
+                    entity_type,
+                    relative_path,
+                )
+                raise ValueError(
+                    f"Metadata resolution failed for {entity_type} '{query}' at '{relative_path}': {error}"
+                ) from error
             values = []
             for value in result["providerIds"]:
-                identifier_type = "movie" if entity_type == "movie" else "series" if entity_type == "series" else entity_type
+                identifier_type = (
+                    "movie"
+                    if entity_type == "movie"
+                    else "series"
+                    if entity_type == "series"
+                    else entity_type
+                )
                 values.append((value["provider"], identifier_type, value["id"]))
             self._ids(entity_id, values)
             for value in result["providerIds"]:
-                self._fetch_configured_locales(service, value["provider"], entity_type, str(value["id"]), required=True)
-            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), entity_id))
+                self._fetch_configured_locales(
+                    service,
+                    value["provider"],
+                    entity_type,
+                    str(value["id"]),
+                    required=True,
+                )
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
+                (now(), entity_id),
+            )
             if entity_type == "series":
                 self._derive_tmdb_child_ids(entity_id)
                 self._derive_provider_child_ids(entity_id, result["metadata"])
                 self._derive_tvdb_episode_ids(entity_id, service)
-                self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE parent_id=? AND match_status='unresolved'", (now(), entity_id))
-            self.store.update_job(job_id, progress_current=index, message=f"Resolved {query}")
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE parent_id=? AND match_status='unresolved'",
+                    (now(), entity_id),
+                )
+            self.store.update_job(
+                job_id, progress_current=index, message=f"Resolved {query}"
+            )
         self._seed_all_children(library_id, service, job_id, should_terminate)
 
-    def _resolve_series_immediately(self, library_id: str, series_id: str, relative_path: str, service, job_id: str, should_terminate: Callable[[], bool]) -> None:
+    def _resolve_series_immediately(
+        self,
+        library_id: str,
+        series_id: str,
+        relative_path: str,
+        service,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> None:
         """Resolve one discovered series and all of its children before continuing."""
         from app.providers import ProviderError
 
@@ -480,22 +799,43 @@ class LibraryScanner:
             query, year = _inventory_query(relative_path or "")
             explicit = [
                 {"provider": row[0], "id": row[2]}
-                for row in self.db.execute("SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?", (series_id,))
+                for row in self.db.execute(
+                    "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                    (series_id,),
+                )
             ]
             try:
-                result = service.resolve_inventory_entity("series", query, year, explicit)
+                result = service.resolve_inventory_entity(
+                    "series", query, year, explicit
+                )
             except ProviderError as error:
-                self.db.execute("UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
-                raise ValueError(f"Metadata resolution failed for series '{query}' at '{relative_path}': {error}") from error
-            self._ids(series_id, [(value["provider"], "series", value["id"]) for value in result["providerIds"]])
-            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
+                    (now(), series_id),
+                )
+                raise ValueError(
+                    f"Metadata resolution failed for series '{query}' at '{relative_path}': {error}"
+                ) from error
+            self._ids(
+                series_id,
+                [
+                    (value["provider"], "series", value["id"])
+                    for value in result["providerIds"]
+                ],
+            )
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
+                (now(), series_id),
+            )
         self._aggregate_series_children(series_id, service)
         # The series hierarchy is useful for bulk caching but can omit an
         # episode from the returned aggregate.  Season details are the
         # authoritative TVDB source for exact episode IDs, so run the same
         # derivation used by the incremental resolution path before seeding.
         self._derive_tvdb_episode_ids(series_id, service)
-        self._seed_all_children(library_id, service, job_id, should_terminate, parent_id=series_id)
+        self._seed_all_children(
+            library_id, service, job_id, should_terminate, parent_id=series_id
+        )
 
     def _aggregate_series_children(self, series_id: str, service) -> None:
         """Map all discovered seasons and episodes from resolved parent IDs."""
@@ -515,14 +855,18 @@ class LibraryScanner:
         episodes = []
         if season_ids:
             episodes = self.db.execute(
-                "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id IN ({}) AND entity_type='episode' ORDER BY season_number,episode_number".format(",".join("?" * len(season_ids))),
+                "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id IN ({}) AND entity_type='episode' ORDER BY season_number,episode_number".format(
+                    ",".join("?" * len(season_ids))
+                ),
                 season_ids,
             )
         by_provider = {row[0]: row[1] for row in provider_rows}
         if not by_provider.get(primary_provider):
             raise ProviderError(f"Resolved series {series_id} has no TVDB ID")
-        from app.models.metadata import MetadataLanguageSettings
-        locales = MetadataLanguageSettings().get()
+        from app.metadata_services import MetadataIngestService
+
+        ingest = MetadataIngestService(service)
+        locales = ingest.locales()
         for provider, provider_id in by_provider.items():
             if provider not in {"tvdb", "tmdb"}:
                 continue
@@ -530,11 +874,25 @@ class LibraryScanner:
             for locale in locales:
                 try:
                     current = service.aggregate_series(provider, provider_id, locale)
+                    if current.get("series"):
+                        ingest.ingest_document(
+                            provider,
+                            "series",
+                            provider_id,
+                            locale,
+                            current["series"],
+                        )
                     aggregate = aggregate or current
                 except Exception as error:
                     if locale == "en" and provider == primary_provider:
                         raise
-                    logger.warning("series aggregation failed series_id=%s provider=%s locale=%s: %s", series_id, provider, locale, error)
+                    logger.warning(
+                        "series aggregation failed series_id=%s provider=%s locale=%s: %s",
+                        series_id,
+                        provider,
+                        locale,
+                        error,
+                    )
                     continue
                 if locale != "en":
                     continue
@@ -543,12 +901,23 @@ class LibraryScanner:
                 continue
             mapped_seasons = {}
             for metadata in aggregate.get("seasons", []):
-                child_number = next((value.get("season") for value in metadata.get("children", []) if value.get("type") == "episode"), None)
+                child_number = next(
+                    (
+                        value.get("season")
+                        for value in metadata.get("children", [])
+                        if value.get("type") == "episode"
+                    ),
+                    None,
+                )
                 if child_number is None:
                     # Season metadata itself does not always echo its number;
                     # provider IDs for TMDB encode it, while TVDB payloads do.
                     provider_value = str(metadata.get("providerId") or "")
-                    child_number = provider_value.rsplit(":", 1)[-1] if provider == "tmdb" and ":" in provider_value else None
+                    child_number = (
+                        provider_value.rsplit(":", 1)[-1]
+                        if provider == "tmdb" and ":" in provider_value
+                        else None
+                    )
                 if child_number is None:
                     child_number = metadata.get("seasonNumber")
                 if child_number is None:
@@ -567,160 +936,325 @@ class LibraryScanner:
                     parts = provider_value.split(":")
                     key = (int(parts[-2]), int(parts[-1]))
                 else:
-                    episode_child = next((value for value in metadata.get("children", []) if value.get("type") == "episode"), None)
-                    season_value = episode_child.get("season") if episode_child else metadata.get("seasonNumber")
-                    episode_value = episode_child.get("episode") if episode_child else metadata.get("episodeNumber")
+                    episode_child = next(
+                        (
+                            value
+                            for value in metadata.get("children", [])
+                            if value.get("type") == "episode"
+                        ),
+                        None,
+                    )
+                    season_value = (
+                        episode_child.get("season")
+                        if episode_child
+                        else metadata.get("seasonNumber")
+                    )
+                    episode_value = (
+                        episode_child.get("episode")
+                        if episode_child
+                        else metadata.get("episodeNumber")
+                    )
                     if season_value is None or episode_value is None:
                         continue
                     key = (int(season_value), int(episode_value))
                 mapped_episodes[key] = metadata
             for child_id, entity_type, season_number, episode_number in episodes:
-                metadata = mapped_episodes.get((int(season_number), int(episode_number)))
+                metadata = mapped_episodes.get(
+                    (int(season_number), int(episode_number))
+                )
                 if not metadata:
                     continue
-                self._ids(child_id, [(provider, "episode", str(metadata["providerId"]))])
+                self._ids(
+                    child_id, [(provider, "episode", str(metadata["providerId"]))]
+                )
                 self._persist_normalized_ids(child_id, "episode", metadata)
 
-    def _seed_all_children(self, library_id: str, service, job_id: str, should_terminate: Callable[[], bool], parent_id: str | None = None) -> None:
+    def _seed_all_children(
+        self,
+        library_id: str,
+        service,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        parent_id: str | None = None,
+    ) -> None:
         """Fetch common metadata and IDs for every season, episode, release, and track."""
+        from app.metadata_services import MetadataIngestService
+
         if parent_id:
             rows = self.db.execute(
                 "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season')) ORDER BY length(relative_path),relative_path",
                 (library_id, parent_id, parent_id),
             )
         else:
-            rows = self.db.execute("SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND parent_id IS NOT NULL ORDER BY length(relative_path),relative_path", (library_id,))
+            rows = self.db.execute(
+                "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND parent_id IS NOT NULL ORDER BY length(relative_path),relative_path",
+                (library_id,),
+            )
         rows = [row for row in rows if row[0] in self._scan_seen_ids]
-        self.store.update_job(job_id, progress_total=len(rows), progress_current=0, message="Seeding child metadata")
-        for index, (entity_id, entity_type, relative_path, row_parent_id, season_number, episode_number) in enumerate(rows, start=1):
+        self.store.update_job(
+            job_id,
+            progress_total=len(rows),
+            progress_current=0,
+            message="Seeding child metadata",
+        )
+        for index, (
+            entity_id,
+            entity_type,
+            relative_path,
+            row_parent_id,
+            season_number,
+            episode_number,
+        ) in enumerate(rows, start=1):
             self._check_termination(should_terminate)
-            provider_rows = self.db.execute("SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider", (entity_id,))
+            provider_rows = self.db.execute(
+                "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
+                (entity_id,),
+            )
             if not provider_rows:
                 if entity_type in {"season", "episode"} and parent_id:
-                    logger.warning("No TVDB provider ID was aggregated; leaving file unresolved type=%s path=%s", entity_type, relative_path)
-                    self.store.update_job(job_id, progress_current=index, message=f"Skipped unresolved {entity_type} {relative_path}")
+                    logger.warning(
+                        "No TVDB provider ID was aggregated; leaving file unresolved type=%s path=%s",
+                        entity_type,
+                        relative_path,
+                    )
+                    self.store.update_job(
+                        job_id,
+                        progress_current=index,
+                        message=f"Skipped unresolved {entity_type} {relative_path}",
+                    )
                     continue
                 query, year = _inventory_query(relative_path or "")
                 try:
-                    result = service.resolve_inventory_entity(entity_type, query, year, [])
-                    self._ids(entity_id, [(value["provider"], entity_type, value["id"]) for value in result["providerIds"]])
-                    provider_rows = [(value["provider"], value["id"]) for value in result["providerIds"]]
+                    result = service.resolve_inventory_entity(
+                        entity_type, query, year, []
+                    )
+                    self._ids(
+                        entity_id,
+                        [
+                            (value["provider"], entity_type, value["id"])
+                            for value in result["providerIds"]
+                        ],
+                    )
+                    provider_rows = [
+                        (value["provider"], value["id"])
+                        for value in result["providerIds"]
+                    ]
                 except Exception as error:
-                    self.db.execute("UPDATE library_entities SET match_status='failed',match_method='scan_resolution',updated_at=? WHERE id=?", (now(), entity_id))
-                    logger.exception("child resolution failed library_id=%s entity_id=%s type=%s path=%s", library_id, entity_id, entity_type, relative_path)
-                    raise ValueError(f"Metadata resolution failed for {entity_type} '{relative_path}': {type(error).__name__}: {error}") from error
-            priorities = {"season": ["tvdb", "tmdb"], "episode": ["tvdb", "tmdb"], "release": ["musicbrainz"], "track": ["musicbrainz"]}.get(entity_type, [row[0] for row in provider_rows])
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='failed',match_method='scan_resolution',updated_at=? WHERE id=?",
+                        (now(), entity_id),
+                    )
+                    logger.exception(
+                        "child resolution failed library_id=%s entity_id=%s type=%s path=%s",
+                        library_id,
+                        entity_id,
+                        entity_type,
+                        relative_path,
+                    )
+                    raise ValueError(
+                        f"Metadata resolution failed for {entity_type} '{relative_path}': {type(error).__name__}: {error}"
+                    ) from error
+            priorities = {
+                "season": ["tvdb", "tmdb"],
+                "episode": ["tvdb", "tmdb"],
+                "release": ["musicbrainz"],
+                "track": ["musicbrainz"],
+            }.get(entity_type, [row[0] for row in provider_rows])
             required = priorities[0] if priorities else None
             fetched = False
             required_succeeded = False
             errors = []
-            original_locales = set()
+            ingest = MetadataIngestService(service)
             for provider in priorities:
-                provider_id = next((row[1] for row in provider_rows if row[0] == provider), None)
+                provider_id = next(
+                    (row[1] for row in provider_rows if row[0] == provider), None
+                )
                 if not provider_id:
                     continue
-                from app.models.metadata import MetadataLanguageSettings
-                for locale in MetadataLanguageSettings().get():
+                for locale in ingest.locales():
                     try:
-                        normalized = service.fetch(provider, entity_type, provider_id, locale, force=False)
-                        if normalized.get("originalLanguage"):
-                            original_locales.add(str(normalized["originalLanguage"]))
+                        normalized = ingest.ingest_locale(
+                            provider, entity_type, provider_id, locale, force=False
+                        )
                         fetched = True
-                        if provider == required and locale == "en":
+                        if provider == required:
                             required_succeeded = True
                         self._persist_normalized_ids(entity_id, entity_type, normalized)
                         self._persist_child_ids(entity_id, normalized)
                     except Exception as error:
-                        errors.append(f"{provider}/{locale}: {type(error).__name__}: {error}")
-                        logger.warning("child metadata seed failed entity_id=%s type=%s provider=%s provider_id=%s locale=%s: %s", entity_id, entity_type, provider, provider_id, locale, error)
-                for original_locale in sorted(original_locales - set(MetadataLanguageSettings().get())):
-                    try:
-                        service.fetch(provider, entity_type, provider_id, original_locale, force=False)
-                    except Exception as error:
-                        logger.warning("original metadata seed failed entity_id=%s provider=%s locale=%s: %s", entity_id, provider, original_locale, error)
+                        errors.append(
+                            f"{provider}/{locale}: {type(error).__name__}: {error}"
+                        )
+                        logger.warning(
+                            "child metadata seed failed entity_id=%s type=%s provider=%s provider_id=%s locale=%s: %s",
+                            entity_id,
+                            entity_type,
+                            provider,
+                            provider_id,
+                            locale,
+                            error,
+                        )
             if not fetched or (required and not required_succeeded):
-                raise ValueError(f"Metadata resolution failed for {entity_type} '{relative_path}': required provider {required or 'provider'} could not be seeded; {'; '.join(errors) or 'no usable provider metadata'}")
-            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?", (now(), entity_id))
-            self.store.update_job(job_id, progress_current=index, message=f"Seeded {entity_type} {relative_path}")
+                raise ValueError(
+                    f"Metadata resolution failed for {entity_type} '{relative_path}': required provider {required or 'provider'} could not be seeded; {'; '.join(errors) or 'no usable provider metadata'}"
+                )
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?",
+                (now(), entity_id),
+            )
+            self.store.update_job(
+                job_id,
+                progress_current=index,
+                message=f"Seeded {entity_type} {relative_path}",
+            )
 
     @staticmethod
-    def _fetch_configured_locales(service, provider: str, entity_type: str, provider_id: str, required: bool = False) -> None:
-        from app.models.metadata import MetadataLanguageSettings
+    def _fetch_configured_locales(
+        service,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        required: bool = False,
+    ) -> None:
+        from app.metadata_services import MetadataIngestService
 
         if provider not in {"tmdb", "tvdb", "musicbrainz"}:
             return
 
         errors = []
-        original_locales = set()
-        for locale in MetadataLanguageSettings().get():
+        ingest = MetadataIngestService(service)
+        locales = ingest.locales()
+        for locale in locales:
             try:
-                normalized = service.fetch(provider, entity_type, provider_id, locale, force=False)
-                if normalized.get("originalLanguage"):
-                    original_locales.add(str(normalized["originalLanguage"]))
+                ingest.ingest_locale(provider, entity_type, provider_id, locale, force=False)
             except Exception as error:
                 errors.append(f"{locale}: {type(error).__name__}: {error}")
-                logger.warning("localized metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s: %s", provider, entity_type, provider_id, locale, error)
-        for original_locale in sorted(original_locales - set(MetadataLanguageSettings().get())):
-            try:
-                service.fetch(provider, entity_type, provider_id, original_locale, force=False)
-            except Exception as error:
-                logger.warning("original metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s: %s", provider, entity_type, provider_id, original_locale, error)
-        if required and errors and len(errors) == len(MetadataLanguageSettings().get()):
-            raise ValueError(f"No metadata locale could be fetched for {provider} {entity_type} {provider_id}: {'; '.join(errors)}")
+                logger.warning(
+                    "localized metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s: %s",
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    error,
+                )
+        if required and errors and len(errors) == len(locales):
+            raise ValueError(
+                f"No metadata locale could be fetched for {provider} {entity_type} {provider_id}: {'; '.join(errors)}"
+            )
 
-    def _persist_normalized_ids(self, entity_id: str, entity_type: str, normalized: dict) -> None:
+    def _persist_normalized_ids(
+        self, entity_id: str, entity_type: str, normalized: dict
+    ) -> None:
         values = []
         for value in normalized.get("ids", []) or []:
             if value.get("provider") and value.get("id"):
-                values.append((value["provider"], value.get("identifierType") or entity_type, str(value["id"])))
+                values.append(
+                    (
+                        value["provider"],
+                        value.get("identifierType") or entity_type,
+                        str(value["id"]),
+                    )
+                )
         self._ids(entity_id, values)
 
     def _persist_child_ids(self, parent_id: str, normalized: dict) -> None:
         """Attach provider child IDs to inventory children by stable numbers."""
-        tracks = [value for value in normalized.get("tracks", []) or [] if value.get("id")]
+        tracks = [
+            value for value in normalized.get("tracks", []) or [] if value.get("id")
+        ]
         if not tracks:
             return
-        children = self.db.execute("SELECT id,track_number,disc_number FROM library_entities WHERE parent_id=? AND entity_type='track' ORDER BY disc_number,track_number,relative_path", (parent_id,))
+        children = self.db.execute(
+            "SELECT id,track_number,disc_number FROM library_entities WHERE parent_id=? AND entity_type='track' ORDER BY disc_number,track_number,relative_path",
+            (parent_id,),
+        )
         for index, (entity_id, track_number, disc_number) in enumerate(children):
-            candidate = next((value for value in tracks if track_number is not None and int(value.get("position") or 0) == int(track_number)), None)
+            candidate = next(
+                (
+                    value
+                    for value in tracks
+                    if track_number is not None
+                    and int(value.get("position") or 0) == int(track_number)
+                ),
+                None,
+            )
             candidate = candidate or (tracks[index] if index < len(tracks) else None)
             if candidate and candidate.get("id"):
-                self._ids(entity_id, [("musicbrainz", "recording", str(candidate["id"]))])
+                self._ids(
+                    entity_id, [("musicbrainz", "recording", str(candidate["id"]))]
+                )
 
     def _derive_tmdb_child_ids(self, series_id: str) -> None:
-        provider_rows = self.db.execute("SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='tmdb'", (series_id,))
+        provider_rows = self.db.execute(
+            "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='tmdb'",
+            (series_id,),
+        )
         if not provider_rows:
             return
-        seasons = self.db.execute("SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=? AND entity_type='season'", (series_id,))
+        seasons = self.db.execute(
+            "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=? AND entity_type='season'",
+            (series_id,),
+        )
         season_ids = [row[0] for row in seasons]
         children = list(seasons)
         if season_ids:
-            children.extend(self.db.execute("SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id IN ({}) AND entity_type='episode'".format(",".join("?" * len(season_ids))), season_ids))
+            children.extend(
+                self.db.execute(
+                    "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id IN ({}) AND entity_type='episode'".format(
+                        ",".join("?" * len(season_ids))
+                    ),
+                    season_ids,
+                )
+            )
         for child_id, entity_type, season_number, episode_number in children:
             if entity_type == "season":
                 provider_id = f"{provider_rows[0][0]}:{season_number}"
-            elif entity_type == "episode" and season_number is not None and episode_number is not None:
+            elif (
+                entity_type == "episode"
+                and season_number is not None
+                and episode_number is not None
+            ):
                 provider_id = f"{provider_rows[0][0]}:{season_number}:{episode_number}"
             else:
                 continue
             self._ids(child_id, [("tmdb", entity_type, provider_id)])
-            self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE id=?", (now(), child_id))
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE id=?",
+                (now(), child_id),
+            )
 
     def _derive_provider_child_ids(self, series_id: str, metadata: dict) -> None:
         if metadata.get("provider") == "tmdb":
             return
-        seasons = self.db.execute("SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=? AND entity_type='season'", (series_id,))
+        seasons = self.db.execute(
+            "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=? AND entity_type='season'",
+            (series_id,),
+        )
         season_ids = [row[0] for row in seasons]
         children = list(seasons)
         if season_ids:
-            children.extend(self.db.execute("SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id IN ({}) AND entity_type='episode'".format(",".join("?" * len(season_ids))), season_ids))
+            children.extend(
+                self.db.execute(
+                    "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id IN ({}) AND entity_type='episode'".format(
+                        ",".join("?" * len(season_ids))
+                    ),
+                    season_ids,
+                )
+            )
         for child_id, entity_type, season_number, episode_number in children:
             for value in metadata.get("children", []) or []:
-                if value.get("type") != entity_type or int(value.get("season", -1)) != int(season_number if season_number is not None else -2):
+                if value.get("type") != entity_type or int(
+                    value.get("season", -1)
+                ) != int(season_number if season_number is not None else -2):
                     continue
-                if entity_type == "episode" and int(value.get("episode", -1)) != int(episode_number if episode_number is not None else -2):
+                if entity_type == "episode" and int(value.get("episode", -1)) != int(
+                    episode_number if episode_number is not None else -2
+                ):
                     continue
-                self._ids(child_id, [(metadata.get("provider", ""), entity_type, str(value["id"]))])
+                self._ids(
+                    child_id,
+                    [(metadata.get("provider", ""), entity_type, str(value["id"]))],
+                )
                 break
 
     def _derive_tvdb_episode_ids(self, series_id: str, service) -> None:
@@ -735,23 +1269,52 @@ class LibraryScanner:
                 (season_id,),
             )
             if not provider_rows:
-                raise ValueError(f"TVDB season ID could not be resolved for season {season_number} at '{season_path}'")
+                raise ValueError(
+                    f"TVDB season ID could not be resolved for season {season_number} at '{season_path}'"
+                )
             season_provider_id = str(provider_rows[0][0])
             try:
-                normalized = service.fetch("tvdb", "season", season_provider_id, "en", force=True)
+                fetch_identity = getattr(service, "fetch_for_identity", None)
+                normalized = (
+                    fetch_identity("tvdb", "season", season_provider_id)
+                    if fetch_identity
+                    else service.fetch("tvdb", "season", season_provider_id, "en", force=True)
+                )
             except Exception as error:
-                raise ValueError(f"TVDB season details failed for season {season_number} at '{season_path}' (ID {season_provider_id}): {type(error).__name__}: {error}") from error
+                raise ValueError(
+                    f"TVDB season details failed for season {season_number} at '{season_path}' (ID {season_provider_id}): {type(error).__name__}: {error}"
+                ) from error
             self._persist_normalized_ids(season_id, "season", normalized)
             episodes = self.db.execute(
                 "SELECT id,episode_number,relative_path FROM library_entities WHERE parent_id=? AND entity_type='episode' ORDER BY episode_number,relative_path",
                 (season_id,),
             )
-            tvdb_children = [value for value in normalized.get("children", []) or [] if value.get("type") == "episode" and value.get("id") is not None]
+            tvdb_children = [
+                value
+                for value in normalized.get("children", []) or []
+                if value.get("type") == "episode" and value.get("id") is not None
+            ]
             for episode_id, episode_number, episode_path in episodes:
-                match = next((value for value in tvdb_children if int(value.get("season", season_number)) == int(season_number) and int(value.get("episode", -1)) == int(episode_number)), None)
+                match = next(
+                    (
+                        value
+                        for value in tvdb_children
+                        if int(value.get("season", season_number)) == int(season_number)
+                        and int(value.get("episode", -1)) == int(episode_number)
+                    ),
+                    None,
+                )
                 if not match:
-                    logger.warning("TVDB episode ID could not be resolved; leaving file unresolved season=%s episode=%s path=%s", season_number, episode_number, episode_path)
-                    self.db.execute("DELETE FROM entity_provider_ids WHERE entity_id=? AND identifier_type='episode'", (episode_id,))
+                    logger.warning(
+                        "TVDB episode ID could not be resolved; leaving file unresolved season=%s episode=%s path=%s",
+                        season_number,
+                        episode_number,
+                        episode_path,
+                    )
+                    self.db.execute(
+                        "DELETE FROM entity_provider_ids WHERE entity_id=? AND identifier_type='episode'",
+                        (episode_id,),
+                    )
                     continue
                 self._ids(episode_id, [("tvdb", "episode", str(match["id"]))])
 
@@ -772,7 +1335,16 @@ class LibraryScanner:
                 language = parts[-1].lower()
             self.db.execute(
                 "INSERT OR REPLACE INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
-                (new_id(), entity_id, relative(str(root), str(path)), role, language, None, stat.st_size, stat.st_mtime_ns),
+                (
+                    new_id(),
+                    entity_id,
+                    relative(str(root), str(path)),
+                    role,
+                    language,
+                    None,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                ),
             )
         # Probe after the file rows are reconciled so playback never
         # depends on a media-source probe response.
@@ -781,23 +1353,44 @@ class LibraryScanner:
 
             PlaybackManager().probe_entity(entity_id)
 
-    def _scan_movies(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool]) -> int:
-        entries = [path for path in root.iterdir() if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS]
+    def _scan_movies(
+        self,
+        library_id: str,
+        root: Path,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> int:
+        entries = [
+            path
+            for path in root.iterdir()
+            if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS
+        ]
         self.store.update_job(job_id, progress_total=len(entries))
         count = 0
         for entry in entries:
             self._check_termination(should_terminate)
-            entity = self._entity(library_id, None, "movie", relative(str(root), str(entry)))
+            entity = self._entity(
+                library_id, None, "movie", relative(str(root), str(entry))
+            )
             self._ids(entity, provider_ids(entry.name))
             files = list(entry.rglob("*")) if entry.is_dir() else [entry]
             for nfo in (path for path in files if path.suffix.lower() == ".nfo"):
                 self._ids(entity, parse_nfo_ids(nfo))
             self._files(entity, root, [path for path in files if path.is_file()])
             count += 1
-            self.store.update_job(job_id, progress_current=count, message=f"Indexed {entry.name}")
+            self.store.update_job(
+                job_id, progress_current=count, message=f"Indexed {entry.name}"
+            )
         return count
 
-    def _scan_series(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool], resolve_immediately: bool = False) -> int:
+    def _scan_series(
+        self,
+        library_id: str,
+        root: Path,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        resolve_immediately: bool = False,
+    ) -> int:
         from app.providers import MetadataService
 
         series_dirs = [path for path in root.iterdir() if path.is_dir()]
@@ -806,47 +1399,138 @@ class LibraryScanner:
         service = MetadataService() if resolve_immediately else None
         for series_index, series_dir in enumerate(series_dirs, start=1):
             self._check_termination(should_terminate)
-            series = self._entity(library_id, None, "series", relative(str(root), str(series_dir)))
+            series = self._entity(
+                library_id, None, "series", relative(str(root), str(series_dir))
+            )
             self._ids(series, provider_ids(series_dir.name))
-            season_dirs = [path for path in series_dir.iterdir() if path.is_dir() and (SEASON_RE.match(path.name) or path.name.lower() == "specials")]
-            if any(path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS for path in series_dir.iterdir()):
+            season_dirs = [
+                path
+                for path in series_dir.iterdir()
+                if path.is_dir()
+                and (SEASON_RE.match(path.name) or path.name.lower() == "specials")
+            ]
+            if any(
+                path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+                for path in series_dir.iterdir()
+            ):
                 season_dirs.append(series_dir)
             for season_dir in season_dirs:
                 match = SEASON_RE.match(season_dir.name)
-                season_folder_number = int(match.group(1)) if match else (0 if season_dir.name.lower() == "specials" else 1)
-                season = self._entity(library_id, series, "season", relative(str(root), str(season_dir)), season_number=season_folder_number)
-                episode_paths = season_dir.iterdir() if season_dir == series_dir else season_dir.rglob("*")
+                season_folder_number = (
+                    int(match.group(1))
+                    if match
+                    else (0 if season_dir.name.lower() == "specials" else 1)
+                )
+                season = self._entity(
+                    library_id,
+                    series,
+                    "season",
+                    relative(str(root), str(season_dir)),
+                    season_number=season_folder_number,
+                )
+                episode_paths = (
+                    season_dir.iterdir()
+                    if season_dir == series_dir
+                    else season_dir.rglob("*")
+                )
                 for media in episode_paths:
                     self._check_termination(should_terminate)
-                    if not media.is_file() or media.suffix.lower() not in VIDEO_EXTENSIONS:
+                    if (
+                        not media.is_file()
+                        or media.suffix.lower() not in VIDEO_EXTENSIONS
+                    ):
                         continue
                     episode_match = EPISODE_RE.search(media.stem)
                     guessed = guess_media(media) if not episode_match else {}
-                    if not episode_match and not (guessed.get("season") and guessed.get("episode")):
+                    if not episode_match and not (
+                        guessed.get("season") and guessed.get("episode")
+                    ):
                         continue
-                    filename_season_number = int(episode_match.group("season")) if episode_match else int(guessed["season"])
-                    episode_number = int(episode_match.group("episode")) if episode_match else int(guessed["episode"] if not isinstance(guessed["episode"], list) else guessed["episode"][0])
-                    end_number = int(episode_match.group("end")) if episode_match and episode_match.group("end") else None
+                    filename_season_number = (
+                        int(episode_match.group("season"))
+                        if episode_match
+                        else int(guessed["season"])
+                    )
+                    episode_number = (
+                        int(episode_match.group("episode"))
+                        if episode_match
+                        else int(
+                            guessed["episode"]
+                            if not isinstance(guessed["episode"], list)
+                            else guessed["episode"][0]
+                        )
+                    )
+                    end_number = (
+                        int(episode_match.group("end"))
+                        if episode_match and episode_match.group("end")
+                        else None
+                    )
                     # The directory establishes the season hierarchy. Keep the
                     # filename season only for loose episodes stored directly
                     # under the series directory.
-                    episode_season_number = filename_season_number if season_dir == series_dir else season_folder_number
-                    episode = self._entity(library_id, season, "episode", relative(str(root), str(media)), season_number=episode_season_number, episode_number=episode_number, episode_end_number=end_number)
+                    episode_season_number = (
+                        filename_season_number
+                        if season_dir == series_dir
+                        else season_folder_number
+                    )
+                    episode = self._entity(
+                        library_id,
+                        season,
+                        "episode",
+                        relative(str(root), str(media)),
+                        season_number=episode_season_number,
+                        episode_number=episode_number,
+                        episode_end_number=end_number,
+                    )
                     self._ids(episode, provider_ids(media.name))
-                    self._files(episode, root, [media] + [sidecar for sidecar in media.parent.iterdir() if sidecar.is_file() and sidecar.stem.startswith(media.stem) and sidecar != media])
+                    self._files(
+                        episode,
+                        root,
+                        [media]
+                        + [
+                            sidecar
+                            for sidecar in media.parent.iterdir()
+                            if sidecar.is_file()
+                            and sidecar.stem.startswith(media.stem)
+                            and sidecar != media
+                        ],
+                    )
                     episode_count += 1
-            self._files(series, root, [path for path in series_dir.iterdir() if path.is_file()])
+            self._files(
+                series, root, [path for path in series_dir.iterdir() if path.is_file()]
+            )
             children = self.db.execute(
                 "SELECT id FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season'))",
                 (library_id, series, series),
             )
-            needs_resolution = self._needs_metadata(series) or any(self._needs_metadata(row[0]) for row in children if row[0] in self._scan_seen_ids)
+            needs_resolution = self._needs_metadata(series) or any(
+                self._needs_metadata(row[0])
+                for row in children
+                if row[0] in self._scan_seen_ids
+            )
             if service and needs_resolution:
-                self._resolve_series_immediately(library_id, series, relative(str(root), str(series_dir)), service, job_id, should_terminate)
-            self.store.update_job(job_id, progress_current=series_index, message=f"Indexed {series_dir.name} ({episode_count} episodes)")
+                self._resolve_series_immediately(
+                    library_id,
+                    series,
+                    relative(str(root), str(series_dir)),
+                    service,
+                    job_id,
+                    should_terminate,
+                )
+            self.store.update_job(
+                job_id,
+                progress_current=series_index,
+                message=f"Indexed {series_dir.name} ({episode_count} episodes)",
+            )
         return len(series_dirs)
 
-    def _scan_music(self, library_id: str, root: Path, job_id: str, should_terminate: Callable[[], bool]) -> int:
+    def _scan_music(
+        self,
+        library_id: str,
+        root: Path,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> int:
         album_dirs = []
         for directory, _, filenames in os.walk(root):
             if any(Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames):
@@ -856,37 +1540,90 @@ class LibraryScanner:
         artists: dict[str, str] = {}
         for album_dir in album_dirs:
             self._check_termination(should_terminate)
-            artist_name = album_dir.relative_to(root).parts[0] if album_dir.relative_to(root).parts else album_dir.name
+            artist_name = (
+                album_dir.relative_to(root).parts[0]
+                if album_dir.relative_to(root).parts
+                else album_dir.name
+            )
             artist = artists.get(artist_name)
             if not artist:
                 artist = self._entity(library_id, None, "artist", artist_name)
                 artists[artist_name] = artist
-            release = self._entity(library_id, artist, "release", relative(str(root), str(album_dir)))
-            tracks = [path for path in album_dir.iterdir() if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS]
+            release = self._entity(
+                library_id, artist, "release", relative(str(root), str(album_dir))
+            )
+            tracks = [
+                path
+                for path in album_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
+            ]
             for track in sorted(tracks):
                 self._check_termination(should_terminate)
                 tags = parse_audio_tags(track)
                 track_number = _int_tag(tags.get("TRACKNUMBER") or tags.get("TRACK"))
                 disc_number = _int_tag(tags.get("DISCNUMBER") or tags.get("DISC"))
-                entity = self._entity(library_id, release, "track", relative(str(root), str(track)), disc_number=disc_number, track_number=track_number)
+                entity = self._entity(
+                    library_id,
+                    release,
+                    "track",
+                    relative(str(root), str(track)),
+                    disc_number=disc_number,
+                    track_number=track_number,
+                )
                 self._ids(entity, _music_ids(tags))
-                self._files(entity, root, [track] + [sidecar for sidecar in track.parent.iterdir() if sidecar.is_file() and sidecar.stem.startswith(track.stem) and sidecar != track])
+                self._files(
+                    entity,
+                    root,
+                    [track]
+                    + [
+                        sidecar
+                        for sidecar in track.parent.iterdir()
+                        if sidecar.is_file()
+                        and sidecar.stem.startswith(track.stem)
+                        and sidecar != track
+                    ],
+                )
                 count += 1
-            self._files(release, root, [path for path in album_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS])
-            self.store.update_job(job_id, progress_current=count, message=f"Indexed {album_dir.name}")
+            self._files(
+                release,
+                root,
+                [
+                    path
+                    for path in album_dir.iterdir()
+                    if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+                ],
+            )
+            self.store.update_job(
+                job_id, progress_current=count, message=f"Indexed {album_dir.name}"
+            )
         return count
 
-    def derive_collection(self, library_id: str, job_id: str, should_terminate: Callable[[], bool] | None = None) -> None:
+    def derive_collection(
+        self,
+        library_id: str,
+        job_id: str,
+        should_terminate: Callable[[], bool] | None = None,
+    ) -> None:
         should_terminate = should_terminate or (lambda: False)
         library = self.store.get(library_id)
         if not library:
             raise ValueError("Library not found")
         sources = self.store.sources(library_id)
         self.store.set_scan_state(library_id, "scanning", started=now(), error=None)
-        self.store.update_job(job_id, state="running", started_at=now(), message="Deriving collections")
+        self.store.update_job(
+            job_id, state="running", started_at=now(), message="Deriving collections"
+        )
         from app.library_cleanup import cleanup_entities
 
-        cleanup_entities(self.db, [row[0] for row in self.db.execute("SELECT id FROM library_entities WHERE library_id=?", (library_id,))])
+        cleanup_entities(
+            self.db,
+            [
+                row[0]
+                for row in self.db.execute(
+                    "SELECT id FROM library_entities WHERE library_id=?", (library_id,)
+                )
+            ],
+        )
         try:
             from app.providers import MetadataService, ProviderError, TVDBClient
 
@@ -894,10 +1631,16 @@ class LibraryScanner:
             client = service.client("tvdb")
             if not isinstance(client, TVDBClient):
                 raise ProviderError("TheTVDB is not configured")
-            source_rows = self.db.execute(
-                "SELECT e.id,e.entity_type,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.library_id IN ({}) AND p.provider='tvdb' AND p.identifier_type IN ('series','movie')".format(",".join("?" * len(sources))),
-                sources,
-            ) if sources else []
+            source_rows = (
+                self.db.execute(
+                    "SELECT e.id,e.entity_type,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.library_id IN ({}) AND p.provider='tvdb' AND p.identifier_type IN ('series','movie')".format(
+                        ",".join("?" * len(sources))
+                    ),
+                    sources,
+                )
+                if sources
+                else []
+            )
             by_id = {(row[1], str(row[2])): row[0] for row in source_rows}
             lists: dict[str, dict] = {}
             # Lists are paged; stop at the first short page to avoid unbounded calls.
@@ -920,39 +1663,93 @@ class LibraryScanner:
                 data = payload.get("data", payload)
                 members = []
                 for entity in data.get("entities", []) or []:
-                    key = ("movie", str(entity.get("movieId"))) if entity.get("movieId") else ("series", str(entity.get("seriesId"))) if entity.get("seriesId") else None
+                    key = (
+                        ("movie", str(entity.get("movieId")))
+                        if entity.get("movieId")
+                        else ("series", str(entity.get("seriesId")))
+                        if entity.get("seriesId")
+                        else None
+                    )
                     if key and key in by_id:
                         members.append(by_id[key])
                 members = list(dict.fromkeys(members))
                 if len(members) < 2:
                     continue
-                collection = self._entity(library_id, None, "collection", f"tvdb-list-{list_id}")
+                collection = self._entity(
+                    library_id, None, "collection", f"tvdb-list-{list_id}"
+                )
                 self._ids(collection, [("tvdb", "collection", list_id)])
                 for position, source_entity in enumerate(members):
-                    self.db.execute("INSERT INTO collection_members(collection_entity_id,source_entity_id,position) VALUES(?,?,?)", (collection, source_entity, position))
+                    self.db.execute(
+                        "INSERT INTO collection_members(collection_entity_id,source_entity_id,position) VALUES(?,?,?)",
+                        (collection, source_entity, position),
+                    )
                 # Store a lightweight localized seed; full metadata remains the provider cache.
                 title = base.get("name") or data.get("name") or f"Collection {list_id}"
-                from app.models.metadata import MetadataLanguageSettings
-                for locale in MetadataLanguageSettings().get():
+                from app.metadata_services import MetadataIngestService
+
+                ingest = MetadataIngestService(service)
+                for locale in ingest.locales():
                     try:
-                        normalized = service.fetch("tvdb", "collection", list_id, locale, force=False)
+                        normalized = ingest.ingest_locale(
+                            "tvdb", "collection", list_id, locale, force=False
+                        )
                     except Exception:
-                        normalized = {"title": title, "overview": data.get("overview"), "provider": "tvdb", "providerId": list_id, "images": []}
+                        normalized = {
+                            "title": title,
+                            "overview": data.get("overview"),
+                            "provider": "tvdb",
+                            "providerId": list_id,
+                            "images": [],
+                        }
                     service.cache.put("tvdb", "collection", list_id, locale, normalized)
                 count += 1
-                self.store.update_job(job_id, progress_current=count, message=f"Derived {title}")
-            self.store.update_job(job_id, state="completed", progress_current=count, progress_total=len(lists), finished_at=now(), message=f"Derived {count} official collections")
+                self.store.update_job(
+                    job_id, progress_current=count, message=f"Derived {title}"
+                )
+            self.store.update_job(
+                job_id,
+                state="completed",
+                progress_current=count,
+                progress_total=len(lists),
+                finished_at=now(),
+                message=f"Derived {count} official collections",
+            )
             self.store.set_scan_state(library_id, "ready", finished=now())
         except JobTerminated:
             finished = now()
-            self.store.update_job(job_id, state="terminated", message="Terminated by administrator", error=None, finished_at=finished)
+            self.store.update_job(
+                job_id,
+                state="terminated",
+                message="Terminated by administrator",
+                error=None,
+                finished_at=finished,
+            )
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except Exception as error:
             summary = f"Collection derivation failed for library '{library_id}': {type(error).__name__}: {error}"
-            details = {"libraryId": library_id, "jobId": job_id, "operation": "collection_derivation", "exception": type(error).__name__, "traceback": traceback.format_exc()}
-            logger.exception("collection derivation failed library_id=%s job_id=%s", library_id, job_id)
-            self.store.update_job(job_id, state="failed", error=summary, error_details=json.dumps(details), finished_at=now())
-            self.store.set_scan_state(library_id, "error", error=summary, finished=now())
+            details = {
+                "libraryId": library_id,
+                "jobId": job_id,
+                "operation": "collection_derivation",
+                "exception": type(error).__name__,
+                "traceback": traceback.format_exc(),
+            }
+            logger.exception(
+                "collection derivation failed library_id=%s job_id=%s",
+                library_id,
+                job_id,
+            )
+            self.store.update_job(
+                job_id,
+                state="failed",
+                error=summary,
+                error_details=json.dumps(details),
+                finished_at=now(),
+            )
+            self.store.set_scan_state(
+                library_id, "error", error=summary, finished=now()
+            )
             raise
 
 
@@ -1000,7 +1797,9 @@ class _LibraryChangeHandler(FileSystemEventHandler):
         self.runtime = runtime
         self.library_id = library_id
 
-    def on_any_event(self, event):  # watchdog emits separate create/modify/delete/move events
+    def on_any_event(
+        self, event
+    ):  # watchdog emits separate create/modify/delete/move events
         if not getattr(event, "is_directory", False):
             self.runtime.request_reconcile(self.library_id)
 
@@ -1026,12 +1825,17 @@ class LibraryRuntime:
             return
         self._recover_active_jobs()
         for library in self.store.list():
-            unresolved = self.store.db.execute("SELECT COUNT(*) FROM library_entities WHERE library_id=? AND match_status IN ('unresolved','failed')", (library["id"],))[0][0]
+            unresolved = self.store.db.execute(
+                "SELECT COUNT(*) FROM library_entities WHERE library_id=? AND match_status IN ('unresolved','failed')",
+                (library["id"],),
+            )[0][0]
             if unresolved:
                 self.enqueue(library["id"], "scan")
         self.stop_event.clear()
         self._configure_watchers()
-        self.thread = threading.Thread(target=self._run, name="zenstream-library-jobs", daemon=True)
+        self.thread = threading.Thread(
+            target=self._run, name="zenstream-library-jobs", daemon=True
+        )
         self.thread.start()
 
     def stop(self):
@@ -1066,13 +1870,19 @@ class LibraryRuntime:
             cursor.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,))
             if not cursor.fetchone():
                 return None
-            cursor.execute("SELECT id FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1", (library_id,))
+            cursor.execute(
+                "SELECT id FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1",
+                (library_id,),
+            )
             existing = cursor.fetchone()
             if existing:
                 job_id = existing[0]
             else:
                 job_id = new_id()
-                cursor.execute("INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)", (job_id, library_id, kind, now()))
+                cursor.execute(
+                    "INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)",
+                    (job_id, library_id, kind, now()),
+                )
         job = self.store.job(job_id)
         with self.condition:
             self.condition.notify_all()
@@ -1087,9 +1897,17 @@ class LibraryRuntime:
             cancel_event = self._cancel_events.get(job_id)
             if cancel_event:
                 cancel_event.set()
-                self.store.update_job(job_id, state="terminating", message="Termination requested")
+                self.store.update_job(
+                    job_id, state="terminating", message="Termination requested"
+                )
             else:
-                self.store.update_job(job_id, state="terminated", message="Terminated by administrator", error=None, finished_at=finished)
+                self.store.update_job(
+                    job_id,
+                    state="terminated",
+                    message="Terminated by administrator",
+                    error=None,
+                    finished_at=finished,
+                )
         with self.condition:
             self.condition.notify_all()
         return self.store.job(job_id)
@@ -1102,13 +1920,21 @@ class LibraryRuntime:
         so wait for workers to leave the active set and refuse deletion if a
         provider call does not return within the bounded timeout.
         """
-        jobs = [job for job in self.store.jobs(library_id) if job and job["state"] in ACTIVE_JOB_STATES]
+        jobs = [
+            job
+            for job in self.store.jobs(library_id)
+            if job and job["state"] in ACTIVE_JOB_STATES
+        ]
         for job in jobs:
             self.terminate(job["id"])
         deadline = time.monotonic() + timeout
         while True:
             with self._active_lock:
-                active = {job_id for job_id in self._active_jobs if (self.store.job(job_id) or {}).get("libraryId") == library_id}
+                active = {
+                    job_id
+                    for job_id in self._active_jobs
+                    if (self.store.job(job_id) or {}).get("libraryId") == library_id
+                }
             if not active:
                 return True
             remaining = deadline - time.monotonic()
@@ -1132,10 +1958,19 @@ class LibraryRuntime:
                 keep_id = resumable[0][0] if resumable else None
                 for job_id, state in jobs:
                     if job_id == keep_id:
-                        cursor.execute("UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after Orchestrator restart',error=NULL,started_at=NULL,finished_at=NULL WHERE id=?", (job_id,))
+                        cursor.execute(
+                            "UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after Orchestrator restart',error=NULL,started_at=NULL,finished_at=NULL WHERE id=?",
+                            (job_id,),
+                        )
                     else:
-                        cursor.execute("UPDATE library_jobs SET state='terminated',message='Superseded by the active task run',error=NULL,finished_at=? WHERE id=?", (timestamp, job_id))
-                cursor.execute("UPDATE libraries SET scan_state='idle',scan_error=NULL,updated_at=? WHERE id=?", (timestamp, library_id))
+                        cursor.execute(
+                            "UPDATE library_jobs SET state='terminated',message='Superseded by the active task run',error=NULL,finished_at=? WHERE id=?",
+                            (timestamp, job_id),
+                        )
+                cursor.execute(
+                    "UPDATE libraries SET scan_state='idle',scan_error=NULL,updated_at=? WHERE id=?",
+                    (timestamp, library_id),
+                )
 
     def request_reconcile(self, library_id: str) -> None:
         # Debounce bursts from copy/move operations into one reconcile job.
@@ -1149,10 +1984,18 @@ class LibraryRuntime:
         observer = Observer()
         for library in self.store.list():
             directory = library.get("directory")
-            if not library.get("watchEnabled") or not directory or not os.path.isdir(directory):
+            if (
+                not library.get("watchEnabled")
+                or not directory
+                or not os.path.isdir(directory)
+            ):
                 continue
             try:
-                observer.schedule(_LibraryChangeHandler(self, library["id"]), directory, recursive=True)
+                observer.schedule(
+                    _LibraryChangeHandler(self, library["id"]),
+                    directory,
+                    recursive=True,
+                )
                 self._watch_paths.add(directory)
             except OSError:
                 continue
@@ -1163,25 +2006,41 @@ class LibraryRuntime:
     def _schedule_repairs(self) -> None:
         now_epoch = time.time()
         for library in self.store.list():
-            if library["type"] == "collection" or not library.get("scanIntervalMinutes"):
+            if library["type"] == "collection" or not library.get(
+                "scanIntervalMinutes"
+            ):
                 continue
             finished = library.get("lastScanFinishedAt")
             try:
-                due = not finished or datetime.fromisoformat(finished).timestamp() + library["scanIntervalMinutes"] * 60 <= now_epoch
+                due = (
+                    not finished
+                    or datetime.fromisoformat(finished).timestamp()
+                    + library["scanIntervalMinutes"] * 60
+                    <= now_epoch
+                )
             except (TypeError, ValueError, OSError):
                 due = True
-            unresolved = self.store.db.execute("SELECT COUNT(*) FROM library_entities WHERE library_id=? AND match_status IN ('unresolved','failed')", (library["id"],))[0][0]
+            unresolved = self.store.db.execute(
+                "SELECT COUNT(*) FROM library_entities WHERE library_id=? AND match_status IN ('unresolved','failed')",
+                (library["id"],),
+            )[0][0]
             due = due or (bool(unresolved) and not finished)
             if due:
                 self.enqueue(library["id"], "scan")
 
     def _run(self):
         while not self.stop_event.is_set():
-            due = [library_id for library_id, deadline in self._reconcile_due.items() if time.monotonic() >= deadline]
+            due = [
+                library_id
+                for library_id, deadline in self._reconcile_due.items()
+                if time.monotonic() >= deadline
+            ]
             for library_id in due:
                 self.enqueue(library_id, "reconcile")
                 self._reconcile_due.pop(library_id, None)
-            rows = self.store.db.execute("SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1")
+            rows = self.store.db.execute(
+                "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
+            )
             if not rows:
                 with self.condition:
                     self.condition.wait(timeout=1)
@@ -1195,23 +2054,43 @@ class LibraryRuntime:
                 self._active_jobs.add(job_id)
                 self._cancel_events[job_id] = threading.Event()
                 with self.store.db.transaction() as cursor:
-                    cursor.execute("UPDATE library_jobs SET state='running',started_at=?,message='Starting scan' WHERE id=? AND state='queued'", (now(), job_id))
+                    cursor.execute(
+                        "UPDATE library_jobs SET state='running',started_at=?,message='Starting scan' WHERE id=? AND state='queued'",
+                        (now(), job_id),
+                    )
                     claimed = cursor.rowcount == 1
                 if not claimed:
                     self._active_jobs.discard(job_id)
                     self._cancel_events.pop(job_id, None)
                     continue
-            threading.Thread(target=self._execute_job, args=(job_id, library_id, kind), name=f"zenstream-library-{job_id[:8]}", daemon=True).start()
+            threading.Thread(
+                target=self._execute_job,
+                args=(job_id, library_id, kind),
+                name=f"zenstream-library-{job_id[:8]}",
+                daemon=True,
+            ).start()
 
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
         try:
             if kind in {"scan", "reconcile", "collection_rebuild"}:
-                self.scanner.scan(library_id, job_id, self._cancel_events[job_id].is_set)
+                self.scanner.scan(
+                    library_id, job_id, self._cancel_events[job_id].is_set
+                )
             else:
-                self.store.update_job(job_id, state="failed", error=f"Unsupported job kind: {kind}", finished_at=now())
+                self.store.update_job(
+                    job_id,
+                    state="failed",
+                    error=f"Unsupported job kind: {kind}",
+                    finished_at=now(),
+                )
         except Exception:
             # The scanner records the durable error; keep the worker alive for later jobs.
-            logger.exception("library worker failed job_id=%s library_id=%s kind=%s", job_id, library_id, kind)
+            logger.exception(
+                "library worker failed job_id=%s library_id=%s kind=%s",
+                job_id,
+                library_id,
+                kind,
+            )
             pass
         finally:
             with self._active_lock:

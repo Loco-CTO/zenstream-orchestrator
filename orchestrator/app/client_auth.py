@@ -58,8 +58,12 @@ def read_ticket(value: str | None, kind: str | None = None) -> dict:
         expected = hmac.new(_secret(), encoded.encode("ascii"), hashlib.sha256).digest()
         if not hmac.compare_digest(actual, expected):
             raise ValueError
-        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-        if not isinstance(payload, dict) or int(payload.get("exp", 0)) <= int(time.time()):
+        payload = json.loads(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        )
+        if not isinstance(payload, dict) or int(payload.get("exp", 0)) <= int(
+            time.time()
+        ):
             raise ValueError
         if kind and payload.get("kind") != kind:
             raise ValueError
@@ -95,4 +99,3 @@ def websocket_account(websocket: WebSocket) -> dict | None:
         (payload.get("uid"),),
     )
     return Account._public(rows[0]) if rows and not rows[0][4] else None
-

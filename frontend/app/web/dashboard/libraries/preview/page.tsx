@@ -48,7 +48,7 @@ type Item = {
 };
 
 type MetadataPerson = { name?: string; role?: string };
-type MetadataTrailer = { name?: string; key?: string };
+type MetadataTrailer = { url?: string; name?: string; key?: string; language?: string };
 type MetadataTrack = { title?: string };
 type Metadata = {
 	title?: string;
@@ -895,6 +895,22 @@ function MetadataSummary({ detail }: { detail: Item }) {
 				<span className="material-muted">Studios:</span>{" "}
 				{list(metadata.studios)}
 			</p>
+			{metadata.trailers?.length ? (
+				<p>
+					<span className="material-muted">Trailers:</span>{" "}
+					{metadata.trailers.map((trailer, index) => (
+						<a
+							key={`${trailer.url || trailer.key || "trailer"}-${index}`}
+							href={trailer.url}
+							target="_blank"
+							rel="noreferrer"
+							className="mr-2 text-cyan-300 hover:underline"
+						>
+							{trailer.name || trailer.language || `Trailer ${index + 1}`}
+						</a>
+					))}
+				</p>
+			) : null}
 			<p>
 				<span className="material-muted">Provider IDs:</span>{" "}
 				{detail.providerIds

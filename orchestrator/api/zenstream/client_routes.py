@@ -52,7 +52,10 @@ async def logout(request: Request):
 @router.get("/api/auth/resource-ticket")
 async def resource_ticket(request: Request):
     account, _ = require_account(request)
-    return {"ticket": issue_ticket(account["id"], "resource", 6 * 60 * 60), "expiresIn": 6 * 60 * 60}
+    return {
+        "ticket": issue_ticket(account["id"], "resource", 6 * 60 * 60),
+        "expiresIn": 6 * 60 * 60,
+    }
 
 
 @router.post("/api/auth/socket-ticket")
@@ -77,7 +80,11 @@ async def get_locale(request: Request):
 async def set_locale(request: Request):
     account, _ = require_account(request)
     try:
-        return {"locale": AccountPreference(account["id"]).set_locale((await request.json()).get("locale"))}
+        return {
+            "locale": AccountPreference(account["id"]).set_locale(
+                (await request.json()).get("locale")
+            )
+        }
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 
@@ -92,7 +99,9 @@ async def get_metadata_language(request: Request):
 async def set_metadata_language(request: Request):
     account, _ = require_account(request)
     try:
-        return AccountPreference(account["id"]).set_metadata_language((await request.json()).get("language"))
+        return AccountPreference(account["id"]).set_metadata_language(
+            (await request.json()).get("language")
+        )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 
@@ -140,7 +149,16 @@ async def items(
     sortOrder: str = Query("ascending"),
 ):
     account, _ = require_account(request)
-    return catalog.list_items(account["id"], libraryId, _preferred(account, language), parent_id=parentId, page=page, page_size=pageSize, sort_by=sortBy, sort_order=sortOrder)
+    return catalog.list_items(
+        account["id"],
+        libraryId,
+        _preferred(account, language),
+        parent_id=parentId,
+        page=page,
+        page_size=pageSize,
+        sort_by=sortBy,
+        sort_order=sortOrder,
+    )
 
 
 @router.get("/api/catalog/search")
@@ -152,7 +170,9 @@ async def search(
     pageSize: int = Query(40, ge=1, le=100),
 ):
     account, _ = require_account(request)
-    return catalog.search(account["id"], query, _preferred(account, language), page, pageSize)
+    return catalog.search(
+        account["id"], query, _preferred(account, language), page, pageSize
+    )
 
 
 @router.get("/api/catalog/favorites")
@@ -165,7 +185,9 @@ async def favorites(
     sortOrder: str = Query("ascending"),
 ):
     account, _ = require_account(request)
-    return catalog.favorites(account["id"], _preferred(account, language), page, pageSize, sortBy, sortOrder)
+    return catalog.favorites(
+        account["id"], _preferred(account, language), page, pageSize, sortBy, sortOrder
+    )
 
 
 @router.get("/api/catalog/items/{entity_id}")
@@ -187,21 +209,41 @@ async def item_metadata(entity_id: str, request: Request, language: str = Query(
 
 
 @router.get("/api/catalog/items/{entity_id}/images/{image_type}")
-async def item_image(entity_id: str, image_type: str, request: Request, language: str = Query(...)):
+async def item_image(
+    entity_id: str, image_type: str, request: Request, language: str = Query(...)
+):
     account = account_from_access(request)
     row = catalog.require_entity(account["id"], entity_id)
-    library_rows = catalog.db.execute("SELECT directory FROM libraries WHERE id=?", (row[1],))
-    directory = Path(library_rows[0][0]) if library_rows and library_rows[0][0] else None
+    library_rows = catalog.db.execute(
+        "SELECT directory FROM libraries WHERE id=?", (row[1],)
+    )
+    directory = (
+        Path(library_rows[0][0]) if library_rows and library_rows[0][0] else None
+    )
     local_names = {
-        "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
+        "Primary": {
+            "poster",
+            "folder",
+            "cover",
+            "primary",
+            "tvshow",
+            "movie",
+            "season",
+        },
         "Backdrop": {"backdrop", "fanart", "background"},
         "Logo": {"logo", "clearlogo", "clear-logo"},
         "Banner": {"banner"},
     }
     if directory:
-        for relative_path, in catalog.db.execute("SELECT relative_path FROM media_files WHERE entity_id=? AND role='image'", (entity_id,)):
+        for (relative_path,) in catalog.db.execute(
+            "SELECT relative_path FROM media_files WHERE entity_id=? AND role='image'",
+            (entity_id,),
+        ):
             candidate = directory / relative_path
-            if candidate.stem.lower() in local_names.get(image_type, set()) and candidate.is_file():
+            if (
+                candidate.stem.lower() in local_names.get(image_type, set())
+                and candidate.is_file()
+            ):
                 return FileResponse(candidate)
     image = catalog.selected_image(account["id"], entity_id, language, image_type)
     if not image:
@@ -212,7 +254,10 @@ async def item_image(entity_id: str, image_type: str, request: Request, language
     )
     if rows and rows[0][0] and Path(rows[0][0]).is_file():
         return FileResponse(rows[0][0])
-    return Response(status_code=202, headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"})
+    return Response(
+        status_code=202,
+        headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"},
+    )
 
 
 @router.patch("/api/catalog/items/{entity_id}/state")
@@ -224,25 +269,35 @@ async def update_item_state(entity_id: str, request: Request):
 @router.post("/api/playback/items/{entity_id}/negotiate")
 async def negotiate_playback(entity_id: str, request: Request):
     account, _ = require_account(request)
-    return await asyncio.to_thread(media.negotiate, account["id"], entity_id, await request.json())
+    return await asyncio.to_thread(
+        media.negotiate, account["id"], entity_id, await request.json()
+    )
 
 
 @router.api_route("/api/playback/items/{entity_id}/stream", methods=["GET", "HEAD"])
 async def direct_stream(entity_id: str, request: Request):
     account = account_from_access(request)
-    return FileResponse(await asyncio.to_thread(media.direct_path, account["id"], entity_id))
+    return FileResponse(
+        await asyncio.to_thread(media.direct_path, account["id"], entity_id)
+    )
 
 
 @router.get("/api/playback/sessions/{session_id}/{filename}")
 async def playback_output(session_id: str, filename: str, request: Request):
     account = account_from_access(request)
-    path = await asyncio.to_thread(media.session_file, account["id"], session_id, filename)
+    path = await asyncio.to_thread(
+        media.session_file, account["id"], session_id, filename
+    )
     if path.suffix.lower() == ".m3u8":
         access = request.query_params.get("access") or ""
         lines = []
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            lines.append(f"{line}?access={access}" if line and not line.startswith("#") else line)
-        return Response("\n".join(lines) + "\n", media_type="application/vnd.apple.mpegurl")
+            lines.append(
+                f"{line}?access={access}" if line and not line.startswith("#") else line
+            )
+        return Response(
+            "\n".join(lines) + "\n", media_type="application/vnd.apple.mpegurl"
+        )
     return FileResponse(path, media_type="video/mp2t")
 
 
@@ -267,7 +322,14 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
     target = target_root / f"{hashlib.sha256(str(source).encode()).hexdigest()}.vtt"
     if not target.is_file() or target.stat().st_mtime_ns < source.stat().st_mtime_ns:
         completed = await asyncio.create_subprocess_exec(
-            executable, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), str(target),
+            executable,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            str(target),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -277,27 +339,44 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
 
 
 @router.get("/api/admin/users")
-async def admin_users(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def admin_users(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
     require_admin(Username, TOKEN)
     return {"users": Account().list()}
 
 
 @router.post("/api/admin/users", status_code=201)
-async def create_user(request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def create_user(
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
     require_admin(Username, TOKEN)
     data = await request.json()
     try:
-        return Account().create(str(data.get("username") or ""), str(data.get("password") or ""))
+        return Account().create(
+            str(data.get("username") or ""), str(data.get("password") or "")
+        )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 
 
 @router.put("/api/admin/users/{user_id}/libraries")
-async def set_user_libraries(user_id: str, request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def set_user_libraries(
+    user_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
     require_admin(Username, TOKEN)
     data = await request.json()
     try:
-        return {"libraryIds": Account().set_library_ids(user_id, data.get("libraryIds") or [])}
+        return {
+            "libraryIds": Account().set_library_ids(
+                user_id, data.get("libraryIds") or []
+            )
+        }
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:
@@ -305,10 +384,17 @@ async def set_user_libraries(user_id: str, request: Request, Username: str | Non
 
 
 @router.post("/api/admin/users/{user_id}/reset-password")
-async def reset_user_password(user_id: str, request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def reset_user_password(
+    user_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
     require_admin(Username, TOKEN)
     try:
-        return Account().set_password(user_id, str((await request.json()).get("password") or ""))
+        return Account().set_password(
+            user_id, str((await request.json()).get("password") or "")
+        )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except ValueError as error:
@@ -316,16 +402,25 @@ async def reset_user_password(user_id: str, request: Request, Username: str | No
 
 
 @router.patch("/api/admin/users/{user_id}")
-async def update_user(user_id: str, request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def update_user(
+    user_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
     require_admin(Username, TOKEN)
     try:
-        return Account().set_disabled(user_id, bool((await request.json()).get("disabled")))
+        return Account().set_disabled(
+            user_id, bool((await request.json()).get("disabled"))
+        )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
 
 
 @router.delete("/api/admin/users/{user_id}", status_code=204)
-async def delete_user(user_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+async def delete_user(
+    user_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
     require_admin(Username, TOKEN)
     if not Account().delete(user_id):
         raise HTTPException(404, "User not found.")

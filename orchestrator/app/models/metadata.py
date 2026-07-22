@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import Config
+from app.metadata_domain import ARTWORK_CATEGORY_SET
 
 IMAGE_LANGUAGE_SCHEMA = 3
 
@@ -24,7 +25,15 @@ def normalize_metadata_locale(value: str) -> str:
     parts = str(value or "").strip().replace("_", "-").split("-")
     if not parts or not parts[0]:
         raise ValueError("Metadata languages must be valid language tags.")
-    normalized = "-".join([parts[0].lower(), *[part.upper() if len(part) == 2 or part.isdigit() else part for part in parts[1:]]])
+    normalized = "-".join(
+        [
+            parts[0].lower(),
+            *[
+                part.upper() if len(part) == 2 or part.isdigit() else part
+                for part in parts[1:]
+            ],
+        ]
+    )
     if not _LOCALE_RE.fullmatch(normalized):
         raise ValueError(f"Invalid metadata language '{value}'.")
     return normalized
@@ -35,7 +44,9 @@ class MetadataLanguageSettings:
         self.db = Config().database
 
     def get(self) -> list[str]:
-        rows = self.db.execute("SELECT value FROM metadata_settings WHERE key='locales'")
+        rows = self.db.execute(
+            "SELECT value FROM metadata_settings WHERE key='locales'"
+        )
         if not rows:
             return list(DEFAULT_METADATA_LOCALES)
         try:
@@ -55,11 +66,6 @@ class MetadataLanguageSettings:
                 result.append(locale)
         if not result:
             raise ValueError("At least one metadata language is required.")
-        # English is the guaranteed public fallback and therefore cannot be
-        # removed from the administrator-selected language set.
-        if "en" in result:
-            result.remove("en")
-        result.insert(0, "en")
         return result
 
     def set(self, values) -> list[str]:
@@ -70,7 +76,9 @@ class MetadataLanguageSettings:
         )
         # An explicit user preference may only point at a configured
         # language. Removed languages fall back to automatic selection.
-        if self.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='account_preferences'"):
+        if self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='account_preferences'"
+        ):
             placeholders = ",".join("?" for _ in locales)
             self.db.execute(
                 f"UPDATE account_preferences SET metadata_language=NULL WHERE metadata_language IS NOT NULL AND metadata_language NOT IN ({placeholders})",
@@ -134,14 +142,24 @@ class MetadataCredentials:
         if not rows:
             return None
         try:
-            return json.loads(_fernet().decrypt(rows[0][0].encode("ascii")).decode("utf-8"))
+            return json.loads(
+                _fernet().decrypt(rows[0][0].encode("ascii")).decode("utf-8")
+            )
         except (InvalidToken, ValueError, json.JSONDecodeError) as error:
-            raise ValueError("Stored provider credential cannot be decrypted; enter it again.") from error
+            raise ValueError(
+                "Stored provider credential cannot be decrypted; enter it again."
+            ) from error
 
-    def set(self, provider: str, credential: dict, credential_type: str = "api_key") -> None:
+    def set(
+        self, provider: str, credential: dict, credential_type: str = "api_key"
+    ) -> None:
         if provider not in PROVIDERS:
             raise ValueError("Unsupported metadata provider")
-        ciphertext = _fernet().encrypt(json.dumps(credential, separators=(",", ":")).encode("utf-8")).decode("ascii")
+        ciphertext = (
+            _fernet()
+            .encrypt(json.dumps(credential, separators=(",", ":")).encode("utf-8"))
+            .decode("ascii")
+        )
         now = iso_now()
         self.db.execute(
             "INSERT INTO metadata_credentials(provider, ciphertext, credential_type, validated_at, updated_at) VALUES(?,?,?,?,?) "
@@ -153,7 +171,9 @@ class MetadataCredentials:
     def clear(self, provider: str) -> None:
         if provider not in PROVIDERS:
             raise ValueError("Unsupported metadata provider")
-        self.db.execute("DELETE FROM metadata_credentials WHERE provider = ?", (provider,))
+        self.db.execute(
+            "DELETE FROM metadata_credentials WHERE provider = ?", (provider,)
+        )
 
     def mark_validated(self, provider: str) -> None:
         self.db.execute(
@@ -166,7 +186,9 @@ class MetadataCache:
     def __init__(self):
         self.db = Config().database
 
-    def get(self, provider: str, entity_type: str, provider_id: str, locale: str) -> dict | None:
+    def get(
+        self, provider: str, entity_type: str, provider_id: str, locale: str
+    ) -> dict | None:
         rows = self.db.execute(
             "SELECT payload, expires_at FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=?",
             (provider, entity_type, provider_id, locale),
@@ -182,25 +204,15 @@ class MetadataCache:
         payload["_stale"] = rows[0][1] <= iso_now()
         return payload
 
-    def any(self, provider: str, entity_type: str, provider_id: str) -> dict | None:
-        """Return the newest non-empty locale when a requested translation is absent."""
-        rows = self.db.execute(
-            "SELECT payload, expires_at FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? ORDER BY fetched_at DESC",
-            (provider, entity_type, provider_id),
-        )
-        for payload_text, expires_at in rows:
-            try:
-                payload = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA:
-                continue
-            if payload.get("title") or payload.get("overview") or payload.get("description") or payload.get("images") or payload.get("extraImages") or payload.get("tracks"):
-                payload["_stale"] = expires_at <= iso_now()
-                return payload
-        return None
-
-    def put(self, provider: str, entity_type: str, provider_id: str, locale: str, payload: dict, days: int = 7) -> None:
+    def put(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locale: str,
+        payload: dict,
+        days: int = 7,
+    ) -> None:
         payload = dict(payload)
         payload["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
         # Keep the locale used for the provider request inside the cache
@@ -214,26 +226,42 @@ class MetadataCache:
             cursor.execute(
                 "INSERT INTO metadata_cache(provider, entity_type, provider_id, locale, payload, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?) "
                 "ON CONFLICT(provider, entity_type, provider_id, locale) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
-                (provider, entity_type, provider_id, locale, encoded, now.isoformat(), (now + timedelta(days=days)).isoformat()),
+                (
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    encoded,
+                    now.isoformat(),
+                    (now + timedelta(days=days)).isoformat(),
+                ),
             )
-            search_exists = cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_search'").fetchone()
-            if search_exists:
-                entities = cursor.execute(
-                    "SELECT e.id,e.library_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? AND p.provider_id=? AND e.entity_type=?",
-                    (provider, provider_id, entity_type),
-                ).fetchall()
-                for entity_id, library_id in entities:
-                    cursor.execute("DELETE FROM catalog_search WHERE entity_id=? AND locale=?", (entity_id, locale))
-                    if payload.get("title"):
-                        cursor.execute("INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)", (entity_id, library_id, locale, str(payload["title"])))
-                    if payload.get("originalTitle"):
-                        cursor.execute("DELETE FROM catalog_search WHERE entity_id=? AND locale='original'", (entity_id,))
-                        cursor.execute("INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)", (entity_id, library_id, "original", str(payload["originalTitle"])))
 
-    def put_image(self, provider: str, entity_type: str, provider_id: str, locale: str | None, image_type: str, image_url: str, local_path: str | None = None) -> None:
+    def put_image(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locale: str | None,
+        image_type: str,
+        image_url: str,
+        local_path: str | None = None,
+    ) -> None:
+        if image_type not in ARTWORK_CATEGORY_SET:
+            raise ValueError(f"Unsupported image type '{image_type}'.")
         now = utc_now()
         self.db.execute(
             "INSERT INTO metadata_images(provider, entity_type, provider_id, locale, image_type, image_url, local_path, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(provider, entity_type, provider_id, locale, image_type, image_url) DO UPDATE SET local_path=excluded.local_path, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
-            (provider, entity_type, provider_id, locale, image_type, image_url, local_path, now.isoformat(), (now + timedelta(days=7)).isoformat()),
+            (
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                image_type,
+                image_url,
+                local_path,
+                now.isoformat(),
+                (now + timedelta(days=7)).isoformat(),
+            ),
         )

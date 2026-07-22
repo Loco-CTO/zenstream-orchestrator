@@ -6,16 +6,31 @@ import os
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
 from app.models import Invite
 from app.models.admin import Admin
-from app.models.syncplay import SyncplayGroup, SyncplayMembershipConflict, StaleSyncplayState, pause, schedule
+from app.models.syncplay import (
+    SyncplayGroup,
+    SyncplayMembershipConflict,
+    StaleSyncplayState,
+    pause,
+    schedule,
+)
 from app.client_auth import bearer_token, websocket_account
 from app.models.account import Account
 from api.zenstream.version import _main_version
 from version import __version__
+
 
 class WebSocketHub:
     def __init__(self):
@@ -134,8 +149,10 @@ def _admin_headers(username: str | None, token: str | None):
         raise HTTPException(403, "Invalid administrator credentials.")
     return username, token
 
+
 router = APIRouter()
 web_root, _assets_root = _static_roots()
+
 
 @router.get("/")
 async def root():
@@ -170,7 +187,6 @@ async def dashboard(path: str = ""):
     return JSONResponse(
         {"message": "Dashboard assets are not installed."}, status_code=503
     )
-
 
 
 @router.post("/api/admin/login")
@@ -246,7 +262,6 @@ async def admin_accounts(
     return Admin(username).list_accounts()
 
 
-
 @router.post("/api/admin/accounts", status_code=201)
 async def admin_create_account(
     Target_Username: str | None = Header(None),
@@ -262,7 +277,6 @@ async def admin_create_account(
         or not Admin(username).create(Target_Username, New_Password)
     ):
         raise HTTPException(400, "Invalid or duplicate administrator account.")
-
 
 
 @router.get("/api/user/check_invite")
@@ -285,19 +299,20 @@ async def mobile_config():
     ffprobe = os.getenv("FFPROBE_PATH") or shutil.which("ffprobe")
     return {
         "apiVersion": 2,
-		"catalog": True,
-		"playback": bool(ffmpeg and ffprobe),
+        "catalog": True,
+        "playback": bool(ffmpeg and ffprobe),
         "version": __version__,
         "main": _main_version(),
     }
-
 
 
 @router.post("/api/user/register", status_code=201)
 async def register_client(request: Request):
     data = await request.json()
     invite_id = str(data.get("invite") or request.headers.get("url") or "").strip()
-    username = str(data.get("username") or request.headers.get("username") or "").strip()
+    username = str(
+        data.get("username") or request.headers.get("username") or ""
+    ).strip()
     password = str(data.get("password") or request.headers.get("password") or "")
     if not Invite().validate(invite_id):
         raise HTTPException(403, "Invalid invite.")
@@ -307,6 +322,7 @@ async def register_client(request: Request):
         raise HTTPException(409, str(error)) from error
     Invite().delete(invite_id)
     return {"user": account}
+
 
 def _sync_identity(token: str | None, participant: str | None):
     account = Account().authenticate_token(bearer_token(token))
@@ -723,5 +739,3 @@ async def syncplay_socket(websocket: WebSocket):
         identity, epoch = await hub.remove(websocket)
         if identity and not await hub.sockets_for(*identity):
             asyncio.create_task(_disconnect_cleanup(*identity, epoch))
-
-

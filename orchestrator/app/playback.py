@@ -41,7 +41,9 @@ class PlaybackManager:
         self.db = Config().database
         self.catalog = Catalog()
 
-    def _file_path(self, entity_id: str, media_file_id: str | None = None, role: str = "video") -> tuple[str, Path]:
+    def _file_path(
+        self, entity_id: str, media_file_id: str | None = None, role: str = "video"
+    ) -> tuple[str, Path]:
         params: list = [entity_id, role]
         where = "f.entity_id=? AND f.role=?"
         if media_file_id:
@@ -73,30 +75,63 @@ class PlaybackManager:
                 continue
             try:
                 completed = subprocess.run(
-                    [executable, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
-                    capture_output=True, text=True, timeout=60, check=True,
+                    [
+                        executable,
+                        "-v",
+                        "error",
+                        "-show_format",
+                        "-show_streams",
+                        "-of",
+                        "json",
+                        str(path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=True,
                 )
                 payload = json.loads(completed.stdout)
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
                 continue
             streams = payload.get("streams") or []
-            video = next((value for value in streams if value.get("codec_type") == "video"), {})
-            audio = next((value for value in streams if value.get("codec_type") == "audio"), {})
+            video = next(
+                (value for value in streams if value.get("codec_type") == "video"), {}
+            )
+            audio = next(
+                (value for value in streams if value.get("codec_type") == "audio"), {}
+            )
             format_value = payload.get("format") or {}
-            source_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"zenstream:{media_file_id}"))
+            source_id = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, f"zenstream:{media_file_id}")
+            )
             value = {
                 "id": source_id,
                 "container": format_value.get("format_name"),
                 "durationSeconds": float(format_value.get("duration") or 0),
                 "bitrate": int(float(format_value.get("bit_rate") or 0)),
-                "width": video.get("width"), "height": video.get("height"),
-                "videoCodec": video.get("codec_name"), "audioCodec": audio.get("codec_name"),
+                "width": video.get("width"),
+                "height": video.get("height"),
+                "videoCodec": video.get("codec_name"),
+                "audioCodec": audio.get("codec_name"),
                 "streams": streams,
             }
             self.db.execute(
                 "INSERT INTO media_sources(id,entity_id,media_file_id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload,probed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(entity_id,media_file_id) DO UPDATE SET container=excluded.container,duration_seconds=excluded.duration_seconds,bitrate=excluded.bitrate,width=excluded.width,height=excluded.height,video_codec=excluded.video_codec,audio_codec=excluded.audio_codec,probe_payload=excluded.probe_payload,probed_at=excluded.probed_at",
-                (source_id, entity_id, media_file_id, value["container"], value["durationSeconds"], value["bitrate"], value["width"], value["height"], value["videoCodec"], value["audioCodec"], json.dumps(payload), _iso()),
+                (
+                    source_id,
+                    entity_id,
+                    media_file_id,
+                    value["container"],
+                    value["durationSeconds"],
+                    value["bitrate"],
+                    value["width"],
+                    value["height"],
+                    value["videoCodec"],
+                    value["audioCodec"],
+                    json.dumps(payload),
+                    _iso(),
+                ),
             )
             values.append(value)
         return values
@@ -114,23 +149,56 @@ class PlaybackManager:
                 (entity_id,),
             )
         sidecars = [
-            {"index": 1000 + index, "codec_type": "subtitle", "codec_name": Path(relative_path).suffix.lstrip("."), "fileId": file_id, "tags": {"language": language} if language else {}}
-            for index, (file_id, relative_path, language) in enumerate(self.db.execute(
-                "SELECT id,relative_path,language FROM media_files WHERE entity_id=? AND role='subtitle' ORDER BY relative_path COLLATE NOCASE",
-                (entity_id,),
-            ))
+            {
+                "index": 1000 + index,
+                "codec_type": "subtitle",
+                "codec_name": Path(relative_path).suffix.lstrip("."),
+                "fileId": file_id,
+                "tags": {"language": language} if language else {},
+            }
+            for index, (file_id, relative_path, language) in enumerate(
+                self.db.execute(
+                    "SELECT id,relative_path,language FROM media_files WHERE entity_id=? AND role='subtitle' ORDER BY relative_path COLLATE NOCASE",
+                    (entity_id,),
+                )
+            )
         ]
-        return [{"id": row[0], "container": row[1], "durationSeconds": row[2], "bitrate": row[3], "width": row[4], "height": row[5], "videoCodec": row[6], "audioCodec": row[7], "streams": (json.loads(row[8]).get("streams") or []) + sidecars} for row in rows]
+        return [
+            {
+                "id": row[0],
+                "container": row[1],
+                "durationSeconds": row[2],
+                "bitrate": row[3],
+                "width": row[4],
+                "height": row[5],
+                "videoCodec": row[6],
+                "audioCodec": row[7],
+                "streams": (json.loads(row[8]).get("streams") or []) + sidecars,
+            }
+            for row in rows
+        ]
 
     @staticmethod
     def _direct(source: dict, profile: dict) -> bool:
         if str(profile.get("engine") or "").lower() == "mpv":
             return True
-        containers = {str(value).lower() for value in profile.get("containers") or ["mp4", "webm"]}
-        video = {str(value).lower() for value in profile.get("videoCodecs") or ["h264", "vp9", "av1"]}
-        audio = {str(value).lower() for value in profile.get("audioCodecs") or ["aac", "opus", "vorbis"]}
+        containers = {
+            str(value).lower() for value in profile.get("containers") or ["mp4", "webm"]
+        }
+        video = {
+            str(value).lower()
+            for value in profile.get("videoCodecs") or ["h264", "vp9", "av1"]
+        }
+        audio = {
+            str(value).lower()
+            for value in profile.get("audioCodecs") or ["aac", "opus", "vorbis"]
+        }
         source_containers = set(str(source.get("container") or "").lower().split(","))
-        return bool(source_containers & containers) and source.get("videoCodec") in video and source.get("audioCodec") in audio
+        return (
+            bool(source_containers & containers)
+            and source.get("videoCodec") in video
+            and source.get("audioCodec") in audio
+        )
 
     def negotiate(self, user_id: str, entity_id: str, profile: dict) -> dict:
         sources = self.sources(user_id, entity_id)
@@ -139,23 +207,41 @@ class PlaybackManager:
         source = sources[0]
         access = issue_ticket(user_id, "resource", 6 * 60 * 60, entity=entity_id)
         if self._direct(source, profile):
-            return {"mode": "direct", "source": source, "url": f"/api/playback/items/{entity_id}/stream?access={access}", "mimeType": self._mime(source)}
+            return {
+                "mode": "direct",
+                "source": source,
+                "url": f"/api/playback/items/{entity_id}/stream?access={access}",
+                "mimeType": self._mime(source),
+            }
         return self._transcode(user_id, entity_id, source, access, profile)
 
     @staticmethod
     def _mime(source: dict) -> str:
         container = str(source.get("container") or "").split(",", 1)[0]
-        return {"matroska": "video/x-matroska", "webm": "video/webm", "mov": "video/mp4", "mp4": "video/mp4"}.get(container, "application/octet-stream")
+        return {
+            "matroska": "video/x-matroska",
+            "webm": "video/webm",
+            "mov": "video/mp4",
+            "mp4": "video/mp4",
+        }.get(container, "application/octet-stream")
 
-    def _transcode(self, user_id: str, entity_id: str, source: dict, access: str, profile: dict) -> dict:
+    def _transcode(
+        self, user_id: str, entity_id: str, source: dict, access: str, profile: dict
+    ) -> dict:
         executable = ffmpeg_path()
         if not executable:
             raise HTTPException(503, "FFmpeg is not available.")
         maximum = max(1, int(os.getenv("MAX_TRANSCODES", "2")))
         per_user_maximum = max(1, int(os.getenv("MAX_TRANSCODES_PER_USER", "1")))
         with self._lock:
-            active = [value for value in self._processes.values() if value.poll() is None]
-            per_user = [value for session in self._users.get(user_id, set()) if (value := self._processes.get(session)) and value.poll() is None]
+            active = [
+                value for value in self._processes.values() if value.poll() is None
+            ]
+            per_user = [
+                value
+                for session in self._users.get(user_id, set())
+                if (value := self._processes.get(session)) and value.poll() is None
+            ]
             if len(active) >= maximum or len(per_user) >= per_user_maximum:
                 raise HTTPException(429, "Transcoding capacity is currently in use.")
             session_id = str(uuid.uuid4())
@@ -163,27 +249,74 @@ class PlaybackManager:
             output.mkdir(parents=True, exist_ok=False)
             media_file_id, path = self._file_path(entity_id)
             command = [
-                executable, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path),
-                "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
-                "-c:a", "aac", "-f", "hls", "-hls_time", "4", "-hls_playlist_type", "event",
-                "-hls_segment_filename", str(output / "segment-%06d.ts"), str(output / "master.m3u8"),
+                executable,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-c:a",
+                "aac",
+                "-f",
+                "hls",
+                "-hls_time",
+                "4",
+                "-hls_playlist_type",
+                "event",
+                "-hls_segment_filename",
+                str(output / "segment-%06d.ts"),
+                str(output / "master.m3u8"),
             ]
-            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
             self._processes[session_id] = process
             self._users.setdefault(user_id, set()).add(session_id)
             self.db.execute(
                 "INSERT INTO playback_sessions(id,user_id,entity_id,source_id,mode,state,output_directory,created_at,expires_at) VALUES(?,?,?,?,?,'active',?,?,?)",
-                (session_id, user_id, entity_id, source["id"], "hls", str(output), _iso(), _iso(datetime.now(timezone.utc) + timedelta(hours=6))),
+                (
+                    session_id,
+                    user_id,
+                    entity_id,
+                    source["id"],
+                    "hls",
+                    str(output),
+                    _iso(),
+                    _iso(datetime.now(timezone.utc) + timedelta(hours=6)),
+                ),
             )
-            threading.Thread(target=self._watch, args=(user_id, session_id, process), daemon=True).start()
-        return {"mode": "hls", "source": source, "sessionId": session_id, "url": f"/api/playback/sessions/{session_id}/master.m3u8?access={access}", "mimeType": "application/vnd.apple.mpegurl"}
+            threading.Thread(
+                target=self._watch, args=(user_id, session_id, process), daemon=True
+            ).start()
+        return {
+            "mode": "hls",
+            "source": source,
+            "sessionId": session_id,
+            "url": f"/api/playback/sessions/{session_id}/master.m3u8?access={access}",
+            "mimeType": "application/vnd.apple.mpegurl",
+        }
 
     def _watch(self, user_id: str, session_id: str, process: subprocess.Popen) -> None:
         process.wait()
         with self._lock:
             self._processes.pop(session_id, None)
             self._users.get(user_id, set()).discard(session_id)
-        self.db.execute("UPDATE playback_sessions SET state=? WHERE id=?", ("completed" if process.returncode == 0 else "failed", session_id))
+        self.db.execute(
+            "UPDATE playback_sessions SET state=? WHERE id=?",
+            ("completed" if process.returncode == 0 else "failed", session_id),
+        )
 
     def direct_path(self, user_id: str, entity_id: str) -> Path:
         self.catalog.require_entity(user_id, entity_id)
@@ -201,5 +334,7 @@ class PlaybackManager:
         while not path.is_file() and time.monotonic() < deadline:
             time.sleep(0.1)
         if not path.is_file():
-            raise HTTPException(503, "Playback output is not ready.", headers={"Retry-After": "1"})
+            raise HTTPException(
+                503, "Playback output is not ready.", headers={"Retry-After": "1"}
+            )
         return path

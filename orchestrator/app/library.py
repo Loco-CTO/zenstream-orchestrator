@@ -455,6 +455,11 @@ class LibraryScanner:
             self._ids(series_id, [(value["provider"], "series", value["id"]) for value in result["providerIds"]])
             self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
         self._aggregate_series_children(series_id, service)
+        # The series hierarchy is useful for bulk caching but can omit an
+        # episode from the returned aggregate.  Season details are the
+        # authoritative TVDB source for exact episode IDs, so run the same
+        # derivation used by the incremental resolution path before seeding.
+        self._derive_tvdb_episode_ids(series_id, service)
         self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='parent_resolution',updated_at=? WHERE parent_id=? AND match_status='unresolved'", (now(), series_id))
         self._seed_all_children(library_id, service, job_id, should_terminate, parent_id=series_id)
 

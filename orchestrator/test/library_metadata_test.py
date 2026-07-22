@@ -94,6 +94,24 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_immediate_series_scan_derives_exact_tvdb_episode_ids_before_seeding(self):
+        db, scanner = self._scanner_db()
+        try:
+            db.execute("INSERT INTO library_entities(id,library_id,entity_type,relative_path) VALUES('series-1','library-1','series','Example [tvdbid-12345]')")
+            scanner._scan_seen_ids = {'series-1'}
+            scanner._scan_created_ids = ['series-1']
+            service = MagicMock()
+            with patch.object(scanner, '_aggregate_series_children') as aggregate, \
+                    patch.object(scanner, '_derive_tvdb_episode_ids') as derive, \
+                    patch.object(scanner, '_seed_all_children') as seed:
+                scanner._resolve_series_immediately('library-1', 'series-1', 'Example [tvdbid-12345]', service, 'job-1', lambda: False)
+
+            aggregate.assert_called_once_with('series-1', service)
+            derive.assert_called_once_with('series-1', service)
+            seed.assert_called_once_with('library-1', service, 'job-1', unittest.mock.ANY, parent_id='series-1')
+        finally:
+            db.close()
+
     def test_series_scan_child_query_binds_series_parent_twice(self):
         db, scanner = self._scanner_db()
         try:

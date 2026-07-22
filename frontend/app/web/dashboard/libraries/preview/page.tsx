@@ -69,6 +69,8 @@ type NavigationEntry = { id: string; type: string; label: string };
 type Navigable = { id: string; type: string; displayName?: string; relativePath?: string };
 type CardItem = Navigable & { metadata?: Metadata | null; metadataState?: Item["metadataState"]; matchStatus?: string; seasonNumber?: number; episodeNumber?: number };
 type LanguageOption = { value: string; label: string };
+type ArtworkType = "Primary" | "Backdrop" | "Logo" | "Banner";
+const artworkTypes: ArtworkType[] = ["Primary", "Backdrop", "Logo", "Banner"];
 const pageSize = 30;
 
 function LibraryViewPage() {
@@ -261,7 +263,7 @@ function EpisodeCard({ item, session, locale, onOpen }: { item: Child; session: 
 	return <button type="button" onClick={onOpen} className="material-surface group flex min-w-0 w-full overflow-hidden rounded-xl text-left transition hover:-translate-y-0.5 hover:bg-[#282828] hover:shadow-xl hover:shadow-black/30"><EntityPoster entityId={item.id} session={session} locale={locale} alt="" landscape /><div className="min-w-0 flex-1 p-4"><p className="truncate text-sm font-semibold">{label}</p><p className="mt-2 text-xs material-muted">S{item.seasonNumber ?? "—"}E{item.episodeNumber ?? "—"}</p><p className="mt-1 text-[11px] material-muted">Open episode details</p></div></button>;
 }
 
-function EntityPoster({ entityId, session, locale, alt, landscape = false }: { entityId: string; session: Session | null; locale: string; alt: string; landscape?: boolean }) {
+function EntityPoster({ entityId, session, locale, alt, imageType = "Primary", landscape = false }: { entityId: string; session: Session | null; locale: string; alt: string; imageType?: ArtworkType; landscape?: boolean }) {
 	const [url, setUrl] = useState<string | null>(null);
 	const [state, setState] = useState<"loading" | "ready" | "missing">("loading");
 	useEffect(() => {
@@ -279,7 +281,7 @@ function EntityPoster({ entityId, session, locale, alt, landscape = false }: { e
 			const delay = Math.min(10000, 1500 * Math.pow(1.5, attempts++));
 			timer = window.setTimeout(load, delay);
 		};
-		const load = () => adminFetch(`/api/admin/library-items/${entityId}/image?imageType=Primary&locale=${encodeURIComponent(locale)}`, session, { signal: controller.signal }).then(async (response) => {
+		const load = () => adminFetch(`/api/admin/library-items/${entityId}/image?imageType=${imageType}&locale=${encodeURIComponent(locale)}`, session, { signal: controller.signal }).then(async (response) => {
 			if (response.status === 202) { setState("loading"); scheduleRetry(); return; }
 			if (!response.ok) { setState("missing"); return; }
 			const nextUrl = URL.createObjectURL(await response.blob());
@@ -291,8 +293,8 @@ function EntityPoster({ entityId, session, locale, alt, landscape = false }: { e
 		}).catch((caught) => { if ((caught as Error).name !== "AbortError") setState("missing"); });
 		load();
 		return () => { cancelled = true; controller.abort(); if (timer) window.clearTimeout(timer); if (objectUrl) URL.revokeObjectURL(objectUrl); };
-	}, [entityId, locale, session]);
-	return <div className={`flex ${landscape ? "aspect-video w-40 shrink-0" : "aspect-[2/3]"} items-center justify-center overflow-hidden bg-[#0d0e13]`}>{url && state === "ready" ? <img src={url} alt={alt} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-105" /> : <IconPhoto className={state === "missing" ? "material-muted" : "text-[#b9c3ff]"} size={28} />}</div>;
+	}, [entityId, imageType, locale, session]);
+	return <div className={`flex ${landscape ? "aspect-video" : "aspect-[2/3]"} items-center justify-center overflow-hidden bg-[#0d0e13]`}>{url && state === "ready" ? <img src={url} alt={alt} loading="lazy" className={`h-full w-full ${imageType === "Logo" ? "object-contain p-4" : "object-cover"} transition duration-300 group-hover:scale-105`} /> : <IconPhoto className={state === "missing" ? "material-muted" : "text-[#b9c3ff]"} size={28} />}</div>;
 }
 
 function EntityDetailView({ entry, session, locale, onBack, onOpen }: { entry: NavigationEntry; session: Session; locale: string; onBack: () => void; onOpen: (item: Navigable) => void }) {
@@ -318,7 +320,11 @@ function EntityDetailView({ entry, session, locale, onBack, onOpen }: { entry: N
 	const metadataPending = !detail?.metadata || detail.metadataState === "queued" || detail.metadataState === "running";
 	const childLabel = detail?.type === "series" ? "Seasons" : detail?.type === "season" ? "Episodes" : detail?.type === "artist" ? "Releases" : detail?.type === "release" ? "Tracks" : detail?.type === "collection" ? "Items" : "";
 	const episodeView = detail?.type === "season";
-	return <div className="min-h-[calc(100vh-7rem)]"><button onClick={onBack} className="material-back"><IconArrowLeft size={17} />Back</button><div className="mt-6 flex items-start justify-between gap-4"><div><p className="text-xs uppercase tracking-[.18em] material-muted">{detail?.type || entry.type}</p>{metadataPending ? <div className="mt-3 h-8 w-64 max-w-[60vw] animate-pulse rounded bg-white/10" aria-hidden="true" /> : <h1 className="mt-2 text-3xl font-semibold tracking-tight">{detail?.metadata?.title}</h1>}</div><button onClick={onBack} className="material-icon-button" aria-label="Close detail"><IconX size={17} /></button></div>{error && <div className="material-alert mt-5"><IconAlertCircle size={18} />{error}<button onClick={() => setRetry((value) => value + 1)} className="material-text-button ml-auto">Retry</button></div>}{detail && <div className="mt-7 grid items-start gap-8 lg:grid-cols-[240px_minmax(0,1fr)]"><div className="space-y-5"><div className="overflow-hidden rounded-2xl border border-white/10 bg-[#0d0e13]"><EntityPoster entityId={entry.id} session={session} locale={locale} alt={metadataPending ? "" : detail.metadata?.title || ""} /></div>{!metadataPending && <MetadataSummary detail={detail} />}</div><div className="min-w-0">{childLabel && <div className="mb-5"><p className="text-xs uppercase tracking-[.18em] material-muted">{childLabel}</p><p className="mt-1 text-sm material-muted">Choose an item to continue</p></div>}{children.length ? <div className={episodeView ? "grid gap-3 sm:grid-cols-2" : "grid justify-start gap-4"} style={episodeView ? undefined : { gridTemplateColumns: "repeat(auto-fill, minmax(180px, 220px))" }}>{children.map((child) => episodeView ? <EpisodeCard key={child.id} item={child} session={session} locale={locale} onOpen={() => onOpen(child)} /> : <EntityCard key={child.id} item={child} session={session} locale={locale} onOpen={() => onOpen(child)} />)}</div> : <div className="material-surface rounded-xl p-6 text-sm material-muted">No child entries available.</div>}</div></div>}</div>;
+	return <div className="min-h-[calc(100vh-7rem)]"><button onClick={onBack} className="material-back"><IconArrowLeft size={17} />Back</button><div className="mt-6 flex items-start justify-between gap-4"><div><p className="text-xs uppercase tracking-[.18em] material-muted">{detail?.type || entry.type}</p>{metadataPending ? <div className="mt-3 h-8 w-64 max-w-[60vw] animate-pulse rounded bg-white/10" aria-hidden="true" /> : <h1 className="mt-2 text-3xl font-semibold tracking-tight">{detail?.metadata?.title}</h1>}</div><button onClick={onBack} className="material-icon-button" aria-label="Close detail"><IconX size={17} /></button></div>{error && <div className="material-alert mt-5"><IconAlertCircle size={18} />{error}<button onClick={() => setRetry((value) => value + 1)} className="material-text-button ml-auto">Retry</button></div>}{detail && <div className="mt-7 grid items-start gap-8 lg:grid-cols-[240px_minmax(0,1fr)]"><div className="space-y-5">{!metadataPending && <ArtworkGallery entityId={entry.id} session={session} locale={locale} title={detail.metadata?.title || ""} />}{!metadataPending && <MetadataSummary detail={detail} />}</div><div className="min-w-0">{childLabel && <div className="mb-5"><p className="text-xs uppercase tracking-[.18em] material-muted">{childLabel}</p><p className="mt-1 text-sm material-muted">Choose an item to continue</p></div>}{children.length ? <div className={episodeView ? "grid gap-3 sm:grid-cols-2" : "grid justify-start gap-4"} style={episodeView ? undefined : { gridTemplateColumns: "repeat(auto-fill, minmax(180px, 220px))" }}>{children.map((child) => episodeView ? <EpisodeCard key={child.id} item={child} session={session} locale={locale} onOpen={() => onOpen(child)} /> : <EntityCard key={child.id} item={child} session={session} locale={locale} onOpen={() => onOpen(child)} />)}</div> : <div className="material-surface rounded-xl p-6 text-sm material-muted">No child entries available.</div>}</div></div>}</div>;
+}
+
+function ArtworkGallery({ entityId, session, locale, title }: { entityId: string; session: Session; locale: string; title: string }) {
+	return <div className="space-y-3"><p className="text-xs uppercase tracking-[.18em] material-muted">Artwork</p><div className="grid grid-cols-2 gap-3">{artworkTypes.map((imageType) => <div key={imageType} className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0e13]"><EntityPoster entityId={entityId} session={session} locale={locale} imageType={imageType} landscape={imageType !== "Primary"} alt={`${imageType} artwork for ${title}`} /><p className="border-t border-white/10 px-3 py-2 text-[11px] material-muted">{imageType}</p></div>)}</div></div>;
 }
 
 function MetadataSummary({ detail }: { detail: Item }) {

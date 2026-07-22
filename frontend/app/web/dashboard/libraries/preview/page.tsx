@@ -68,6 +68,7 @@ type Metadata = {
 type NavigationEntry = { id: string; type: string; label: string };
 type Navigable = { id: string; type: string; displayName?: string; relativePath?: string };
 type CardItem = Navigable & { metadata?: Metadata | null; metadataState?: Item["metadataState"]; matchStatus?: string; seasonNumber?: number; episodeNumber?: number };
+type LanguageOption = { value: string; label: string };
 const pageSize = 30;
 
 function LibraryViewPage() {
@@ -81,7 +82,9 @@ function LibraryViewPage() {
 	const [items, setItems] = useState<Item[]>([]);
 	const [libraryName, setLibraryName] = useState("");
 	const [parent, setParent] = useState<string | null>(null);
-	const [locale, setLocale] = useState("en");
+	const [locale, setLocale] = useState("");
+	const [locales, setLocales] = useState<string[]>([]);
+	const [languageOptions, setLanguageOptions] = useState<LanguageOption[]>([]);
 	const [searchInput, setSearchInput] = useState("");
 	const [searchQuery, setSearchQuery] = useState("");
 	const [page, setPage] = useState(1);
@@ -93,7 +96,7 @@ function LibraryViewPage() {
 	const abortRef = useRef<AbortController | null>(null);
 
 	const load = useCallback(async (current: Session | null, parentId: string | null, currentPage: number) => {
-		if (!current || !libraryId) return;
+		if (!current || !libraryId || !locale) return;
 		const id = ++requestId.current;
 		abortRef.current?.abort();
 		const controller = new AbortController();
@@ -125,6 +128,26 @@ function LibraryViewPage() {
 	}, [libraryId, locale, searchQuery]);
 
 	useEffect(() => {
+		const current = readSession();
+		setSession(current);
+		if (!current || !libraryId) return;
+		let cancelled = false;
+		void adminFetch("/api/admin/metadata/languages", current).then(async (response) => {
+			if (!response.ok) throw new Error("Metadata languages could not be loaded.");
+			return response.json();
+		}).then((value) => {
+			if (cancelled) return;
+			const configured = Array.isArray(value.locales) ? value.locales.filter((item: unknown): item is string => typeof item === "string" && item.length > 0) : [];
+			setLocales(configured);
+			setLanguageOptions(Array.isArray(value.options) ? value.options : []);
+			setLocale((currentLocale) => configured.includes(currentLocale) ? currentLocale : configured[0] || "");
+		}).catch((caught) => {
+			if (!cancelled) setError(caught instanceof Error ? caught.message : "Metadata languages could not be loaded.");
+		});
+		return () => { cancelled = true; };
+	}, [libraryId]);
+
+	useEffect(() => {
 		const timer = window.setTimeout(() => setSearchQuery(searchInput.trim()), 300);
 		return () => window.clearTimeout(timer);
 	}, [searchInput]);
@@ -136,7 +159,7 @@ function LibraryViewPage() {
 		setParent(null);
 		setNavigation([]);
 		setItems([]);
-		if (current) void load(current, null, 1);
+		if (current && locale) void load(current, null, 1);
 		return () => abortRef.current?.abort();
 	}, [libraryId, locale, load]);
 
@@ -211,7 +234,7 @@ function LibraryViewPage() {
 								<input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Search library" aria-label="Search library" className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
 								{searchInput && <button type="button" onClick={() => setSearchInput("")} aria-label="Clear search" className="material-muted transition hover:text-white"><IconX size={15} /></button>}
 							</label>
-							<select value={locale} onChange={(event) => { setLocale(event.target.value); setItems([]); }} className="material-input h-10 rounded-lg px-3 text-sm outline-none"><option value="en">English</option><option value="ja">日本語</option></select>
+							<select value={locale} disabled={!locales.length} onChange={(event) => { setLocale(event.target.value); setItems([]); }} className="material-input h-10 rounded-lg px-3 text-sm outline-none" aria-label="Metadata language"><option value="" disabled>Select language</option>{locales.map((value) => <option key={value} value={value}>{languageOptions.find((option) => option.value === value)?.label || value}</option>)}</select>
 						</div>
 					</div>
 					{parent && <button onClick={() => { setParent(null); setPage(1); void load(session, null, 1); }} className="material-back mt-5"><IconArrowLeft size={15} />Back to library</button>}

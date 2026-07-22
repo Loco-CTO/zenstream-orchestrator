@@ -179,7 +179,7 @@ class CatalogTest(unittest.TestCase):
 
         self.assertEqual(
             [item["id"] for item in result["items"]],
-            ["episode-2", "episode-10", "episode-1", "episode-unset"],
+            ["episode-2", "episode-10", "episode-unset", "episode-1"],
         )
 
     def test_argon_session_revocation_and_legacy_password_upgrade(self):

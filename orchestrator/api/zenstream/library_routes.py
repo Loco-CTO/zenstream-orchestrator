@@ -441,11 +441,13 @@ async def get_image(entity_id: str, imageType: str = Query("Primary"), locale: s
             scheduler.enqueue_metadata_hydration([entity_id], locale)
             logger.info("image pending entity_id=%s locale=%s image_type=%s", entity_id, locale, imageType)
             return Response(status_code=202, headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"})
-        logger.warning("image unavailable because entity has no provider IDs entity_id=%s image_type=%s", entity_id, imageType)
-        return Response(status_code=404, headers={"X-ZenStream-Image-State": "error"})
+        else:
+            logger.warning("image unavailable because entity has no provider IDs entity_id=%s image_type=%s", entity_id, imageType)
+            return Response(status_code=404, headers={"X-ZenStream-Image-State": "error"})
     image = choose_image(metadata.get("images", []), locale, imageType)
     if not image:
         return Response(status_code=404, headers={"X-ZenStream-Image-State": "missing"})
+    response_headers = {"X-ZenStream-Image-State": "ready"}
     cache_root = Path(store.db.db_file).parent / "metadata-cache" / "images"
     cache_root.mkdir(parents=True, exist_ok=True)
     extension = Path(image["url"].split("?", 1)[0]).suffix.lower() or ".jpg"
@@ -463,6 +465,6 @@ async def get_image(entity_id: str, imageType: str = Query("Primary"), locale: s
     selected_id = next((value["id"] for value in item["providerIds"] if value["provider"] == selected_provider), "")
     cached_file = store.db.execute("SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=?", (selected_provider, item["type"], selected_id, imageType, image["url"]))
     if cached_file and cached_file[0][0] and Path(cached_file[0][0]).is_file():
-        return FileResponse(cached_file[0][0])
+        return FileResponse(cached_file[0][0], headers=response_headers)
     MetadataCache().put_image(selected_provider, item["type"], selected_id, image.get("language"), imageType, image["url"], str(target))
-    return FileResponse(target)
+    return FileResponse(target, headers=response_headers)

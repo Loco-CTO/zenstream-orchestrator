@@ -744,7 +744,7 @@ class LibraryScanner:
             self._files(series, root, [path for path in series_dir.iterdir() if path.is_file()])
             children = self.db.execute(
                 "SELECT id FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season'))",
-                (library_id, series),
+                (library_id, series, series),
             )
             needs_resolution = self._needs_metadata(series) or any(self._needs_metadata(row[0]) for row in children if row[0] in self._scan_seen_ids)
             if service and needs_resolution:

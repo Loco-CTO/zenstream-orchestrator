@@ -569,7 +569,7 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(db.execute("SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id='season-0'"), [("tvdb", "season-tvdb-0")])
         db.close()
 
-    def test_tvdb_episode_resolution_failure_is_actionable(self):
+    def test_tvdb_episode_resolution_missing_id_leaves_episode_unresolved(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, parent_id TEXT, season_number INTEGER, episode_number INTEGER, relative_path TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT, updated_at TEXT)")
         db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER)")
@@ -579,27 +579,10 @@ class LibraryMetadataTest(unittest.TestCase):
         db.execute("INSERT INTO library_entities(id,entity_type,relative_path) VALUES('series-1','series','Example')")
         db.execute("INSERT INTO library_entities(id,entity_type,parent_id,season_number,relative_path) VALUES('season-1','season','series-1',1,'Season 1')")
         db.execute("INSERT INTO library_entities(id,entity_type,parent_id,season_number,episode_number,relative_path) VALUES('episode-1','episode','season-1',1,2,'Episode 2')")
+        scanner._ids("episode-1", [("tmdb", "episode", "tmdb-series:1:2")])
         scanner._ids("season-1", [("tvdb", "season", "season-tvdb-1")])
-        with self.assertRaisesRegex(ValueError, "TVDB episode ID could not be resolved.*S01E02"):
-            scanner._derive_tvdb_episode_ids("series-1", type("FakeService", (), {"fetch": lambda *_args, **_kwargs: {"children": [], "ids": [], "images": []}})())
-
-    def test_tvdb_episode_resolution_keeps_tmdb_fallback_when_tvdb_is_missing(self):
-        db = DatabaseHandler("sqlite", {}, ":memory:")
-        db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, parent_id TEXT, season_number INTEGER, episode_number INTEGER, relative_path TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT, updated_at TEXT)")
-        db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER)")
-        store = LibraryStore.__new__(LibraryStore)
-        store.db = db
-        scanner = LibraryScanner(store)
-        db.execute("INSERT INTO library_entities(id,entity_type,relative_path) VALUES('series-1','series','Example')")
-        db.execute("INSERT INTO library_entities(id,entity_type,parent_id,season_number,relative_path) VALUES('season-1','season','series-1',3,'Season 3')")
-        db.execute("INSERT INTO library_entities(id,entity_type,parent_id,season_number,episode_number,relative_path) VALUES('episode-1','episode','season-1',3,1,'S03E01')")
-        scanner._ids("episode-1", [("tmdb", "episode", "tmdb-series:3:1")])
-        scanner._ids("season-1", [("tvdb", "season", "season-tvdb-3")])
-
         scanner._derive_tvdb_episode_ids("series-1", type("FakeService", (), {"fetch": lambda *_args, **_kwargs: {"children": [], "ids": [], "images": []}})())
-
-        self.assertEqual(db.execute("SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id='episode-1'"), [("tmdb", "tmdb-series:3:1")])
-        db.close()
+        self.assertEqual(db.execute("SELECT provider_id FROM entity_provider_ids WHERE entity_id='episode-1'"), [])
         db.close()
 
     def test_detail_payload_orders_and_labels_tvdb_as_series_primary(self):

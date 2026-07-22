@@ -577,6 +577,17 @@ class LibraryMetadataTest(unittest.TestCase):
         with patch.object(client, "_request", side_effect=[[{"iso_639_1": "ja"}], ["ja-JP"], {"name": "Example"}]) as request:
             client.details("series", "10", "ja")
         self.assertEqual(request.call_args_list[2].kwargs["params"]["language"], "ja-JP")
+        self.assertEqual(request.call_args_list[2].kwargs["params"]["include_image_language"], "ja-JP,ja,null")
+
+    def test_tmdb_details_includes_english_and_untranslated_artwork(self):
+        client = TMDBClient({"value": "test"})
+        TMDBClient._language_codes_loaded = False
+        TMDBClient._language_catalog = ProviderLanguageCatalog()
+        with patch.object(client, "_request", side_effect=[[{"iso_639_1": "en"}], ["en-US"], {"name": "Example"}]) as request:
+            client.details("movie", "10", "en")
+        params = request.call_args_list[2].kwargs["params"]
+        self.assertEqual(params["language"], "en-US")
+        self.assertEqual(params["include_image_language"], "en-US,en,null")
 
     def test_provider_language_catalogs_pass_unknown_locale_through(self):
         tvdb = TVDBClient({"apiKey": "test"})

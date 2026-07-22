@@ -222,6 +222,18 @@ class TMDBClient(ProviderClient):
         raw = value.strip()
         return self._language_catalog.canonical(raw), raw
 
+    @staticmethod
+    def _include_image_language(language: str) -> str:
+        """Keep localized and language-neutral TMDB artwork in appended images.
+
+        TMDB applies the ``language`` filter to the appended ``images``
+        response too.  Without this parameter, an English details request can
+        return no posters even when the title has artwork; TMDB documents
+        ``include_image_language`` as the fallback for this case.
+        """
+        values = [language, _language_family(language), "null"]
+        return ",".join(dict.fromkeys(value for value in values if value))
+
     def test(self) -> None:
         self._request("/configuration")
 
@@ -235,14 +247,15 @@ class TMDBClient(ProviderClient):
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
         language = self._language_code(locale)
+        image_language = self._include_image_language(language)
         if entity_type == "season":
             series_id, season = provider_id.split(":", 1)
-            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}", params={"language": language, "append_to_response": "images,external_ids,videos"})
+            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}", params={"language": language, "include_image_language": image_language, "append_to_response": "images,external_ids,videos"})
         if entity_type == "episode":
             series_id, season, episode = provider_id.split(":", 2)
-            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}", params={"language": language, "append_to_response": "images,external_ids,videos"})
+            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}", params={"language": language, "include_image_language": image_language, "append_to_response": "images,external_ids,videos"})
         kind = "tv" if entity_type == "series" else "movie"
-        return self._request(f"/{kind}/{quote(provider_id)}", params={"language": language, "append_to_response": "images,external_ids,credits,videos"})
+        return self._request(f"/{kind}/{quote(provider_id)}", params={"language": language, "include_image_language": image_language, "append_to_response": "images,external_ids,credits,videos"})
 
     def series_hierarchy(self, provider_id: str, locale: str) -> dict:
         """Fetch season details, whose responses include their episode lists."""

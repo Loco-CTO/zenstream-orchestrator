@@ -12,6 +12,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import Config
 
+IMAGE_LANGUAGE_SCHEMA = 3
 
 PROVIDERS = {"tmdb", "tvdb"}
 
@@ -114,6 +115,8 @@ class MetadataCache:
             payload = json.loads(rows[0][0])
         except json.JSONDecodeError:
             return None
+        if payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA:
+            return None
         payload["_stale"] = rows[0][1] <= iso_now()
         return payload
 
@@ -128,12 +131,16 @@ class MetadataCache:
                 payload = json.loads(payload_text)
             except json.JSONDecodeError:
                 continue
+            if payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA:
+                continue
             if payload.get("title") or payload.get("overview") or payload.get("description") or payload.get("images") or payload.get("extraImages") or payload.get("tracks"):
                 payload["_stale"] = expires_at <= iso_now()
                 return payload
         return None
 
     def put(self, provider: str, entity_type: str, provider_id: str, locale: str, payload: dict, days: int = 7) -> None:
+        payload = dict(payload)
+        payload["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
         now = utc_now()
         self.db.execute(
             "INSERT INTO metadata_cache(provider, entity_type, provider_id, locale, payload, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?) "

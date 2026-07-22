@@ -516,6 +516,15 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(response["locales"], ["en", "zh-TW"])
         refresh.assert_called_once_with()
 
+    def test_explicit_metadata_refresh_queues_existing_entity_backfill(self):
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(library_routes.scheduler, "enqueue_metadata_refresh", return_value={"id": "run-1"}) as refresh,
+        ):
+            response = asyncio.run(library_routes.refresh_metadata(Username="admin", TOKEN="token"))
+        self.assertEqual(response, {"backfill": {"id": "run-1"}})
+        refresh.assert_called_once_with()
+
     def test_local_image_names_are_matched_to_canonical_artwork_types(self):
         self.assertTrue(library_routes._local_image_for_type("Series/poster.jpg", "Primary"))
         self.assertTrue(library_routes._local_image_for_type("Series/fanart.jpg", "Backdrop"))

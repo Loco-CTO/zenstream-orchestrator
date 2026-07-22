@@ -163,10 +163,21 @@ class ProviderClient:
 
     def _get(self, url: str, **kwargs) -> dict:
         try:
+            request_params = dict(kwargs.get("params") or {})
+            request_params.pop("api_key", None)
+            logger.debug("provider request url=%s params=%s", url, request_params)
             response = httpx.get(url, timeout=self.timeout, **kwargs)
             response.raise_for_status()
-            return response.json()
+            payload = response.json()
+            logger.debug(
+                "provider response url=%s status=%s payload=%s",
+                url,
+                response.status_code,
+                payload,
+            )
+            return payload
         except (httpx.HTTPError, ValueError) as error:
+            logger.debug("provider request failed url=%s error=%s", url, error, exc_info=True)
             raise ProviderError(f"provider request failed: {type(error).__name__}: {error}") from error
 
 

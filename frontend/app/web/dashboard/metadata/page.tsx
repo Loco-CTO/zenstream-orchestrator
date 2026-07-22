@@ -45,6 +45,13 @@ export default function MetadataPage() {
 		if (response.ok) setLocales(data.locales || locales);
 	}
 
+	async function refreshMetadata() {
+		if (!session) return;
+		const response = await adminFetch("/api/admin/metadata/refresh", session, { method: "POST" });
+		const data = await response.json().catch(() => null);
+		setMessage(response.ok ? "Metadata and artwork refresh queued." : data?.detail || "Could not queue metadata refresh.");
+	}
+
 	function addLanguage() {
 		if (!languageToAdd || locales.includes(languageToAdd)) return;
 		setLocales((current) => [...current, languageToAdd]);
@@ -95,7 +102,7 @@ export default function MetadataPage() {
 				<section className="console-card rounded-2xl p-6 lg:col-span-2">
 					<div className="flex items-start justify-between gap-4"><div><p className="console-kicker">Scan-time translations</p><h2 className="mt-2 text-xl font-bold">Metadata languages</h2><p className="mt-3 max-w-3xl text-sm leading-6 console-muted">Choose the languages the Orchestrator should collect during library scans. Saving queues a backfill for existing indexed items; unavailable provider translations are skipped.</p></div><IconMusic className="text-[#8fe4cf]" size={22} /></div>
 					<div className="mt-5 flex flex-wrap gap-2">{locales.map((locale) => <span key={locale} className="flex items-center gap-2 rounded-full border console-divider px-3 py-2 text-sm">{locale}<button type="button" disabled={locales.length === 1} onClick={() => setLocales((current) => current.filter((value) => value !== locale))} className="console-muted hover:text-white disabled:opacity-30" aria-label={`Remove ${locale}`}><IconX size={14} /></button></span>)}</div>
-					<div className="mt-5 flex flex-wrap gap-3"><select value={languageToAdd} onChange={(event) => setLanguageToAdd(event.target.value)} className="console-input h-11 min-w-56 rounded-xl px-4 text-sm outline-none"><option value="">Select a language</option>{languageOptions.filter((option) => !locales.includes(option.value)).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><button type="button" onClick={addLanguage} disabled={!languageToAdd} className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm font-semibold disabled:opacity-40"><IconPlus size={16} />Add language</button><button type="button" onClick={saveLanguages} className="console-button rounded-xl px-4 py-3 text-sm font-semibold">Save languages</button></div>
+					<div className="mt-5 flex flex-wrap gap-3"><select value={languageToAdd} onChange={(event) => setLanguageToAdd(event.target.value)} className="console-input h-11 min-w-56 rounded-xl px-4 text-sm outline-none"><option value="">Select a language</option>{languageOptions.filter((option) => !locales.includes(option.value)).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select><button type="button" onClick={addLanguage} disabled={!languageToAdd} className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm font-semibold disabled:opacity-40"><IconPlus size={16} />Add language</button><button type="button" onClick={saveLanguages} className="console-button rounded-xl px-4 py-3 text-sm font-semibold">Save languages</button><button type="button" onClick={refreshMetadata} className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm font-semibold"><IconRefresh size={16} />Refresh metadata and artwork</button></div>
 				</section>
 				<form onSubmit={(event) => save(event, "tmdb")} className="console-card rounded-2xl p-6">
 					<div className="flex items-start justify-between"><div><p className="console-kicker">Movies and secondary TV metadata</p><h2 className="mt-2 text-xl font-bold">TMDB</h2></div><IconKey className="text-[#8fe4cf]" size={22} /></div>

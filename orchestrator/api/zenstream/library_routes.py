@@ -214,6 +214,13 @@ async def update_metadata_languages(request: Request, Username: str | None = Hea
     return {"locales": locales, "backfill": run}
 
 
+@router.post("/metadata/refresh")
+async def refresh_metadata(Username: str | None = Header(None), TOKEN: str | None = Header(None)):
+    """Explicitly repair/refetch all indexed provider metadata and artwork."""
+    require_admin(Username, TOKEN)
+    return {"backfill": scheduler.enqueue_metadata_refresh()}
+
+
 @router.put("/metadata/providers/{provider}")
 async def update_provider(provider: str, request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)):
     require_admin(Username, TOKEN)

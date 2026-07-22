@@ -837,6 +837,28 @@ class MetadataService:
                 locale,
                 force=force or not cache_matches_locale,
             )
+
+            def localized_child(entity_type: str, entity_id: str, hierarchy_payload: dict) -> dict:
+                cached = self.cache.get(provider, entity_type, entity_id, locale)
+                cache_matches_locale = cached and cached.get("_metadataLocale") == locale
+                try:
+                    return self.fetch(
+                        provider,
+                        entity_type,
+                        entity_id,
+                        locale,
+                        force=force or not cache_matches_locale,
+                    )
+                except ProviderError:
+                    # The hierarchy record is still useful for child
+                    # identity mapping when a translation is unavailable,
+                    # but do not write that default-language record into the
+                    # requested locale cache.
+                    fallback = client.normalize(entity_type, entity_id, hierarchy_payload)
+                    if not fallback.get("title"):
+                        raise
+                    return fallback
+
             seasons = (hierarchy["extended"].get("data") or {}).get("seasons") or []
             for season in seasons:
                 season_type = season.get("type")
@@ -850,13 +872,7 @@ class MetadataService:
                 if season.get("id") is None or number is None:
                     continue
                 season_id = str(season["id"])
-                normalized = self._cache_normalized(provider, "season", season_id, locale, client, {"data": season})
-                if not any(image.get("type") == PRIMARY for image in normalized.get("images", [])):
-                    try:
-                        normalized = self.fetch(provider, "season", season_id, locale, force=True)
-                    except ProviderError:
-                        if not normalized.get("title"):
-                            raise
+                normalized = localized_child("season", season_id, {"data": season})
                 records["seasons"].append(normalized)
             for episode in hierarchy["episodes"]:
                 episode_id = episode.get("id")
@@ -868,13 +884,7 @@ class MetadataService:
                     episode_number = episode.get("episodeNumber")
                 if episode_id is None or season_number is None or episode_number is None:
                     continue
-                normalized = self._cache_normalized(provider, "episode", str(episode_id), locale, client, {"data": episode})
-                if not normalized.get("title") or not any(image.get("type") == PRIMARY for image in normalized.get("images", [])):
-                    try:
-                        normalized = self.fetch(provider, "episode", str(episode_id), locale, force=True)
-                    except ProviderError:
-                        if not normalized.get("title"):
-                            raise
+                normalized = localized_child("episode", str(episode_id), {"data": episode})
                 records["episodes"].append(normalized)
             return records
         if provider == "tmdb":

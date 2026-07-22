@@ -4,7 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
@@ -773,6 +773,39 @@ class LibraryMetadataTest(unittest.TestCase):
 
         self.assertEqual(records["series"]["title"], "English title")
         service.fetch.assert_called_once_with("tvdb", "series", "series-1", "en", force=True)
+
+    def test_tvdb_series_aggregation_fetches_seasons_and_episodes_in_requested_locale(self):
+        class FakeClient:
+            def series_hierarchy(self, provider_id):
+                return {
+                    "extended": {"data": {"seasons": [{"id": 2, "number": 1, "type": "official"}]}},
+                    "episodes": [{"id": 3, "seasonNumber": 1, "number": 4}],
+                }
+
+            def normalize(self, entity_type, provider_id, payload):
+                return {"title": "Default hierarchy title"}
+
+        def fetch(provider, entity_type, provider_id, locale, force=False):
+            return {"title": f"{entity_type}-{locale}", "images": []}
+
+        service = MetadataService.__new__(MetadataService)
+        service.cache = MagicMock()
+        service.cache.get.return_value = {"title": "Legacy default-language title"}
+        service.client = MagicMock(return_value=FakeClient())
+        service.fetch = MagicMock(side_effect=fetch)
+
+        records = service.aggregate_series("tvdb", "series-1", "en")
+
+        self.assertEqual(records["seasons"][0]["title"], "season-en")
+        self.assertEqual(records["episodes"][0]["title"], "episode-en")
+        self.assertEqual(
+            [call.args for call in service.fetch.call_args_list],
+            [
+                ("tvdb", "series", "series-1", "en"),
+                ("tvdb", "season", "2", "en"),
+                ("tvdb", "episode", "3", "en"),
+            ],
+        )
 
     def test_series_aggregation_maps_children_without_name_resolution(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")

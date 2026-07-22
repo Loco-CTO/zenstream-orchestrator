@@ -1,9 +1,7 @@
 import threading
 import unittest
-from unittest.mock import patch
-
 from app.database import DatabaseHandler
-from app.jobs import JobScheduler, JobStore, MetadataHydrationQueue
+from app.jobs import JobScheduler, JobStore
 
 
 class DatabaseRollbackTest(unittest.TestCase):
@@ -84,46 +82,6 @@ class JobLockingTest(unittest.TestCase):
         self.assertTrue(second_created)
         self.assertNotEqual(second_run["id"], first_run["id"])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM job_runs")[0][0], 2)
-
-
-class MetadataHydrationQueueTest(unittest.TestCase):
-    def setUp(self):
-        self.db = DatabaseHandler("sqlite", {}, ":memory:")
-        self.db.execute("CREATE TABLE metadata_hydration_requests (entity_id TEXT NOT NULL, locale TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, error_details TEXT, requested_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, PRIMARY KEY(entity_id, locale))")
-        self.db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, entity_type TEXT NOT NULL)")
-        self.db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT NOT NULL, provider TEXT NOT NULL, provider_id TEXT NOT NULL, is_primary INTEGER NOT NULL DEFAULT 0)")
-        self.db.execute("CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
-        self.db.execute("CREATE TABLE job_runs (id TEXT PRIMARY KEY, definition_id TEXT, library_id TEXT, kind TEXT, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, thread_name TEXT)")
-        store = JobStore.__new__(JobStore)
-        store.db = self.db
-        scheduler = JobScheduler.__new__(JobScheduler)
-        scheduler.store = store
-        scheduler.condition = threading.Condition()
-        self.queue = MetadataHydrationQueue(scheduler)
-
-    def tearDown(self):
-        self.queue.stop()
-        self.db.close()
-
-    def test_requests_are_coalesced_per_entity_and_locale(self):
-        first = self.queue.enqueue(["entity-1", "entity-1"], "ja")
-        second = self.queue.enqueue(["entity-1"], "ja")
-
-        self.assertEqual(first["queued"], 1)
-        self.assertEqual(second["queued"], 0)
-        self.assertNotIn("jobId", first)
-        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM metadata_hydration_requests")[0][0], 1)
-
-    def test_worker_wakes_immediately_for_an_on_demand_request(self):
-        processed = threading.Event()
-
-        def hydrate(*_args):
-            processed.set()
-
-        with patch("app.jobs._hydrate_request", side_effect=hydrate):
-            self.queue.start()
-            self.queue.enqueue(["entity-1"], "ja")
-            self.assertTrue(processed.wait(2), "on-demand hydration worker did not wake")
 
 
 if __name__ == "__main__":

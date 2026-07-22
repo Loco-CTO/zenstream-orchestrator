@@ -481,7 +481,6 @@ class LibraryMetadataTest(unittest.TestCase):
             ),
             patch.object(library_routes.store.db, "execute", return_value=[]),
             patch.object(library_routes, "_metadata_for", return_value=None) as metadata,
-            patch.object(library_routes.scheduler, "enqueue_metadata_hydration", return_value={"jobId": "job-1"}) as hydration,
         ):
             response = asyncio.run(
                 library_routes.get_image(
@@ -496,7 +495,6 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.headers["retry-after"], "2")
         metadata.assert_called_once_with(item, "en", False, False)
-        hydration.assert_not_called()
 
     def test_metadata_language_update_queues_existing_entity_backfill(self):
         settings = MagicMock()

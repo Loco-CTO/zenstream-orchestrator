@@ -205,7 +205,7 @@ class Catalog:
         parent_id: str | None = None,
         page: int = 1,
         page_size: int = 40,
-        sort_by: str = "title",
+        sort_by: str | None = None,
         sort_order: str = "ascending",
     ) -> dict:
         self.require_library(user_id, library_id)
@@ -221,14 +221,38 @@ class Catalog:
         for row in rows:
             metadata = self.metadata(user_id, row[0], language)["metadata"]
             values.append(self._serialize(user_id, row, metadata))
-        reverse = sort_order.lower() == "descending"
-        key = {
-            "dateAdded": lambda value: value.get("dateAdded") or "",
-            "releaseDate": lambda value: value["metadata"].get("date") or "",
-            "rating": lambda value: value["metadata"].get("communityRating") or 0,
-            "runtime": lambda value: value["metadata"].get("runtimeMinutes") or 0,
-        }.get(sort_by, lambda value: str(value.get("name") or "").casefold())
-        values.sort(key=lambda value: (key(value), value["id"]), reverse=reverse)
+        hierarchy_parent = None
+        if parent_id:
+            hierarchy_parent = self.require_entity(user_id, parent_id)[3]
+        if sort_by is None and hierarchy_parent in {"series", "season"}:
+            def hierarchy_key(value):
+                season = value.get("seasonNumber")
+                episode = value.get("episodeNumber")
+                if hierarchy_parent == "season":
+                    return (
+                        episode is None,
+                        episode if episode is not None else 0,
+                        value["id"],
+                    )
+                return (
+                    season is None,
+                    season if season is not None else 0,
+                    episode is None,
+                    episode if episode is not None else 0,
+                    value["id"],
+                )
+
+            values.sort(key=hierarchy_key)
+        else:
+            reverse = sort_order.lower() == "descending"
+            selected_sort = sort_by or "title"
+            key = {
+                "dateAdded": lambda value: value.get("dateAdded") or "",
+                "releaseDate": lambda value: value["metadata"].get("date") or "",
+                "rating": lambda value: value["metadata"].get("communityRating") or 0,
+                "runtime": lambda value: value["metadata"].get("runtimeMinutes") or 0,
+            }.get(selected_sort, lambda value: str(value.get("name") or "").casefold())
+            values.sort(key=lambda value: (key(value), value["id"]), reverse=reverse)
         total = len(values)
         start = (page - 1) * page_size
         return {

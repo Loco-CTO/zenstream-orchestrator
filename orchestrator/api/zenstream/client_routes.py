@@ -145,7 +145,7 @@ async def items(
     parentId: str | None = Query(None),
     page: int = Query(1, ge=1),
     pageSize: int = Query(40, ge=1, le=100),
-    sortBy: str = Query("title"),
+    sortBy: str | None = Query(None),
     sortOrder: str = Query("ascending"),
 ):
     account, _ = require_account(request)

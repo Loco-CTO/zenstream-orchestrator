@@ -152,6 +152,10 @@ def _purge_orphan_inventory(cursor, tables: set[str]) -> None:
         cursor.execute(
             f"DELETE FROM media_files AS f WHERE NOT {valid_entity('f.entity_id')}"
         )
+    if "catalog_search" in tables:
+        cursor.execute(
+            f"DELETE FROM catalog_search AS s WHERE NOT {valid_entity('s.entity_id')}"
+        )
     if "entity_provider_ids" in tables:
         cursor.execute(
             f"DELETE FROM entity_provider_ids AS p WHERE NOT {valid_entity('p.entity_id')}"

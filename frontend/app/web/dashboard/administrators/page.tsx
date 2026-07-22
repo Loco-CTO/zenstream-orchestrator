@@ -49,7 +49,19 @@ export default function AdministratorsPage() {
 	}
 	return (
 		<div>
-			<div className="flex items-center gap-3 pb-5"><h1 className="text-3xl font-semibold tracking-tight">Administrators</h1><button onClick={() => load()} className="material-icon-button" aria-label="Refresh administrators" title="Refresh administrators"><IconRefresh size={17} /></button></div>
+			<div className="flex items-center gap-3 pb-5">
+				<h1 className="text-3xl font-semibold tracking-tight">
+					Administrators
+				</h1>
+				<button
+					onClick={() => load()}
+					className="material-icon-button"
+					aria-label="Refresh administrators"
+					title="Refresh administrators"
+				>
+					<IconRefresh size={17} />
+				</button>
+			</div>
 			<div className="mt-8 grid gap-6 lg:grid-cols-[1.4fr_1fr]">
 				<section className="console-card overflow-hidden rounded-2xl">
 					<div className="border-b console-divider px-5 py-4 text-[10px] font-bold uppercase tracking-[.16em] console-muted">

@@ -27,9 +27,13 @@ export async function adminFetch(
 			TOKEN: session.token,
 		},
 	});
-	if ((response.status === 401 || response.status === 403) && typeof window !== "undefined") {
+	if (
+		(response.status === 401 || response.status === 403) &&
+		typeof window !== "undefined"
+	) {
 		clearSession();
-		if (!window.location.pathname.endsWith("/login")) window.location.replace("/web/login");
+		if (!window.location.pathname.endsWith("/login"))
+			window.location.replace("/web/login");
 	}
 	return response;
 }

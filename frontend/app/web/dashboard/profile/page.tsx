@@ -39,7 +39,9 @@ export default function ProfilePage() {
 	}
 	return (
 		<div>
-			<h1 className="pb-5 text-3xl font-semibold tracking-tight">Profile & security</h1>
+			<h1 className="pb-5 text-3xl font-semibold tracking-tight">
+				Profile & security
+			</h1>
 			<form
 				onSubmit={submit}
 				className="console-card mt-8 max-w-xl rounded-2xl p-6"

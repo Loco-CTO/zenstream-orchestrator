@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+import pycountry
 
 from app.models.metadata import MetadataCache, MetadataCredentials
 from app.logging_config import get_logger
@@ -49,7 +50,7 @@ PRIMARY_PROVIDER_BY_ENTITY = {
 
 def _image(image_type: str, url: str, *, language: str | None = None, provider: str,
            source_type: str | None = None, score: float = 0, width: int = 0,
-           height: int = 0) -> dict:
+           height: int = 0, provider_language: str | None = None) -> dict:
     value = {
         "type": image_type,
         "language": language,
@@ -59,6 +60,8 @@ def _image(image_type: str, url: str, *, language: str | None = None, provider: 
         "height": height or 0,
         "provider": provider,
     }
+    if provider_language and provider_language.lower() != (language or "").lower():
+        value["providerLanguage"] = provider_language
     if source_type is not None:
         value["sourceType"] = source_type
     return value
@@ -72,6 +75,86 @@ def _name(value: Any) -> str | None:
 
 def _names(values: Any) -> list[str]:
     return [value for value in (_name(item) for item in values or []) if value]
+
+
+def _normalize_language_tag(value: str | None) -> str:
+    parts = str(value or "").strip().replace("_", "-").split("-", 1)
+    if not parts[0]:
+        return ""
+    return parts[0].lower() if len(parts) == 1 else f"{parts[0].lower()}-{parts[1].upper()}"
+
+
+def _catalog_language_tag(provider_code: str, name: str | None = None, short_code: str | None = None) -> str:
+    """Resolve a provider language record through ISO catalogs without language-pair tables."""
+    raw = str(provider_code or "").strip().lower()
+    canonical = _normalize_language_tag(short_code)
+    language_name, _, qualifier = str(name or "").partition(" - ")
+    if not canonical:
+        language = None
+        for lookup in (
+            {"alpha_2": raw} if len(raw) == 2 else {},
+            {"alpha_3": raw} if len(raw) == 3 else {},
+            {"bibliographic": raw} if len(raw) == 3 else {},
+        ):
+            if not lookup:
+                continue
+            language = pycountry.languages.get(**lookup)
+            if language:
+                break
+        if not language and language_name:
+            try:
+                language = pycountry.languages.lookup(language_name)
+            except LookupError:
+                language = None
+        canonical = str(getattr(language, "alpha_2", "") or raw).lower()
+    if qualifier and canonical:
+        try:
+            country = pycountry.countries.lookup(qualifier)
+        except LookupError:
+            country = None
+        if country:
+            canonical = f"{_language_family(canonical)}-{country.alpha_2.upper()}"
+    return canonical or raw
+
+
+class ProviderLanguageCatalog:
+    """Bidirectional provider-code and canonical-locale resolver."""
+
+    def __init__(self):
+        self.provider_to_canonical: dict[str, str] = {}
+        self.provider_spelling: dict[str, str] = {}
+        self.canonical_to_provider: dict[str, str] = {}
+
+    def register(self, provider_code: str, canonical: str, *, prefer: bool = False) -> None:
+        provider = str(provider_code or "").strip()
+        canonical_tag = _normalize_language_tag(canonical)
+        if not provider or not canonical_tag:
+            return
+        provider_key = provider.lower()
+        self.provider_to_canonical[provider_key] = canonical_tag
+        self.provider_spelling[provider_key] = provider
+        if prefer or canonical_tag not in self.canonical_to_provider:
+            self.canonical_to_provider[canonical_tag] = provider
+        base = _language_family(canonical_tag)
+        if "-" not in canonical_tag and (prefer or base not in self.canonical_to_provider):
+            self.canonical_to_provider[base] = provider
+
+    def canonical(self, provider_code: str | None) -> str | None:
+        if not provider_code:
+            return None
+        raw = str(provider_code).strip()
+        return self.provider_to_canonical.get(raw.lower(), _normalize_language_tag(raw))
+
+    def provider(self, locale: str | None) -> str:
+        raw = str(locale or "").strip()
+        normalized = _normalize_language_tag(raw)
+        provider_key = raw.lower()
+        provider_canonical = self.provider_to_canonical.get(provider_key)
+        # A provider code that means a more specific canonical locale (for
+        # example a regional provider code) must remain directly addressable.
+        if provider_canonical and provider_canonical != normalized:
+            return self.provider_spelling[provider_key]
+        return self.canonical_to_provider.get(normalized, self.canonical_to_provider.get(_language_family(normalized), raw))
 
 
 class ProviderClient:
@@ -89,6 +172,9 @@ class ProviderClient:
 
 class TMDBClient(ProviderClient):
     base_url = "https://api.themoviedb.org/3"
+    _language_catalog = ProviderLanguageCatalog()
+    _language_codes_loaded = False
+    _language_codes_lock = threading.Lock()
 
     def __init__(self, credentials: dict, credential_type: str = "api_key", timeout: float = 20):
         super().__init__(timeout)
@@ -107,6 +193,35 @@ class TMDBClient(ProviderClient):
             params["api_key"] = value
         return self._get(f"{self.base_url}{path}", params=params, headers=headers)
 
+    def _language_code(self, locale: str) -> str:
+        with self._language_codes_lock:
+            if not self._language_codes_loaded:
+                try:
+                    values = self._request("/configuration/languages")
+                    for value in values if isinstance(values, list) else []:
+                        if not isinstance(value, dict):
+                            continue
+                        code = str(value.get("iso_639_1") or "").lower()
+                        if code:
+                            self.__class__._language_catalog.register(code, code)
+                    primary_translations = self._request("/configuration/primary_translations")
+                    for value in primary_translations if isinstance(primary_translations, list) else []:
+                        code = str(value or "").strip()
+                        if "-" in code:
+                            canonical = _normalize_language_tag(code)
+                            self.__class__._language_catalog.register(code, canonical, prefer=True)
+                            self.__class__._language_catalog.canonical_to_provider[_language_family(canonical)] = code
+                except ProviderError:
+                    logger.warning("TMDB language catalog unavailable; using locale fallback")
+                self.__class__._language_codes_loaded = True
+        return self._language_catalog.provider(locale)
+
+    def _canonical_language(self, value: str | None) -> tuple[str | None, str | None]:
+        if not value:
+            return None, None
+        raw = value.strip()
+        return self._language_catalog.canonical(raw), raw
+
     def test(self) -> None:
         self._request("/configuration")
 
@@ -119,14 +234,15 @@ class TMDBClient(ProviderClient):
         return [{"provider": "tmdb", "providerId": str(value.get("id")), "title": value.get("title") or value.get("name"), "year": (value.get("release_date") or value.get("first_air_date") or "")[:4] or None, "overview": value.get("overview")} for value in payload.get("results", []) if value.get("id")]
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
+        language = self._language_code(locale)
         if entity_type == "season":
             series_id, season = provider_id.split(":", 1)
-            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}", params={"language": locale, "append_to_response": "images,external_ids,videos"})
+            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}", params={"language": language, "append_to_response": "images,external_ids,videos"})
         if entity_type == "episode":
             series_id, season, episode = provider_id.split(":", 2)
-            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}", params={"language": locale, "append_to_response": "images,external_ids,videos"})
+            return self._request(f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}", params={"language": language, "append_to_response": "images,external_ids,videos"})
         kind = "tv" if entity_type == "series" else "movie"
-        return self._request(f"/{kind}/{quote(provider_id)}", params={"language": locale, "append_to_response": "images,external_ids,credits,videos"})
+        return self._request(f"/{kind}/{quote(provider_id)}", params={"language": language, "append_to_response": "images,external_ids,credits,videos"})
 
     def series_hierarchy(self, provider_id: str, locale: str) -> dict:
         """Fetch season details, whose responses include their episode lists."""
@@ -196,15 +312,15 @@ class TMDBClient(ProviderClient):
             "images": self._images(entity_type, payload),
         }
 
-    @staticmethod
-    def _images(entity_type: str, payload: dict) -> list[dict]:
+    def _images(self, entity_type: str, payload: dict) -> list[dict]:
         images = payload.get("images") or {}
         values = []
         for image_type, key in ((PRIMARY, "posters"), (BACKDROP, "backdrops"), (LOGO, "logos")):
             for image in images.get(key, []) or []:
                 path = image.get("file_path")
                 if path:
-                    values.append(_image(image_type, f"https://image.tmdb.org/t/p/w1280{path}", language=image.get("iso_639_1"), provider="tmdb", source_type=key, score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
+                    language, provider_language = self._canonical_language(image.get("iso_639_1"))
+                    values.append(_image(image_type, f"https://image.tmdb.org/t/p/w1280{path}", language=language, provider_language=provider_language, provider="tmdb", source_type=key, score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
         # TMDB calls episode artwork "stills". Stills are primary only for
         # episodes; season artwork must remain poster-only.
         if entity_type == "episode":
@@ -214,7 +330,8 @@ class TMDBClient(ProviderClient):
             for image in images.get("stills", []) or []:
                 path = image.get("file_path")
                 if path:
-                    values.append(_image(PRIMARY, f"https://image.tmdb.org/t/p/w1280{path}", language=image.get("iso_639_1"), provider="tmdb", source_type="stills", score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
+                    language, provider_language = self._canonical_language(image.get("iso_639_1"))
+                    values.append(_image(PRIMARY, f"https://image.tmdb.org/t/p/w1280{path}", language=language, provider_language=provider_language, provider="tmdb", source_type="stills", score=image.get("vote_average", 0), width=image.get("width", 0), height=image.get("height", 0)))
         return values
 
 
@@ -222,6 +339,12 @@ class TVDBClient(ProviderClient):
     base_url = "https://api4.thetvdb.com/v4"
     _tokens: dict[str, tuple[str, float]] = {}
     _lock = threading.Lock()
+    _language_catalog_lock = threading.Lock()
+    _language_catalog = ProviderLanguageCatalog()
+    _language_codes_loaded = False
+    _artwork_catalog_lock = threading.Lock()
+    _artwork_types: dict[str, tuple[str | None, str]] = {}
+    _artwork_types_loaded = False
 
     def __init__(self, credentials: dict, timeout: float = 20):
         super().__init__(timeout)
@@ -257,6 +380,75 @@ class TVDBClient(ProviderClient):
         headers = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json"}
         return self._get(f"{self.base_url}{path}", params=params or {}, headers=headers)
 
+    def _language_code(self, locale: str) -> str:
+        with self._language_catalog_lock:
+            if not self.__class__._language_codes_loaded:
+                try:
+                    payload = self._request("/languages")
+                    values = payload.get("data", []) if isinstance(payload, dict) else payload
+                    if isinstance(values, dict):
+                        values = [values]
+                    for value in values if isinstance(values, list) else []:
+                        if not isinstance(value, dict):
+                            continue
+                        provider_code = str(value.get("id") or value.get("shortCode") or "").strip().lower()
+                        short_code = str(value.get("shortCode") or "").strip().lower()
+                        canonical = _catalog_language_tag(provider_code, value.get("name"), short_code)
+                        if provider_code and canonical:
+                            self.__class__._language_catalog.register(provider_code, canonical)
+                            if short_code:
+                                self.__class__._language_catalog.register(short_code, canonical)
+                except ProviderError:
+                    logger.warning("TVDB language catalog unavailable; using locale fallback")
+                self.__class__._language_codes_loaded = True
+        # Keep unknown locale values intact when the provider catalog cannot
+        # resolve them. This lets newly supported locales pass through
+        # without another provider-specific hard-coded table.
+        return self._language_catalog.provider(locale)
+
+    def _language_code_for_artwork(self, value: str | None) -> str | None:
+        if not value:
+            return None
+        self._language_code(value)
+        return self._language_catalog.canonical(value)
+
+    def _load_artwork_types(self) -> None:
+        with self._artwork_catalog_lock:
+            if self.__class__._artwork_types_loaded:
+                return
+            try:
+                payload = self._request("/artwork/types")
+                values = payload.get("data", []) if isinstance(payload, dict) else payload
+                for value in values if isinstance(values, list) else []:
+                    if not isinstance(value, dict) or value.get("id") is None:
+                        continue
+                    name = str(value.get("name") or value.get("slug") or "").lower()
+                    record_type = str(value.get("recordType") or "").lower()
+                    image_type = None
+                    if "poster" in name:
+                        image_type = PRIMARY
+                    elif "background" in name:
+                        image_type = BACKDROP
+                    elif "clearlogo" in name or "clear logo" in name:
+                        image_type = LOGO
+                    elif "banner" in name:
+                        image_type = BANNER
+                    elif record_type == "episode" and "screencap" in name:
+                        image_type = PRIMARY
+                    self.__class__._artwork_types[str(value["id"])] = (image_type, record_type)
+            except ProviderError:
+                logger.warning("TVDB artwork type catalog unavailable; using payload fallback")
+            self.__class__._artwork_types_loaded = True
+
+    def _artwork_type(self, entity_type: str, artwork: dict) -> str | None:
+        self._load_artwork_types()
+        key = str(artwork.get("type", ""))
+        if key in self._artwork_types:
+            image_type, record_type = self._artwork_types[key]
+            expected_record_type = "list" if entity_type == "collection" else entity_type
+            return image_type if not record_type or record_type == expected_record_type else None
+        return _fallback_tvdb_image_type(entity_type, artwork)
+
     def test(self) -> None:
         # Use a catalog endpoint rather than a hard-coded media ID. The v4
         # catalog can legitimately omit legacy IDs such as series/1.
@@ -281,9 +473,25 @@ class TVDBClient(ProviderClient):
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
         endpoint = {"series": "series", "episode": "episodes", "season": "seasons", "movie": "movies", "collection": "lists"}.get(entity_type, "series")
         payload = self._request(f"/{endpoint}/{quote(provider_id)}/extended")
-        if locale and locale not in {"en", "eng"}:
-            translated = self._request(f"/{endpoint}/{quote(provider_id)}/translations/{quote(_tvdb_language(locale))}")
-            payload["translation"] = translated.get("data")
+        # TheTVDB extended endpoint is not reliably English by default. Ask
+        # for the requested translation explicitly, including English, so a
+        # response cached under `en` cannot contain the provider's default
+        # language.
+        if locale:
+            try:
+                translated = self._request(f"/{endpoint}/{quote(provider_id)}/translations/{quote(self._language_code(locale))}")
+                payload["translation"] = translated.get("data")
+            except ProviderError as error:
+                # TVDB does not expose translations for every entity (notably
+                # some seasons). Extended metadata is still usable, so an
+                # optional translation miss must not abort the whole scan.
+                logger.debug(
+                    "TVDB translation unavailable provider_id=%s entity_type=%s locale=%s error=%s",
+                    provider_id,
+                    entity_type,
+                    locale,
+                    error,
+                )
         return payload
 
     def series_hierarchy(self, provider_id: str, season_type: str = "default") -> dict:
@@ -325,7 +533,7 @@ class TVDBClient(ProviderClient):
                 entry["image"] = _image(PRIMARY, image, provider="tvdb", source_type="person")
             if entry["name"]:
                 people.append(entry)
-        images, extra_images = _tvdb_images(entity_type, data)
+        images, extra_images = _tvdb_images(entity_type, data, self._language_code_for_artwork, self._artwork_type)
         overview_translations = data.get("overviewTranslations") or []
         return {
             "title": translation.get("name") or data.get("name") or data.get("title"),
@@ -430,11 +638,25 @@ class MusicBrainzClient(ProviderClient):
         return {"title": payload.get("name") or payload.get("title"), "overview": None, "description": None, "date": date, "releaseDate": date, "year": str(date or "")[:4] or None, "tags": tags, "originalLanguage": None, "albumArtist": credits[0]["name"] if credits else None, "artists": credits, "tracks": tracks, "provider": "musicbrainz", "providerId": provider_id, "ids": external_ids, "images": images, "extraImages": extra_images}
 
 
-def _tvdb_language(locale: str) -> str:
-    return {"en": "eng", "en-us": "eng", "ja": "jpn", "ja-jp": "jpn", "zh": "zho", "ko": "kor"}.get(locale.lower(), locale.split("-")[0])
+def _fallback_tvdb_image_type(entity_type: str, artwork: dict) -> str | None:
+    raw_type = artwork.get("type", "")
+    kind = str(raw_type).lower()
+    if any(value in kind for value in ("background", "backdrop")):
+        return BACKDROP
+    if any(value in kind for value in ("clearlogo", "clear logo", "logo")):
+        return LOGO
+    if any(value in kind for value in ("banner", "thumbnail", "thumb")):
+        return BANNER
+    if entity_type == "episode" and any(value in kind for value in ("still", "episode", "screencap")):
+        return PRIMARY
+    if any(value in kind for value in ("poster", "series", "movie", "season", "box", "cover")):
+        return PRIMARY
+    width = artwork.get("width") or 0
+    height = artwork.get("height") or 0
+    return BANNER if width and height and float(width) / float(height) > 1.45 else None
 
 
-def _tvdb_images(entity_type: str, data: dict) -> tuple[list[dict], list[dict]]:
+def _tvdb_images(entity_type: str, data: dict, normalize_language=None, normalize_type=None) -> tuple[list[dict], list[dict]]:
     values = []
     extras = []
     for artwork in data.get("artworks", []) or data.get("artwork", []) or []:
@@ -442,22 +664,25 @@ def _tvdb_images(entity_type: str, data: dict) -> tuple[list[dict], list[dict]]:
         if not url:
             continue
         raw_type = artwork.get("type", "")
-        kind = str(raw_type).lower()
-        if any(value in kind for value in ("background", "backdrop")):
-            image_type = BACKDROP
-        elif any(value in kind for value in ("clearlogo", "clear logo", "logo")):
-            image_type = LOGO
-        elif any(value in kind for value in ("banner", "thumbnail", "thumb")):
-            image_type = BANNER
-        elif entity_type == "episode" and any(value in kind for value in ("still", "episode", "screencap")):
-            image_type = PRIMARY
-        elif any(value in kind for value in ("poster", "series", "movie", "season", "box", "cover")):
-            image_type = PRIMARY
+        image_type = normalize_type(entity_type, artwork) if normalize_type else _fallback_tvdb_image_type(entity_type, artwork)
+        provider_language = artwork.get("language") or artwork.get("lang")
+        language = provider_language
+        if normalize_language:
+            language = normalize_language(language)
+        if image_type:
+            value = _image(image_type, url, language=language, provider_language=provider_language, provider="tvdb", source_type=str(raw_type), score=artwork.get("score", 0), width=artwork.get("width", 0), height=artwork.get("height", 0))
         else:
-            width = artwork.get("width") or 0
-            height = artwork.get("height") or 0
-            image_type = BANNER if width and height and float(width) / float(height) > 1.45 else None
-        value = _image(image_type, url, language=artwork.get("language") or artwork.get("lang"), provider="tvdb", source_type=str(raw_type), score=artwork.get("score", 0), width=artwork.get("width", 0), height=artwork.get("height", 0)) if image_type else {"sourceType": str(raw_type), "url": url, "provider": "tvdb"}
+            value = {
+                "sourceType": str(raw_type),
+                "url": url,
+                "provider": "tvdb",
+                "language": language,
+                "score": artwork.get("score", 0) or 0,
+                "width": artwork.get("width", 0) or 0,
+                "height": artwork.get("height", 0) or 0,
+            }
+            if provider_language and str(provider_language).lower() != str(language or "").lower():
+                value["providerLanguage"] = provider_language
         (values if image_type else extras).append(value)
     if data.get("image") and entity_type in {"series", "season", "episode", "movie"}:
         values.append(_image(PRIMARY, data["image"], provider="tvdb", source_type="image"))
@@ -729,28 +954,22 @@ def choose_image(images: list[dict], requested: str, image_type: str) -> dict | 
     values = [image for image in images if image.get("type") == image_type]
     if not values:
         return None
-    requested = (requested or "en").lower()
-    requested_language = _language_family(requested)
+    requested_tag = (requested or "").strip().lower()
+    requested_language = _language_family(requested_tag)
 
     def bucket(image: dict) -> int:
         lang = (image.get("language") or "").lower()
-        image_language = _language_family(lang)
-        if image_language == requested_language:
+        if lang and lang == requested_tag:
             return 0
-        if not lang:
+        image_language = _language_family(lang)
+        if lang and image_language == requested_language:
             return 1
-        if _language_family(lang) == "en":
+        if not lang:
             return 2
         return 3
     return sorted(values, key=lambda image: (bucket(image), -(image.get("score") or 0), -(image.get("width") or 0), image.get("url", "")))[0]
 
 
 def _language_family(value: str) -> str:
-    """Normalize locale and provider ISO-639-2 language codes for artwork selection."""
-    code = (value or "").lower().split("-", 1)[0].split("_", 1)[0]
-    return {
-        "eng": "en",
-        "jpn": "ja",
-        "zho": "zh",
-        "kor": "ko",
-    }.get(code, code)
+    """Normalize a language tag to its base code without provider assumptions."""
+    return (value or "").lower().split("-", 1)[0].split("_", 1)[0]

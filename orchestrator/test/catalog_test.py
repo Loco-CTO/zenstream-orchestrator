@@ -88,6 +88,100 @@ class CatalogTest(unittest.TestCase):
                 (locale, json.dumps(payload), "now", "later"),
             )
 
+    def seed_series_hierarchy(self):
+        account = self.account().create("series", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("series-1", "allowed", None, "series", "Example", None, None, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("season-1", "allowed", "series-1", "season", "Example/Season 1", 1, None, None, None, "2026", "2026"),
+        )
+        for entity_id, episode, title in (
+            ("episode-10", 10, "Episode 10"),
+            ("episode-2", 2, "Episode 2"),
+            ("episode-1", 1, "Episode 1"),
+        ):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (entity_id, "allowed", "season-1", "episode", f"Example/Season 1/{title}", 1, episode, None, None, "2026", "2026"),
+            )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("episode-unset", "allowed", "season-1", "episode", "Example/Season 1/Unaired", 1, None, None, None, "2026", "2026"),
+        )
+        for entity_id, season in (("season-10", 10), ("season-2", 2), ("season-3", 3)):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (entity_id, "allowed", "series-1", "season", f"Example/Season {season}", season, None, None, None, "2026", "2026"),
+            )
+        return account["id"]
+
+    def patch_catalog_metadata(self, catalog):
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {"title": entity_id.replace("-", " ")}
+        }
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_hierarchy_defaults_to_numeric_episode_order_and_paginates(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+
+        first_page = catalog.list_items(
+            user_id, "allowed", "en", parent_id="season-1", page_size=2
+        )
+        second_page = catalog.list_items(
+            user_id, "allowed", "en", parent_id="season-1", page=2, page_size=2
+        )
+
+        self.assertEqual(
+            [item["id"] for item in first_page["items"] + second_page["items"]],
+            ["episode-1", "episode-2", "episode-10", "episode-unset"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_hierarchy_defaults_to_numeric_season_order(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+
+        result = catalog.list_items(user_id, "allowed", "en", parent_id="series-1")
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["season-1", "season-2", "season-3", "season-10"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_explicit_title_sort_overrides_hierarchy_order(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {
+                "title": {
+                    "episode-1": "Zulu",
+                    "episode-2": "Alpha",
+                    "episode-10": "Middle",
+                    "episode-unset": "Omega",
+                }[entity_id]
+            }
+        }
+
+        result = catalog.list_items(
+            user_id, "allowed", "en", parent_id="season-1", sort_by="title"
+        )
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["episode-2", "episode-10", "episode-1", "episode-unset"],
+        )
+
     def test_argon_session_revocation_and_legacy_password_upgrade(self):
         account = self.account()
         created = account.create("local", "password-123")

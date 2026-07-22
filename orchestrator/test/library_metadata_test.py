@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import EPISODE_RE, LibraryRuntime, LibraryScanner, LibraryStore, guess_media, provider_ids
-from app.providers import BANNER, PRIMARY, MetadataService, ProviderError, TMDBClient, TVDBClient, _select_match, choose_image, _tvdb_children, _tvdb_images
+from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache
+from app.providers import BANNER, PRIMARY, MetadataService, ProviderError, ProviderLanguageCatalog, TMDBClient, TVDBClient, _select_match, choose_image, _tvdb_children, _tvdb_images
 
 
 class LibraryMetadataTest(unittest.TestCase):
@@ -93,6 +94,21 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_series_scan_child_query_binds_series_parent_twice(self):
+        db, scanner = self._scanner_db()
+        try:
+            db.execute("CREATE TABLE IF NOT EXISTS metadata_cache (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT, PRIMARY KEY(provider, entity_type, provider_id, locale))")
+            db.execute("INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path) VALUES(?,?,?,?,?)", ("series-1", "library-1", None, "series", "Example"))
+            db.execute("INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path) VALUES(?,?,?,?,?)", ("season-1", "library-1", "series-1", "season", "Example/Season 1"))
+            db.execute("INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path) VALUES(?,?,?,?,?)", ("episode-1", "library-1", "season-1", "episode", "Example/Season 1/Episode 1"))
+            children = scanner.db.execute(
+                "SELECT id FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season'))",
+                ("library-1", "series-1", "series-1"),
+            )
+            self.assertEqual({row[0] for row in children}, {"season-1", "episode-1"})
+        finally:
+            db.close()
+
     def test_incremental_music_scan_removes_stale_track_without_resetting_release(self):
         db, scanner = self._scanner_db()
         try:
@@ -170,15 +186,43 @@ class LibraryMetadataTest(unittest.TestCase):
     def test_image_fallback_order_is_requested_no_language_english_any(self):
         images = [
             {"type": PRIMARY, "language": "fr", "url": "fr"},
-            {"type": PRIMARY, "language": "eng", "url": "en"},
+            {"type": PRIMARY, "language": "en", "url": "en"},
             {"type": PRIMARY, "language": None, "url": "neutral"},
-            {"type": PRIMARY, "language": "jpn", "url": "ja"},
+            {"type": PRIMARY, "language": "ja", "url": "ja"},
         ]
         self.assertEqual(choose_image(images, "ja-JP", PRIMARY)["url"], "ja")
         self.assertEqual(choose_image(images, "en", PRIMARY)["url"], "en")
         self.assertEqual(choose_image(images, "de-DE", PRIMARY)["url"], "neutral")
         with self.assertRaises(ValueError):
             choose_image(images, "en", "Thumb")
+
+    def test_image_fallback_does_not_prefer_an_unrequested_language(self):
+        images = [
+            {"type": PRIMARY, "language": "fr", "url": "fr"},
+            {"type": PRIMARY, "language": "de", "url": "de"},
+        ]
+        self.assertEqual(choose_image(images, "es", PRIMARY)["url"], "de")
+
+    def test_tvdb_artwork_keeps_raw_code_and_normalizes_catalog_code(self):
+        images, _ = _tvdb_images(
+            "series",
+            {"artworks": [{"type": "poster", "language": "provider-jpn", "image": "poster"}]},
+            lambda value: "ja" if value == "provider-jpn" else value,
+        )
+        self.assertEqual(images[0]["language"], "ja")
+        self.assertEqual(images[0]["providerLanguage"], "provider-jpn")
+
+    def test_metadata_cache_rejects_legacy_image_language_payloads(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        db.execute("CREATE TABLE metadata_cache (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT, PRIMARY KEY(provider,entity_type,provider_id,locale))")
+        cache = MetadataCache.__new__(MetadataCache)
+        cache.db = db
+        db.execute("INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)", ("tvdb", "series", "1", "en", '{"title":"Legacy","images":[{"type":"Primary","language":null,"url":"legacy"}]}', "2020-01-01", "2999-01-01"))
+        self.assertIsNone(cache.get("tvdb", "series", "1", "en"))
+        cache.put("tvdb", "series", "1", "en", {"title": "Current", "images": []})
+        current = cache.get("tvdb", "series", "1", "en")
+        self.assertEqual(current["_imageLanguageSchema"], IMAGE_LANGUAGE_SCHEMA)
+        db.close()
 
     def test_preview_image_cache_miss_does_not_hydrate_provider_metadata(self):
         item = {
@@ -248,6 +292,111 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(value["tags"], ["Drama"])
         self.assertEqual(value["images"], [])
         self.assertEqual({item["provider"] for item in value["ids"]}, {"tvdb", "imdb"})
+
+    def test_tvdb_details_requests_english_translation_explicitly(self):
+        client = TVDBClient({"apiKey": "test"})
+        TVDBClient._language_codes_loaded = False
+        TVDBClient._language_catalog = ProviderLanguageCatalog()
+        with patch.object(client, "_request", return_value={"data": [{"id": "eng", "shortCode": "en"}]}) as request:
+            self.assertEqual(client._language_code("en"), "eng")
+        with patch.object(client, "_request", side_effect=[{"data": {"name": "Default title"}}, {"data": {"name": "English title"}}]) as request:
+            payload = client.details("series", "436603", "en")
+        self.assertEqual(payload["translation"], {"name": "English title"})
+        self.assertEqual(request.call_args_list[1].args[0], "/series/436603/translations/eng")
+
+    def test_tvdb_missing_translation_keeps_extended_metadata(self):
+        client = TVDBClient({"apiKey": "test"})
+        with patch.object(client, "_request", side_effect=[{"data": {"name": "Default title"}}, ProviderError("404 Not Found")]) as request:
+            payload = client.details("season", "489132", "en")
+        self.assertNotIn("translation", payload)
+        self.assertEqual(payload["data"]["name"], "Default title")
+        self.assertEqual(request.call_count, 2)
+
+    def test_tmdb_details_maps_short_locale_to_provider_language(self):
+        client = TMDBClient({"value": "test"})
+        TMDBClient._language_codes_loaded = False
+        TMDBClient._language_catalog = ProviderLanguageCatalog()
+        with patch.object(client, "_request", side_effect=[[{"iso_639_1": "ja"}], ["ja-JP"], {"name": "Example"}]) as request:
+            client.details("series", "10", "ja")
+        self.assertEqual(request.call_args_list[2].kwargs["params"]["language"], "ja-JP")
+
+    def test_provider_language_catalogs_pass_unknown_locale_through(self):
+        tvdb = TVDBClient({"apiKey": "test"})
+        TVDBClient._language_codes_loaded = False
+        TVDBClient._language_catalog = ProviderLanguageCatalog()
+        with patch.object(tvdb, "_request", return_value={"data": []}):
+            self.assertEqual(tvdb._language_code("xx-YY"), "xx-YY")
+
+        tmdb = TMDBClient({"value": "test"})
+        TMDBClient._language_codes_loaded = False
+        TMDBClient._language_catalog = ProviderLanguageCatalog()
+        with patch.object(tmdb, "_request", side_effect=[[], []]):
+            self.assertEqual(tmdb._language_code("xx-YY"), "xx-YY")
+
+    def test_provider_language_catalog_failures_pass_requested_locale_through(self):
+        tvdb = TVDBClient({"apiKey": "test"})
+        TVDBClient._language_codes_loaded = False
+        TVDBClient._language_catalog = ProviderLanguageCatalog()
+        with patch.object(tvdb, "_request", side_effect=ProviderError("catalog unavailable")):
+            self.assertEqual(tvdb._language_code("ga-IE"), "ga-IE")
+
+        tmdb = TMDBClient({"value": "test"})
+        TMDBClient._language_codes_loaded = False
+        TMDBClient._language_catalog = ProviderLanguageCatalog()
+        with patch.object(tmdb, "_request", side_effect=ProviderError("catalog unavailable")):
+            self.assertEqual(tmdb._language_code("ga-IE"), "ga-IE")
+
+    def test_tvdb_null_short_codes_map_iso_and_regional_languages_bidirectionally(self):
+        client = TVDBClient({"apiKey": "test"})
+        TVDBClient._language_codes_loaded = False
+        TVDBClient._language_catalog = ProviderLanguageCatalog()
+        values = [
+            {"id": "eng", "name": "English", "shortCode": None},
+            {"id": "jpn", "name": "Japanese", "shortCode": None},
+            {"id": "por", "name": "Portuguese - Portugal", "shortCode": None},
+            {"id": "pt", "name": "Portuguese - Brazil", "shortCode": None},
+            {"id": "zho", "name": "Chinese - China", "shortCode": None},
+            {"id": "zhtw", "name": "Chinese - Taiwan", "shortCode": None},
+            {"id": "yue", "name": "Chinese - Cantonese", "shortCode": None},
+        ]
+        with patch.object(client, "_request", return_value={"data": values}):
+            self.assertEqual(client._language_code("en"), "eng")
+        self.assertEqual(client._language_code("ja"), "jpn")
+        self.assertEqual(client._language_code("pt-PT"), "por")
+        self.assertEqual(client._language_code("pt-BR"), "pt")
+        self.assertEqual(client._language_code("zh-CN"), "zho")
+        self.assertEqual(client._language_code("zh-TW"), "zhtw")
+        self.assertEqual(client._language_code_for_artwork("jpn"), "ja")
+        self.assertEqual(client._language_code_for_artwork("zhtw"), "zh-TW")
+        self.assertEqual(client._language_code_for_artwork("yue"), "yue")
+
+    def test_tvdb_numeric_artwork_catalog_maps_posters_and_languages(self):
+        client = TVDBClient({"apiKey": "test"})
+        TVDBClient._language_codes_loaded = False
+        TVDBClient._language_catalog = ProviderLanguageCatalog()
+        TVDBClient._artwork_types_loaded = False
+        TVDBClient._artwork_types = {}
+
+        def request(path, params=None):
+            if path == "/artwork/types":
+                return {"data": [
+                    {"id": 2, "name": "Poster", "recordType": "series", "slug": "posters"},
+                    {"id": 7, "name": "Poster", "recordType": "season", "slug": "posters"},
+                ]}
+            if path == "/languages":
+                return {"data": [{"id": "eng", "name": "English", "shortCode": None}, {"id": "jpn", "name": "Japanese", "shortCode": None}]}
+            raise AssertionError(path)
+
+        with patch.object(client, "_request", side_effect=request):
+            value = client.normalize("series", "1", {"data": {"name": "Example", "artworks": [
+                {"type": 2, "language": "eng", "image": "english", "score": 1},
+                {"type": 2, "language": "jpn", "image": "japanese", "score": 1},
+                {"type": 7, "language": "jpn", "image": "season", "score": 100},
+            ]}})
+        self.assertEqual([(image["language"], image["providerLanguage"], image["sourceType"]) for image in value["images"]], [("en", "eng", "2"), ("ja", "jpn", "2")])
+        self.assertEqual(value["extraImages"][0]["url"], "season")
+        self.assertEqual(choose_image(value["images"], "en", PRIMARY)["url"], "english")
+        self.assertEqual(choose_image(value["images"], "ja", PRIMARY)["url"], "japanese")
 
     def test_provider_artwork_uses_canonical_categories(self):
         tmdb = TMDBClient({}, "api_key").normalize("episode", "10:1:2", {"name": "Episode", "images": {"stills": [{"file_path": "/still.jpg"}], "backdrops": [{"file_path": "/backdrop.jpg"}], "logos": [{"file_path": "/logo.png"}]}})

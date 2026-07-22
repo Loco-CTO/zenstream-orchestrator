@@ -455,6 +455,7 @@ class LibraryScanner:
             self._ids(series_id, [(value["provider"], "series", value["id"]) for value in result["providerIds"]])
             self.db.execute("UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?", (now(), series_id))
         self._aggregate_series_children(series_id, service)
+        self._derive_tmdb_child_ids(series_id)
         # The series hierarchy is useful for bulk caching but can omit an
         # episode from the returned aggregate.  Season details are the
         # authoritative TVDB source for exact episode IDs, so run the same
@@ -565,7 +566,7 @@ class LibraryScanner:
                     logger.exception("child resolution failed library_id=%s entity_id=%s type=%s path=%s", library_id, entity_id, entity_type, relative_path)
                     raise ValueError(f"Metadata resolution failed for {entity_type} '{relative_path}': {type(error).__name__}: {error}") from error
             priorities = {"season": ["tvdb", "tmdb"], "episode": ["tvdb", "tmdb"], "release": ["musicbrainz"], "track": ["musicbrainz"]}.get(entity_type, [row[0] for row in provider_rows])
-            required = priorities[0] if priorities else None
+            required = next((provider for provider in priorities if any(row[0] == provider for row in provider_rows)), priorities[0] if priorities else None)
             fetched = False
             required_succeeded = False
             errors = []
@@ -670,6 +671,12 @@ class LibraryScanner:
             for episode_id, episode_number, episode_path in episodes:
                 match = next((value for value in tvdb_children if int(value.get("season", season_number)) == int(season_number) and int(value.get("episode", -1)) == int(episode_number)), None)
                 if not match:
+                    # Some TVDB series are missing a newly aired or
+                    # alternate-season episode even though TMDB has it.
+                    # Keep the secondary provider identity and let seeding
+                    # use it rather than failing the entire library scan.
+                    if self.db.execute("SELECT 1 FROM entity_provider_ids WHERE entity_id=? AND provider='tmdb' LIMIT 1", (episode_id,)):
+                        continue
                     raise ValueError(f"TVDB episode ID could not be resolved for S{int(season_number):02d}E{int(episode_number):02d} at '{episode_path}'")
                 self._ids(episode_id, [("tvdb", "episode", str(match["id"]))])
 

@@ -77,7 +77,7 @@ class LibraryMetadataTest(unittest.TestCase):
             "CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER, PRIMARY KEY(entity_id, provider, identifier_type))"
         )
         db.execute(
-            "CREATE TABLE media_files (id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT, language TEXT, flags TEXT, size INTEGER, modified_ns INTEGER, UNIQUE(entity_id, relative_path, role))"
+            "CREATE TABLE media_files (id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT, language TEXT, flags TEXT, size INTEGER, modified_ns INTEGER, file_hash TEXT, UNIQUE(entity_id, relative_path, role))"
         )
         db.execute(
             "CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT, kind TEXT, state TEXT, progress_current INTEGER DEFAULT 0, progress_total INTEGER DEFAULT 0, message TEXT)"

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 import threading
 import unittest
@@ -7,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
-from app.library import EPISODE_RE, LibraryRuntime, LibraryScanner, LibraryStore, guess_media, provider_ids
-from app.library_cleanup import cleanup_entities, cleanup_library
+from app.library import EPISODE_RE, LibraryRuntime, LibraryScanner, LibraryStore, guess_media, normalized_path, provider_ids
+from app.library_cleanup import cleanup_entities, cleanup_library, cleanup_orphans
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, MetadataLanguageSettings
 from app.providers import BANNER, PRIMARY, MetadataService, ProviderError, ProviderLanguageCatalog, TMDBClient, TVDBClient, _select_match, choose_image, _tvdb_children, _tvdb_images
 
@@ -26,6 +27,14 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(MetadataLanguageSettings.normalize(["ja", "zh_tw", "en", "ja"]), ["en", "ja", "zh-TW"])
         with self.assertRaises(ValueError):
             MetadataLanguageSettings.normalize([])
+
+    def test_normalized_path_accepts_literal_windows_yen_separators(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "Media Library" / "Movie"
+            target.mkdir(parents=True)
+            literal_yen_path = str(target).replace("\\", "\u00a5")
+
+            self.assertEqual(normalized_path(literal_yen_path), os.path.normcase(os.path.normpath(str(target))))
 
     def _scanner_db(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
@@ -123,7 +132,10 @@ class LibraryMetadataTest(unittest.TestCase):
             db.execute("INSERT INTO media_files VALUES('file','episode')")
             db.execute("INSERT INTO metadata_hydration_requests VALUES('episode','en')")
             db.execute("INSERT INTO metadata_cache VALUES('tvdb','series','show-id','en','{}','now','later')")
+            db.execute("INSERT INTO metadata_cache VALUES('tvdb','series','show-id','ja','{}','now','later')")
             db.execute("INSERT INTO metadata_cache VALUES('tvdb','episode','episode-id','en','{}','now','later')")
+            db.execute("INSERT INTO metadata_cache VALUES('tvdb','episode','episode-id','ja','{}','now','later')")
+            db.execute("INSERT INTO metadata_cache VALUES('tvdb','movie','old-orphan','ja','{}','now','later')")
             db.execute("INSERT INTO library_jobs VALUES('job','library-1')")
 
             self.assertTrue(cleanup_library(db, 'library-1'))
@@ -131,6 +143,41 @@ class LibraryMetadataTest(unittest.TestCase):
                 self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}")[0][0], 0, table)
         finally:
             db.close()
+
+    def test_library_cleanup_rolls_back_when_final_library_delete_fails(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            db.execute("CREATE TABLE libraries (id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE library_sources (library_id TEXT, source_library_id TEXT)")
+            db.execute("CREATE TABLE library_jobs (id TEXT, library_id TEXT)")
+            db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT, parent_id TEXT, entity_type TEXT)")
+            db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT)")
+            db.execute("CREATE TABLE media_files (id TEXT, entity_id TEXT)")
+            db.execute("CREATE TABLE metadata_cache (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT)")
+            db.execute("CREATE TRIGGER refuse_library_delete BEFORE DELETE ON libraries BEGIN SELECT RAISE(ABORT, 'delete blocked'); END")
+            db.execute("INSERT INTO libraries VALUES('library-1')")
+            db.execute("INSERT INTO library_entities VALUES('movie','library-1',NULL,'movie')")
+            db.execute("INSERT INTO entity_provider_ids VALUES('movie','tmdb','movie','movie-id')")
+            db.execute("INSERT INTO media_files VALUES('file','movie')")
+
+            with self.assertRaises(Exception):
+                cleanup_library(db, "library-1")
+
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM libraries")[0][0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM entity_provider_ids")[0][0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 1)
+        finally:
+            db.close()
+
+    def test_library_delete_endpoint_does_not_continue_after_cleanup_failure(self):
+        async def invoke():
+            with patch.object(library_routes, "require_admin"), patch.object(library_routes.store, "delete", side_effect=RuntimeError("cleanup failed")), patch.object(library_routes.scheduler, "remove_library_definition") as remove:
+                with self.assertRaises(RuntimeError):
+                    await library_routes.delete_library("library-1", "admin", "token")
+                remove.assert_not_called()
+
+        asyncio.run(invoke())
 
     def test_deleting_last_entity_removes_cached_image_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -159,6 +206,60 @@ class LibraryMetadataTest(unittest.TestCase):
                 self.assertFalse(image_path.exists())
             finally:
                 db.close()
+
+    def test_deleting_large_library_batches_sqlite_variables(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            db.execute("CREATE TABLE libraries (id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE library_sources (library_id TEXT, source_library_id TEXT)")
+            db.execute("CREATE TABLE library_jobs (id TEXT, library_id TEXT)")
+            db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT, parent_id TEXT, entity_type TEXT)")
+            db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT)")
+            db.execute("CREATE TABLE media_files (id TEXT, entity_id TEXT)")
+            db.execute("CREATE TABLE collection_members (collection_entity_id TEXT, source_entity_id TEXT, position INTEGER)")
+            db.execute("CREATE TABLE metadata_hydration_requests (entity_id TEXT, locale TEXT)")
+            db.execute("CREATE TABLE metadata_cache (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT)")
+            db.execute("CREATE TABLE metadata_images (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, image_type TEXT, image_url TEXT, local_path TEXT)")
+            db.execute("INSERT INTO libraries VALUES('large-library')")
+            for index in range(1100):
+                entity_id = f"entity-{index}"
+                db.execute("INSERT INTO library_entities VALUES(?,?,NULL,'movie')", (entity_id, "large-library"))
+                db.execute("INSERT INTO entity_provider_ids VALUES(?,?,?,?)", (entity_id, "tmdb", "movie", entity_id))
+                db.execute("INSERT INTO media_files VALUES(?,?)", (f"file-{index}", entity_id))
+                db.execute("INSERT INTO metadata_hydration_requests VALUES(?,?)", (entity_id, "en"))
+
+            self.assertTrue(cleanup_library(db, "large-library"))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM entity_provider_ids")[0][0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM metadata_hydration_requests")[0][0], 0)
+        finally:
+            db.close()
+
+    def test_orphan_cleanup_removes_leftovers_when_no_libraries_remain(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            db.execute("CREATE TABLE libraries (id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT, parent_id TEXT, entity_type TEXT)")
+            db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT)")
+            db.execute("CREATE TABLE media_files (id TEXT, entity_id TEXT)")
+            db.execute("CREATE TABLE collection_members (collection_entity_id TEXT, source_entity_id TEXT, position INTEGER)")
+            db.execute("CREATE TABLE metadata_hydration_requests (entity_id TEXT, locale TEXT)")
+            db.execute("CREATE TABLE metadata_cache (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT)")
+            db.execute("CREATE TABLE metadata_images (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, image_type TEXT, image_url TEXT, local_path TEXT)")
+            db.execute("INSERT INTO library_entities VALUES('old','deleted-library',NULL,'movie')")
+            db.execute("INSERT INTO entity_provider_ids VALUES('old','tmdb','movie','old-movie')")
+            db.execute("INSERT INTO media_files VALUES('old-file','old')")
+            db.execute("INSERT INTO metadata_hydration_requests VALUES('old','ja')")
+            db.execute("INSERT INTO metadata_cache VALUES('tmdb','movie','old-movie','ja','{}','now','later')")
+            db.execute("INSERT INTO metadata_cache VALUES('tmdb','movie','orphan','en','{}','now','later')")
+
+            cleanup_orphans(db)
+
+            for table in ("library_entities", "entity_provider_ids", "media_files", "metadata_hydration_requests", "metadata_cache", "metadata_images"):
+                self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}")[0][0], 0, table)
+        finally:
+            db.close()
 
     def test_incremental_series_scan_preserves_hierarchy_and_removes_missing_episode(self):
         db, scanner = self._scanner_db()
@@ -781,7 +882,9 @@ class LibraryMetadataTest(unittest.TestCase):
 class LibraryJobControlTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
+        self.db.execute("CREATE TABLE libraries (id TEXT PRIMARY KEY)")
         self.db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)")
+        self.db.execute("INSERT INTO libraries VALUES('library-1')")
         store = LibraryStore.__new__(LibraryStore)
         store.db = self.db
         self.runtime = LibraryRuntime.__new__(LibraryRuntime)
@@ -807,6 +910,12 @@ class LibraryJobControlTest(unittest.TestCase):
 
         self.assertEqual(terminated["state"], "terminated")
         self.assertIsNotNone(terminated["finishedAt"])
+
+    def test_deleted_library_cannot_enqueue_reconcile_job(self):
+        self.db.execute("DELETE FROM libraries WHERE id='library-1'")
+
+        self.assertIsNone(self.runtime.enqueue("library-1", "reconcile"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM library_jobs")[0][0], 0)
 
 
 if __name__ == "__main__":

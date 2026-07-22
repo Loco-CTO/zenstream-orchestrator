@@ -50,7 +50,11 @@ def new_id() -> str:
 
 
 def normalized_path(path: str) -> str:
-    value = os.path.abspath(os.path.expanduser(path.strip()))
+    # Japanese Windows commonly renders U+005C as a yen glyph, and copied
+    # paths can occasionally contain a literal U+00A5/U+FFE5 instead. Treat
+    # both yen variants as Windows separators so valid paths are accepted.
+    raw = path.strip().replace("\u00a5", "\\").replace("\uffe5", "\\")
+    value = os.path.abspath(os.path.expanduser(raw))
     if not os.path.isdir(value):
         raise ValueError("Library directory does not exist or is not a directory.")
     return os.path.normcase(os.path.normpath(value))
@@ -1021,10 +1025,16 @@ class LibraryRuntime:
         self._watch_paths.clear()
         self._configure_watchers()
 
-    def enqueue(self, library_id: str, kind: str = "scan") -> dict:
+    def enqueue(self, library_id: str, kind: str = "scan") -> dict | None:
         # Scan, reconcile, and collection rebuild all mutate the same inventory.
         # Claim the task atomically so different triggers cannot overlap.
         with self.store.db.transaction() as cursor:
+            # Filesystem events and the repair timer can race library deletion.
+            # Check the parent row in the same transaction as the job insert so
+            # a deleted library is simply ignored instead of violating the FK.
+            cursor.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,))
+            if not cursor.fetchone():
+                return None
             cursor.execute("SELECT id FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1", (library_id,))
             existing = cursor.fetchone()
             if existing:

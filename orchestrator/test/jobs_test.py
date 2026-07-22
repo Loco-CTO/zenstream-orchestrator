@@ -26,6 +26,22 @@ class JobMappingTest(unittest.TestCase):
         self.assertEqual(value["progressCurrent"], 4)
         self.assertEqual(value["threadName"], "worker")
 
+    def test_default_tasks_include_orphan_cleanup(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            db.execute("CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            store = JobStore.__new__(JobStore)
+            store.db = db
+
+            store.ensure_defaults()
+
+            cleanup = store.by_key("metadata_cleanup")
+            self.assertIsNotNone(cleanup)
+            self.assertEqual(cleanup["kind"], "metadata_cleanup")
+            self.assertEqual(cleanup["intervalMinutes"], 10080)
+        finally:
+            db.close()
+
 
 class JobLockingTest(unittest.TestCase):
     def setUp(self):

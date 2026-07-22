@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import Config
 from app.library import JobTerminated, runtime as library_runtime
+from app.library_cleanup import cleanup_orphans
 from app.providers import ProviderError, MetadataService
 from app.models.metadata import MetadataLanguageSettings
 from app.logging_config import get_logger
@@ -80,6 +81,9 @@ class JobStore:
         definition = self.ensure("metadata_refresh", "Refresh metadata", "Fetch provider metadata and artwork for indexed IDs.", "metadata_refresh", 1440, {"locales": ["en"], "batchSize": 50})
         if definition["lastRunAt"] is None:
             self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (now(), now(), definition["id"]))
+        cleanup = self.ensure("metadata_cleanup", "Clean orphaned library data", "Remove deleted-library inventory, metadata, hydration, and cached artwork leftovers.", "metadata_cleanup", 10080, {})
+        if cleanup["lastRunAt"] is None:
+            self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (now(), now(), cleanup["id"]))
 
     def ensure_library(self, library: dict) -> dict:
         description = "Index the library without moving or renaming files."
@@ -204,6 +208,20 @@ class MetadataRefreshJob:
             self.store.update_run(run_id, state="failed", progress_current=completed, progress_total=len(items), finished_at=now(), message=summary, error=summary, error_details=json.dumps({"operation": "metadata_refresh", "failures": failures}))
         else:
             self.store.update_run(run_id, state="completed", progress_current=completed, progress_total=len(items), finished_at=now(), message=f"Refreshed {completed} entities")
+
+
+class MetadataCleanupJob:
+    def __init__(self, store: JobStore):
+        self.store = store
+        self.db = store.db
+
+    def run(self, run_id: str, definition: dict, should_terminate=None) -> None:
+        should_terminate = should_terminate or (lambda: False)
+        if should_terminate():
+            raise JobTerminated()
+        self.store.update_run(run_id, state="running", started_at=now(), progress_total=1, message="Cleaning orphaned library data", thread_name=threading.current_thread().name)
+        cleanup_orphans(self.db)
+        self.store.update_run(run_id, state="completed", progress_current=1, progress_total=1, finished_at=now(), message="Orphaned library data cleaned")
 
 
 def _hydrate_request(db, service: MetadataService, entity_id: str, locale: str) -> None:
@@ -481,6 +499,8 @@ class JobScheduler:
             definition = self.store.definition(definition_id) or {"id": definition_id, "kind": kind, "config": config, "name": name}
             if kind == "metadata_refresh":
                 MetadataRefreshJob(self.store).run(run_id, definition, self.cancel_events[run_id].is_set)
+            elif kind == "metadata_cleanup":
+                MetadataCleanupJob(self.store).run(run_id, definition, self.cancel_events[run_id].is_set)
             else:
                 self.store.update_run(run_id, state="failed", error=f"Unsupported job kind: {kind}", finished_at=now())
         except JobTerminated:

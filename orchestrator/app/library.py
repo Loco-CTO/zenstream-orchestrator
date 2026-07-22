@@ -624,6 +624,7 @@ class LibraryScanner:
     def _prune_missing_entities(self, library_id: str, root: Path | None = None) -> None:
         if not self._scan_complete:
             return
+        legacy_without_library_root = False
         if root is None:
             try:
                 rows = self.db.execute(
@@ -632,6 +633,7 @@ class LibraryScanner:
                 root = Path(rows[0][0]) if rows else None
             except Exception:
                 root = None
+                legacy_without_library_root = True
         rows = self.db.execute(
             "SELECT id,relative_path FROM library_entities WHERE library_id=?", (library_id,)
         )
@@ -641,6 +643,9 @@ class LibraryScanner:
                 continue
             # A complete traversal is required before pruning. Existing paths
             # that were not classifiable are deliberately retained.
+            if legacy_without_library_root:
+                missing.append(entity_id)
+                continue
             if root is None or relative_path is None:
                 continue
             try:
@@ -789,7 +794,7 @@ class LibraryScanner:
         ingest = MetadataIngestService(MetadataService())
         rows = (
             self.db.execute(
-                "SELECT e.entity_type,p.provider,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.id IN ({})".format(
+                "SELECT e.id,e.entity_type,p.provider,p.identifier_type,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.id IN ({})".format(
                     ",".join("?" * len(self._scan_seen_ids))
                 ),
                 list(self._scan_seen_ids),
@@ -797,26 +802,35 @@ class LibraryScanner:
             if self._scan_seen_ids
             else []
         )
-        for entity_type, provider, provider_id in rows:
+        locales = ingest.locales()
+        for entity_id, entity_type, provider, identifier_type, provider_id in rows:
             self._check_termination(should_terminate)
             if provider not in {"tmdb", "tvdb", "musicbrainz"}:
                 continue
-            try:
-                ingest.ingest(
-                    provider,
-                    entity_type,
-                    str(provider_id),
-                    force=False,
-                    should_terminate=should_terminate,
+            for locale in locales:
+                cached = self.db.execute(
+                    "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
+                    (provider, identifier_type, str(provider_id), locale),
                 )
-            except Exception as error:
-                logger.warning(
-                    "rescan localized metadata failed entity_type=%s provider=%s provider_id=%s: %s",
-                    entity_type,
-                    provider,
-                    provider_id,
-                    error,
-                )
+                if cached and entity_id not in self._scan_provider_identity_changed and entity_id not in self._scan_delta["added"] and entity_id not in self._scan_delta["changed"]:
+                    continue
+                try:
+                    ingest.ingest_locale(
+                        provider,
+                        identifier_type,
+                        str(provider_id),
+                        locale,
+                        force=False,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "rescan localized metadata failed entity_type=%s provider=%s provider_id=%s locale=%s: %s",
+                        entity_type,
+                        provider,
+                        provider_id,
+                        locale,
+                        error,
+                    )
 
     def _ids(self, entity_id: str, values: Iterable[tuple[str, str, str]]) -> None:
         from app.providers import PRIMARY_PROVIDER_BY_ENTITY
@@ -1985,8 +1999,8 @@ class LibraryScanner:
                         )
                     except Exception:
                         normalized = {
-                            "title": title,
-                            "overview": data.get("overview"),
+                            "title": value["title"],
+                            "overview": value["data"].get("overview"),
                             "provider": "tvdb",
                             "providerId": list_id,
                             "images": [],

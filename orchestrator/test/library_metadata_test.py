@@ -8,8 +8,17 @@ from unittest.mock import MagicMock, patch
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import EPISODE_RE, LibraryRuntime, LibraryScanner, LibraryStore, guess_media, provider_ids
+from app.library_cleanup import cleanup_entities, cleanup_library
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, MetadataLanguageSettings
 from app.providers import BANNER, PRIMARY, MetadataService, ProviderError, ProviderLanguageCatalog, TMDBClient, TVDBClient, _select_match, choose_image, _tvdb_children, _tvdb_images
+
+
+class _JsonRequest:
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def json(self):
+        return self.payload
 
 
 class LibraryMetadataTest(unittest.TestCase):
@@ -24,6 +33,10 @@ class LibraryMetadataTest(unittest.TestCase):
         db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER, PRIMARY KEY(entity_id, provider, identifier_type))")
         db.execute("CREATE TABLE media_files (id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT, language TEXT, flags TEXT, size INTEGER, modified_ns INTEGER, UNIQUE(entity_id, relative_path, role))")
         db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT, kind TEXT, state TEXT, progress_current INTEGER DEFAULT 0, progress_total INTEGER DEFAULT 0, message TEXT)")
+        db.execute("CREATE TABLE collection_members (collection_entity_id TEXT, source_entity_id TEXT, position INTEGER)")
+        db.execute("CREATE TABLE metadata_hydration_requests (entity_id TEXT, locale TEXT)")
+        db.execute("CREATE TABLE metadata_cache (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT)")
+        db.execute("CREATE TABLE metadata_images (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, image_type TEXT, image_url TEXT, local_path TEXT)")
         db.execute("INSERT INTO library_jobs(id, library_id, kind, state) VALUES('job-1','library-1','scan','queued')")
         store = LibraryStore.__new__(LibraryStore)
         store.db = db
@@ -66,6 +79,86 @@ class LibraryMetadataTest(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 2)
         finally:
             db.close()
+
+    def test_removing_episode_cleans_its_metadata_but_keeps_shared_show_metadata(self):
+        db, scanner = self._scanner_db()
+        try:
+            db.execute("INSERT INTO library_entities(id,library_id,entity_type,relative_path) VALUES('show','library-1','series','Show')")
+            db.execute("INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path) VALUES('episode','library-1','show','episode','Show/Episode')")
+            db.execute("INSERT INTO library_entities(id,library_id,entity_type,relative_path) VALUES('other','library-1','series','Other')")
+            db.execute("INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)", ('show', 'tvdb', 'series', 'show-id', 1))
+            db.execute("INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)", ('episode', 'tvdb', 'episode', 'episode-id', 1))
+            db.execute("INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)", ('other', 'tvdb', 'series', 'show-id', 1))
+            for provider_id in ('show-id', 'episode-id'):
+                db.execute("INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)", ('tvdb', 'series' if provider_id == 'show-id' else 'episode', provider_id, 'en', '{}', 'now', 'later'))
+            db.execute("INSERT INTO metadata_hydration_requests VALUES('episode','en')")
+
+            cleanup_entities(db, ['episode'])
+
+            self.assertEqual(db.execute("SELECT id FROM library_entities WHERE id='episode'"), [])
+            self.assertEqual(db.execute("SELECT entity_id FROM metadata_hydration_requests"), [])
+            self.assertEqual(db.execute("SELECT provider_id FROM metadata_cache ORDER BY provider_id"), [('show-id',)])
+            self.assertEqual(db.execute("SELECT provider_id FROM entity_provider_ids ORDER BY provider_id"), [('show-id',), ('show-id',)])
+        finally:
+            db.close()
+
+    def test_deleting_library_removes_entities_jobs_and_unreferenced_metadata(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            db.execute("CREATE TABLE libraries (id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE library_sources (library_id TEXT, source_library_id TEXT)")
+            db.execute("CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT)")
+            db.execute("CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT, parent_id TEXT, entity_type TEXT)")
+            db.execute("CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT)")
+            db.execute("CREATE TABLE media_files (id TEXT, entity_id TEXT)")
+            db.execute("CREATE TABLE collection_members (collection_entity_id TEXT, source_entity_id TEXT, position INTEGER)")
+            db.execute("CREATE TABLE metadata_hydration_requests (entity_id TEXT, locale TEXT)")
+            db.execute("CREATE TABLE metadata_cache (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT)")
+            db.execute("CREATE TABLE metadata_images (provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, image_type TEXT, image_url TEXT, local_path TEXT)")
+            db.execute("INSERT INTO libraries VALUES('library-1')")
+            db.execute("INSERT INTO library_entities VALUES('show','library-1',NULL,'series')")
+            db.execute("INSERT INTO library_entities VALUES('episode','library-1','show','episode')")
+            db.execute("INSERT INTO entity_provider_ids VALUES('show','tvdb','series','show-id')")
+            db.execute("INSERT INTO entity_provider_ids VALUES('episode','tvdb','episode','episode-id')")
+            db.execute("INSERT INTO media_files VALUES('file','episode')")
+            db.execute("INSERT INTO metadata_hydration_requests VALUES('episode','en')")
+            db.execute("INSERT INTO metadata_cache VALUES('tvdb','series','show-id','en','{}','now','later')")
+            db.execute("INSERT INTO metadata_cache VALUES('tvdb','episode','episode-id','en','{}','now','later')")
+            db.execute("INSERT INTO library_jobs VALUES('job','library-1')")
+
+            self.assertTrue(cleanup_library(db, 'library-1'))
+            for table in ('libraries', 'library_entities', 'entity_provider_ids', 'media_files', 'metadata_hydration_requests', 'metadata_cache', 'library_jobs'):
+                self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}")[0][0], 0, table)
+        finally:
+            db.close()
+
+    def test_deleting_last_entity_removes_cached_image_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = DatabaseHandler("sqlite", {}, str(Path(directory) / "orchestrator.db"))
+            try:
+                for sql in (
+                    "CREATE TABLE library_entities(id TEXT PRIMARY KEY, library_id TEXT, parent_id TEXT, entity_type TEXT)",
+                    "CREATE TABLE entity_provider_ids(entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT)",
+                    "CREATE TABLE media_files(id TEXT, entity_id TEXT)",
+                    "CREATE TABLE collection_members(collection_entity_id TEXT, source_entity_id TEXT, position INTEGER)",
+                    "CREATE TABLE metadata_hydration_requests(entity_id TEXT, locale TEXT)",
+                    "CREATE TABLE metadata_cache(provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, payload TEXT, fetched_at TEXT, expires_at TEXT)",
+                    "CREATE TABLE metadata_images(provider TEXT, entity_type TEXT, provider_id TEXT, locale TEXT, image_type TEXT, image_url TEXT, local_path TEXT)",
+                ):
+                    db.execute(sql)
+                image_dir = Path(directory) / "metadata-cache" / "images"
+                image_dir.mkdir(parents=True)
+                image_path = image_dir / "cached.jpg"
+                image_path.touch()
+                db.execute("INSERT INTO library_entities VALUES('movie','library-1',NULL,'movie')")
+                db.execute("INSERT INTO entity_provider_ids VALUES('movie','tmdb','movie','movie-id')")
+                db.execute("INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?)", ('tmdb', 'movie', 'movie-id', 'en', 'Primary', 'https://image', str(image_path)))
+
+                cleanup_entities(db, ['movie'])
+
+                self.assertFalse(image_path.exists())
+            finally:
+                db.close()
 
     def test_incremental_series_scan_preserves_hierarchy_and_removes_missing_episode(self):
         db, scanner = self._scanner_db()
@@ -303,6 +396,24 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(response.headers["retry-after"], "2")
         metadata.assert_called_once_with(item, "en", False, False)
         hydration.assert_not_called()
+
+    def test_metadata_language_update_queues_existing_entity_backfill(self):
+        settings = MagicMock()
+        settings.set.return_value = ["en", "zh-TW"]
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(library_routes, "MetadataLanguageSettings", return_value=settings),
+            patch.object(library_routes.scheduler, "enqueue_metadata_refresh", return_value={"id": "run-1"}) as refresh,
+        ):
+            response = asyncio.run(
+                library_routes.update_metadata_languages(
+                    _JsonRequest({"locales": ["en", "zh-TW"]}),
+                    Username="admin",
+                    TOKEN="token",
+                )
+            )
+        self.assertEqual(response["locales"], ["en", "zh-TW"])
+        refresh.assert_called_once_with()
 
     def test_local_image_names_are_matched_to_canonical_artwork_types(self):
         self.assertTrue(library_routes._local_image_for_type("Series/poster.jpg", "Primary"))

@@ -29,6 +29,7 @@ class DatabaseHandler:
         """Connect to a SQLite database."""
         try:
             self.connection = sqlite3.connect(db_file, check_same_thread=False)
+            self.connection.execute("PRAGMA foreign_keys = ON")
         except sqlite3.Error as e:
             print(f"Error connecting to SQLite: {e}")
 

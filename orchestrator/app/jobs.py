@@ -196,6 +196,8 @@ class MetadataRefreshJob:
             for provider in providers:
                 try:
                     service.fetch(provider, entity_type, provider_id, locale, force=True)
+                    if not service.cache.get(provider, entity_type, provider_id, locale):
+                        raise ProviderError("Provider returned no cacheable metadata")
                 except (ProviderError, ValueError) as error:
                     failure = {"provider": provider, "entityType": entity_type, "providerId": provider_id, "locale": locale, "error": f"{type(error).__name__}: {error}"}
                     failures.append(failure)

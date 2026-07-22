@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import threading
@@ -78,6 +79,14 @@ def now() -> str:
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def normalized_path(path: str) -> str:
@@ -425,6 +434,14 @@ class LibraryScanner:
         self.db = self.store.db
         self._scan_seen_ids: set[str] = set()
         self._scan_created_ids: list[str] = []
+        self._scan_delta = {
+            "added": set(),
+            "changed": set(),
+            "unchanged": set(),
+            "removed": set(),
+        }
+        self._scan_provider_identity_changed: set[str] = set()
+        self._scan_complete = False
 
     def scan(
         self,
@@ -449,6 +466,14 @@ class LibraryScanner:
         )
         self._scan_seen_ids = set()
         self._scan_created_ids = []
+        self._scan_delta = {
+            "added": set(),
+            "changed": set(),
+            "unchanged": set(),
+            "removed": set(),
+        }
+        self._scan_provider_identity_changed = set()
+        self._scan_complete = False
         try:
             self._check_termination(should_terminate)
             if library["type"] == "movies":
@@ -459,12 +484,14 @@ class LibraryScanner:
                 )
             else:
                 count = self._scan_music(library_id, root, job_id, should_terminate)
+            self._scan_complete = True
             if library["type"] != "tv_series":
                 self._resolve_and_seed(
                     library_id, library["type"], job_id, should_terminate
                 )
             self._fetch_seen_locales(should_terminate)
-            self._prune_missing_entities(library_id)
+            self._reconcile_moved_entities(library_id, root)
+            self._prune_missing_entities(library_id, root)
             finished = now()
             self.store.update_job(
                 job_id,
@@ -476,6 +503,7 @@ class LibraryScanner:
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except JobTerminated:
+            self._scan_complete = False
             finished = now()
             self.store.update_job(
                 job_id,
@@ -486,6 +514,7 @@ class LibraryScanner:
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except Exception as error:
+            self._scan_complete = False
             self._remove_created_entities()
             details = {
                 "libraryId": library_id,
@@ -537,6 +566,11 @@ class LibraryScanner:
         )
         if existing:
             entity_id = existing[0][0]
+            self._scan_delta["unchanged"].add(entity_id)
+            before = self.db.execute(
+                "SELECT parent_id,season_number,episode_number,episode_end_number,disc_number,track_number FROM library_entities WHERE id=?",
+                (entity_id,),
+            )
             self.db.execute(
                 "UPDATE library_entities SET parent_id=?,season_number=?,episode_number=?,episode_end_number=?,disc_number=?,track_number=?,updated_at=? WHERE id=?",
                 (
@@ -550,6 +584,15 @@ class LibraryScanner:
                     entity_id,
                 ),
             )
+            if before and tuple(before[0]) != (
+                parent_id,
+                fields["season_number"],
+                fields["episode_number"],
+                fields["episode_end_number"],
+                fields["disc_number"],
+                fields["track_number"],
+            ):
+                self._mark_changed(entity_id)
         else:
             entity_id = new_id()
             self.db.execute(
@@ -570,19 +613,152 @@ class LibraryScanner:
                 ),
             )
             self._scan_created_ids.append(entity_id)
+            self._scan_delta["added"].add(entity_id)
         self._scan_seen_ids.add(entity_id)
         return entity_id
 
-    def _prune_missing_entities(self, library_id: str) -> None:
+    def _mark_changed(self, entity_id: str) -> None:
+        self._scan_delta["changed"].add(entity_id)
+        self._scan_delta["unchanged"].discard(entity_id)
+
+    def _prune_missing_entities(self, library_id: str, root: Path | None = None) -> None:
+        if not self._scan_complete:
+            return
+        if root is None:
+            try:
+                rows = self.db.execute(
+                    "SELECT directory FROM libraries WHERE id=?", (library_id,)
+                )
+                root = Path(rows[0][0]) if rows else None
+            except Exception:
+                root = None
         rows = self.db.execute(
-            "SELECT id FROM library_entities WHERE library_id=?", (library_id,)
+            "SELECT id,relative_path FROM library_entities WHERE library_id=?", (library_id,)
         )
-        missing = [row[0] for row in rows if row[0] not in self._scan_seen_ids]
+        missing = []
+        for entity_id, relative_path in rows:
+            if entity_id in self._scan_seen_ids:
+                continue
+            # A complete traversal is required before pruning. Existing paths
+            # that were not classifiable are deliberately retained.
+            if root is None or relative_path is None:
+                continue
+            try:
+                candidate = root / relative_path
+                if candidate.exists() or candidate.is_symlink():
+                    continue
+            except (OSError, ValueError):
+                continue
+            missing.append(entity_id)
         if not missing:
             return
         from app.library_cleanup import cleanup_entities
 
         cleanup_entities(self.db, missing)
+        self._scan_delta["removed"].update(missing)
+
+    def _entity_fingerprint(self, entity_id: str) -> str | None:
+        rows = self.db.execute(
+            "SELECT role,file_hash FROM media_files WHERE entity_id=? AND role IN ('video','audio') ORDER BY role,relative_path",
+            (entity_id,),
+        )
+        if not rows or any(not row[1] for row in rows):
+            return None
+        return "|".join(f"{role}:{file_hash}" for role, file_hash in rows)
+
+    def _reconcile_moved_entities(self, library_id: str, root: Path) -> None:
+        """Match newly discovered leaf entities to vanished paths by unique hash."""
+        leaf_types = {"movie", "episode", "track", "release"}
+        new_ids = [
+            entity_id
+            for entity_id in self._scan_created_ids
+            if entity_id in self._scan_seen_ids
+        ]
+        old_rows = self.db.execute(
+            "SELECT id,entity_type,relative_path FROM library_entities WHERE library_id=?",
+            (library_id,),
+        )
+        old_ids = [
+            row[0]
+            for row in old_rows
+            if row[0] not in self._scan_seen_ids and row[1] in leaf_types
+        ]
+        old_by_key: dict[tuple[str, str], list[str]] = {}
+        new_by_key: dict[tuple[str, str], list[str]] = {}
+        for entity_id in old_ids:
+            row = self.db.execute(
+                "SELECT entity_type FROM library_entities WHERE id=?", (entity_id,)
+            )
+            fingerprint = self._entity_fingerprint(entity_id)
+            if row and fingerprint:
+                old_by_key.setdefault((row[0][0], fingerprint), []).append(entity_id)
+        for entity_id in new_ids:
+            row = self.db.execute(
+                "SELECT entity_type FROM library_entities WHERE id=?", (entity_id,)
+            )
+            fingerprint = self._entity_fingerprint(entity_id)
+            if row and fingerprint:
+                new_by_key.setdefault((row[0][0], fingerprint), []).append(entity_id)
+
+        for key, old_matches in old_by_key.items():
+            new_matches = new_by_key.get(key, [])
+            if len(old_matches) != 1 or len(new_matches) != 1:
+                continue
+            old_id, new_id = old_matches[0], new_matches[0]
+            old = self.db.execute(
+                "SELECT relative_path,parent_id,season_number,episode_number,episode_end_number,disc_number,track_number FROM library_entities WHERE id=?",
+                (old_id,),
+            )
+            replacement = self.db.execute(
+                "SELECT relative_path,parent_id,season_number,episode_number,episode_end_number,disc_number,track_number FROM library_entities WHERE id=?",
+                (new_id,),
+            )
+            if not old or not replacement:
+                continue
+            old_values = old[0]
+            new_values = replacement[0]
+            try:
+                with self.db.transaction() as cursor:
+                    cursor.execute(
+                        "UPDATE library_entities SET relative_path=?,parent_id=?,season_number=?,episode_number=?,episode_end_number=?,disc_number=?,track_number=?,updated_at=? WHERE id=?",
+                        (*new_values, now(), old_id),
+                    )
+                    # New rows contain the current path. Keep the old entity's
+                    # provider IDs and playback state, but attach its files to
+                    # the stable entity identity.
+                    cursor.execute("DELETE FROM media_files WHERE entity_id=?", (old_id,))
+                    cursor.execute("UPDATE media_files SET entity_id=? WHERE entity_id=?", (old_id, new_id))
+                    tables = {
+                        row[0]
+                        for row in cursor.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        )
+                    }
+                    if "media_sources" in tables:
+                        cursor.execute("DELETE FROM media_sources WHERE entity_id=?", (old_id,))
+                        cursor.execute("UPDATE media_sources SET entity_id=? WHERE entity_id=?", (old_id, new_id))
+                    if "collection_members" in tables:
+                        cursor.execute("UPDATE collection_members SET source_entity_id=? WHERE source_entity_id=?", (old_id, new_id))
+                    if "user_item_state" in tables:
+                        cursor.execute(
+                            "DELETE FROM user_item_state WHERE entity_id=? AND EXISTS (SELECT 1 FROM user_item_state current WHERE current.entity_id=? AND current.user_id=user_item_state.user_id)",
+                            (new_id, old_id),
+                        )
+                        cursor.execute("UPDATE user_item_state SET entity_id=? WHERE entity_id=?", (old_id, new_id))
+                    if "catalog_search" in tables:
+                        cursor.execute("UPDATE catalog_search SET entity_id=? WHERE entity_id=?", (old_id, new_id))
+                    cursor.execute("DELETE FROM entity_provider_ids WHERE entity_id=?", (new_id,))
+                    if "collection_members" in tables:
+                        cursor.execute("DELETE FROM collection_members WHERE collection_entity_id=? OR source_entity_id=?", (new_id, new_id))
+                    cursor.execute("DELETE FROM library_entities WHERE id=?", (new_id,))
+            except Exception:
+                logger.exception("failed to preserve moved entity old_id=%s new_id=%s", old_id, new_id)
+                continue
+            self._scan_seen_ids.add(old_id)
+            self._scan_delta["added"].discard(new_id)
+            self._scan_delta["changed"].add(old_id)
+            self._scan_delta["unchanged"].discard(old_id)
+            self._scan_created_ids = [value for value in self._scan_created_ids if value != new_id]
 
     def _remove_created_entities(self) -> None:
         if not self._scan_created_ids:
@@ -666,6 +842,46 @@ class LibraryScanner:
             )
             found = True
         if found:
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='explicit_id',updated_at=? WHERE id=?",
+                (now(), entity_id),
+            )
+
+    def _replace_ids(
+        self, entity_id: str, values: Iterable[tuple[str, str, str]]
+    ) -> None:
+        """Replace scanner-discovered IDs, preserving the merge-style _ids API."""
+        from app.providers import PRIMARY_PROVIDER_BY_ENTITY
+
+        row = self.db.execute(
+            "SELECT entity_type FROM library_entities WHERE id=?", (entity_id,)
+        )
+        entity_type = row[0][0] if row else ""
+        primary_provider = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
+        normalized = []
+        for provider, identifier_type, value in values:
+            if provider in {"tmdb", "tvdb"} and entity_type in {"movie", "series"}:
+                identifier_type = "movie" if entity_type == "movie" else "series"
+            normalized.append((provider, identifier_type, str(value)))
+        normalized = list(dict.fromkeys(normalized))
+        current = [
+            tuple(row)
+            for row in self.db.execute(
+                "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                (entity_id,),
+            )
+        ]
+        if normalized != current:
+            self.db.execute("DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,))
+            for provider, identifier_type, value in normalized:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)",
+                    (entity_id, provider, identifier_type, value, int(provider == primary_provider)),
+                )
+            if current:
+                self._scan_provider_identity_changed.add(entity_id)
+                self._mark_changed(entity_id)
+        if normalized:
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='explicit_id',updated_at=? WHERE id=?",
                 (now(), entity_id),
@@ -1318,9 +1534,21 @@ class LibraryScanner:
                     continue
                 self._ids(episode_id, [("tvdb", "episode", str(match["id"]))])
 
-    def _files(self, entity_id: str, root: Path, files: Iterable[Path]) -> None:
-        files = list(files)
-        self.db.execute("DELETE FROM media_files WHERE entity_id=?", (entity_id,))
+    def _files(self, entity_id: str, root: Path, files: Iterable[Path]) -> dict:
+        """Reconcile media rows in place and return a scan delta."""
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(media_files)")
+        }
+        has_hash = "file_hash" in columns
+        select_hash = ",file_hash" if has_hash else ""
+        existing_rows = self.db.execute(
+            f"SELECT id,relative_path,role,language,flags,size,modified_ns{select_hash} FROM media_files WHERE entity_id=?",
+            (entity_id,),
+        )
+        existing = {(row[1], row[2]): row for row in existing_rows}
+        seen = set()
+        result = {"added": 0, "updated": 0, "removed": 0, "unchanged": 0, "content_changed": False}
         for path in files:
             role = media_role(path)
             if not role:
@@ -1333,25 +1561,54 @@ class LibraryScanner:
             parts = path.stem.split(".")
             if len(parts) > 1 and len(parts[-1]) in {2, 3}:
                 language = parts[-1].lower()
-            self.db.execute(
-                "INSERT OR REPLACE INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    new_id(),
-                    entity_id,
-                    relative(str(root), str(path)),
-                    role,
-                    language,
-                    None,
-                    stat.st_size,
-                    stat.st_mtime_ns,
-                ),
-            )
-        # Probe after the file rows are reconciled so playback never
-        # depends on a media-source probe response.
-        if any(path.suffix.lower() in VIDEO_EXTENSIONS for path in files):
+            relative_path = relative(str(root), str(path))
+            key = (relative_path, role)
+            seen.add(key)
+            old = existing.get(key)
+            old_hash = old[8] if old and has_hash else None
+            if old and old[5] == stat.st_size and old[6] == stat.st_mtime_ns and (not has_hash or old_hash):
+                result["unchanged"] += 1
+                continue
+            file_hash = _sha256_file(path)
+            if old:
+                content_changed = old_hash != file_hash if has_hash else True
+                self.db.execute(
+                    f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',file_hash=?' if has_hash else ''} WHERE id=?",
+                    ([language, None, stat.st_size, stat.st_mtime_ns, file_hash, old[0]] if has_hash else [language, None, stat.st_size, stat.st_mtime_ns, old[0]]),
+                )
+                result["updated"] += 1
+                if content_changed and role in {"video", "audio"}:
+                    result["content_changed"] = True
+            else:
+                if has_hash:
+                    self.db.execute(
+                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,file_hash) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (new_id(), entity_id, relative_path, role, language, None, stat.st_size, stat.st_mtime_ns, file_hash),
+                    )
+                else:
+                    self.db.execute(
+                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
+                        (new_id(), entity_id, relative_path, role, language, None, stat.st_size, stat.st_mtime_ns),
+                    )
+                result["added"] += 1
+                if role in {"video", "audio"}:
+                    result["content_changed"] = True
+        for key, old in existing.items():
+            if key in seen:
+                continue
+            self.db.execute("DELETE FROM media_files WHERE id=?", (old[0],))
+            result["removed"] += 1
+            if old[2] in {"video", "audio"}:
+                result["content_changed"] = True
+        if result["added"] or result["updated"] or result["removed"]:
+            self._mark_changed(entity_id)
+        # Probe after the file rows are reconciled so playback never depends
+        # on a stale source row. A same-hash timestamp touch does not probe.
+        if result["content_changed"]:
             from app.playback import PlaybackManager
 
             PlaybackManager().probe_entity(entity_id)
+        return result
 
     def _scan_movies(
         self,
@@ -1372,15 +1629,18 @@ class LibraryScanner:
             entity = self._entity(
                 library_id, None, "movie", relative(str(root), str(entry))
             )
-            self._ids(entity, provider_ids(entry.name))
             files = list(entry.rglob("*")) if entry.is_dir() else [entry]
+            discovered_ids = list(provider_ids(entry.name))
             for nfo in (path for path in files if path.suffix.lower() == ".nfo"):
-                self._ids(entity, parse_nfo_ids(nfo))
+                discovered_ids.extend(parse_nfo_ids(nfo))
+            if discovered_ids:
+                self._replace_ids(entity, discovered_ids)
             self._files(entity, root, [path for path in files if path.is_file()])
             count += 1
             self.store.update_job(
                 job_id, progress_current=count, message=f"Indexed {entry.name}"
             )
+        self._scan_complete = True
         return count
 
     def _scan_series(
@@ -1402,7 +1662,9 @@ class LibraryScanner:
             series = self._entity(
                 library_id, None, "series", relative(str(root), str(series_dir))
             )
-            self._ids(series, provider_ids(series_dir.name))
+            series_ids = provider_ids(series_dir.name)
+            if series_ids:
+                self._replace_ids(series, series_ids)
             season_dirs = [
                 path
                 for path in series_dir.iterdir()
@@ -1482,7 +1744,9 @@ class LibraryScanner:
                         episode_number=episode_number,
                         episode_end_number=end_number,
                     )
-                    self._ids(episode, provider_ids(media.name))
+                    episode_ids = provider_ids(media.name)
+                    if episode_ids:
+                        self._replace_ids(episode, episode_ids)
                     self._files(
                         episode,
                         root,
@@ -1522,6 +1786,7 @@ class LibraryScanner:
                 progress_current=series_index,
                 message=f"Indexed {series_dir.name} ({episode_count} episodes)",
             )
+        self._scan_complete = True
         return len(series_dirs)
 
     def _scan_music(
@@ -1532,7 +1797,10 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
     ) -> int:
         album_dirs = []
-        for directory, _, filenames in os.walk(root):
+        def traversal_error(error):
+            raise error
+
+        for directory, _, filenames in os.walk(root, onerror=traversal_error):
             if any(Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames):
                 album_dirs.append(Path(directory))
         self.store.update_job(job_id, progress_total=len(album_dirs))
@@ -1570,7 +1838,9 @@ class LibraryScanner:
                     disc_number=disc_number,
                     track_number=track_number,
                 )
-                self._ids(entity, _music_ids(tags))
+                music_ids = _music_ids(tags)
+                if music_ids:
+                    self._replace_ids(entity, music_ids)
                 self._files(
                     entity,
                     root,
@@ -1596,6 +1866,7 @@ class LibraryScanner:
             self.store.update_job(
                 job_id, progress_current=count, message=f"Indexed {album_dir.name}"
             )
+        self._scan_complete = True
         return count
 
     def derive_collection(

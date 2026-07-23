@@ -82,6 +82,12 @@ class MetadataServicesTest(unittest.TestCase):
         value = service.resolve_raw("movie", [{"provider": "tmdb", "id": "10"}], "fr")
         self.assertEqual(value["title"], "Japanese")
 
+    def test_original_language_provider_codes_match_canonical_cache_locales(self):
+        self._cache("en", {"title": "English", "originalLanguage": "eng"})
+        service = MetadataReadService(self.db)
+        value = service.resolve_raw("movie", [{"provider": "tmdb", "id": "10"}], "fr")
+        self.assertEqual(value["title"], "English")
+
     def test_ingest_fetches_only_configured_locales(self):
         fetcher = _Fetcher()
         ingest = MetadataIngestService(fetcher, _Settings(["ja", "de"]))

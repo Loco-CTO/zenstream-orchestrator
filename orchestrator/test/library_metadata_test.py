@@ -1113,6 +1113,15 @@ class LibraryMetadataTest(unittest.TestCase):
         ) as request:
             payload = client.details("season", "489132", "en")
         self.assertNotIn("translation", payload)
+
+    def test_tvdb_original_language_is_normalized_to_canonical_locale(self):
+        client = TVDBClient({"apiKey": "test"})
+        value = client.normalize(
+            "series",
+            "1",
+            {"data": {"name": "Example", "originalLanguage": "eng"}},
+        )
+        self.assertEqual(value["originalLanguage"], "en")
         self.assertEqual(payload["data"]["name"], "Default title")
         self.assertEqual(request.call_count, 2)
 

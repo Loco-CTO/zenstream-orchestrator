@@ -1,3 +1,5 @@
+FROM mwader/static-ffmpeg:7.1.1 AS media-tools
+
 FROM node:26-slim AS dashboard-build
 WORKDIR /frontend
 COPY frontend/package.json ./
@@ -13,14 +15,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ORCHESTRATOR_HOST=0.0.0.0 \
     ORCHESTRATOR_PORT=9088
 COPY requirements.txt ./
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini ./
 COPY .main-version.json ./
 COPY migrations/ ./migrations/
 COPY assets/ ./assets/
+COPY --from=media-tools /ffmpeg ./assets/ffmpeg/linux/ffmpeg
+COPY --from=media-tools /ffprobe ./assets/ffmpeg/linux/ffprobe
 COPY orchestrator/ ./orchestrator/
 COPY --from=dashboard-build /frontend/out/ ./orchestrator/web/
 EXPOSE 9088

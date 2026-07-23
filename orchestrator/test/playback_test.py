@@ -134,3 +134,29 @@ class PlaybackTest(unittest.TestCase):
             manager.negotiate("user-1", "entity-1", {"forceTranscoding": True})
 
         self.assertEqual(context.exception.status_code, 503)
+
+    @patch("app.playback.ffmpeg_path", return_value="ffmpeg")
+    def test_reuses_active_matching_transcode_session(self, _ffmpeg):
+        manager = object.__new__(PlaybackManager)
+        process = MagicMock()
+        process.poll.return_value = None
+        source = {"id": "source-1", "mediaFileId": "file-1"}
+        profile = {"maxStreamingBitrate": 2_000_000}
+        session_id = "session-1"
+        key = PlaybackManager._transcode_key("user-1", "entity-1", source, profile)
+        previous_processes = PlaybackManager._processes
+        previous_users = PlaybackManager._users
+        previous_keys = PlaybackManager._session_keys
+        try:
+            PlaybackManager._processes = {session_id: process}
+            PlaybackManager._users = {"user-1": {session_id}}
+            PlaybackManager._session_keys = {session_id: key}
+
+            result = manager._transcode("user-1", "entity-1", source, "ticket", profile)
+
+            self.assertEqual(result["sessionId"], session_id)
+            self.assertEqual(result["mode"], "hls")
+        finally:
+            PlaybackManager._processes = previous_processes
+            PlaybackManager._users = previous_users
+            PlaybackManager._session_keys = previous_keys

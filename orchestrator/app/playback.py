@@ -41,6 +41,7 @@ class PlaybackManager:
     _lock = threading.RLock()
     _processes: dict[str, subprocess.Popen] = {}
     _users: dict[str, set[str]] = {}
+    _session_keys: dict[str, tuple[str, str, str, str]] = {}
 
     def __init__(self):
         self.db = Config().database
@@ -304,6 +305,21 @@ class PlaybackManager:
         maximum = max(1, int(os.getenv("MAX_TRANSCODES", "2")))
         per_user_maximum = max(1, int(os.getenv("MAX_TRANSCODES_PER_USER", "1")))
         with self._lock:
+            session_key = self._transcode_key(user_id, entity_id, source, profile)
+            for existing_id in self._users.get(user_id, set()):
+                process = self._processes.get(existing_id)
+                if (
+                    process is not None
+                    and process.poll() is None
+                    and self._session_keys.get(existing_id) == session_key
+                ):
+                    logger.info(
+                        "reusing active playback transcode user_id=%s entity_id=%s session_id=%s",
+                        user_id,
+                        entity_id,
+                        existing_id,
+                    )
+                    return self._hls_result(existing_id, source, access)
             active = [
                 value for value in self._processes.values() if value.poll() is None
             ]
@@ -379,6 +395,7 @@ class PlaybackManager:
             )
             self._processes[session_id] = process
             self._users.setdefault(user_id, set()).add(session_id)
+            self._session_keys[session_id] = session_key
             self.db.execute(
                 "INSERT INTO playback_sessions(id,user_id,entity_id,source_id,mode,state,output_directory,created_at,expires_at) VALUES(?,?,?,?,?,'active',?,?,?)",
                 (
@@ -395,6 +412,25 @@ class PlaybackManager:
             threading.Thread(
                 target=self._watch, args=(user_id, session_id, process), daemon=True
             ).start()
+        return self._hls_result(session_id, source, access)
+
+    @staticmethod
+    def _transcode_key(
+        user_id: str, entity_id: str, source: dict, profile: dict
+    ) -> tuple[str, str, str, str]:
+        settings = {
+            "audioStreamIndex": profile.get("audioStreamIndex"),
+            "maxStreamingBitrate": profile.get("maxStreamingBitrate"),
+        }
+        return (
+            user_id,
+            entity_id,
+            str(source["id"]),
+            json.dumps(settings, sort_keys=True),
+        )
+
+    @staticmethod
+    def _hls_result(session_id: str, source: dict, access: str) -> dict:
         return {
             "mode": "hls",
             "source": source,
@@ -408,6 +444,7 @@ class PlaybackManager:
         with self._lock:
             self._processes.pop(session_id, None)
             self._users.get(user_id, set()).discard(session_id)
+            self._session_keys.pop(session_id, None)
         self.db.execute(
             "UPDATE playback_sessions SET state=? WHERE id=?",
             ("completed" if process.returncode == 0 else "failed", session_id),

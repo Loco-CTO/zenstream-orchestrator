@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -18,6 +19,10 @@ from fastapi import HTTPException
 from app.catalog import Catalog
 from app.config import Config
 from app.client_auth import issue_ticket
+
+
+logger = logging.getLogger(__name__)
+PLAYABLE_ROLE = "media"
 
 
 def _iso(value: datetime | None = None) -> str:
@@ -42,7 +47,7 @@ class PlaybackManager:
         self.catalog = Catalog()
 
     def _file_path(
-        self, entity_id: str, media_file_id: str | None = None, role: str = "video"
+        self, entity_id: str, media_file_id: str | None = None, role: str = PLAYABLE_ROLE
     ) -> tuple[str, Path]:
         params: list = [entity_id, role]
         where = "f.entity_id=? AND f.role=?"
@@ -65,8 +70,8 @@ class PlaybackManager:
         if not executable:
             return []
         rows = self.db.execute(
-            "SELECT f.id,l.directory,f.relative_path FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.entity_id=? AND f.role='video'",
-            (entity_id,),
+            "SELECT f.id,l.directory,f.relative_path FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.entity_id=? AND f.role=?",
+            (entity_id, PLAYABLE_ROLE),
         )
         values = []
         for media_file_id, directory, relative_path in rows:
@@ -91,7 +96,13 @@ class PlaybackManager:
                     check=True,
                 )
                 payload = json.loads(completed.stdout)
-            except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+                logger.warning(
+                    "playback probe failed entity_id=%s media_file_id=%s error=%s",
+                    entity_id,
+                    media_file_id,
+                    error,
+                )
                 continue
             streams = payload.get("streams") or []
             video = next(
@@ -139,13 +150,13 @@ class PlaybackManager:
     def sources(self, user_id: str, entity_id: str) -> list[dict]:
         self.catalog.require_entity(user_id, entity_id)
         rows = self.db.execute(
-            "SELECT id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload FROM media_sources WHERE entity_id=?",
+            "SELECT id,media_file_id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload FROM media_sources WHERE entity_id=? ORDER BY id",
             (entity_id,),
         )
         if not rows:
             self.probe_entity(entity_id)
             rows = self.db.execute(
-                "SELECT id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload FROM media_sources WHERE entity_id=?",
+                "SELECT id,media_file_id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload FROM media_sources WHERE entity_id=? ORDER BY id",
                 (entity_id,),
             )
         sidecars = [
@@ -166,60 +177,116 @@ class PlaybackManager:
         return [
             {
                 "id": row[0],
-                "container": row[1],
-                "durationSeconds": row[2],
-                "bitrate": row[3],
-                "width": row[4],
-                "height": row[5],
-                "videoCodec": row[6],
-                "audioCodec": row[7],
-                "streams": (json.loads(row[8]).get("streams") or []) + sidecars,
+                "mediaFileId": row[1],
+                "container": row[2],
+                "durationSeconds": row[3],
+                "bitrate": row[4],
+                "width": row[5],
+                "height": row[6],
+                "videoCodec": row[7],
+                "audioCodec": row[8],
+                "streams": (json.loads(row[9]).get("streams") or []) + sidecars,
             }
             for row in rows
         ]
 
     @staticmethod
-    def _direct(source: dict, profile: dict) -> bool:
+    def _profile_values(profile: dict, key: str, defaults: set[str]) -> set[str]:
+        if key not in profile or profile[key] is None:
+            return defaults
+        value = profile[key]
+        if not isinstance(value, (list, tuple, set)):
+            return set()
+        return {str(item).strip().lower() for item in value if str(item).strip()}
+
+    @staticmethod
+    def _container_values(value: str | None) -> set[str]:
+        aliases = {"matroska": "mkv", "mpegts": "ts", "quicktime": "mov"}
+        return {
+            aliases.get(part.strip().lower(), part.strip().lower())
+            for part in str(value or "").split(",")
+            if part.strip()
+        }
+
+    @classmethod
+    def _direct(cls, source: dict, profile: dict) -> bool:
+        if profile.get("forceTranscoding") is True:
+            return False
         if str(profile.get("engine") or "").lower() == "mpv":
             return True
-        containers = {
-            str(value).lower() for value in profile.get("containers") or ["mp4", "webm"]
-        }
-        video = {
-            str(value).lower()
-            for value in profile.get("videoCodecs") or ["h264", "vp9", "av1"]
-        }
-        audio = {
-            str(value).lower()
-            for value in profile.get("audioCodecs") or ["aac", "opus", "vorbis"]
-        }
-        source_containers = set(str(source.get("container") or "").lower().split(","))
+        containers = cls._profile_values(profile, "containers", {"mp4", "webm"})
+        containers |= {"mkv"} if "matroska" in containers else set()
+        containers |= {"ts"} if "mpegts" in containers else set()
+        video = cls._profile_values(profile, "videoCodecs", {"h264", "vp9", "av1"})
+        audio = cls._profile_values(profile, "audioCodecs", {"aac", "opus", "vorbis"})
+        source_containers = cls._container_values(source.get("container"))
+        maximum_bitrate = profile.get("maxStreamingBitrate")
+        bitrate_ok = (
+            not maximum_bitrate
+            or not source.get("bitrate")
+            or source["bitrate"] <= int(maximum_bitrate)
+        )
         return (
             bool(source_containers & containers)
-            and source.get("videoCodec") in video
-            and source.get("audioCodec") in audio
+            and str(source.get("videoCodec") or "").lower() in video
+            and str(source.get("audioCodec") or "").lower() in audio
+            and bitrate_ok
         )
 
     def negotiate(self, user_id: str, entity_id: str, profile: dict) -> dict:
         sources = self.sources(user_id, entity_id)
         if not sources:
-            raise HTTPException(409, "Media has not been probed or is unavailable.")
-        source = sources[0]
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "MEDIA_NOT_READY",
+                    "message": "Media has not been probed or is unavailable.",
+                },
+                headers={"Retry-After": "2"},
+            )
+        requested_source_id = profile.get("mediaSourceId")
+        if requested_source_id:
+            source = next(
+                (value for value in sources if value["id"] == requested_source_id),
+                None,
+            )
+            if source is None:
+                raise HTTPException(404, "Media source not found.")
+        else:
+            source = sources[0]
+        direct_only = profile.get("directPlayOnly") is True
+        logger.info(
+            "playback negotiation entity_id=%s source_id=%s engine=%s force_transcoding=%s direct_play_only=%s",
+            entity_id,
+            source["id"],
+            profile.get("engine"),
+            profile.get("forceTranscoding") is True,
+            direct_only,
+        )
         access = issue_ticket(user_id, "resource", 6 * 60 * 60, entity=entity_id)
         if self._direct(source, profile):
             return {
                 "mode": "direct",
                 "source": source,
-                "url": f"/api/playback/items/{entity_id}/stream?access={access}",
+                "url": f"/api/playback/items/{entity_id}/stream?mediaSourceId={source['id']}&access={access}",
                 "mimeType": self._mime(source),
             }
+        if direct_only:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "DIRECT_PLAY_UNAVAILABLE",
+                    "message": "The selected media cannot be played directly by this client.",
+                },
+            )
         return self._transcode(user_id, entity_id, source, access, profile)
 
     @staticmethod
     def _mime(source: dict) -> str:
-        container = str(source.get("container") or "").split(",", 1)[0]
+        container = str(source.get("container") or "").split(",", 1)[0].lower()
         return {
             "matroska": "video/x-matroska",
+            "mkv": "video/x-matroska",
             "webm": "video/webm",
             "mov": "video/mp4",
             "mp4": "video/mp4",
@@ -230,7 +297,10 @@ class PlaybackManager:
     ) -> dict:
         executable = ffmpeg_path()
         if not executable:
-            raise HTTPException(503, "FFmpeg is not available.")
+            raise HTTPException(
+                503,
+                detail={"code": "FFMPEG_UNAVAILABLE", "message": "FFmpeg is not available."},
+            )
         maximum = max(1, int(os.getenv("MAX_TRANSCODES", "2")))
         per_user_maximum = max(1, int(os.getenv("MAX_TRANSCODES_PER_USER", "1")))
         with self._lock:
@@ -243,11 +313,24 @@ class PlaybackManager:
                 if (value := self._processes.get(session)) and value.poll() is None
             ]
             if len(active) >= maximum or len(per_user) >= per_user_maximum:
-                raise HTTPException(429, "Transcoding capacity is currently in use.")
+                raise HTTPException(
+                    429,
+                    detail={
+                        "code": "TRANSCODE_CAPACITY",
+                        "message": "Transcoding capacity is currently in use.",
+                    },
+                    headers={"Retry-After": "2"},
+                )
             session_id = str(uuid.uuid4())
             output = Path(tempfile.gettempdir()) / "zenstream-transcodes" / session_id
             output.mkdir(parents=True, exist_ok=False)
-            media_file_id, path = self._file_path(entity_id)
+            media_file_id, path = self._file_path(entity_id, source.get("mediaFileId"))
+            audio_index = profile.get("audioStreamIndex")
+            audio_map = (
+                f"0:{int(audio_index)}"
+                if audio_index is not None and int(audio_index) >= 0
+                else "0:a:0?"
+            )
             command = [
                 executable,
                 "-hide_banner",
@@ -259,13 +342,25 @@ class PlaybackManager:
                 "-map",
                 "0:v:0",
                 "-map",
-                "0:a:0?",
+                audio_map,
                 "-c:v",
                 "libx264",
                 "-preset",
                 "veryfast",
                 "-c:a",
                 "aac",
+            ]
+            maximum_bitrate = profile.get("maxStreamingBitrate")
+            if maximum_bitrate:
+                command.extend(
+                    [
+                        "-maxrate",
+                        str(int(maximum_bitrate)),
+                        "-bufsize",
+                        str(int(maximum_bitrate) * 2),
+                    ]
+                )
+            command.extend([
                 "-f",
                 "hls",
                 "-hls_time",
@@ -275,7 +370,7 @@ class PlaybackManager:
                 "-hls_segment_filename",
                 str(output / "segment-%06d.ts"),
                 str(output / "master.m3u8"),
-            ]
+            ])
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
@@ -318,9 +413,20 @@ class PlaybackManager:
             ("completed" if process.returncode == 0 else "failed", session_id),
         )
 
-    def direct_path(self, user_id: str, entity_id: str) -> Path:
+    def direct_path(
+        self, user_id: str, entity_id: str, media_source_id: str | None = None
+    ) -> Path:
         self.catalog.require_entity(user_id, entity_id)
-        return self._file_path(entity_id)[1]
+        media_file_id = None
+        if media_source_id:
+            rows = self.db.execute(
+                "SELECT media_file_id FROM media_sources WHERE id=? AND entity_id=?",
+                (media_source_id, entity_id),
+            )
+            if not rows:
+                raise HTTPException(404, "Media source not found.")
+            media_file_id = rows[0][0]
+        return self._file_path(entity_id, media_file_id)[1]
 
     def session_file(self, user_id: str, session_id: str, filename: str) -> Path:
         rows = self.db.execute(

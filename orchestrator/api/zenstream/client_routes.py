@@ -277,8 +277,11 @@ async def negotiate_playback(entity_id: str, request: Request):
 @router.api_route("/api/playback/items/{entity_id}/stream", methods=["GET", "HEAD"])
 async def direct_stream(entity_id: str, request: Request):
     account = account_from_access(request)
+    media_source_id = request.query_params.get("mediaSourceId")
     return FileResponse(
-        await asyncio.to_thread(media.direct_path, account["id"], entity_id)
+        await asyncio.to_thread(
+            media.direct_path, account["id"], entity_id, media_source_id
+        )
     )
 
 

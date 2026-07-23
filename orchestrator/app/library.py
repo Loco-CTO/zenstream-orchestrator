@@ -668,7 +668,7 @@ class LibraryScanner:
         }:
             return None
         rows = self.db.execute(
-            "SELECT role,file_hash FROM media_files WHERE entity_id=? AND role IN ('video','audio') ORDER BY role,relative_path",
+            "SELECT role,file_hash FROM media_files WHERE entity_id=? AND role='media' ORDER BY role,relative_path",
             (entity_id,),
         )
         if not rows or any(not row[1] for row in rows):
@@ -1624,7 +1624,7 @@ class LibraryScanner:
                     ([language, None, stat.st_size, stat.st_mtime_ns, file_hash, old[0]] if has_hash else [language, None, stat.st_size, stat.st_mtime_ns, old[0]]),
                 )
                 result["updated"] += 1
-                if content_changed and role in {"video", "audio"}:
+                if content_changed and role == "media":
                     result["content_changed"] = True
             else:
                 if has_hash:
@@ -1638,14 +1638,14 @@ class LibraryScanner:
                         (new_id(), entity_id, relative_path, role, language, None, stat.st_size, stat.st_mtime_ns),
                     )
                 result["added"] += 1
-                if role in {"video", "audio"}:
+                if role == "media":
                     result["content_changed"] = True
         for key, old in existing.items():
             if key in seen:
                 continue
             self.db.execute("DELETE FROM media_files WHERE id=?", (old[0],))
             result["removed"] += 1
-            if old[2] in {"video", "audio"}:
+            if old[2] == "media":
                 result["content_changed"] = True
         if result["added"] or result["updated"] or result["removed"]:
             self._mark_changed(entity_id)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -324,19 +325,26 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
     target_root.mkdir(parents=True, exist_ok=True)
     target = target_root / f"{hashlib.sha256(str(source).encode()).hexdigest()}.vtt"
     if not target.is_file() or target.stat().st_mtime_ns < source.stat().st_mtime_ns:
-        completed = await asyncio.create_subprocess_exec(
-            executable,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(source),
-            str(target),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        if await completed.wait() != 0:
+        try:
+            completed = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    executable,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(source),
+                    str(target),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise HTTPException(422, "Subtitle track could not be converted.") from error
+        if completed.returncode != 0:
             raise HTTPException(422, "Subtitle track could not be converted.")
     return FileResponse(target, media_type="text/vtt")
 

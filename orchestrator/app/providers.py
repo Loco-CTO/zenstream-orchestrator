@@ -30,9 +30,6 @@ LOGO = "Logo"
 BANNER = "Banner"
 IMAGE_TYPES = set(ARTWORK_CATEGORIES)
 
-# The first provider is authoritative for identity and hierarchy resolution.
-# Secondary providers may enrich the same entity but must never be flagged as
-# the entity's primary ID.
 PRIMARY_PROVIDER_BY_ENTITY = {
     "series": "tvdb",
     "season": "tvdb",

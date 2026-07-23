@@ -1,9 +1,3 @@
-"""Accounts, permissions, preferences, user state, and media catalog.
-
-Revision ID: 0011_accounts_catalog
-Revises: 0010_metadata_languages
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -142,4 +136,3 @@ def downgrade():
         "user_sessions",
     ):
         op.execute(sa.text(f"DROP TABLE IF EXISTS {table}"))
-

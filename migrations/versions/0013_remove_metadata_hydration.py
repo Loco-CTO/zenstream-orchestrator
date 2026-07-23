@@ -1,10 +1,3 @@
-"""Remove the obsolete on-demand metadata hydration queue.
-
-Metadata is now populated for every configured language during scans and the
-Refresh metadata task. Keeping a request table would imply that hydration is
-still part of the runtime contract.
-"""
-
 from alembic import op
 import sqlalchemy as sa
 

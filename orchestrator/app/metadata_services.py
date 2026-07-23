@@ -1,5 +1,3 @@
-"""Application services for metadata ingestion and cache-only reads."""
-
 from __future__ import annotations
 
 import json

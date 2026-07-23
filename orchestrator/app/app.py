@@ -1,5 +1,3 @@
-"""FastAPI application composition and service lifespan."""
-
 import os
 from contextlib import asynccontextmanager
 

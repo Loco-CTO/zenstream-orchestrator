@@ -1,5 +1,3 @@
-"""Application, dashboard-administrator, and Syncplay API routes."""
-
 import asyncio
 import math
 import os

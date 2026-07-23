@@ -1,5 +1,3 @@
-"""Durable on-demand localized metadata hydration requests."""
-
 from alembic import op
 import sqlalchemy as sa
 

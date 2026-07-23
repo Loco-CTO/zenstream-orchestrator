@@ -1,5 +1,3 @@
-"""Persistent scheduler definitions and non-blocking background job execution."""
-
 from __future__ import annotations
 
 import json

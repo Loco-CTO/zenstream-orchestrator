@@ -1,5 +1,3 @@
-"""Authentication helpers shared by ZenStream REST and WebSocket APIs."""
-
 from __future__ import annotations
 
 import base64

@@ -1,5 +1,3 @@
-"""Preferences owned by Orchestrator accounts."""
-
 from __future__ import annotations
 
 from app.config import Config

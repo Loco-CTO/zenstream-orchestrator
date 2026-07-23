@@ -1,10 +1,3 @@
-"""Pure metadata policy and value helpers.
-
-This module deliberately has no database, HTTP, FastAPI, or filesystem
-dependencies. Provider adapters and route services use the same locale and
-artwork rules through these helpers.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass

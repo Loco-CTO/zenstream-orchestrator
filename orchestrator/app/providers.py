@@ -1,5 +1,3 @@
-"""Small provider clients used by the administrator library preview."""
-
 from __future__ import annotations
 
 import threading

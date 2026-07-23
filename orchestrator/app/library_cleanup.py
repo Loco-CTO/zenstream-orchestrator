@@ -1,5 +1,3 @@
-"""Atomic relationship-aware cleanup for library inventory and metadata."""
-
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,9 +1,3 @@
-"""Remove obsolete gateway account and preference tables.
-
-Revision ID: 0012_remove_gateway_tables
-Revises: 0011_accounts_catalog
-"""
-
 from alembic import op
 import sqlalchemy as sa
 

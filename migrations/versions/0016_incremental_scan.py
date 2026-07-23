@@ -1,5 +1,3 @@
-"""Store streamed content identities for incremental library reconciliation."""
-
 from alembic import op
 import sqlalchemy as sa
 

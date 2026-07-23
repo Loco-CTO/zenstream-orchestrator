@@ -1,5 +1,3 @@
-"""Persistent scheduler definitions and non-blocking metadata job runs."""
-
 from alembic import op
 import sqlalchemy as sa
 

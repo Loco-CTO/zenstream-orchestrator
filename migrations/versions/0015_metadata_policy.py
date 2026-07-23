@@ -1,5 +1,3 @@
-"""Canonicalize metadata artwork values for the shared metadata policy."""
-
 from alembic import op
 import sqlalchemy as sa
 

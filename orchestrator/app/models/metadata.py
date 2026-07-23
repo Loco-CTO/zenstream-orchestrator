@@ -1,5 +1,3 @@
-"""Provider credentials and locale-keyed metadata cache helpers."""
-
 from __future__ import annotations
 
 import base64

@@ -1,5 +1,3 @@
-"""Invalidate cached trailers so the localized URL shape is refetched."""
-
 from alembic import op
 import sqlalchemy as sa
 

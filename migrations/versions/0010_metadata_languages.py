@@ -1,5 +1,3 @@
-"""Persist administrator-selected metadata languages."""
-
 from alembic import op
 import sqlalchemy as sa
 

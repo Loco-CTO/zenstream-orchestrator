@@ -1,5 +1,3 @@
-"""Media probing and direct/HLS playback runtime."""
-
 from __future__ import annotations
 
 import json

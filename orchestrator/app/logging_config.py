@@ -1,5 +1,3 @@
-"""Structured, redacted logging for orchestrator background work."""
-
 from __future__ import annotations
 
 import logging

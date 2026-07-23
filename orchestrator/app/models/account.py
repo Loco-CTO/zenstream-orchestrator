@@ -1,5 +1,3 @@
-"""ZenStream user accounts, bearer sessions, and library grants."""
-
 from __future__ import annotations
 
 import hashlib

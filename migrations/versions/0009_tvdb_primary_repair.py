@@ -1,5 +1,3 @@
-"""Repair provider primary flags and requeue incomplete TVDB hierarchy IDs."""
-
 from alembic import op
 import sqlalchemy as sa
 

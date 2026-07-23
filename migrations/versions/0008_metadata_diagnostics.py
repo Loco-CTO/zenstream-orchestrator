@@ -1,5 +1,3 @@
-"""Normalize artwork categories and retain structured background failures."""
-
 from alembic import op
 import sqlalchemy as sa
 

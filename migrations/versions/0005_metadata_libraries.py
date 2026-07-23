@@ -1,5 +1,3 @@
-"""Metadata providers, native library inventory, and scan jobs."""
-
 from alembic import op
 import sqlalchemy as sa
 

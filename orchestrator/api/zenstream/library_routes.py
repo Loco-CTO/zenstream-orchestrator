@@ -1,5 +1,3 @@
-"""Administrator APIs for provider settings and library previews."""
-
 from __future__ import annotations
 
 import asyncio

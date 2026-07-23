@@ -1,5 +1,3 @@
-"""Public ZenStream account, catalog, preference, and state APIs."""
-
 from __future__ import annotations
 
 import asyncio
@@ -343,7 +341,9 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
                 timeout=120,
             )
         except (OSError, subprocess.SubprocessError) as error:
-            raise HTTPException(422, "Subtitle track could not be converted.") from error
+            raise HTTPException(
+                422, "Subtitle track could not be converted."
+            ) from error
         if completed.returncode != 0:
             raise HTTPException(422, "Subtitle track could not be converted.")
     return FileResponse(target, media_type="text/vtt")

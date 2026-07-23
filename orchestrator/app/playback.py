@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -29,12 +31,34 @@ def _iso(value: datetime | None = None) -> str:
     return (value or datetime.now(timezone.utc)).isoformat()
 
 
+def _media_tool_path(name: str) -> str | None:
+    override = os.getenv("FFMPEG_PATH" if name == "ffmpeg" else "FFPROBE_PATH")
+    if override:
+        return override
+    executable = f"{name}.exe" if platform.system() == "Windows" else name
+    roots = [
+        Path(getattr(sys, "_MEIPASS", "")) if getattr(sys, "_MEIPASS", None) else None,
+        Path(__file__).resolve().parents[2],
+    ]
+    platform_name = {
+        "Windows": "windows",
+        "Darwin": "macos",
+    }.get(platform.system(), "linux")
+    for root in roots:
+        if root is None:
+            continue
+        candidate = root / "assets" / "ffmpeg" / platform_name / executable
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which(executable) or shutil.which(name)
+
+
 def ffmpeg_path() -> str | None:
-    return os.getenv("FFMPEG_PATH") or shutil.which("ffmpeg")
+    return _media_tool_path("ffmpeg")
 
 
 def ffprobe_path() -> str | None:
-    return os.getenv("FFPROBE_PATH") or shutil.which("ffprobe")
+    return _media_tool_path("ffprobe")
 
 
 class PlaybackManager:

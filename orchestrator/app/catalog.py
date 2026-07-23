@@ -32,6 +32,13 @@ class Catalog:
             )
         }
 
+    def _has_table(self, name: str) -> bool:
+        return bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            )
+        )
+
     def require_library(self, user_id: str, library_id: str) -> dict:
         if library_id not in self.allowed_libraries(user_id):
             raise HTTPException(404, "Library not found.")
@@ -48,7 +55,23 @@ class Catalog:
             "type": row[2],
             "scanState": row[3],
             "lastScanFinishedAt": row[4],
+            "supportsLastAdded": self._supports_last_added(library_id),
         }
+
+    def _supports_last_added(self, library_id: str) -> bool:
+        return bool(
+            self.db.execute(
+                "SELECT 1 FROM library_entities child JOIN library_entities parent ON parent.id=child.parent_id WHERE parent.library_id=? LIMIT 1",
+                (library_id,),
+            )
+            or (
+                self._has_table("collection_members")
+                and self.db.execute(
+                "SELECT 1 FROM collection_members m JOIN library_entities parent ON parent.id=m.collection_entity_id WHERE parent.library_id=? LIMIT 1",
+                (library_id,),
+                )
+            )
+        )
 
     def libraries(self, user_id: str) -> list[dict]:
         allowed = self.allowed_libraries(user_id)
@@ -65,6 +88,7 @@ class Catalog:
                 "type": row[2],
                 "scanState": row[3],
                 "lastScanFinishedAt": row[4],
+                "supportsLastAdded": self._supports_last_added(row[0]),
             }
             for row in rows
         ]
@@ -171,7 +195,12 @@ class Catalog:
         }
 
     def _serialize(
-        self, user_id: str, row, metadata: dict, children: list[str] | None = None
+        self,
+        user_id: str,
+        row,
+        metadata: dict,
+        children: list[str] | None = None,
+        dates: dict | None = None,
     ) -> dict:
         season_id = row[2] if row[3] == "episode" else None
         series_id = row[2] if row[3] == "season" else None
@@ -189,11 +218,71 @@ class Catalog:
             "seasonNumber": row[5],
             "episodeNumber": row[6],
             "episodeEndNumber": row[7],
-            "dateAdded": row[8],
+            "dateAdded": (dates or {}).get("addedAt", row[8]),
+            "addedAt": (dates or {}).get("addedAt", row[8]),
+            "lastAddedAt": (dates or {}).get("lastAddedAt", row[8]),
             "updatedAt": row[9],
             "metadata": metadata,
             "userState": self._state(user_id, row[0]),
             "childIds": children or [],
+        }
+
+    def _date_values(
+        self, library_id: str, allowed_library_ids: set[str] | None = None
+    ) -> dict[str, dict[str, str]]:
+        """Return filesystem-derived Added and Last added values per entity."""
+        scope = allowed_library_ids or {library_id}
+        placeholders = ",".join("?" for _ in scope)
+        rows = self.db.execute(
+            f"SELECT id,parent_id,entity_type,created_at FROM library_entities WHERE library_id IN ({placeholders})",
+            list(scope),
+        )
+        entities = {row[0]: row for row in rows}
+        children: dict[str, list[str]] = {}
+        for entity_id, parent_id, _, _ in rows:
+            if parent_id:
+                children.setdefault(parent_id, []).append(entity_id)
+        if self._has_table("collection_members"):
+            for collection_id, member_id in self.db.execute(
+                f"SELECT m.collection_entity_id,m.source_entity_id FROM collection_members m JOIN library_entities c ON c.id=m.collection_entity_id WHERE c.library_id IN ({placeholders})",
+                list(scope),
+            ):
+                children.setdefault(collection_id, []).append(member_id)
+
+        media: dict[str, list[str]] = {}
+        if self._has_table("media_files"):
+            for entity_id, modified_ns in self.db.execute(
+                f"SELECT entity_id,modified_ns FROM media_files WHERE role IN ('video','audio') AND entity_id IN (SELECT id FROM library_entities WHERE library_id IN ({placeholders})) AND modified_ns IS NOT NULL",
+                list(scope),
+            ):
+                media.setdefault(entity_id, []).append(
+                    datetime.fromtimestamp(modified_ns / 1_000_000_000, tz=timezone.utc).isoformat()
+                )
+
+        memo: dict[str, tuple[str, str]] = {}
+
+        def aggregate(entity_id: str, visiting: set[str] | None = None) -> tuple[str, str]:
+            if entity_id in memo:
+                return memo[entity_id]
+            visiting = visiting or set()
+            if entity_id in visiting:
+                fallback = entities[entity_id][3] or ""
+                return fallback, fallback
+            visiting.add(entity_id)
+            timestamps = list(media.get(entity_id, []))
+            for child_id in children.get(entity_id, []):
+                if child_id in entities:
+                    child_added, child_last = aggregate(child_id, visiting)
+                    timestamps.extend(value for value in (child_added, child_last) if value)
+            fallback = entities[entity_id][3] or ""
+            result = (min(timestamps) if timestamps else fallback, max(timestamps) if timestamps else fallback)
+            memo[entity_id] = result
+            return result
+
+        return {
+            entity_id: {"addedAt": added, "lastAddedAt": last_added}
+            for entity_id in entities
+            for added, last_added in [aggregate(entity_id)]
         }
 
     def list_items(
@@ -217,10 +306,11 @@ class Catalog:
             "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id=? AND parent_id IS ?",
             (library_id, parent_id),
         )
+        dates = self._date_values(library_id, self.allowed_libraries(user_id))
         values = []
         for row in rows:
             metadata = self.metadata(user_id, row[0], language)["metadata"]
-            values.append(self._serialize(user_id, row, metadata))
+            values.append(self._serialize(user_id, row, metadata, dates=dates.get(row[0])))
         hierarchy_parent = None
         if parent_id:
             hierarchy_parent = self.require_entity(user_id, parent_id)[3]
@@ -245,14 +335,15 @@ class Catalog:
             values.sort(key=hierarchy_key)
         else:
             reverse = sort_order.lower() == "descending"
-            selected_sort = sort_by or "title"
+            selected_sort = sort_by if sort_by in {"rating", "title", "added", "lastAdded", "release", "runtime"} else "title"
             key = {
-                "dateAdded": lambda value: value.get("dateAdded") or "",
-                "releaseDate": lambda value: value["metadata"].get("date") or "",
+                "added": lambda value: value.get("addedAt") or "",
+                "lastAdded": lambda value: value.get("lastAddedAt") or "",
+                "release": lambda value: value["metadata"].get("date") or "",
                 "rating": lambda value: value["metadata"].get("communityRating") or 0,
                 "runtime": lambda value: value["metadata"].get("runtimeMinutes") or 0,
             }.get(selected_sort, lambda value: str(value.get("name") or "").casefold())
-            values.sort(key=lambda value: (key(value), value["id"]), reverse=reverse)
+            values.sort(key=lambda value: (key(value), str(value.get("name") or "").casefold(), value["id"]), reverse=reverse)
         total = len(values)
         start = (page - 1) * page_size
         return {

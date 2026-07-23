@@ -1612,7 +1612,7 @@ class LibraryScanner:
             key = (relative_path, role)
             seen.add(key)
             old = existing.get(key)
-            old_hash = old[8] if old and has_hash else None
+            old_hash = old[7] if old and has_hash else None
             if old and old[5] == stat.st_size and old[6] == stat.st_mtime_ns and (not has_hash or old_hash):
                 result["unchanged"] += 1
                 continue

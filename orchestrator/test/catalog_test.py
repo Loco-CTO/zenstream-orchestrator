@@ -182,6 +182,45 @@ class CatalogTest(unittest.TestCase):
             ["episode-2", "episode-10", "episode-unset", "episode-1"],
         )
 
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_added_and_last_added_aggregate_playable_file_mtimes(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("series-2", "allowed", None, "series", "Other", None, None, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("episode-20", "allowed", "series-2", "episode", "Other/Episode", 1, 1, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES(?,?,?,?,?)",
+            ("file-1", "episode-1", "episode-1.mkv", "video", 1_700_000_000_000_000_000),
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES(?,?,?,?,?)",
+            ("file-2", "episode-2", "episode-2.mkv", "video", 1_800_000_000_000_000_000),
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES(?,?,?,?,?)",
+            ("file-3", "episode-20", "episode-20.mkv", "video", 1_750_000_000_000_000_000),
+        )
+        catalog = self.catalog()
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {"title": entity_id}
+        }
+
+        added = catalog.list_items(user_id, "allowed", "en", sort_by="added", sort_order="ascending")
+        latest = catalog.list_items(user_id, "allowed", "en", sort_by="lastAdded", sort_order="descending")
+
+        self.assertEqual([item["id"] for item in added["items"]], ["series-1", "series-2"])
+        self.assertEqual([item["id"] for item in latest["items"]], ["series-1", "series-2"])
+        self.assertEqual(added["items"][0]["addedAt"], "2023-11-14T22:13:20+00:00")
+        self.assertEqual(added["items"][0]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
+
     def test_argon_session_revocation_and_legacy_password_upgrade(self):
         account = self.account()
         created = account.create("local", "password-123")

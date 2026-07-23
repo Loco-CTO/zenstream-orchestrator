@@ -26,6 +26,27 @@ from app.logging_config import get_logger
 logger = get_logger("metadata")
 
 
+def _canonical_metadata_language(value: object) -> str | None:
+    raw = str(value or "").strip().replace("_", "-")
+    if not raw:
+        return None
+    parts = raw.split("-", 1)
+    base = parts[0].lower()
+    base = {
+        "deu": "de",
+        "eng": "en",
+        "fra": "fr",
+        "ita": "it",
+        "jpn": "ja",
+        "kor": "ko",
+        "por": "pt",
+        "rus": "ru",
+        "spa": "es",
+        "zho": "zh",
+    }.get(base, base)
+    return base if len(parts) == 1 else f"{base}-{parts[1].upper()}"
+
+
 TEXT_FIELDS = {
     "title",
     "originalTitle",
@@ -144,7 +165,7 @@ class MetadataReadService:
         available = {locale for _, locale in payloads}
         original = next(
             (
-                str(value.get("originalLanguage"))
+                _canonical_metadata_language(value.get("originalLanguage"))
                 for value in payloads.values()
                 if value.get("originalLanguage")
             ),

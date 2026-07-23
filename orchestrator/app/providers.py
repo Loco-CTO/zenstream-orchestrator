@@ -896,7 +896,10 @@ class TVDBClient(ProviderClient):
             ),
             "year": str(data.get("year") or dates or "")[:4] or None,
             "tags": _names(genres),
-            "originalLanguage": data.get("originalLanguage"),
+            "originalLanguage": _catalog_language_tag(
+                str(data.get("originalLanguage") or "")
+            )
+            or data.get("originalLanguage"),
             "trailers": trailers,
             "people": people,
             "provider": "tvdb",

@@ -26,6 +26,7 @@ from app.models.syncplay import (
     pause,
     schedule,
 )
+from app.playback import ffmpeg_path, ffprobe_path
 from app.client_auth import bearer_token, websocket_account
 from app.models.account import Account
 from api.zenstream.version import _main_version
@@ -293,10 +294,8 @@ async def version():
 
 @router.get("/api/config")
 async def mobile_config():
-    import shutil
-
-    ffmpeg = os.getenv("FFMPEG_PATH") or shutil.which("ffmpeg")
-    ffprobe = os.getenv("FFPROBE_PATH") or shutil.which("ffprobe")
+    ffmpeg = ffmpeg_path()
+    ffprobe = ffprobe_path()
     return {
         "apiVersion": 2,
         "catalog": True,

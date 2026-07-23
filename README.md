@@ -28,6 +28,10 @@ ZenStream Orchestrator is a robust application server that extends the functiona
 
 ## 📦 Installation
 
+The Docker image includes static `ffmpeg` and `ffprobe` binaries, so container
+runtime playback does not require host media-tool installation. `FFMPEG_PATH`
+and `FFPROBE_PATH` remain optional overrides for custom builds.
+
 1. Clone the repository:
    ```sh
    git clone https://github.com/Rystal-Team/zenstream-orchestrator.git

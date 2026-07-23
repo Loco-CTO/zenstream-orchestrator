@@ -30,6 +30,9 @@ class DockerLayoutTest(unittest.TestCase):
         dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertIn("COPY assets/ ./assets/", dockerfile)
+        self.assertIn("FROM mwader/static-ffmpeg:7.1.1 AS media-tools", dockerfile)
+        self.assertIn("COPY --from=media-tools /ffmpeg ./assets/ffmpeg/linux/ffmpeg", dockerfile)
+        self.assertIn("COPY --from=media-tools /ffprobe ./assets/ffmpeg/linux/ffprobe", dockerfile)
         self.assertIn("COPY frontend/ ./", dockerfile)
         self.assertIn("COPY frontend/package.json ./", dockerfile)
         self.assertIn(

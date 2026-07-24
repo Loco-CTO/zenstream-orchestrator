@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -303,17 +304,55 @@ async def playback_output(session_id: str, filename: str, request: Request):
     return FileResponse(path, media_type="video/mp2t")
 
 
+def _lyrics_to_vtt(source: Path) -> str:
+    text = source.read_text(encoding="utf-8-sig", errors="replace")
+    timed: list[tuple[float, str]] = []
+    for line in text.splitlines():
+        stamps = re.findall(r"\[(\d+):(\d{2})(?:[.:](\d{1,3}))?\]", line)
+        lyric = re.sub(r"\[[^\]]+\]", "", line).strip()
+        if not lyric:
+            continue
+        for minutes, seconds, fraction in stamps:
+            value = float(minutes) * 60 + float(seconds)
+            if fraction:
+                value += int(fraction.ljust(3, "0")) / 1000
+            timed.append((value, lyric))
+    if timed:
+        timed.sort(key=lambda value: value[0])
+        cues = []
+        for index, (start, lyric) in enumerate(timed):
+            end = timed[index + 1][0] if index + 1 < len(timed) else start + 8
+            cues.append(f"{index + 1}\n{_vtt_time(start)} --> {_vtt_time(max(end, start + 0.5))}\n{lyric}\n")
+        return "WEBVTT\n\n" + "\n".join(cues)
+    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("[")]
+    return "WEBVTT\n\n1\n00:00:00.000 --> 99:59:59.000\n" + "\n".join(lines) + "\n"
+
+
+def _vtt_time(seconds: float) -> str:
+    hours, remainder = divmod(max(0.0, seconds), 3600)
+    minutes, remainder = divmod(remainder, 60)
+    return f"{int(hours):02d}:{int(minutes):02d}:{remainder:06.3f}"
+
+
 @router.get("/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt")
 async def subtitle(entity_id: str, media_file_id: str, request: Request):
     account = account_from_access(request)
     catalog.require_entity(account["id"], entity_id)
     rows = catalog.db.execute(
-        "SELECT f.relative_path,l.directory FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.id=? AND f.entity_id=? AND f.role='subtitle'",
+        "SELECT f.relative_path,l.directory,f.role FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.id=? AND f.entity_id=? AND f.role IN ('subtitle','lyrics')",
         (media_file_id, entity_id),
     )
     if not rows:
         raise HTTPException(404, "Subtitle track not found.")
     source = Path(rows[0][1]) / rows[0][0]
+    role = rows[0][2]
+    if role == "lyrics":
+        target_root = Path(catalog.db.db_file).parent / "subtitle-cache"
+        target_root.mkdir(parents=True, exist_ok=True)
+        target = target_root / f"{hashlib.sha256(str(source).encode()).hexdigest()}.vtt"
+        if not target.is_file() or target.stat().st_mtime_ns < source.stat().st_mtime_ns:
+            target.write_text(_lyrics_to_vtt(source), encoding="utf-8")
+        return FileResponse(target, media_type="text/vtt")
     if source.suffix.lower() == ".vtt":
         return FileResponse(source, media_type="text/vtt")
     executable = ffmpeg_path()

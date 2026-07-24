@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import platform
@@ -188,11 +189,15 @@ class PlaybackManager:
                 "codec_type": "subtitle",
                 "codec_name": Path(relative_path).suffix.lstrip("."),
                 "fileId": file_id,
-                "tags": {"language": language} if language else {},
+                "kind": role,
+                "tags": {
+                    **({"language": language} if language else {}),
+                    "title": "Lyrics" if role == "lyrics" else "",
+                },
             }
-            for index, (file_id, relative_path, language) in enumerate(
+            for index, (file_id, relative_path, language, role) in enumerate(
                 self.db.execute(
-                    "SELECT id,relative_path,language FROM media_files WHERE entity_id=? AND role='subtitle' ORDER BY relative_path COLLATE NOCASE",
+                    "SELECT id,relative_path,language,role FROM media_files WHERE entity_id=? AND role IN ('subtitle','lyrics') ORDER BY relative_path COLLATE NOCASE",
                     (entity_id,),
                 )
             )

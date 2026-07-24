@@ -53,8 +53,14 @@ AUDIO_EXTENSIONS = {
     ".ape",
     ".wv",
 }
-SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
-LYRIC_EXTENSIONS = {".lrc", ".elrc", ".txt"}
+# Sidecars are deliberately broader than the formats rendered natively by
+# either client. The playback API normalizes text and bitmap subtitle formats
+# to WebVTT at request time.
+SUBTITLE_EXTENSIONS = {
+    ".srt", ".ass", ".ssa", ".vtt", ".sub", ".smi", ".sami", ".ttml",
+    ".dfxp", ".xml", ".sup", ".idx",
+}
+LYRIC_EXTENSIONS = {".lrc", ".elrc", ".txt", ".lyrics", ".yrc"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
 ID_RE = re.compile(
     r"\[(?P<provider>tmdbid|tvdbid|imdbid)-(?P<id>[^\]]+)\]", re.IGNORECASE

@@ -215,7 +215,11 @@ class MetadataReadService:
                     None,
                 )
                 if nonempty(value):
-                    result[key] = value
+                    result[key] = (
+                        _canonical_metadata_language(value)
+                        if key == "originalLanguage"
+                        else value
+                    )
                     break
 
         images = [

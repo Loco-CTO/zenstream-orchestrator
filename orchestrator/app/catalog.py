@@ -272,6 +272,10 @@ class Catalog:
         direct = self._direct_state(row)
         leaves = self._playable_descendants(entity_id, entities, children)
         if not leaves or (len(leaves) == 1 and leaves[0] == entity_id):
+            if entities.get(entity_id, (None, ""))[1] in {"series", "season", "collection", "artist", "release"}:
+                direct["played"] = False
+                direct["playedPercentage"] = None
+                direct["unplayedItemCount"] = 0
             return direct
         leaf_states = [self._direct_state(self._state_row(user_id, leaf_id)) for leaf_id in leaves]
         direct["played"] = bool(leaf_states) and all(state["played"] for state in leaf_states)
@@ -549,6 +553,9 @@ class Catalog:
                 affected_id: self._direct_state(self._state_row(user_id, affected_id, cursor))
                 for affected_id in affected
             }
+            original_played = {
+                affected_id: state["played"] for affected_id, state in states.items()
+            }
             states[entity_id].update(
                 favorite=favorite,
                 played=played,
@@ -572,7 +579,7 @@ class Catalog:
                 affected.append(ancestor_id)
             for affected_id in dict.fromkeys(affected):
                 state = states[affected_id]
-                was_played = self._direct_state(self._state_row(user_id, affected_id, cursor))["played"]
+                was_played = original_played.get(affected_id, False)
                 next_played = bool(state["played"])
                 play_count = state["playCount"] + int(next_played and not was_played)
                 cursor.execute(

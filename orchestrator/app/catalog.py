@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -166,31 +167,117 @@ class Catalog:
             )
         return self._serialize(user_id, row, metadata, [child[0] for child in children])
 
-    def _state(self, user_id: str, entity_id: str) -> dict:
+    def _relationship_graph(self, user_id: str) -> tuple[dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]]:
+        allowed = self.allowed_libraries(user_id)
+        if not allowed:
+            return {}, {}, {}
+        placeholders = ",".join("?" for _ in allowed)
         rows = self.db.execute(
-            "SELECT favorite,played,play_count,position_seconds,duration_seconds,last_played_at FROM user_item_state WHERE user_id=? AND entity_id=?",
-            (user_id, entity_id),
+            f"SELECT id,parent_id,entity_type FROM library_entities WHERE library_id IN ({placeholders})",
+            list(allowed),
         )
-        if not rows:
+        entities = {row[0]: (row[1], row[2]) for row in rows}
+        children: dict[str, list[str]] = {}
+        parents: dict[str, list[str]] = {}
+        for entity_id, (parent_id, _) in entities.items():
+            if parent_id in entities:
+                children.setdefault(parent_id, []).append(entity_id)
+                parents.setdefault(entity_id, []).append(parent_id)
+        if self._has_table("collection_members"):
+            membership_rows = self.db.execute(
+                f"SELECT m.collection_entity_id,m.source_entity_id FROM collection_members m JOIN library_entities c ON c.id=m.collection_entity_id JOIN library_entities s ON s.id=m.source_entity_id WHERE c.library_id IN ({placeholders}) AND s.library_id IN ({placeholders})",
+                [*allowed, *allowed],
+            )
+            for collection_id, source_id in membership_rows:
+                if collection_id in entities and source_id in entities:
+                    children.setdefault(collection_id, []).append(source_id)
+                    parents.setdefault(source_id, []).append(collection_id)
+        return entities, children, parents
+
+    @staticmethod
+    def _walk_children(entity_id: str, children: dict[str, list[str]]) -> list[str]:
+        found: list[str] = []
+        pending = list(children.get(entity_id, []))
+        visited = {entity_id}
+        while pending:
+            child_id = pending.pop()
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            found.append(child_id)
+            pending.extend(children.get(child_id, []))
+        return found
+
+    @staticmethod
+    def _walk_parents(entity_id: str, parents: dict[str, list[str]]) -> list[str]:
+        found: list[str] = []
+        pending = list(parents.get(entity_id, []))
+        visited = {entity_id}
+        while pending:
+            parent_id = pending.pop()
+            if parent_id in visited:
+                continue
+            visited.add(parent_id)
+            found.append(parent_id)
+            pending.extend(parents.get(parent_id, []))
+        return found
+
+    def _playable_descendants(
+        self,
+        entity_id: str,
+        entities: dict[str, tuple[str | None, str]],
+        children: dict[str, list[str]],
+    ) -> list[str]:
+        leaf_types = {"movie", "episode", "track", "release"}
+        result: list[str] = []
+        for descendant_id in [entity_id, *self._walk_children(entity_id, children)]:
+            if children.get(descendant_id):
+                continue
+            if entities.get(descendant_id, (None, ""))[1] in leaf_types:
+                result.append(descendant_id)
+        return result
+
+    def _state_row(self, user_id: str, entity_id: str, cursor=None):
+        query = "SELECT favorite,played,play_count,position_seconds,duration_seconds,last_played_at FROM user_item_state WHERE user_id=? AND entity_id=?"
+        rows = cursor.execute(query, (user_id, entity_id)).fetchall() if cursor else self.db.execute(query, (user_id, entity_id))
+        return rows[0] if rows else None
+
+    @staticmethod
+    def _direct_state(row) -> dict:
+        if not row:
             return {
                 "favorite": False,
                 "played": False,
                 "playCount": 0,
                 "positionSeconds": 0,
                 "durationSeconds": 0,
-                "playedPercentage": 0,
+                "playedPercentage": None,
             }
-        row = rows[0]
-        percentage = (row[3] / row[4] * 100) if row[4] else 0
+        position = max(0.0, float(row[3] or 0))
+        duration = max(0.0, float(row[4] or 0))
+        percentage = None if position <= 0 or duration <= 0 else min(100.0, position / duration * 100)
         return {
             "favorite": bool(row[0]),
             "played": bool(row[1]),
-            "playCount": row[2],
-            "positionSeconds": row[3],
-            "durationSeconds": row[4],
+            "playCount": int(row[2] or 0),
+            "positionSeconds": position,
+            "durationSeconds": duration,
             "playedPercentage": percentage,
             "lastPlayedAt": row[5],
         }
+
+    def _state(self, user_id: str, entity_id: str) -> dict:
+        entities, children, _ = self._relationship_graph(user_id)
+        row = self._state_row(user_id, entity_id)
+        direct = self._direct_state(row)
+        leaves = self._playable_descendants(entity_id, entities, children)
+        if not leaves or (len(leaves) == 1 and leaves[0] == entity_id):
+            return direct
+        leaf_states = [self._direct_state(self._state_row(user_id, leaf_id)) for leaf_id in leaves]
+        direct["played"] = bool(leaf_states) and all(state["played"] for state in leaf_states)
+        direct["unplayedItemCount"] = sum(not state["played"] for state in leaf_states)
+        direct["playedPercentage"] = None
+        return direct
 
     def _serialize(
         self,
@@ -434,38 +521,65 @@ class Catalog:
 
     def update_state(self, user_id: str, entity_id: str, changes: dict) -> dict:
         self.require_entity(user_id, entity_id)
-        current = self._state(user_id, entity_id)
-        favorite = bool(changes.get("favorite", current["favorite"]))
-        position = max(
-            0.0, float(changes.get("positionSeconds", current["positionSeconds"]))
-        )
-        duration = max(
-            0.0, float(changes.get("durationSeconds", current["durationSeconds"]))
-        )
+        if not isinstance(changes, dict):
+            raise HTTPException(400, "Invalid item state.")
+        entities, children, parents = self._relationship_graph(user_id)
+        current_row = self._state_row(user_id, entity_id)
+        current = self._direct_state(current_row)
+        try:
+            position = max(0.0, float(changes.get("positionSeconds", current["positionSeconds"])))
+            duration = max(0.0, float(changes.get("durationSeconds", current["durationSeconds"])))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, "Invalid playback position.") from error
+        if not math.isfinite(position) or not math.isfinite(duration):
+            raise HTTPException(400, "Invalid playback position.")
         explicit_played = changes.get("played")
         played = (
             bool(explicit_played)
             if explicit_played is not None
             else bool(duration and position / duration >= 0.9)
         )
-        play_count = int(current.get("playCount") or 0)
-        if played and not current.get("played"):
-            play_count += 1
-        self.db.execute(
-            "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,position_seconds,duration_seconds,last_played_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(user_id,entity_id) DO UPDATE SET favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
-            (
-                user_id,
-                entity_id,
-                int(favorite),
-                int(played),
-                play_count,
-                0 if played else position,
-                duration,
-                _now() if position or played else current.get("lastPlayedAt"),
-                _now(),
-            ),
-        )
+        favorite = bool(changes.get("favorite", current["favorite"]))
+        descendants = self._walk_children(entity_id, children) if explicit_played is not None else []
+        affected = [entity_id, *descendants]
+        ancestor_ids = self._walk_parents(entity_id, parents)
+        now = _now()
+        with self.db.transaction() as cursor:
+            states = {
+                affected_id: self._direct_state(self._state_row(user_id, affected_id, cursor))
+                for affected_id in affected
+            }
+            states[entity_id].update(
+                favorite=favorite,
+                played=played,
+                positionSeconds=0 if played or explicit_played is False else position,
+                durationSeconds=duration,
+            )
+            if explicit_played is False:
+                for descendant_id in descendants:
+                    states[descendant_id].update(played=False, positionSeconds=0)
+            elif explicit_played is True:
+                for descendant_id in descendants:
+                    states[descendant_id].update(played=True, positionSeconds=0)
+            for ancestor_id in ancestor_ids:
+                leaves = self._playable_descendants(ancestor_id, entities, children)
+                if not leaves:
+                    continue
+                leaf_states = [states.get(leaf_id) or self._direct_state(self._state_row(user_id, leaf_id, cursor)) for leaf_id in leaves]
+                ancestor = self._direct_state(self._state_row(user_id, ancestor_id, cursor))
+                ancestor.update(played=all(state["played"] for state in leaf_states), positionSeconds=0)
+                states[ancestor_id] = ancestor
+                affected.append(ancestor_id)
+            for affected_id in dict.fromkeys(affected):
+                state = states[affected_id]
+                was_played = self._direct_state(self._state_row(user_id, affected_id, cursor))["played"]
+                next_played = bool(state["played"])
+                play_count = state["playCount"] + int(next_played and not was_played)
+                cursor.execute(
+                    "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,position_seconds,duration_seconds,last_played_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(user_id,entity_id) DO UPDATE SET favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
+                    (user_id, affected_id, int(state["favorite"]), int(next_played), play_count, state["positionSeconds"], state["durationSeconds"], now if state["positionSeconds"] or next_played else state.get("lastPlayedAt"), now),
+                )
         return self._state(user_id, entity_id)
 
     def favorites(

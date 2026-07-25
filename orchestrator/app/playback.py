@@ -20,6 +20,7 @@ from fastapi import HTTPException
 from app.catalog import Catalog
 from app.config import Config
 from app.client_auth import issue_ticket
+from app.library import LANGUAGE_ALIASES, language_name
 
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,20 @@ class PlaybackManager:
                 "SELECT id,media_file_id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload FROM media_sources WHERE entity_id=? ORDER BY id",
                 (entity_id,),
             )
+        def normalize_stream(stream: dict) -> dict:
+            value = dict(stream)
+            tags = dict(value.get("tags") or {})
+            raw_language = str(tags.get("language") or tags.get("LANGUAGE") or "").strip()
+            language = LANGUAGE_ALIASES.get(raw_language.lower(), raw_language.lower() or None)
+            if language:
+                tags["language"] = language
+            if str(value.get("codec_type") or "").lower() == "subtitle":
+                current_title = str(tags.get("title") or "").strip().lower()
+                if not current_title or current_title in {"subtitle", "subtitles"}:
+                    tags["title"] = language_name(language, "subtitle")
+            value["tags"] = tags
+            return value
+
         sidecars = [
             {
                 "index": 1000 + index,
@@ -192,7 +207,7 @@ class PlaybackManager:
                 "kind": role,
                 "tags": {
                     **({"language": language} if language else {}),
-                    "title": "Lyrics" if role == "lyrics" else "",
+                    "title": language_name(language, role),
                 },
             }
             for index, (file_id, relative_path, language, role) in enumerate(
@@ -213,7 +228,7 @@ class PlaybackManager:
                 "height": row[6],
                 "videoCodec": row[7],
                 "audioCodec": row[8],
-                "streams": (json.loads(row[9]).get("streams") or []) + sidecars,
+                "streams": [normalize_stream(stream) for stream in (json.loads(row[9]).get("streams") or [])] + sidecars,
             }
             for row in rows
         ]

@@ -57,10 +57,26 @@ AUDIO_EXTENSIONS = {
 # either client. The playback API normalizes text and bitmap subtitle formats
 # to WebVTT at request time.
 SUBTITLE_EXTENSIONS = {
-    ".srt", ".ass", ".ssa", ".vtt", ".sub", ".smi", ".sami", ".ttml",
-    ".dfxp", ".xml", ".sup", ".idx",
+    ".srt", ".ass", ".ssa", ".vtt", ".webvtt", ".sub", ".smi", ".sami",
+    ".ttml", ".dfxp", ".xml", ".sup", ".idx", ".mks", ".mpl2", ".rt",
+    ".scc", ".stl", ".usf", ".cap", ".pjs", ".aqt", ".jacosub", ".gsub",
+    ".dks", ".mpsub", ".xss",
 }
-LYRIC_EXTENSIONS = {".lrc", ".elrc", ".txt", ".lyrics", ".yrc"}
+LYRIC_EXTENSIONS = {".lrc", ".elrc", ".txt", ".lyrics", ".qrc", ".krc", ".ksc", ".irc", ".yrc"}
+LANGUAGE_ALIASES = {
+    "eng": "en", "jpn": "ja", "jap": "ja", "deu": "de", "ger": "de",
+    "fra": "fr", "fre": "fr", "spa": "es", "ita": "it", "kor": "ko",
+    "por": "pt", "rus": "ru", "zho": "zh", "chi": "zh", "tha": "th",
+    "vie": "vi", "ara": "ar", "und": None,
+}
+LANGUAGE_NAMES = {
+    "en": "English", "ja": "Japanese", "de": "German", "fr": "French",
+    "es": "Spanish", "it": "Italian", "ko": "Korean", "pt": "Portuguese",
+    "ru": "Russian", "zh": "Chinese", "zh-CN": "Chinese (Simplified)",
+    "zh-TW": "Chinese (Traditional)", "th": "Thai", "vi": "Vietnamese",
+    "ar": "Arabic",
+}
+LANGUAGE_MARKERS = {"default", "forced", "sdh", "cc", "hi", "sub", "subtitle", "subs", "lyrics"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
 ID_RE = re.compile(
     r"\[(?P<provider>tmdbid|tvdbid|imdbid)-(?P<id>[^\]]+)\]", re.IGNORECASE
@@ -198,6 +214,28 @@ def media_role(path: Path) -> str | None:
     if name == "theme" or path.parent.name.lower() == "theme-music":
         return "theme"
     return None
+
+
+def sidecar_language(path: Path) -> str | None:
+    """Extract a real language marker without mistaking release flags for one."""
+    for token in reversed(path.stem.replace("_", "-").split(".")):
+        candidate = token.strip()
+        lowered = candidate.lower()
+        if lowered in LANGUAGE_MARKERS:
+            continue
+        if lowered in LANGUAGE_ALIASES:
+            return LANGUAGE_ALIASES[lowered]
+        if re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?", candidate):
+            base, _, region = candidate.partition("-")
+            if len(base) in {2, 3}:
+                return f"{base.lower()}-{region.upper()}" if region else base.lower()
+    return None
+
+
+def language_name(language: str | None, role: str) -> str:
+    if role == "lyrics":
+        return "Lyrics"
+    return LANGUAGE_NAMES.get(language or "", "Subtitle")
 
 
 class LibraryStore:
@@ -1608,10 +1646,7 @@ class LibraryScanner:
                 stat = path.stat()
             except OSError:
                 continue
-            language = None
-            parts = path.stem.split(".")
-            if len(parts) > 1 and len(parts[-1]) in {2, 3}:
-                language = parts[-1].lower()
+            language = sidecar_language(path) if role in {"subtitle", "lyrics"} else None
             relative_path = relative(str(root), str(path))
             key = (relative_path, role)
             seen.add(key)

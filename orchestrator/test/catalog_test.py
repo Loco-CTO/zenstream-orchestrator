@@ -280,6 +280,56 @@ class CatalogTest(unittest.TestCase):
         self.assertTrue(state["played"])
         self.assertEqual(state["playCount"], 1)
         self.assertEqual(state["positionSeconds"], 0)
+        self.assertIsNone(state["playedPercentage"])
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_parent_state_cascades_and_unwatch_clears_descendant_progress(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+
+        catalog.update_state(
+            user_id,
+            "episode-1",
+            {"positionSeconds": 25, "durationSeconds": 100},
+        )
+        catalog.update_state(user_id, "series-1", {"played": True})
+
+        for entity_id in ("series-1", "season-1", "episode-1", "episode-2", "episode-10", "episode-unset"):
+            state = catalog._state(user_id, entity_id)
+            self.assertTrue(state["played"], entity_id)
+            self.assertEqual(state["positionSeconds"], 0, entity_id)
+        self.assertEqual(catalog._state(user_id, "series-1")["unplayedItemCount"], 0)
+
+        catalog.update_state(user_id, "series-1", {"played": False})
+        for entity_id in ("series-1", "season-1", "episode-1", "episode-2", "episode-10", "episode-unset"):
+            state = catalog._state(user_id, entity_id)
+            self.assertFalse(state["played"], entity_id)
+            self.assertEqual(state["positionSeconds"], 0, entity_id)
+        self.assertEqual(catalog._state(user_id, "series-1")["unplayedItemCount"], 4)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_all_playable_children_mark_each_ancestor_watched(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+
+        for entity_id in ("episode-1", "episode-2", "episode-10", "episode-unset"):
+            catalog.update_state(user_id, entity_id, {"played": True})
+
+        self.assertTrue(catalog._state(user_id, "season-1")["played"])
+        self.assertTrue(catalog._state(user_id, "series-1")["played"])
+        self.assertEqual(catalog._state(user_id, "series-1")["unplayedItemCount"], 0)
+        self.assertEqual(catalog._state(user_id, "series-1")["playCount"], 1)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_parent_state_reports_permission_filtered_unplayed_count(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        self.assertEqual(catalog._state(user_id, "series-1")["unplayedItemCount"], 4)
+        self.assertIsNone(catalog._state(user_id, "episode-1")["playedPercentage"])
+
+        with self.assertRaises(HTTPException) as invalid:
+            catalog.update_state(user_id, "episode-1", {"positionSeconds": "nan"})
+        self.assertEqual(invalid.exception.status_code, 400)
 
 
 if __name__ == "__main__":

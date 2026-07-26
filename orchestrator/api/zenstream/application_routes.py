@@ -27,6 +27,7 @@ from app.models.syncplay import (
 from app.playback import ffmpeg_path, ffprobe_path
 from app.client_auth import bearer_token, websocket_account
 from app.models.account import Account
+from app.models.playback_settings import PlaybackSettings
 from api.zenstream.version import _main_version
 from version import __version__
 
@@ -251,6 +252,30 @@ async def admin_overview(
         ][0],
         "pending_invites": db.execute("SELECT COUNT(*) FROM invites")[0][0],
     }
+
+
+@router.get("/api/admin/playback/settings")
+async def admin_playback_settings(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    _admin_headers(Username, TOKEN)
+    return PlaybackSettings().get()
+
+
+@router.put("/api/admin/playback/settings")
+async def update_admin_playback_settings(
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    _admin_headers(Username, TOKEN)
+    data = await request.json()
+    try:
+        return PlaybackSettings().set(
+            data.get("maxTranscodes"), data.get("maxTranscodesPerUser")
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.get("/api/admin/accounts")

@@ -322,7 +322,9 @@ class PlaybackManager:
                     "message": "The selected media cannot be played directly by this client.",
                 },
             )
-        return self._transcode(user_id, entity_id, source, access, profile)
+        start_time = max(0.0, float(profile.get("startTimeSeconds") or 0.0))
+        start_time = min(start_time, max(0.0, float(source.get("durationSeconds") or 0.0)))
+        return self._transcode(user_id, entity_id, source, access, profile, start_time)
 
     @staticmethod
     def _mime(source: dict) -> str:
@@ -336,7 +338,8 @@ class PlaybackManager:
         }.get(container, "application/octet-stream")
 
     def _transcode(
-        self, user_id: str, entity_id: str, source: dict, access: str, profile: dict
+        self, user_id: str, entity_id: str, source: dict, access: str, profile: dict,
+        start_time: float = 0.0,
     ) -> dict:
         executable = ffmpeg_path()
         if not executable:
@@ -347,7 +350,7 @@ class PlaybackManager:
         maximum = max(1, int(os.getenv("MAX_TRANSCODES", "2")))
         per_user_maximum = max(1, int(os.getenv("MAX_TRANSCODES_PER_USER", "1")))
         with self._lock:
-            session_key = self._transcode_key(user_id, entity_id, source, profile)
+            session_key = self._transcode_key(user_id, entity_id, source, profile, start_time)
             for existing_id in self._users.get(user_id, set()):
                 process = self._processes.get(existing_id)
                 if (
@@ -361,7 +364,9 @@ class PlaybackManager:
                         entity_id,
                         existing_id,
                     )
-                    return self._hls_result(existing_id, source, access)
+                    result = self._hls_result(existing_id, source, access)
+                    result["startTimeSeconds"] = start_time
+                    return result
             active = [
                 value for value in self._processes.values() if value.poll() is None
             ]
@@ -395,6 +400,8 @@ class PlaybackManager:
                 "-loglevel",
                 "error",
                 "-y",
+                "-ss",
+                f"{start_time:.3f}",
                 "-i",
                 str(path),
                 "-map",
@@ -454,15 +461,18 @@ class PlaybackManager:
             threading.Thread(
                 target=self._watch, args=(user_id, session_id, process), daemon=True
             ).start()
-        return self._hls_result(session_id, source, access)
+        result = self._hls_result(session_id, source, access)
+        result["startTimeSeconds"] = start_time
+        return result
 
     @staticmethod
     def _transcode_key(
-        user_id: str, entity_id: str, source: dict, profile: dict
+        user_id: str, entity_id: str, source: dict, profile: dict, start_time: float = 0.0
     ) -> tuple[str, str, str, str]:
         settings = {
             "audioStreamIndex": profile.get("audioStreamIndex"),
             "maxStreamingBitrate": profile.get("maxStreamingBitrate"),
+            "startTimeSeconds": round(start_time, 3),
         }
         return (
             user_id,
@@ -491,6 +501,11 @@ class PlaybackManager:
             "UPDATE playback_sessions SET state=? WHERE id=?",
             ("completed" if process.returncode == 0 else "failed", session_id),
         )
+        row = self.db.execute(
+            "SELECT output_directory FROM playback_sessions WHERE id=?", (session_id,)
+        )
+        if row:
+            shutil.rmtree(row[0][0], ignore_errors=True)
 
     def direct_path(
         self, user_id: str, entity_id: str, media_source_id: str | None = None

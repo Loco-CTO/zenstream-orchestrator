@@ -21,6 +21,7 @@ from app.config import Config
 from app.client_auth import issue_ticket
 from app.library import LANGUAGE_ALIASES, language_name
 from app.logging_config import get_logger
+from app.models.playback_settings import PlaybackSettings
 
 
 logger = get_logger("playback")
@@ -90,13 +91,8 @@ class PlaybackManager:
 
     @staticmethod
     def _limits() -> tuple[int, int]:
-        def value(name: str, default: int) -> int:
-            try:
-                return max(1, int(os.getenv(name, str(default))))
-            except ValueError:
-                return default
-
-        return value("MAX_TRANSCODES", 2), value("MAX_TRANSCODES_PER_USER", 1)
+        settings = PlaybackSettings().get()
+        return settings["maxTranscodes"], settings["maxTranscodesPerUser"]
 
 
     def _file_path(

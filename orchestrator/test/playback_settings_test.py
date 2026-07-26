@@ -28,6 +28,17 @@ class PlaybackSettingsTest(unittest.TestCase):
             {"maxTranscodes": 0, "maxTranscodesPerUser": 0},
         )
 
+    def test_unlimited_global_does_not_clamp_user_limit(self):
+        with patch.dict(
+            os.environ,
+            {"MAX_TRANSCODES": "0", "MAX_TRANSCODES_PER_USER": "4"},
+            clear=False,
+        ):
+            self.assertEqual(
+                PlaybackSettings(MemoryDatabase()).get(),
+                {"maxTranscodes": 0, "maxTranscodesPerUser": 4},
+            )
+
     def test_defaults_follow_environment_until_saved(self):
         with patch.dict(
             os.environ,

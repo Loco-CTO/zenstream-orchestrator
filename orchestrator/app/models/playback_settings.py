@@ -55,7 +55,11 @@ class PlaybackSettings:
                 "MAX_TRANSCODES_PER_USER", DEFAULT_MAX_TRANSCODES_PER_USER
             ),
         }
-        if defaults["maxTranscodesPerUser"] > defaults["maxTranscodes"]:
+        if (
+            defaults["maxTranscodes"] > 0
+            and defaults["maxTranscodesPerUser"] > 0
+            and defaults["maxTranscodesPerUser"] > defaults["maxTranscodes"]
+        ):
             defaults["maxTranscodesPerUser"] = defaults["maxTranscodes"]
         rows = self.db.execute(
             "SELECT max_transcodes,max_transcodes_per_user FROM playback_settings WHERE id=1"

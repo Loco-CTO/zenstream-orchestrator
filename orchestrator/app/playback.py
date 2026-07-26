@@ -367,6 +367,17 @@ class PlaybackManager:
                     result = self._hls_result(existing_id, source, access)
                     result["startTimeSeconds"] = start_time
                     return result
+            base_key = self._transcode_key(user_id, entity_id, source, profile, 0.0)[:3]
+            for existing_id in list(self._users.get(user_id, set())):
+                process = self._processes.get(existing_id)
+                existing_key = self._session_keys.get(existing_id)
+                if (
+                    process is not None
+                    and process.poll() is None
+                    and existing_key is not None
+                    and existing_key[:3] == base_key
+                ):
+                    process.terminate()
             active = [
                 value for value in self._processes.values() if value.poll() is None
             ]

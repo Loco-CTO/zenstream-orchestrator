@@ -594,7 +594,9 @@ class PlaybackManager:
                 and process.poll() is None
             ]
             global_limit, user_limit = self._limits()
-            if len(active) >= global_limit or len(per_user) >= user_limit:
+            global_limit_reached = global_limit > 0 and len(active) >= global_limit
+            user_limit_reached = user_limit > 0 and len(per_user) >= user_limit
+            if global_limit_reached or user_limit_reached:
                 logger.warning(
                     "transcode limit reached user_id=%s active=%s per_user=%s global_limit=%s user_limit=%s",
                     user_id,
@@ -716,7 +718,6 @@ class PlaybackManager:
         spec: dict,
         worker_dir: Path,
         start_index: int,
-        stop_index: int | None = None,
     ) -> list[str]:
         source = spec["source"]
         profile = spec["profile"]
@@ -768,8 +769,6 @@ class PlaybackManager:
             "-hls_segment_filename", str(worker_dir / "segment-%06d.ts"),
             str(worker_dir / "worker.m3u8"),
         ]
-        if stop_index is not None:
-            output_options[0:0] = ["-to", f"{(stop_index + 1) * self._segment_seconds:.3f}"]
         command.extend(output_options)
         return command
 
@@ -861,7 +860,7 @@ class PlaybackManager:
         spec["generation"] = generation
         worker_dir = spec["output"] / f"worker-{generation:06d}"
         worker_dir.mkdir(parents=True, exist_ok=True)
-        command = self._build_ffmpeg_command(spec, worker_dir, start_index, start_index)
+        command = self._build_ffmpeg_command(spec, worker_dir, start_index)
         logger.info(
             "starting playback worker session_id=%s generation=%s start_index=%s source_start=%.3f output_directory=%s",
             session_id, generation, start_index, start_index * self._segment_seconds, spec["output"],
@@ -886,7 +885,6 @@ class PlaybackManager:
             "process": process,
             "generation": generation,
             "start_index": start_index,
-            "stop_index": start_index,
             "worker_dir": worker_dir,
         }
         self._session_workers[session_id] = worker

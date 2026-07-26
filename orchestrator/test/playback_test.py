@@ -60,7 +60,7 @@ class PlaybackTest(unittest.TestCase):
         self.assertIsNone(PlaybackManager._segment_index("segment-12.ts.tmp"))
         self.assertIsNone(PlaybackManager._segment_index("../segment-000012.ts"))
 
-    def test_segment_worker_is_bounded_on_the_source_timeline(self):
+    def test_segment_worker_starts_on_the_source_timeline_without_per_segment_cutoff(self):
         manager = object.__new__(PlaybackManager)
         manager._segment_seconds = 4.0
         spec = {
@@ -77,9 +77,9 @@ class PlaybackTest(unittest.TestCase):
             "executable": "ffmpeg",
             "path": Path("movie.mkv"),
         }
-        command = manager._build_ffmpeg_command(spec, Path("worker"), 25, 25)
+        command = manager._build_ffmpeg_command(spec, Path("worker"), 25)
         self.assertEqual(command[command.index("-ss") + 1], "100.000")
-        self.assertEqual(command[command.index("-to") + 1], "104.000")
+        self.assertNotIn("-to", command)
         self.assertIn("-f", command)
         self.assertEqual(command[command.index("-f") + 1], "hls")
         self.assertNotIn("init.mp4", " ".join(command))

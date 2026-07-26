@@ -17,6 +17,17 @@ class MemoryDatabase:
 
 
 class PlaybackSettingsTest(unittest.TestCase):
+    def test_zero_defaults_to_unlimited(self):
+        settings = PlaybackSettings(MemoryDatabase())
+        self.assertEqual(
+            settings.get(),
+            {"maxTranscodes": 0, "maxTranscodesPerUser": 0},
+        )
+        self.assertEqual(
+            settings.set(0, 0),
+            {"maxTranscodes": 0, "maxTranscodesPerUser": 0},
+        )
+
     def test_defaults_follow_environment_until_saved(self):
         with patch.dict(
             os.environ,
@@ -43,6 +54,15 @@ class PlaybackSettingsTest(unittest.TestCase):
             PlaybackSettings.normalize(2, 3)
 
     def test_limits_have_a_safe_upper_bound(self):
-        with self.assertRaisesRegex(ValueError, "between 1 and 64"):
+        with self.assertRaisesRegex(ValueError, "between 0 and 64"):
             PlaybackSettings.normalize(65, 1)
 
+    def test_unlimited_global_or_user_limit_is_valid(self):
+        self.assertEqual(
+            PlaybackSettings.normalize(0, 4),
+            {"maxTranscodes": 0, "maxTranscodesPerUser": 4},
+        )
+        self.assertEqual(
+            PlaybackSettings.normalize(4, 0),
+            {"maxTranscodes": 4, "maxTranscodesPerUser": 0},
+        )

@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 from app.config import Config
 
 
-DEFAULT_MAX_TRANSCODES = 2
-DEFAULT_MAX_TRANSCODES_PER_USER = 1
+DEFAULT_MAX_TRANSCODES = 0
+DEFAULT_MAX_TRANSCODES_PER_USER = 0
 MAX_ALLOWED_TRANSCODES = 64
 
 
@@ -14,7 +14,7 @@ def _environment_value(name: str, default: int) -> int:
         value = int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
-    return value if value >= 1 else default
+    return value if 0 <= value <= MAX_ALLOWED_TRANSCODES else default
 
 
 class PlaybackSettings:
@@ -33,12 +33,16 @@ class PlaybackSettings:
                 integer = int(value)
             except (TypeError, ValueError) as error:
                 raise ValueError(f"{name} must be a whole number.") from error
-            if integer < 1 or integer > MAX_ALLOWED_TRANSCODES:
+            if integer < 0 or integer > MAX_ALLOWED_TRANSCODES:
                 raise ValueError(
-                    f"{name} must be between 1 and {MAX_ALLOWED_TRANSCODES}."
+                    f"{name} must be between 0 and {MAX_ALLOWED_TRANSCODES}."
                 )
             normalized[name] = integer
-        if normalized["maxTranscodesPerUser"] > normalized["maxTranscodes"]:
+        if (
+            normalized["maxTranscodes"] > 0
+            and normalized["maxTranscodesPerUser"] > 0
+            and normalized["maxTranscodesPerUser"] > normalized["maxTranscodes"]
+        ):
             raise ValueError("maxTranscodesPerUser cannot exceed maxTranscodes.")
         return normalized
 

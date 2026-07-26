@@ -34,6 +34,57 @@ class PlaybackTest(unittest.TestCase):
             self.assertNotIn("#EXT-X-PLAYLIST-TYPE:EVENT", playlist)
             self.assertFalse((output / "master.m3u8.finalizing").exists())
 
+    def test_public_playlist_owns_full_mpeg_ts_timeline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            PlaybackManager._write_public_playlist(output, 9.0)
+            playlist = (output / "master.m3u8").read_text(encoding="utf-8")
+            self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", playlist)
+            self.assertIn("#EXT-X-ENDLIST", playlist)
+            self.assertIn("segment-000000.ts", playlist)
+            self.assertIn("segment-000001.ts", playlist)
+            self.assertIn("segment-000002.ts", playlist)
+            self.assertNotIn("init.mp4", playlist)
+            self.assertNotIn(".m4s", playlist)
+
+    def test_seek_does_not_change_transcode_session_key(self):
+        source = {"id": "source-1", "videoCodec": "hevc", "audioCodec": "aac"}
+        profile = {"audioStreamId": 1, "maxStreamingBitrate": 2_000_000}
+        self.assertEqual(
+            PlaybackManager._transcode_key("u", "e", source, profile, 0.0),
+            PlaybackManager._transcode_key("u", "e", source, profile, 120.0),
+        )
+
+    def test_segment_names_are_strictly_parsed(self):
+        self.assertEqual(PlaybackManager._segment_index("segment-000012.ts"), 12)
+        self.assertIsNone(PlaybackManager._segment_index("segment-12.ts.tmp"))
+        self.assertIsNone(PlaybackManager._segment_index("../segment-000012.ts"))
+
+    def test_segment_worker_is_bounded_on_the_source_timeline(self):
+        manager = object.__new__(PlaybackManager)
+        manager._segment_seconds = 4.0
+        spec = {
+            "source": {
+                "streams": [
+                    {"index": 0, "codec_type": "video", "codec_name": "hevc"},
+                    {"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2},
+                ],
+                "width": 1920,
+                "height": 1080,
+            },
+            "profile": {},
+            "mode": "video-transcode",
+            "executable": "ffmpeg",
+            "path": Path("movie.mkv"),
+        }
+        command = manager._build_ffmpeg_command(spec, Path("worker"), 25, 25)
+        self.assertEqual(command[command.index("-ss") + 1], "100.000")
+        self.assertEqual(command[command.index("-to") + 1], "104.000")
+        self.assertIn("-f", command)
+        self.assertEqual(command[command.index("-f") + 1], "hls")
+        self.assertNotIn("init.mp4", " ".join(command))
+        self.assertNotIn(".m4s", " ".join(command))
+
     def test_failed_session_output_returns_structured_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = object.__new__(PlaybackManager)

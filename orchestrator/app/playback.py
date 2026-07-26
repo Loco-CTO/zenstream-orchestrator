@@ -557,18 +557,16 @@ class PlaybackManager:
                     output = Path(session_rows[0][0])
                     if process is None and existing_id not in self._session_specs:
                         continue
-                    if not self._startup_ready(output):
-                        if process is None or process.poll() is not None:
-                            continue
-                        if not self._wait_for_startup(existing_id, output, process):
-                            continue
+                    playlist_ready = self._startup_ready(output)
+                    if not playlist_ready and (process is None or process.poll() is not None):
+                        continue
                     logger.info(
                         "reusing playback session user_id=%s entity_id=%s session_id=%s state=%s playlist_ready=%s",
                         user_id,
                         entity_id,
                         existing_id,
                         session_rows[0][1],
-                        self._startup_ready(output),
+                        playlist_ready,
                     )
                     reused_session = (existing_id, output, process)
                     break
@@ -577,7 +575,7 @@ class PlaybackManager:
                 result = self._hls_result(existing_id, source, access, transcode_mode)
                 result["startPositionSeconds"] = start_time
                 result["actualStartPositionSeconds"] = 0.0
-                result["sessionState"] = "ready"
+                result["sessionState"] = "ready" if self._startup_ready(reused_session[1]) else "starting"
                 result["sourceId"] = source["id"]
                 result["audioStreamId"] = profile.get("audioStreamId")
                 logger.info(
@@ -678,26 +676,16 @@ class PlaybackManager:
                 "output": output,
                 "generation": generation,
             }
-            self._start_worker_locked(session_id, 0)
+            start_index = int(start_time // self._segment_seconds)
+            self._start_worker_locked(session_id, start_index)
             process = self._processes[session_id]
-        ready = self._wait_for_startup(session_id, output, process)
-        if not ready:
-            raise HTTPException(
-                503,
-                detail={
-                    "code": "TRANSCODE_START_TIMEOUT",
-                    "message": "The playback session did not produce media in time.",
-                    "sessionId": session_id,
-                },
-                headers={"Retry-After": "2"},
-            )
         result = self._hls_result(session_id, source, access, transcode_mode)
         result["startPositionSeconds"] = start_time
-        result["sessionState"] = "ready"
+        result["sessionState"] = "ready" if self._startup_ready(output) else "starting"
         result["sourceId"] = source["id"]
         result["audioStreamId"] = profile.get("audioStreamId")
         result["durationSeconds"] = source.get("durationSeconds")
-        result["actualStartPositionSeconds"] = 0.0
+        result["actualStartPositionSeconds"] = start_index * self._segment_seconds
         return result
 
     @classmethod
@@ -785,6 +773,84 @@ class PlaybackManager:
         command.extend(output_options)
         return command
 
+    def _monitor_startup(
+        self,
+        session_id: str,
+        output: Path,
+        process: subprocess.Popen,
+        generation: int,
+    ) -> None:
+        deadline = time.monotonic() + 10
+        last_snapshot = None
+        while time.monotonic() < deadline:
+            with self._lock:
+                worker = self._session_workers.get(session_id)
+                current = bool(
+                    worker
+                    and worker.get("process") is process
+                    and worker.get("generation") == generation
+                )
+            if not current:
+                return
+            self._publish_worker_segments(session_id)
+            snapshot = self._playlist_snapshot(output)
+            if snapshot != last_snapshot:
+                logger.debug(
+                    "playback readiness session_id=%s generation=%s snapshot=%s",
+                    session_id,
+                    generation,
+                    snapshot,
+                )
+                last_snapshot = snapshot
+            if snapshot["playlistReady"] and snapshot["segmentCount"] > 0:
+                self.db.execute(
+                    "UPDATE playback_sessions SET state='ready',started_at=? WHERE id=? AND state='starting' AND seek_generation=?",
+                    (_iso(), session_id, generation),
+                )
+                logger.info(
+                    "playback ready session_id=%s generation=%s snapshot=%s",
+                    session_id,
+                    generation,
+                    snapshot,
+                )
+                return
+            if process.poll() is not None:
+                return
+            time.sleep(0.05)
+        with self._lock:
+            worker = self._session_workers.get(session_id)
+            current = bool(
+                worker
+                and worker.get("process") is process
+                and worker.get("generation") == generation
+            )
+        if not current or process.poll() is not None:
+            return
+        logger.warning(
+            "playback startup timeout session_id=%s generation=%s snapshot=%s",
+            session_id,
+            generation,
+            self._playlist_snapshot(output),
+        )
+        process.terminate()
+        self.db.execute(
+            "UPDATE playback_sessions SET state='failed',completed_at=?,failure_code=?,failure_detail=? WHERE id=? AND state='starting' AND seek_generation=?",
+            (
+                _iso(),
+                "TRANSCODE_START_TIMEOUT",
+                json.dumps(
+                    {
+                        "stage": "startup",
+                        "returnCode": None,
+                        **self._playlist_snapshot(output),
+                    },
+                    sort_keys=True,
+                ),
+                session_id,
+                generation,
+            ),
+        )
+
     def _start_worker_locked(self, session_id: str, start_index: int) -> subprocess.Popen:
         spec = self._session_specs[session_id]
         old = self._processes.get(session_id)
@@ -833,6 +899,11 @@ class PlaybackManager:
         threading.Thread(
             target=self._watch,
             args=(spec["user_id"], session_id, process, generation),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._monitor_startup,
+            args=(session_id, spec["output"], process, generation),
             daemon=True,
         ).start()
         return process
@@ -1116,68 +1187,6 @@ class PlaybackManager:
             session_id,
             len(list(output.glob("segment-*.ts"))),
         )
-
-    def _wait_for_startup(
-        self, session_id: str, output: Path, process: subprocess.Popen
-    ) -> bool:
-        deadline = time.monotonic() + 10
-        last_snapshot = None
-        logger.info(
-            "waiting for playback readiness session_id=%s deadline_seconds=10",
-            session_id,
-        )
-        while time.monotonic() < deadline:
-            self._publish_worker_segments(session_id)
-            snapshot = self._playlist_snapshot(output)
-            if snapshot != last_snapshot:
-                logger.debug(
-                    "playback readiness session_id=%s snapshot=%s", session_id, snapshot
-                )
-                last_snapshot = snapshot
-            if snapshot["playlistReady"] and snapshot["segmentCount"] > 0:
-                self.db.execute(
-                    "UPDATE playback_sessions SET state='ready',started_at=? WHERE id=?",
-                    (_iso(), session_id),
-                )
-                logger.info(
-                    "playback ready session_id=%s snapshot=%s", session_id, snapshot
-                )
-                return True
-            if process.poll() is not None:
-                break
-            time.sleep(0.05)
-        process_alive = process.poll() is None
-        if process.poll() is None:
-            logger.warning(
-                "playback startup timeout session_id=%s snapshot=%s process_alive=true",
-                session_id,
-                self._playlist_snapshot(output),
-            )
-            process.terminate()
-        else:
-            logger.warning(
-                "playback startup failed session_id=%s snapshot=%s return_code=%s",
-                session_id,
-                self._playlist_snapshot(output),
-                process.returncode,
-            )
-        self.db.execute(
-            "UPDATE playback_sessions SET state='failed',completed_at=?,failure_code=?,failure_detail=? WHERE id=? AND state='starting'",
-            (
-                _iso(),
-                "TRANSCODE_START_TIMEOUT" if process_alive else "FFMPEG_FAILED",
-                json.dumps(
-                    {
-                        "stage": "startup",
-                        "returnCode": process.returncode,
-                        **self._playlist_snapshot(output),
-                    },
-                    sort_keys=True,
-                ),
-                session_id,
-            ),
-        )
-        return False
 
     def _watch(
         self,

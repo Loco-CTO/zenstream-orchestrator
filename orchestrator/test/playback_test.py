@@ -209,6 +209,24 @@ class PlaybackTest(unittest.TestCase):
         }
         self.assertFalse(PlaybackManager._direct(source, profile))
 
+    def test_codec_aliases_do_not_force_transcoding(self):
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {
+                    "container": "matroska",
+                    "videoCodec": "h265",
+                    "audioCodec": "mp4a",
+                },
+                {
+                    "containers": ["mkv"],
+                    "videoCodecs": ["hevc"],
+                    "audioCodecs": ["aac"],
+                    "maxAudioChannels": 6,
+                },
+            ),
+            "direct",
+        )
+
     def test_sources_reads_media_file_id_and_media_role(self):
         manager = object.__new__(PlaybackManager)
         manager.catalog = MagicMock()

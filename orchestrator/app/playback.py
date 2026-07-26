@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -65,6 +66,9 @@ def ffprobe_path() -> str | None:
 
 class PlaybackManager:
     _lock = threading.RLock()
+    _cleanup_thread_lock = threading.Lock()
+    _cleanup_stop = threading.Event()
+    _cleanup_thread: threading.Thread | None = None
     _processes: dict[str, subprocess.Popen] = {}
     _users: dict[str, set[str]] = {}
     _session_keys: dict[str, tuple[str, str, str, str]] = {}
@@ -85,9 +89,37 @@ class PlaybackManager:
     def __init__(self):
         self.db = Config().database
         self.catalog = Catalog()
+        self._start_cleanup_thread()
+
+    def _start_cleanup_thread(self) -> None:
+        manager_type = type(self)
+        with manager_type._cleanup_thread_lock:
+            if manager_type._cleanup_thread and manager_type._cleanup_thread.is_alive():
+                return
+            manager_type._cleanup_stop = threading.Event()
+            manager_type._cleanup_thread = threading.Thread(
+                target=self._cleanup_loop,
+                name="zenstream-playback-cleanup",
+                daemon=True,
+            )
+            manager_type._cleanup_thread.start()
+
+    def _cleanup_loop(self) -> None:
+        manager_type = type(self)
+        while not manager_type._cleanup_stop.wait(
+            min(15.0, max(5.0, self._idle_timeout_seconds() / 3.0))
+        ):
+            try:
+                self._cleanup_expired()
+            except Exception:
+                logger.exception("playback background cleanup failed")
 
     @classmethod
     def stop_all(cls) -> None:
+        with cls._cleanup_thread_lock:
+            cleanup_stop = cls._cleanup_stop
+            cleanup_thread = cls._cleanup_thread
+            cleanup_stop.set()
         with cls._lock:
             sessions = list(cls._processes.items())
         for session_id, process in sessions:
@@ -98,7 +130,27 @@ class PlaybackManager:
                 cls._session_specs.pop(session_id, None)
                 cls._session_workers.pop(session_id, None)
                 cls._session_locks.pop(session_id, None)
+        try:
+            database = Config().database
+            persisted = database.execute(
+                "SELECT id,process_id FROM playback_sessions WHERE state IN ('starting','ready','stopping') AND process_id IS NOT NULL"
+            )
+            for session_id, process_id in persisted or []:
+                if any(session_id == active_id for active_id, _ in sessions):
+                    continue
+                cls._stop_process_id(process_id, f"shutdown persisted session_id={session_id}")
+                database.execute(
+                    "UPDATE playback_sessions SET state='stopping',completed_at=?,process_id=NULL WHERE id=? AND process_id=?",
+                    (_iso(), session_id, process_id),
+                )
+        except Exception:
+            logger.exception("could not clean persisted playback workers during shutdown")
         cls._users.clear()
+        if cleanup_thread and cleanup_thread is not threading.current_thread():
+            cleanup_thread.join(timeout=2)
+        with cls._cleanup_thread_lock:
+            if cls._cleanup_thread is cleanup_thread:
+                cls._cleanup_thread = None
 
     @staticmethod
     def _stop_process(process: subprocess.Popen | None, reason: str) -> None:
@@ -115,6 +167,61 @@ class PlaybackManager:
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 logger.error("playback worker did not exit after kill pid=%s reason=%s", process.pid, reason)
+
+    @staticmethod
+    def _stop_process_id(process_id: int | None, reason: str) -> None:
+        if not process_id or process_id <= 0:
+            return
+        logger.info("stopping persisted playback worker pid=%s reason=%s", process_id, reason)
+        if os.name == "nt":
+            try:
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(process_id), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                logger.warning("could not stop persisted playback worker pid=%s reason=%s error=%s", process_id, reason, error)
+                return
+            if result.returncode not in {0, 128}:
+                logger.warning(
+                    "taskkill failed for persisted playback worker pid=%s reason=%s exit_code=%s stderr=%s",
+                    process_id,
+                    reason,
+                    result.returncode,
+                    (result.stderr or "").strip()[-500:],
+                )
+            return
+        try:
+            os.kill(process_id, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError as error:
+            logger.warning("could not stop persisted playback worker pid=%s reason=%s error=%s", process_id, reason, error)
+            return
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.kill(process_id, 0)
+            except (ProcessLookupError, OSError):
+                return
+            time.sleep(0.1)
+        try:
+            os.kill(process_id, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
+    @staticmethod
+    def _process_id_alive(process_id: int | None) -> bool:
+        if not process_id or process_id <= 0:
+            return False
+        try:
+            os.kill(process_id, 0)
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
 
     @staticmethod
     def _limits() -> tuple[int, int]:
@@ -310,6 +417,23 @@ class PlaybackManager:
         return {str(item).strip().lower() for item in value if str(item).strip()}
 
     @staticmethod
+    def _codec_values(value: str | None) -> set[str]:
+        aliases = {
+            "avc": "h264",
+            "avc1": "h264",
+            "h265": "hevc",
+            "x265": "hevc",
+            "ac-3": "ac3",
+            "e-ac-3": "eac3",
+            "mp4a": "aac",
+        }
+        return {
+            aliases.get(part.strip().lower(), part.strip().lower())
+            for part in str(value or "").split(",")
+            if part.strip()
+        }
+
+    @staticmethod
     def _container_values(value: str | None) -> set[str]:
         aliases = {"matroska": "mkv", "mpegts": "ts", "quicktime": "mov"}
         return {
@@ -348,8 +472,20 @@ class PlaybackManager:
         if requested_mode == "video-transcode":
             return requested_mode
         containers = cls._profile_values(profile, "containers", {"mp4", "webm"})
-        video = cls._profile_values(profile, "videoCodecs", {"h264", "vp9", "av1"})
-        audio = cls._profile_values(profile, "audioCodecs", {"aac", "opus", "vorbis"})
+        video = {
+            codec
+            for value in cls._profile_values(
+                profile, "videoCodecs", {"h264", "vp9", "av1"}
+            )
+            for codec in cls._codec_values(value)
+        }
+        audio = {
+            codec
+            for value in cls._profile_values(
+                profile, "audioCodecs", {"aac", "opus", "vorbis"}
+            )
+            for codec in cls._codec_values(value)
+        }
         source_container = cls._container_values(source.get("container"))
         container_ok = bool(source_container & containers)
         video_streams = [
@@ -363,11 +499,16 @@ class PlaybackManager:
             or source.get("height")
             or source.get("videoCodec")
         )
-        video_codec = str(source.get("videoCodec") or "").lower()
+        video_codec = next(iter(cls._codec_values(source.get("videoCodec"))), "")
         audio_stream = cls._stream_for_profile(source, profile)
-        audio_codec = str(
-            audio_stream.get("codec_name") or source.get("audioCodec") or ""
-        ).lower()
+        audio_codec = next(
+            iter(
+                cls._codec_values(
+                    audio_stream.get("codec_name") or source.get("audioCodec")
+                )
+            ),
+            "",
+        )
         video_ok = not has_video or video_codec in video
         for limit_key, source_key in (("maxWidth", "width"), ("maxHeight", "height")):
             try:
@@ -469,8 +610,22 @@ class PlaybackManager:
             profile.get("forceTranscoding") is True,
             direct_only,
         )
+        selected_mode = self._playback_mode(source, profile)
+        selected_audio = self._stream_for_profile(source, profile)
+        logger.info(
+            "playback decision entity_id=%s source_id=%s mode=%s container=%s video_codec=%s audio_codec=%s channels=%s bitrate=%s max_bitrate=%s",
+            entity_id,
+            source["id"],
+            selected_mode,
+            source.get("container"),
+            source.get("videoCodec"),
+            selected_audio.get("codec_name") or source.get("audioCodec"),
+            selected_audio.get("channels"),
+            source.get("bitrate"),
+            profile.get("maxStreamingBitrate"),
+        )
         access = issue_ticket(user_id, "resource", 6 * 60 * 60, entity=entity_id)
-        if self._direct(source, profile):
+        if selected_mode == "direct":
             return {
                 "mode": "direct",
                 "sessionState": "ready",
@@ -494,19 +649,7 @@ class PlaybackManager:
         start_time = min(
             start_time, max(0.0, float(source.get("durationSeconds") or 0.0))
         )
-        transcode_mode = self._playback_mode(source, profile)
-        logger.info(
-            "playback decision entity_id=%s source_id=%s mode=%s container=%s video_codec=%s audio_codec=%s channels=%s bitrate=%s max_bitrate=%s",
-            entity_id,
-            source["id"],
-            transcode_mode,
-            source.get("container"),
-            source.get("videoCodec"),
-            source.get("audioCodec"),
-            self._stream_for_profile(source, profile).get("channels"),
-            source.get("bitrate"),
-            profile.get("maxStreamingBitrate"),
-        )
+        transcode_mode = selected_mode
         result = self._transcode(
             user_id, entity_id, source, access, profile, start_time, transcode_mode
         )
@@ -889,7 +1032,7 @@ class PlaybackManager:
             if not current:
                 return
             rows = self.db.execute(
-                "SELECT state,last_accessed_at FROM playback_sessions WHERE id=? AND user_id=?",
+                "SELECT state,last_accessed_at,process_id FROM playback_sessions WHERE id=? AND user_id=?",
                 (session_id, user_id),
             )
             if not rows or rows[0][0] in {"stopping", "failed", "completed", "expired"}:
@@ -933,6 +1076,8 @@ class PlaybackManager:
                 ),
             )
             self._stop_process(process, f"idle_timeout session_id={session_id}")
+            if process is None:
+                self._stop_process_id(rows[0][2], f"idle_timeout session_id={session_id}")
             return
 
     def _start_worker_locked(self, session_id: str, start_index: int) -> subprocess.Popen:
@@ -955,16 +1100,45 @@ class PlaybackManager:
             generation,
             command,
         )
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        process: subprocess.Popen | None = None
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self.db.execute(
+                "UPDATE playback_sessions SET process_id=?,state='starting',requested_start_seconds=?,actual_start_seconds=?,seek_generation=?,failure_code=NULL,failure_detail=NULL WHERE id=?",
+                (process.pid, start_index * self._segment_seconds, start_index * self._segment_seconds, generation, session_id),
+            )
+        except Exception as error:
+            if process is not None:
+                self._stop_process(process, f"worker_registration_failed session_id={session_id}")
+            logger.exception(
+                "could not register playback worker session_id=%s generation=%s error=%s",
+                session_id,
+                generation,
+                error,
+            )
+            try:
+                self.db.execute(
+                    "UPDATE playback_sessions SET state='failed',completed_at=?,failure_code='PLAYBACK_WORKER_REGISTRATION_FAILED',failure_detail=? WHERE id=? AND seek_generation=?",
+                    (_iso(), str(error)[-1000:], session_id, generation),
+                )
+            except Exception:
+                logger.exception("could not record worker registration failure session_id=%s", session_id)
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "PLAYBACK_WORKER_REGISTRATION_FAILED",
+                    "message": "The playback worker could not be registered safely.",
+                },
+            ) from error
         worker = {
             "process": process,
             "generation": generation,
@@ -974,10 +1148,6 @@ class PlaybackManager:
         self._session_workers[session_id] = worker
         self._processes[session_id] = process
         self._users.setdefault(spec["user_id"], set()).add(session_id)
-        self.db.execute(
-            "UPDATE playback_sessions SET process_id=?,state='starting',requested_start_seconds=?,actual_start_seconds=?,seek_generation=?,failure_code=NULL,failure_detail=NULL WHERE id=?",
-            (process.pid, start_index * self._segment_seconds, start_index * self._segment_seconds, generation, session_id),
-        )
         threading.Thread(
             target=self._watch,
             args=(spec["user_id"], session_id, process, generation),
@@ -1383,11 +1553,14 @@ class PlaybackManager:
         )
 
     def _cleanup_expired(self) -> None:
+        self.db.execute(
+            "UPDATE playback_sessions SET process_id=NULL WHERE state IN ('failed','completed','expired') AND process_id IS NOT NULL"
+        )
         rows = self.db.execute(
-            "SELECT id,output_directory FROM playback_sessions WHERE expires_at<=? AND state NOT IN ('expired','stopping')",
+            "SELECT id,output_directory,process_id FROM playback_sessions WHERE expires_at<=? AND state != 'expired'",
             (_iso(),),
         )
-        for session_id, output_directory in rows or []:
+        for session_id, output_directory, process_id in rows or []:
             logger.info(
                 "cleaning expired playback session_id=%s output_directory=%s",
                 session_id,
@@ -1396,6 +1569,8 @@ class PlaybackManager:
             with self._lock:
                 process = self._processes.get(session_id)
             self._stop_process(process, f"expiry session_id={session_id}")
+            if process is None:
+                self._stop_process_id(process_id, f"expiry session_id={session_id}")
             if output_directory:
                 shutil.rmtree(output_directory, ignore_errors=True)
             with self._lock:
@@ -1408,6 +1583,53 @@ class PlaybackManager:
                 "UPDATE playback_sessions SET state='expired' WHERE id=?",
                 (session_id,),
             )
+
+        timeout = self._idle_timeout_seconds()
+        orphan_rows = self.db.execute(
+            "SELECT id,last_accessed_at,process_id,seek_generation FROM playback_sessions WHERE state IN ('starting','ready') AND process_id IS NOT NULL AND expires_at>?",
+            (_iso(),),
+        )
+        for session_id, last_accessed_at, process_id, generation in orphan_rows or []:
+            try:
+                idle_for = time.time() - datetime.fromisoformat(last_accessed_at).timestamp()
+            except (TypeError, ValueError, OSError):
+                idle_for = timeout
+            if idle_for < timeout:
+                continue
+            logger.warning(
+                "reaping orphaned playback worker session_id=%s pid=%s generation=%s idle_seconds=%.1f",
+                session_id,
+                process_id,
+                generation,
+                idle_for,
+            )
+            self.db.execute(
+                "UPDATE playback_sessions SET state='stopping',failure_code=?,failure_detail=?,completed_at=? WHERE id=? AND seek_generation=? AND state IN ('starting','ready')",
+                (
+                    "PLAYBACK_IDLE_TIMEOUT",
+                    json.dumps(
+                        {
+                            "stage": "orphan_reaper",
+                            "idleSeconds": round(idle_for, 3),
+                            "timeoutSeconds": timeout,
+                            "processId": process_id,
+                        },
+                        sort_keys=True,
+                    ),
+                    _iso(),
+                    session_id,
+                    generation,
+                ),
+            )
+            with self._lock:
+                process = self._processes.get(session_id)
+            self._stop_process(process, f"orphan_reaper session_id={session_id}")
+            if process is None:
+                self._stop_process_id(process_id, f"orphan_reaper session_id={session_id}")
+                self.db.execute(
+                    "UPDATE playback_sessions SET process_id=NULL WHERE id=? AND seek_generation=? AND state='stopping'",
+                    (session_id, generation),
+                )
 
     def direct_path(
         self, user_id: str, entity_id: str, media_source_id: str | None = None
@@ -1488,7 +1710,7 @@ class PlaybackManager:
     def session_status(self, user_id: str, session_id: str) -> dict:
         self._cleanup_expired()
         rows = self.db.execute(
-            "SELECT state,source_id,created_at,expires_at,last_accessed_at,failure_code,failure_detail,output_directory,requested_start_seconds,actual_start_seconds,seek_generation FROM playback_sessions WHERE id=? AND user_id=?",
+            "SELECT state,source_id,created_at,expires_at,last_accessed_at,failure_code,failure_detail,output_directory,requested_start_seconds,actual_start_seconds,seek_generation,process_id FROM playback_sessions WHERE id=? AND user_id=?",
             (session_id, user_id),
         )
         if not rows:
@@ -1503,7 +1725,10 @@ class PlaybackManager:
         with self._lock:
             process = self._processes.get(session_id)
             worker = self._session_workers.get(session_id)
-        process_alive = bool(process is not None and process.poll() is None)
+        process_alive = bool(
+            (process is not None and process.poll() is None)
+            or self._process_id_alive(row[11])
+        )
         logger.debug(
             "playback session status session_id=%s state=%s process_alive=%s snapshot=%s",
             session_id,
@@ -1531,15 +1756,18 @@ class PlaybackManager:
     def cancel_session(self, user_id: str, session_id: str) -> None:
         self._cleanup_expired()
         rows = self.db.execute(
-            "SELECT output_directory FROM playback_sessions WHERE id=? AND user_id=?",
+            "SELECT output_directory,process_id,state FROM playback_sessions WHERE id=? AND user_id=?",
             (session_id, user_id),
         )
         if not rows:
             raise HTTPException(404, "Playback session not found.")
+        process_id = rows[0][1]
+        self.db.execute(
+            "UPDATE playback_sessions SET state='stopping',completed_at=? WHERE id=? AND user_id=? AND state NOT IN ('stopping','failed','completed','expired')",
+            (_iso(), session_id, user_id),
+        )
         with self._lock:
             process = self._processes.get(session_id)
         self._stop_process(process, f"client_cancel user_id={user_id} session_id={session_id}")
-        self.db.execute(
-            "UPDATE playback_sessions SET state='stopping' WHERE id=? AND user_id=?",
-            (session_id, user_id),
-        )
+        if process is None:
+            self._stop_process_id(process_id, f"client_cancel user_id={user_id} session_id={session_id}")

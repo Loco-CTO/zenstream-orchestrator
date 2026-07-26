@@ -140,6 +140,22 @@ class PlaybackTest(unittest.TestCase):
             ),
             "video-transcode",
         )
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {
+                    "container": "matroska,webm",
+                    "videoCodec": "hevc",
+                    "audioCodec": "aac",
+                },
+                {
+                    "containers": ["mkv"],
+                    "videoCodecs": ["hevc"],
+                    "audioCodecs": ["aac"],
+                    "maxAudioChannels": 6,
+                },
+            ),
+            "direct",
+        )
 
     def test_bitrate_limit_requires_video_transcode(self):
         self.assertEqual(

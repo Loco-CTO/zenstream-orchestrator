@@ -10,8 +10,8 @@ type PlaybackSettings = {
 };
 
 const DEFAULTS: PlaybackSettings = {
-	maxTranscodes: 2,
-	maxTranscodesPerUser: 1,
+	maxTranscodes: 0,
+	maxTranscodesPerUser: 0,
 };
 
 export default function PlaybackPage() {
@@ -26,11 +26,15 @@ export default function PlaybackPage() {
 		const response = await adminFetch("/api/admin/playback/settings", current);
 		const data = await response.json().catch(() => null);
 		if (response.ok) {
+			const maxTranscodes = Number(data?.maxTranscodes);
+			const maxTranscodesPerUser = Number(data?.maxTranscodesPerUser);
 			setSettings({
-				maxTranscodes: Number(data?.maxTranscodes) || DEFAULTS.maxTranscodes,
-				maxTranscodesPerUser:
-					Number(data?.maxTranscodesPerUser) ||
-					DEFAULTS.maxTranscodesPerUser,
+				maxTranscodes: Number.isFinite(maxTranscodes)
+					? maxTranscodes
+					: DEFAULTS.maxTranscodes,
+				maxTranscodesPerUser: Number.isFinite(maxTranscodesPerUser)
+					? maxTranscodesPerUser
+					: DEFAULTS.maxTranscodesPerUser,
 			});
 		} else {
 			setMessage(data?.detail || "Could not load playback settings.");
@@ -89,7 +93,8 @@ export default function PlaybackPage() {
 						<h2 className="text-xl font-bold">Transcoding limits</h2>
 						<p className="mt-3 text-sm leading-6 console-muted">
 							Limit concurrent FFmpeg sessions to keep the server responsive.
-							Direct play and remux sessions do not count against these limits.
+							Enter 0 for unlimited. Direct play and remux sessions do not count
+							against these limits.
 						</p>
 					</div>
 					<IconPlayerPlay className="text-[#8fe4cf]" size={22} />
@@ -98,11 +103,11 @@ export default function PlaybackPage() {
 					<label className="block">
 						<span className="text-sm font-semibold">Maximum global transcodes</span>
 						<span className="mt-1 block text-xs console-muted">
-							Maximum number of active FFmpeg playback sessions across all users.
+							Maximum number of active FFmpeg playback sessions across all users; 0 is unlimited.
 						</span>
 						<input
 							type="number"
-							min={1}
+							min={0}
 							max={64}
 							step={1}
 							value={settings.maxTranscodes}
@@ -118,11 +123,11 @@ export default function PlaybackPage() {
 					<label className="block">
 						<span className="text-sm font-semibold">Maximum transcodes per user</span>
 						<span className="mt-1 block text-xs console-muted">
-							Prevents one account from using all global transcoding capacity.
+							Prevents one account from using all global transcoding capacity; 0 is unlimited.
 						</span>
 						<input
 							type="number"
-							min={1}
+							min={0}
 							max={64}
 							step={1}
 							value={settings.maxTranscodesPerUser}

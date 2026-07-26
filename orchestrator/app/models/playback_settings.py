@@ -6,7 +6,7 @@ from app.config import Config
 
 DEFAULT_MAX_TRANSCODES = 2
 DEFAULT_MAX_TRANSCODES_PER_USER = 1
-MAX_ALLOWED_TRANSCODES = 2048
+MAX_ALLOWED_TRANSCODES = 64
 
 
 def _environment_value(name: str, default: int) -> int:

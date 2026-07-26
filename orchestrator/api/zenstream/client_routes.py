@@ -362,7 +362,10 @@ async def playback_output(session_id: str, filename: str, request: Request):
         filename,
         account["id"],
     )
-    return FileResponse(path, media_type="video/mp2t")
+    return FileResponse(
+        path,
+        media_type="video/mp2t",
+    )
 
 
 @router.get("/api/playback/sessions/{session_id}")

@@ -684,10 +684,10 @@ class PlaybackManager:
                 "-loglevel",
                 "error",
                 "-y",
-                "-i",
-                str(path),
                 "-ss",
                 f"{start_time:.3f}",
+                "-i",
+                str(path),
             ]
             if has_video:
                 command.extend(

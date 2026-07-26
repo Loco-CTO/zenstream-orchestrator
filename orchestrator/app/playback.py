@@ -641,6 +641,8 @@ class PlaybackManager:
             generation = 1
             self._seek_generations[base_key] = generation
             duration = max(0.1, float(source.get("durationSeconds") or 0.0))
+            start_index = int(start_time // self._segment_seconds)
+            actual_start = start_index * self._segment_seconds
             self._write_public_playlist(output, duration)
             self.db.execute(
                 "INSERT INTO playback_sessions(id,user_id,entity_id,source_id,mode,state,output_directory,created_at,expires_at,process_id,requested_start_seconds,actual_start_seconds,audio_stream_id,last_accessed_at,seek_generation) VALUES(?,?,?,?,?,'starting',?,?,?,?,?,?,?,?,?)",
@@ -655,7 +657,7 @@ class PlaybackManager:
                     _iso(datetime.now(timezone.utc) + timedelta(hours=6)),
                     None,
                     start_time,
-                    0.0,
+                    actual_start,
                     str(profile.get("audioStreamId"))
                     if profile.get("audioStreamId") is not None
                     else None,
@@ -676,16 +678,14 @@ class PlaybackManager:
                 "output": output,
                 "generation": generation,
             }
-            start_index = int(start_time // self._segment_seconds)
             self._start_worker_locked(session_id, start_index)
-            process = self._processes[session_id]
         result = self._hls_result(session_id, source, access, transcode_mode)
         result["startPositionSeconds"] = start_time
         result["sessionState"] = "ready" if self._startup_ready(output) else "starting"
         result["sourceId"] = source["id"]
         result["audioStreamId"] = profile.get("audioStreamId")
         result["durationSeconds"] = source.get("durationSeconds")
-        result["actualStartPositionSeconds"] = start_index * self._segment_seconds
+        result["actualStartPositionSeconds"] = actual_start
         return result
 
     @classmethod

@@ -3,18 +3,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import mimetypes
 import re
 import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app.catalog import Catalog
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
 from app.client_auth import account_from_access, issue_ticket, require_account
+from app.logging_config import get_logger
 from app.playback import PlaybackManager, ffmpeg_path
 from api.zenstream.library_routes import require_admin
 
@@ -22,6 +24,7 @@ from api.zenstream.library_routes import require_admin
 router = APIRouter()
 catalog = Catalog()
 media = PlaybackManager()
+logger = get_logger("playback_routes")
 
 
 @router.post("/api/auth/login")
@@ -277,17 +280,67 @@ async def negotiate_playback(entity_id: str, request: Request):
 @router.api_route("/api/playback/items/{entity_id}/stream", methods=["GET", "HEAD"])
 async def direct_stream(entity_id: str, request: Request):
     account = account_from_access(request)
-    media_source_id = request.query_params.get("mediaSourceId")
-    return FileResponse(
-        await asyncio.to_thread(
-            media.direct_path, account["id"], entity_id, media_source_id
-        )
+    media_source_id = request.query_params.get("sourceId")
+    path = await asyncio.to_thread(
+        media.direct_path, account["id"], entity_id, media_source_id
     )
+    size = path.stat().st_size
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(size)}
+    range_header = request.headers.get("range")
+    if not range_header:
+        if request.method == "HEAD":
+            return Response(status_code=200, headers=headers, media_type=media_type)
+        return FileResponse(path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
+    if not range_header.startswith("bytes=") or "," in range_header:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+    start_text, _, end_text = range_header[6:].partition("-")
+    try:
+        if start_text:
+            start = int(start_text)
+            end = int(end_text) if end_text else size - 1
+        else:
+            suffix = int(end_text)
+            start = max(0, size - suffix)
+            end = size - 1
+    except ValueError:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+    if size == 0 or start < 0 or start >= size or end < start:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+    end = min(end, size - 1)
+    length = end - start + 1
+    headers.update(
+        {
+            "Content-Length": str(length),
+            "Content-Range": f"bytes {start}-{end}/{size}",
+        }
+    )
+    if request.method == "HEAD":
+        return Response(status_code=206, headers=headers, media_type=media_type)
+
+    def chunks():
+        with path.open("rb") as stream:
+            stream.seek(start)
+            remaining = length
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(chunks(), status_code=206, headers=headers, media_type=media_type)
 
 
 @router.get("/api/playback/sessions/{session_id}/{filename}")
 async def playback_output(session_id: str, filename: str, request: Request):
     account = account_from_access(request)
+    logger.debug(
+        "playback output request session_id=%s filename=%s user_id=%s",
+        session_id,
+        filename,
+        account["id"],
+    )
     path = await asyncio.to_thread(
         media.session_file, account["id"], session_id, filename
     )
@@ -296,12 +349,36 @@ async def playback_output(session_id: str, filename: str, request: Request):
         lines = []
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             lines.append(
-                f"{line}?access={access}" if line and not line.startswith("#") else line
+                f"{line}{'&' if '?' in line else '?'}access={access}"
+                if line and not line.startswith("#")
+                else line
             )
         return Response(
             "\n".join(lines) + "\n", media_type="application/vnd.apple.mpegurl"
         )
+    logger.debug(
+        "playback segment response session_id=%s filename=%s user_id=%s",
+        session_id,
+        filename,
+        account["id"],
+    )
     return FileResponse(path, media_type="video/mp2t")
+
+
+@router.get("/api/playback/sessions/{session_id}")
+async def playback_session_status(session_id: str, request: Request):
+    account = account_from_access(request)
+    logger.debug(
+        "playback status request session_id=%s user_id=%s", session_id, account["id"]
+    )
+    return await asyncio.to_thread(media.session_status, account["id"], session_id)
+
+
+@router.delete("/api/playback/sessions/{session_id}")
+async def cancel_playback_session(session_id: str, request: Request):
+    account = account_from_access(request)
+    await asyncio.to_thread(media.cancel_session, account["id"], session_id)
+    return {"sessionId": session_id, "sessionState": "stopping"}
 
 
 def _lyrics_to_vtt(source: Path) -> str:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import logging
 import os
 import platform
 import shutil
@@ -21,9 +20,10 @@ from app.catalog import Catalog
 from app.config import Config
 from app.client_auth import issue_ticket
 from app.library import LANGUAGE_ALIASES, language_name
+from app.logging_config import get_logger
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger("playback")
 PLAYABLE_ROLE = "media"
 
 
@@ -71,8 +71,39 @@ class PlaybackManager:
         self.db = Config().database
         self.catalog = Catalog()
 
+    @classmethod
+    def stop_all(cls) -> None:
+        with cls._lock:
+            sessions = list(cls._processes.items())
+        for session_id, process in sessions:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    
+                    process.kill()
+            with cls._lock:
+                cls._processes.pop(session_id, None)
+                cls._session_keys.pop(session_id, None)
+        cls._users.clear()
+
+    @staticmethod
+    def _limits() -> tuple[int, int]:
+        def value(name: str, default: int) -> int:
+            try:
+                return max(1, int(os.getenv(name, str(default))))
+            except ValueError:
+                return default
+
+        return value("MAX_TRANSCODES", 2), value("MAX_TRANSCODES_PER_USER", 1)
+
+
     def _file_path(
-        self, entity_id: str, media_file_id: str | None = None, role: str = PLAYABLE_ROLE
+        self,
+        entity_id: str,
+        media_file_id: str | None = None,
+        role: str = PLAYABLE_ROLE,
     ) -> tuple[str, Path]:
         params: list = [entity_id, role]
         where = "f.entity_id=? AND f.role=?"
@@ -122,7 +153,7 @@ class PlaybackManager:
                     timeout=60,
                     check=True,
                 )
-                if not completed.stdout:
+                if not completed.stdout or not isinstance(completed.stdout, str):
                     raise json.JSONDecodeError("FFprobe returned no JSON output", "", 0)
                 payload = json.loads(completed.stdout)
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
@@ -188,11 +219,16 @@ class PlaybackManager:
                 "SELECT id,media_file_id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload FROM media_sources WHERE entity_id=? ORDER BY id",
                 (entity_id,),
             )
+
         def normalize_stream(stream: dict) -> dict:
             value = dict(stream)
             tags = dict(value.get("tags") or {})
-            raw_language = str(tags.get("language") or tags.get("LANGUAGE") or "").strip()
-            language = LANGUAGE_ALIASES.get(raw_language.lower(), raw_language.lower() or None)
+            raw_language = str(
+                tags.get("language") or tags.get("LANGUAGE") or ""
+            ).strip()
+            language = LANGUAGE_ALIASES.get(
+                raw_language.lower(), raw_language.lower() or None
+            )
             if language:
                 tags["language"] = language
             if str(value.get("codec_type") or "").lower() == "subtitle":
@@ -232,7 +268,11 @@ class PlaybackManager:
                 "height": row[6],
                 "videoCodec": row[7],
                 "audioCodec": row[8],
-                "streams": [normalize_stream(stream) for stream in (json.loads(row[9]).get("streams") or [])] + sidecars,
+                "streams": [
+                    normalize_stream(stream)
+                    for stream in (json.loads(row[9]).get("streams") or [])
+                ]
+                + sidecars,
             }
             for row in rows
         ]
@@ -256,31 +296,117 @@ class PlaybackManager:
         }
 
     @classmethod
-    def _direct(cls, source: dict, profile: dict) -> bool:
+    def _stream_for_profile(cls, source: dict, profile: dict) -> dict:
+        requested = profile.get("audioStreamId")
+        streams = [
+            stream
+            for stream in source.get("streams", [])
+            if str(stream.get("codec_type") or "").lower() == "audio"
+        ]
+        if requested is None:
+            return streams[0] if streams else {}
+        try:
+            requested_index = int(requested)
+        except (TypeError, ValueError):
+            return {}
+        for stream in streams:
+            try:
+                if int(stream.get("index", -1)) == requested_index:
+                    return stream
+            except (TypeError, ValueError):
+                continue
+        return {}
+
+    @classmethod
+    def _playback_mode(cls, source: dict, profile: dict) -> str:
         if profile.get("forceTranscoding") is True:
-            return False
-        if str(profile.get("engine") or "").lower() == "mpv":
-            return True
+            return "video-transcode"
+        requested_mode = str(profile.get("requestedMode") or "").lower()
+        if requested_mode == "video-transcode":
+            return requested_mode
         containers = cls._profile_values(profile, "containers", {"mp4", "webm"})
-        containers |= {"mkv"} if "matroska" in containers else set()
-        containers |= {"ts"} if "mpegts" in containers else set()
         video = cls._profile_values(profile, "videoCodecs", {"h264", "vp9", "av1"})
         audio = cls._profile_values(profile, "audioCodecs", {"aac", "opus", "vorbis"})
-        source_containers = cls._container_values(source.get("container"))
+        source_container = cls._container_values(source.get("container"))
+        container_ok = bool(source_container & containers)
+        video_streams = [
+            stream
+            for stream in source.get("streams", [])
+            if str(stream.get("codec_type") or "").lower() == "video"
+        ]
+        has_video = bool(
+            video_streams
+            or source.get("width")
+            or source.get("height")
+            or source.get("videoCodec")
+        )
+        video_codec = str(source.get("videoCodec") or "").lower()
+        audio_stream = cls._stream_for_profile(source, profile)
+        audio_codec = str(
+            audio_stream.get("codec_name") or source.get("audioCodec") or ""
+        ).lower()
+        video_ok = not has_video or video_codec in video
+        for limit_key, source_key in (("maxWidth", "width"), ("maxHeight", "height")):
+            try:
+                limit = (
+                    int(profile.get(limit_key))
+                    if profile.get(limit_key) is not None
+                    else None
+                )
+                dimension = (
+                    int(source.get(source_key)) if source.get(source_key) else None
+                )
+            except (TypeError, ValueError):
+                limit = dimension = None
+            if limit is not None and dimension is not None and dimension > limit:
+                video_ok = False
+        audio_ok = not audio_codec or audio_codec in audio
+        try:
+            maximum_channels = int(profile.get("maxAudioChannels") or 2)
+        except (TypeError, ValueError):
+            maximum_channels = 2
+        if int(audio_stream.get("channels") or 0) > maximum_channels:
+            audio_ok = False
         maximum_bitrate = profile.get("maxStreamingBitrate")
         bitrate_ok = (
             not maximum_bitrate
             or not source.get("bitrate")
-            or source["bitrate"] <= int(maximum_bitrate)
+            or int(source["bitrate"]) <= int(maximum_bitrate)
         )
-        return (
-            bool(source_containers & containers)
-            and str(source.get("videoCodec") or "").lower() in video
-            and str(source.get("audioCodec") or "").lower() in audio
-            and bitrate_ok
-        )
+        if video_ok and audio_ok and container_ok and bitrate_ok:
+            return "direct"
+        if video_ok and audio_ok and bitrate_ok:
+            return "remux"
+        if video_ok and not audio_ok and bitrate_ok:
+            return "audio-transcode"
+        return "video-transcode"
+
+    @classmethod
+    def _direct(cls, source: dict, profile: dict) -> bool:
+        return cls._playback_mode(source, profile) == "direct"
+
+    @classmethod
+    def _transcode_mode(cls, source: dict, profile: dict) -> str:
+        mode = cls._playback_mode(source, profile)
+        return "video-transcode" if mode == "direct" else mode
 
     def negotiate(self, user_id: str, entity_id: str, profile: dict) -> dict:
+        forbidden = {
+            "EnableTranscoding",
+            "MediaSourceId",
+            "AudioStreamIndex",
+            "StartTimeTicks",
+            "StartTimeSeconds",
+            "PlaySessionId",
+        }
+        if forbidden.intersection(profile):
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "LEGACY_PLAYBACK_CONTRACT",
+                    "message": "Use the canonical playback contract.",
+                },
+            )
         sources = self.sources(user_id, entity_id)
         if not sources:
             raise HTTPException(
@@ -291,7 +417,7 @@ class PlaybackManager:
                 },
                 headers={"Retry-After": "2"},
             )
-        requested_source_id = profile.get("mediaSourceId")
+        requested_source_id = profile.get("sourceId")
         if requested_source_id:
             source = next(
                 (value for value in sources if value["id"] == requested_source_id),
@@ -301,6 +427,16 @@ class PlaybackManager:
                 raise HTTPException(404, "Media source not found.")
         else:
             source = sources[0]
+        if profile.get("audioStreamId") is not None and not self._stream_for_profile(
+            source, profile
+        ):
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "INVALID_AUDIO_TRACK",
+                    "message": "The selected audio track is unavailable.",
+                },
+            )
         direct_only = profile.get("directPlayOnly") is True
         logger.info(
             "playback negotiation entity_id=%s source_id=%s engine=%s force_transcoding=%s direct_play_only=%s",
@@ -314,9 +450,14 @@ class PlaybackManager:
         if self._direct(source, profile):
             return {
                 "mode": "direct",
+                "sessionState": "ready",
                 "source": source,
-                "url": f"/api/playback/items/{entity_id}/stream?mediaSourceId={source['id']}&access={access}",
+                "sourceId": source["id"],
+                "audioStreamId": profile.get("audioStreamId"),
+                "url": f"/api/playback/items/{entity_id}/stream?sourceId={source['id']}&access={access}",
                 "mimeType": self._mime(source),
+                "startPositionSeconds": 0.0,
+                "durationSeconds": source.get("durationSeconds"),
             }
         if direct_only:
             raise HTTPException(
@@ -326,9 +467,32 @@ class PlaybackManager:
                     "message": "The selected media cannot be played directly by this client.",
                 },
             )
-        start_time = max(0.0, float(profile.get("startTimeSeconds") or 0.0))
-        start_time = min(start_time, max(0.0, float(source.get("durationSeconds") or 0.0)))
-        return self._transcode(user_id, entity_id, source, access, profile, start_time)
+        start_time = max(0.0, float(profile.get("startPositionSeconds") or 0.0))
+        start_time = min(
+            start_time, max(0.0, float(source.get("durationSeconds") or 0.0))
+        )
+        transcode_mode = self._playback_mode(source, profile)
+        logger.info(
+            "playback decision entity_id=%s source_id=%s mode=%s container=%s video_codec=%s audio_codec=%s channels=%s bitrate=%s max_bitrate=%s",
+            entity_id,
+            source["id"],
+            transcode_mode,
+            source.get("container"),
+            source.get("videoCodec"),
+            source.get("audioCodec"),
+            self._stream_for_profile(source, profile).get("channels"),
+            source.get("bitrate"),
+            profile.get("maxStreamingBitrate"),
+        )
+        result = self._transcode(
+            user_id, entity_id, source, access, profile, start_time, transcode_mode
+        )
+        result["sessionState"] = result.get("sessionState", "starting")
+        result["sourceId"] = source["id"]
+        result["audioStreamId"] = profile.get("audioStreamId")
+        result["startPositionSeconds"] = start_time
+        result["durationSeconds"] = source.get("durationSeconds")
+        return result
 
     @staticmethod
     def _mime(source: dict) -> str:
@@ -342,19 +506,30 @@ class PlaybackManager:
         }.get(container, "application/octet-stream")
 
     def _transcode(
-        self, user_id: str, entity_id: str, source: dict, access: str, profile: dict,
+        self,
+        user_id: str,
+        entity_id: str,
+        source: dict,
+        access: str,
+        profile: dict,
         start_time: float = 0.0,
+        transcode_mode: str = "video-transcode",
     ) -> dict:
         executable = ffmpeg_path()
         if not executable:
             raise HTTPException(
                 503,
-                detail={"code": "FFMPEG_UNAVAILABLE", "message": "FFmpeg is not available."},
+                detail={
+                    "code": "FFMPEG_UNAVAILABLE",
+                    "message": "FFmpeg is not available.",
+                },
             )
-        maximum = max(1, int(os.getenv("MAX_TRANSCODES", "2")))
-        per_user_maximum = max(1, int(os.getenv("MAX_TRANSCODES_PER_USER", "1")))
+        reused_session: tuple[str, Path, subprocess.Popen] | None = None
         with self._lock:
-            session_key = self._transcode_key(user_id, entity_id, source, profile, start_time)
+            session_key = self._transcode_key(
+                user_id, entity_id, source, profile, start_time
+            )
+            replaced_ids: set[str] = set()
             for existing_id in self._users.get(user_id, set()):
                 process = self._processes.get(existing_id)
                 if (
@@ -362,76 +537,180 @@ class PlaybackManager:
                     and process.poll() is None
                     and self._session_keys.get(existing_id) == session_key
                 ):
+                    session_rows = self.db.execute(
+                        "SELECT output_directory,state FROM playback_sessions WHERE id=? AND user_id=?",
+                        (existing_id, user_id),
+                    )
+                    if not session_rows or session_rows[0][1] not in {
+                        "starting",
+                        "ready",
+                    }:
+                        logger.debug(
+                            "not reusing playback session_id=%s reason=database_state state=%s",
+                            existing_id,
+                            session_rows[0][1] if session_rows else "missing",
+                        )
+                        continue
+                    output = Path(session_rows[0][0])
                     logger.info(
-                        "reusing active playback transcode user_id=%s entity_id=%s session_id=%s",
+                        "reusing active playback transcode user_id=%s entity_id=%s session_id=%s state=%s ready=%s",
                         user_id,
                         entity_id,
                         existing_id,
+                        session_rows[0][1],
+                        self._startup_ready(output),
                     )
-                    result = self._hls_result(existing_id, source, access)
-                    result["startTimeSeconds"] = start_time
-                    return result
-            base_key = self._transcode_key(user_id, entity_id, source, profile, 0.0)[:3]
-            for existing_id in list(self._users.get(user_id, set())):
-                process = self._processes.get(existing_id)
-                existing_key = self._session_keys.get(existing_id)
-                if (
-                    process is not None
-                    and process.poll() is None
-                    and existing_key is not None
-                    and existing_key[:3] == base_key
+                    reused_session = (existing_id, output, process)
+                    break
+            if reused_session is not None:
+                existing_id, existing_output, existing_process = reused_session
+                if not self._wait_for_startup(
+                    existing_id, existing_output, existing_process
                 ):
-                    process.terminate()
-            active = [
-                value for value in self._processes.values() if value.poll() is None
-            ]
-            per_user = [
-                value
-                for session in self._users.get(user_id, set())
-                if (value := self._processes.get(session)) and value.poll() is None
-            ]
-            if len(active) >= maximum or len(per_user) >= per_user_maximum:
-                raise HTTPException(
-                    429,
-                    detail={
-                        "code": "TRANSCODE_CAPACITY",
-                        "message": "Transcoding capacity is currently in use.",
-                    },
-                    headers={"Retry-After": "2"},
+                    raise HTTPException(
+                        503,
+                        detail={
+                            "code": "PLAYBACK_SESSION_FAILED",
+                            "message": "The existing playback session failed before producing media.",
+                            "sessionId": existing_id,
+                        },
+                        headers={"Retry-After": "2"},
+                    )
+                result = self._hls_result(existing_id, source, access, transcode_mode)
+                result["startPositionSeconds"] = start_time
+                result["sessionState"] = "ready"
+                result["sourceId"] = source["id"]
+                result["audioStreamId"] = profile.get("audioStreamId")
+                logger.info(
+                    "reused playback session is ready session_id=%s", existing_id
                 )
+                return result
+            else:
+                base_key = self._transcode_key(
+                    user_id, entity_id, source, profile, 0.0
+                )[:3]
+                for existing_id in list(self._users.get(user_id, set())):
+                    process = self._processes.get(existing_id)
+                    existing_key = self._session_keys.get(existing_id)
+                    if (
+                        process is not None
+                        and process.poll() is None
+                        and existing_key is not None
+                        and existing_key[:3] == base_key
+                    ):
+                        process.terminate()
+                        replaced_ids.add(existing_id)
+                        logger.info(
+                            "cancelled superseded playback session_id=%s reason=seek_or_profile_change",
+                            existing_id,
+                        )
+                active = [
+                    value
+                    for session_id, value in self._processes.items()
+                    if session_id not in replaced_ids and value.poll() is None
+                ]
+                per_user = [
+                    value
+                    for session in self._users.get(user_id, set())
+                    if session not in replaced_ids
+                    and (value := self._processes.get(session))
+                    and value.poll() is None
+                ]
+                global_limit, user_limit = self._limits()
+                if len(active) >= global_limit or len(per_user) >= user_limit:
+                    logger.warning(
+                        "transcode limit reached user_id=%s active=%s per_user=%s global_limit=%s user_limit=%s",
+                        user_id,
+                        len(active),
+                        len(per_user),
+                        global_limit,
+                        user_limit,
+                    )
+                    raise HTTPException(
+                        429,
+                        detail={
+                            "code": "TRANSCODE_LIMIT_REACHED",
+                            "message": "Transcoding capacity is currently full.",
+                        },
+                        headers={"Retry-After": "5"},
+                    )
+
             session_id = str(uuid.uuid4())
             output = Path(tempfile.gettempdir()) / "zenstream-transcodes" / session_id
             output.mkdir(parents=True, exist_ok=False)
             media_file_id, path = self._file_path(entity_id, source.get("mediaFileId"))
-            audio_index = profile.get("audioStreamIndex")
+            audio_index = profile.get("audioStreamId")
+            if audio_index is not None:
+                try:
+                    audio_index = int(audio_index)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        400,
+                        detail={
+                            "code": "INVALID_AUDIO_TRACK",
+                            "message": "The selected audio track is invalid.",
+                        },
+                    )
+            selected_audio = self._stream_for_profile(source, profile)
+            if audio_index is not None and not selected_audio:
+                shutil.rmtree(output, ignore_errors=True)
+                raise HTTPException(
+                    400,
+                    detail={
+                        "code": "INVALID_AUDIO_TRACK",
+                        "message": "The selected audio track is unavailable.",
+                    },
+                )
             audio_map = (
                 f"0:{int(audio_index)}"
                 if audio_index is not None and int(audio_index) >= 0
                 else "0:a:0?"
             )
+            selected_audio_codec = str(
+                selected_audio.get("codec_name") or source.get("audioCodec") or ""
+            ).lower()
+            try:
+                selected_audio_channels = int(selected_audio.get("channels") or 2)
+            except (TypeError, ValueError):
+                selected_audio_channels = 2
+            copy_audio = transcode_mode == "remux" or (
+                transcode_mode == "video-transcode"
+                and selected_audio_codec == "aac"
+                and selected_audio_channels <= 2
+            )
+            has_video = any(
+                str(stream.get("codec_type") or "").lower() == "video"
+                for stream in source.get("streams", [])
+            ) or bool(source.get("width") or source.get("height"))
             command = [
                 executable,
                 "-hide_banner",
                 "-loglevel",
                 "error",
                 "-y",
-                "-ss",
-                f"{start_time:.3f}",
                 "-i",
                 str(path),
-                "-map",
-                "0:v:0",
-                "-map",
-                audio_map,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-c:a",
-                "aac",
+                "-ss",
+                f"{start_time:.3f}",
             ]
+            if has_video:
+                command.extend(
+                    [
+                        "-map",
+                        "0:v:0",
+                        "-c:v",
+                        "copy"
+                        if transcode_mode in {"remux", "audio-transcode"}
+                        else "libx264",
+                    ]
+                )
+            else:
+                command.append("-vn")
+            command.extend(["-map", audio_map, "-c:a", "copy" if copy_audio else "aac"])
+            if not copy_audio:
+                command.extend(["-ac", "2", "-ar", "48000", "-b:a", "192k"])
             maximum_bitrate = profile.get("maxStreamingBitrate")
-            if maximum_bitrate:
+            if maximum_bitrate and transcode_mode == "video-transcode":
                 command.extend(
                     [
                         "-maxrate",
@@ -440,54 +719,120 @@ class PlaybackManager:
                         str(int(maximum_bitrate) * 2),
                     ]
                 )
-            command.extend([
-                "-f",
-                "hls",
-                "-hls_time",
-                "4",
-                "-hls_playlist_type",
-                "event",
-                "-hls_segment_filename",
-                str(output / "segment-%06d.ts"),
-                str(output / "master.m3u8"),
-            ])
+            if transcode_mode == "video-transcode":
+                command.extend(["-preset", "veryfast"])
+            command.extend(
+                [
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    "-f",
+                    "hls",
+                    "-hls_time",
+                    "4",
+                    "-hls_playlist_type",
+                    "event",
+                    "-hls_list_size",
+                    "0",
+                    "-hls_flags",
+                    "independent_segments",
+                    "-hls_segment_filename",
+                    str(output / "segment-%06d.ts"),
+                    str(output / "master.m3u8"),
+                ]
+            )
+            logger.info(
+                "starting ffmpeg session_id=%s mode=%s executable=%s output_directory=%s limits_global=%s limits_user=%s",
+                session_id,
+                transcode_mode,
+                executable,
+                output,
+                self._limits()[0],
+                self._limits()[1],
+            )
+            logger.debug(
+                "ffmpeg command session_id=%s command=%s source=%s container=%s video_codec=%s audio_codec=%s bitrate=%s",
+                session_id,
+                command,
+                path,
+                source.get("container"),
+                source.get("videoCodec"),
+                selected_audio_codec,
+                source.get("bitrate"),
+            )
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            logger.info(
+                "created playback session_id=%s pid=%s mode=%s output_directory=%s",
+                session_id,
+                process.pid,
+                transcode_mode,
+                output,
             )
             self._processes[session_id] = process
             self._users.setdefault(user_id, set()).add(session_id)
             self._session_keys[session_id] = session_key
             self.db.execute(
-                "INSERT INTO playback_sessions(id,user_id,entity_id,source_id,mode,state,output_directory,created_at,expires_at) VALUES(?,?,?,?,?,'active',?,?,?)",
+                "INSERT INTO playback_sessions(id,user_id,entity_id,source_id,mode,state,output_directory,created_at,expires_at,process_id,requested_start_seconds,audio_stream_id,last_accessed_at) VALUES(?,?,?,?,?,'starting',?,?,?,?,?,?,?)",
                 (
                     session_id,
                     user_id,
                     entity_id,
                     source["id"],
-                    "hls",
+                    transcode_mode,
                     str(output),
                     _iso(),
                     _iso(datetime.now(timezone.utc) + timedelta(hours=6)),
+                    process.pid,
+                    start_time,
+                    str(profile.get("audioStreamId"))
+                    if profile.get("audioStreamId") is not None
+                    else None,
+                    _iso(),
                 ),
             )
             threading.Thread(
                 target=self._watch, args=(user_id, session_id, process), daemon=True
             ).start()
-        result = self._hls_result(session_id, source, access)
-        result["startTimeSeconds"] = start_time
+        ready = self._wait_for_startup(session_id, output, process)
+        if not ready:
+            raise HTTPException(
+                503,
+                detail={
+                    "code": "TRANSCODE_START_TIMEOUT",
+                    "message": "The playback session did not produce media in time.",
+                    "sessionId": session_id,
+                },
+                headers={"Retry-After": "2"},
+            )
+        result = self._hls_result(session_id, source, access, transcode_mode)
+        result["startPositionSeconds"] = start_time
+        result["sessionState"] = "ready"
+        result["sourceId"] = source["id"]
+        result["audioStreamId"] = profile.get("audioStreamId")
+        result["durationSeconds"] = source.get("durationSeconds")
         return result
 
     @staticmethod
     def _transcode_key(
-        user_id: str, entity_id: str, source: dict, profile: dict, start_time: float = 0.0
+        user_id: str,
+        entity_id: str,
+        source: dict,
+        profile: dict,
+        start_time: float = 0.0,
     ) -> tuple[str, str, str, str]:
         settings = {
-            "audioStreamIndex": profile.get("audioStreamIndex"),
+            "audioStreamId": profile.get("audioStreamId"),
             "maxStreamingBitrate": profile.get("maxStreamingBitrate"),
             "startTimeSeconds": round(start_time, 3),
+            "transcodeMode": PlaybackManager._playback_mode(source, profile),
         }
         return (
             user_id,
@@ -497,30 +842,249 @@ class PlaybackManager:
         )
 
     @staticmethod
-    def _hls_result(session_id: str, source: dict, access: str) -> dict:
+    def _hls_result(session_id: str, source: dict, access: str, mode: str) -> dict:
         return {
-            "mode": "hls",
+            "mode": mode,
             "source": source,
+            "sourceId": source["id"],
             "sessionId": session_id,
             "url": f"/api/playback/sessions/{session_id}/master.m3u8?access={access}",
             "mimeType": "application/vnd.apple.mpegurl",
         }
 
+    @staticmethod
+    def _playlist_snapshot(output: Path) -> dict:
+        playlist = output / "master.m3u8"
+        segments = sorted(output.glob("segment-*.ts"))
+        if not playlist.is_file():
+            playlist_state = "missing"
+        elif playlist.stat().st_size == 0:
+            playlist_state = "empty"
+        elif "#EXT-X-ENDLIST" in playlist.read_text(encoding="utf-8", errors="replace"):
+            playlist_state = "endlist"
+        else:
+            playlist_state = "progressive"
+        return {
+            "playlistReady": playlist.is_file() and playlist.stat().st_size > 0,
+            "segmentCount": len(segments),
+            "playlistState": playlist_state,
+        }
+
+    @classmethod
+    def _startup_ready(cls, output: Path) -> bool:
+        snapshot = cls._playlist_snapshot(output)
+        return bool(snapshot["playlistReady"] and snapshot["segmentCount"] > 0)
+
+    @staticmethod
+    def _finalize_playlist(session_id: str, output: Path) -> None:
+        playlist = output / "master.m3u8"
+        if not playlist.is_file():
+            raise RuntimeError("FFmpeg completed without producing master.m3u8")
+        lines = playlist.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = [
+            line
+            for line in lines
+            if line
+            not in {
+                "#EXT-X-PLAYLIST-TYPE:EVENT",
+                "#EXT-X-PLAYLIST-TYPE:VOD",
+                "#EXT-X-ENDLIST",
+            }
+        ]
+        version_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line.startswith("#EXT-X-VERSION:")
+            ),
+            0,
+        )
+        lines.insert(version_index + 1, "#EXT-X-PLAYLIST-TYPE:VOD")
+        lines.append("#EXT-X-ENDLIST")
+        temporary = output / "master.m3u8.finalizing"
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(temporary, playlist)
+        logger.info(
+            "finalized playback playlist session_id=%s playlist_state=vod segment_count=%s",
+            session_id,
+            len(list(output.glob("segment-*.ts"))),
+        )
+
+    def _wait_for_startup(
+        self, session_id: str, output: Path, process: subprocess.Popen
+    ) -> bool:
+        deadline = time.monotonic() + 10
+        last_snapshot = None
+        logger.info(
+            "waiting for playback readiness session_id=%s deadline_seconds=10",
+            session_id,
+        )
+        while time.monotonic() < deadline:
+            snapshot = self._playlist_snapshot(output)
+            if snapshot != last_snapshot:
+                logger.debug(
+                    "playback readiness session_id=%s snapshot=%s", session_id, snapshot
+                )
+                last_snapshot = snapshot
+            if snapshot["playlistReady"] and snapshot["segmentCount"] > 0:
+                self.db.execute(
+                    "UPDATE playback_sessions SET state='ready',started_at=? WHERE id=?",
+                    (_iso(), session_id),
+                )
+                logger.info(
+                    "playback ready session_id=%s snapshot=%s", session_id, snapshot
+                )
+                return True
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+        process_alive = process.poll() is None
+        if process.poll() is None:
+            logger.warning(
+                "playback startup timeout session_id=%s snapshot=%s process_alive=true",
+                session_id,
+                self._playlist_snapshot(output),
+            )
+            process.terminate()
+        else:
+            logger.warning(
+                "playback startup failed session_id=%s snapshot=%s return_code=%s",
+                session_id,
+                self._playlist_snapshot(output),
+                process.returncode,
+            )
+        self.db.execute(
+            "UPDATE playback_sessions SET state='failed',completed_at=?,failure_code=?,failure_detail=? WHERE id=? AND state='starting'",
+            (
+                _iso(),
+                "TRANSCODE_START_TIMEOUT" if process_alive else "FFMPEG_FAILED",
+                json.dumps(
+                    {
+                        "stage": "startup",
+                        "returnCode": process.returncode,
+                        **self._playlist_snapshot(output),
+                    },
+                    sort_keys=True,
+                ),
+                session_id,
+            ),
+        )
+        return False
+
     def _watch(self, user_id: str, session_id: str, process: subprocess.Popen) -> None:
+        row = self.db.execute(
+            "SELECT output_directory,state,failure_code FROM playback_sessions WHERE id=?",
+            (session_id,),
+        )
+        output = Path(row[0][0]) if row else None
+        stderr_lines: list[str] = []
+        stderr = getattr(process, "stderr", None)
+        error_file = output / "ffmpeg.stderr.log" if output else None
+        target = error_file.open("a", encoding="utf-8") if error_file else None
+        try:
+            if stderr is not None:
+                for line in stderr:
+                    value = str(line).rstrip()
+                    if not value:
+                        continue
+                    stderr_lines.append(value)
+                    del stderr_lines[:-80]
+                    if target:
+                        target.write(value + "\n")
+                    logger.debug(
+                        "ffmpeg stderr session_id=%s detail=%s", session_id, value
+                    )
+        finally:
+            if target:
+                target.close()
         process.wait()
+        return_code = process.returncode
         with self._lock:
             self._processes.pop(session_id, None)
             self._users.get(user_id, set()).discard(session_id)
             self._session_keys.pop(session_id, None)
-        self.db.execute(
-            "UPDATE playback_sessions SET state=? WHERE id=?",
-            ("completed" if process.returncode == 0 else "failed", session_id),
-        )
         row = self.db.execute(
-            "SELECT output_directory FROM playback_sessions WHERE id=?", (session_id,)
+            "SELECT output_directory,state,failure_code FROM playback_sessions WHERE id=?",
+            (session_id,),
         )
-        if row:
-            shutil.rmtree(row[0][0], ignore_errors=True)
+        was_cancelled = bool(row and row[0][1] == "stopping")
+        output = Path(row[0][0]) if row else output
+        snapshot = self._playlist_snapshot(output) if output else {}
+        existing_failure = row[0][2] if row else None
+        if return_code == 0 and not was_cancelled:
+            try:
+                self._finalize_playlist(session_id, output)
+                snapshot = self._playlist_snapshot(output)
+            except (OSError, RuntimeError) as error:
+                logger.error(
+                    "playback finalization failed session_id=%s return_code=%s error=%s snapshot=%s",
+                    session_id,
+                    return_code,
+                    error,
+                    snapshot,
+                )
+                return_code = 1
+        state = (
+            "stopping"
+            if was_cancelled
+            else ("completed" if return_code == 0 else "failed")
+        )
+        detail = None
+        failure_code = None
+        if state == "failed":
+            failure_code = existing_failure or "FFMPEG_FAILED"
+            detail = json.dumps(
+                {
+                    "stage": "ffmpeg",
+                    "returnCode": return_code,
+                    "stderrTail": "\n".join(stderr_lines)[-4000:],
+                    **snapshot,
+                },
+                sort_keys=True,
+            )
+        logger.info(
+            "ffmpeg exited session_id=%s return_code=%s state=%s snapshot=%s stderr_tail=%s",
+            session_id,
+            return_code,
+            state,
+            snapshot,
+            "present" if stderr_lines else "empty",
+        )
+        self.db.execute(
+            "UPDATE playback_sessions SET state=?,completed_at=?,failure_code=?,failure_detail=? WHERE id=?",
+            (
+                state,
+                _iso(),
+                failure_code,
+                detail,
+                session_id,
+            ),
+        )
+
+    def _cleanup_expired(self) -> None:
+        rows = self.db.execute(
+            "SELECT id,output_directory FROM playback_sessions WHERE expires_at<=? AND state NOT IN ('expired','stopping')",
+            (_iso(),),
+        )
+        for session_id, output_directory in rows or []:
+            logger.info(
+                "cleaning expired playback session_id=%s output_directory=%s",
+                session_id,
+                output_directory,
+            )
+            with self._lock:
+                process = self._processes.get(session_id)
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    logger.info(
+                        "terminated expired playback process session_id=%s", session_id
+                    )
+            if output_directory:
+                shutil.rmtree(output_directory, ignore_errors=True)
+            self.db.execute(
+                "UPDATE playback_sessions SET state='expired' WHERE id=?",
+                (session_id,),
+            )
 
     def direct_path(
         self, user_id: str, entity_id: str, media_source_id: str | None = None
@@ -538,18 +1102,118 @@ class PlaybackManager:
         return self._file_path(entity_id, media_file_id)[1]
 
     def session_file(self, user_id: str, session_id: str, filename: str) -> Path:
+        self._cleanup_expired()
         rows = self.db.execute(
-            "SELECT output_directory FROM playback_sessions WHERE id=? AND user_id=? AND expires_at>?",
+            "SELECT output_directory,state,failure_code,failure_detail FROM playback_sessions WHERE id=? AND user_id=? AND expires_at>?",
             (session_id, user_id, _iso()),
         )
-        if not rows or Path(filename).name != filename:
+        allowed = filename == "master.m3u8" or (
+            filename.startswith("segment-") and filename.endswith(".ts")
+        )
+        if not rows or not allowed or rows[0][1] in {"stopping", "expired"}:
             raise HTTPException(404, "Playback session not found.")
-        path = Path(rows[0][0]) / filename
-        deadline = time.monotonic() + 8
-        while not path.is_file() and time.monotonic() < deadline:
-            time.sleep(0.1)
+        output = Path(rows[0][0]).resolve()
+        path = output / filename
+        if path.parent != output:
+            raise HTTPException(404, "Playback session not found.")
         if not path.is_file():
-            raise HTTPException(
-                503, "Playback output is not ready.", headers={"Retry-After": "1"}
+            snapshot = self._playlist_snapshot(output)
+            logger.warning(
+                "playback output unavailable session_id=%s filename=%s state=%s snapshot=%s",
+                session_id,
+                filename,
+                rows[0][1],
+                snapshot,
             )
+            if rows[0][1] == "failed":
+                raise HTTPException(
+                    502,
+                    detail={
+                        "sessionId": session_id,
+                        "sessionState": rows[0][1],
+                        "errorCode": rows[0][2] or "FFMPEG_FAILED",
+                        "errorDetail": rows[0][3]
+                        or "The playback process failed before producing this file.",
+                        **snapshot,
+                    },
+                )
+            raise HTTPException(
+                503,
+                detail={
+                    "sessionId": session_id,
+                    "sessionState": rows[0][1],
+                    "errorCode": "PLAYBACK_OUTPUT_NOT_READY",
+                    "errorDetail": "The playback session is still preparing media.",
+                    **snapshot,
+                },
+                headers={"Retry-After": "1"},
+            )
+        self.db.execute(
+            "UPDATE playback_sessions SET last_accessed_at=? WHERE id=? AND user_id=?",
+            (_iso(), session_id, user_id),
+        )
+        logger.debug(
+            "served playback output session_id=%s filename=%s state=%s",
+            session_id,
+            filename,
+            rows[0][1],
+        )
         return path
+
+    def session_status(self, user_id: str, session_id: str) -> dict:
+        self._cleanup_expired()
+        rows = self.db.execute(
+            "SELECT state,source_id,created_at,expires_at,last_accessed_at,failure_code,failure_detail,output_directory FROM playback_sessions WHERE id=? AND user_id=?",
+            (session_id, user_id),
+        )
+        if not rows:
+            raise HTTPException(404, "Playback session not found.")
+        row = rows[0]
+        self.db.execute(
+            "UPDATE playback_sessions SET last_accessed_at=? WHERE id=? AND user_id=?",
+            (_iso(), session_id, user_id),
+        )
+        output = Path(row[7])
+        snapshot = self._playlist_snapshot(output)
+        with self._lock:
+            process = self._processes.get(session_id)
+        process_alive = bool(process is not None and process.poll() is None)
+        logger.debug(
+            "playback session status session_id=%s state=%s process_alive=%s snapshot=%s",
+            session_id,
+            row[0],
+            process_alive,
+            snapshot,
+        )
+        return {
+            "sessionId": session_id,
+            "sessionState": row[0],
+            "sourceId": row[1],
+            "createdAt": row[2],
+            "expiresAt": row[3],
+            "lastAccessedAt": row[4],
+            "errorCode": row[5],
+            "errorDetail": row[6],
+            **snapshot,
+            "processAlive": process_alive,
+        }
+
+    def cancel_session(self, user_id: str, session_id: str) -> None:
+        self._cleanup_expired()
+        rows = self.db.execute(
+            "SELECT output_directory FROM playback_sessions WHERE id=? AND user_id=?",
+            (session_id, user_id),
+        )
+        if not rows:
+            raise HTTPException(404, "Playback session not found.")
+        with self._lock:
+            process = self._processes.get(session_id)
+            if process is not None and process.poll() is None:
+                process.terminate()
+                logger.info(
+                    "cancelled playback session_id=%s user_id=%s", session_id, user_id
+                )
+        self.db.execute(
+            "UPDATE playback_sessions SET state='stopping' WHERE id=? AND user_id=?",
+            (session_id, user_id),
+        )

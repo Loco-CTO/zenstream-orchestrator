@@ -1,12 +1,111 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from fastapi import HTTPException
 
 from app.playback import PlaybackManager
 
 
 class PlaybackTest(unittest.TestCase):
+    def test_progressive_playlist_is_ready_only_with_playlist_and_segment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            self.assertFalse(PlaybackManager._startup_ready(output))
+            (output / "master.m3u8").write_text("#EXTM3U\n", encoding="utf-8")
+            self.assertFalse(PlaybackManager._startup_ready(output))
+            (output / "segment-000000.ts").write_bytes(b"segment")
+            self.assertTrue(PlaybackManager._startup_ready(output))
+
+    def test_completed_playlist_is_finalized_as_vod(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "master.m3u8").write_text(
+                "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\nsegment-000000.ts\n",
+                encoding="utf-8",
+            )
+            (output / "segment-000000.ts").write_bytes(b"segment")
+            PlaybackManager._finalize_playlist("session-1", output)
+            playlist = (output / "master.m3u8").read_text(encoding="utf-8")
+            self.assertIn("#EXT-X-PLAYLIST-TYPE:VOD", playlist)
+            self.assertIn("#EXT-X-ENDLIST", playlist)
+            self.assertNotIn("#EXT-X-PLAYLIST-TYPE:EVENT", playlist)
+            self.assertFalse((output / "master.m3u8.finalizing").exists())
+
+    def test_failed_session_output_returns_structured_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = object.__new__(PlaybackManager)
+            manager.db = MagicMock()
+            manager.db.execute.side_effect = [
+                [],
+                [(str(Path(directory)), "failed", "FFMPEG_FAILED", '{"stage":"ffmpeg"}')],
+            ]
+            with self.assertRaises(HTTPException) as context:
+                manager.session_file("user-1", "session-1", "master.m3u8")
+            self.assertEqual(context.exception.status_code, 502)
+            self.assertEqual(context.exception.detail["sessionId"], "session-1")
+            self.assertEqual(context.exception.detail["errorCode"], "FFMPEG_FAILED")
+
+    def test_playback_mode_decision_matrix(self):
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {"container": "mp4", "videoCodec": "h264", "audioCodec": "aac"},
+                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+            ),
+            "direct",
+        )
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {"container": "mkv", "videoCodec": "h264", "audioCodec": "aac"},
+                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+            ),
+            "remux",
+        )
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {"container": "mp4", "videoCodec": "h264", "audioCodec": "ac3"},
+                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+            ),
+            "audio-transcode",
+        )
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {
+                    "container": "mp4",
+                    "videoCodec": "h264",
+                    "audioCodec": "aac",
+                    "streams": [{"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 6}],
+                },
+                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"], "audioStreamId": 1, "maxAudioChannels": 2},
+            ),
+            "audio-transcode",
+        )
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {"container": "mp4", "videoCodec": "hevc", "audioCodec": "aac"},
+                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+            ),
+            "video-transcode",
+        )
+
+    def test_bitrate_limit_requires_video_transcode(self):
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {"container": "mkv", "videoCodec": "h264", "audioCodec": "aac", "bitrate": 8_000_000},
+                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"], "maxStreamingBitrate": 2_000_000},
+            ),
+            "video-transcode",
+        )
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {"container": "mkv", "videoCodec": "h264", "audioCodec": "ac3", "bitrate": 8_000_000},
+                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"], "maxStreamingBitrate": 2_000_000},
+            ),
+            "video-transcode",
+        )
+
     def test_empty_capabilities_mean_no_direct_support(self):
         source = {
             "container": "mp4",
@@ -69,7 +168,7 @@ class PlaybackTest(unittest.TestCase):
 
         self.assertEqual(sources[0]["mediaFileId"], "file-1")
         media_query = manager.db.execute.call_args_list[0].args[0]
-        self.assertIn("role='subtitle'", manager.db.execute.call_args_list[1].args[0])
+        self.assertIn("role IN ('subtitle','lyrics')", manager.db.execute.call_args_list[1].args[0])
         self.assertIn("media_sources", media_query)
 
     @patch("app.playback.issue_ticket", return_value="ticket")
@@ -93,15 +192,16 @@ class PlaybackTest(unittest.TestCase):
                 {"id": "source-2", "mediaFileId": "file-2", "container": "webm", "videoCodec": "vp9", "audioCodec": "opus"},
             ]
         )
+        manager._transcode = MagicMock(return_value={"mode": "remux", "url": "playlist"})
 
         result = manager.negotiate(
             "user-1",
             "entity-1",
-            {"mediaSourceId": "source-2", "containers": ["webm"], "videoCodecs": ["vp9"], "audioCodecs": ["opus"]},
+            {"sourceId": "source-2", "containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
         )
 
-        self.assertEqual(result["source"]["id"], "source-2")
-        self.assertIn("mediaSourceId=source-2", result["url"])
+        self.assertEqual(result["sourceId"], "source-2")
+        self.assertEqual(manager._transcode.call_args.args[2]["id"], "source-2")
 
     @patch("app.playback.issue_ticket", return_value="ticket")
     def test_direct_only_does_not_start_transcoding(self, _ticket):
@@ -121,6 +221,26 @@ class PlaybackTest(unittest.TestCase):
             )
 
         self.assertEqual(context.exception.status_code, 409)
+        manager._transcode.assert_not_called()
+
+    @patch("app.playback.issue_ticket", return_value="ticket")
+    def test_direct_play_does_not_create_a_session(self, _ticket):
+        manager = object.__new__(PlaybackManager)
+        manager.sources = MagicMock(
+            return_value=[
+                {"id": "source-1", "mediaFileId": "file-1", "container": "mp4", "videoCodec": "h264", "audioCodec": "aac"}
+            ]
+        )
+        manager._transcode = MagicMock()
+
+        result = manager.negotiate(
+            "user-1",
+            "entity-1",
+            {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+        )
+
+        self.assertEqual(result["mode"], "direct")
+        self.assertIsNone(result.get("sessionId"))
         manager._transcode.assert_not_called()
 
     @patch("app.playback.ffmpeg_path", return_value=None)
@@ -143,6 +263,14 @@ class PlaybackTest(unittest.TestCase):
         source = {"id": "source-1", "mediaFileId": "file-1"}
         profile = {"maxStreamingBitrate": 2_000_000}
         session_id = "session-1"
+        output = Path(tempfile.mkdtemp())
+        (output / "master.m3u8").write_text(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\nsegment-000000.ts\n",
+            encoding="utf-8",
+        )
+        (output / "segment-000000.ts").write_bytes(b"segment")
+        manager.db = MagicMock()
+        manager.db.execute.return_value = [(str(output), "ready")]
         key = PlaybackManager._transcode_key("user-1", "entity-1", source, profile)
         previous_processes = PlaybackManager._processes
         previous_users = PlaybackManager._users
@@ -155,7 +283,7 @@ class PlaybackTest(unittest.TestCase):
             result = manager._transcode("user-1", "entity-1", source, "ticket", profile)
 
             self.assertEqual(result["sessionId"], session_id)
-            self.assertEqual(result["mode"], "hls")
+            self.assertEqual(result["mode"], "video-transcode")
         finally:
             PlaybackManager._processes = previous_processes
             PlaybackManager._users = previous_users

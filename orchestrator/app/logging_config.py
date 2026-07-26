@@ -10,7 +10,7 @@ from pathlib import Path
 _configured = False
 _lock = __import__("threading").Lock()
 _secret_pattern = re.compile(
-    r"(?i)(api[_-]?key|token|password|secret|authorization)=?[^\s,;]+"
+    r"(?i)(api[_-]?key|token|password|secret|authorization|access)=?[^\s,;&\"']+"
 )
 
 
@@ -63,6 +63,10 @@ def configure_logging() -> None:
         file_handler.setFormatter(formatter)
         file_handler.setLevel(logging.DEBUG)
         root.addHandler(file_handler)
+        for logger_name in ("uvicorn.access", "uvicorn.error"):
+            external_logger = logging.getLogger(logger_name)
+            for handler in external_logger.handlers:
+                handler.setFormatter(formatter)
         _configured = True
 
 

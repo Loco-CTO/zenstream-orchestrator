@@ -74,6 +74,14 @@ class PlaybackManager:
     _session_locks: dict[str, threading.RLock] = {}
     _segment_seconds = 4.0
 
+    @staticmethod
+    def _idle_timeout_seconds() -> float:
+        try:
+            value = float(os.getenv("PLAYBACK_SESSION_IDLE_TIMEOUT_SECONDS", "45"))
+        except (TypeError, ValueError):
+            value = 45.0
+        return max(15.0, min(value, 3600.0))
+
     def __init__(self):
         self.db = Config().database
         self.catalog = Catalog()
@@ -83,13 +91,7 @@ class PlaybackManager:
         with cls._lock:
             sessions = list(cls._processes.items())
         for session_id, process in sessions:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    
-                    process.kill()
+            cls._stop_process(process, f"shutdown session_id={session_id}")
             with cls._lock:
                 cls._processes.pop(session_id, None)
                 cls._session_keys.pop(session_id, None)
@@ -97,6 +99,22 @@ class PlaybackManager:
                 cls._session_workers.pop(session_id, None)
                 cls._session_locks.pop(session_id, None)
         cls._users.clear()
+
+    @staticmethod
+    def _stop_process(process: subprocess.Popen | None, reason: str) -> None:
+        if process is None or process.poll() is not None:
+            return
+        logger.info("stopping playback worker pid=%s reason=%s", process.pid, reason)
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            logger.warning("killing unresponsive playback worker pid=%s reason=%s", process.pid, reason)
+            process.kill()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                logger.error("playback worker did not exit after kill pid=%s reason=%s", process.pid, reason)
 
     @staticmethod
     def _limits() -> tuple[int, int]:
@@ -831,7 +849,7 @@ class PlaybackManager:
             generation,
             self._playlist_snapshot(output),
         )
-        process.terminate()
+        self._stop_process(process, f"startup_timeout session_id={session_id} generation={generation}")
         self.db.execute(
             "UPDATE playback_sessions SET state='failed',completed_at=?,failure_code=?,failure_detail=? WHERE id=? AND state='starting' AND seek_generation=?",
             (
@@ -850,12 +868,78 @@ class PlaybackManager:
             ),
         )
 
+    def _monitor_idle(
+        self,
+        user_id: str,
+        session_id: str,
+        process: subprocess.Popen,
+        generation: int,
+    ) -> None:
+        timeout = self._idle_timeout_seconds()
+        interval = min(5.0, max(1.0, timeout / 5.0))
+        while process.poll() is None:
+            time.sleep(interval)
+            with self._lock:
+                worker = self._session_workers.get(session_id)
+                current = bool(
+                    worker
+                    and worker.get("process") is process
+                    and worker.get("generation") == generation
+                )
+            if not current:
+                return
+            rows = self.db.execute(
+                "SELECT state,last_accessed_at FROM playback_sessions WHERE id=? AND user_id=?",
+                (session_id, user_id),
+            )
+            if not rows or rows[0][0] in {"stopping", "failed", "completed", "expired"}:
+                return
+            try:
+                last_accessed = datetime.fromisoformat(rows[0][1]).timestamp()
+            except (TypeError, ValueError, OSError):
+                last_accessed = time.time()
+            idle_for = time.time() - last_accessed
+            if idle_for < timeout:
+                continue
+            with self._lock:
+                spec = self._session_specs.get(session_id)
+            if not spec:
+                return
+            snapshot = self._playlist_snapshot(spec["output"])
+            logger.warning(
+                "playback idle timeout session_id=%s generation=%s idle_seconds=%.1f snapshot=%s",
+                session_id,
+                generation,
+                idle_for,
+                snapshot,
+            )
+            self.db.execute(
+                "UPDATE playback_sessions SET state='stopping',failure_code=?,failure_detail=?,completed_at=? WHERE id=? AND user_id=? AND seek_generation=? AND state NOT IN ('stopping','failed','completed','expired')",
+                (
+                    "PLAYBACK_IDLE_TIMEOUT",
+                    json.dumps(
+                        {
+                            "stage": "idle_watchdog",
+                            "idleSeconds": round(idle_for, 3),
+                            "timeoutSeconds": timeout,
+                            **snapshot,
+                        },
+                        sort_keys=True,
+                    ),
+                    _iso(),
+                    session_id,
+                    user_id,
+                    generation,
+                ),
+            )
+            self._stop_process(process, f"idle_timeout session_id={session_id}")
+            return
+
     def _start_worker_locked(self, session_id: str, start_index: int) -> subprocess.Popen:
         spec = self._session_specs[session_id]
         old = self._processes.get(session_id)
         if old is not None and old.poll() is None:
-            old.terminate()
-            logger.info("cancelled playback worker session_id=%s reason=segment_seek", session_id)
+            self._stop_process(old, f"segment_seek session_id={session_id}")
         generation = int(spec.get("generation") or 0) + 1
         spec["generation"] = generation
         worker_dir = spec["output"] / f"worker-{generation:06d}"
@@ -902,6 +986,11 @@ class PlaybackManager:
         threading.Thread(
             target=self._monitor_startup,
             args=(session_id, spec["output"], process, generation),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._monitor_idle,
+            args=(spec["user_id"], session_id, process, generation),
             daemon=True,
         ).start()
         return process
@@ -1306,11 +1395,7 @@ class PlaybackManager:
             )
             with self._lock:
                 process = self._processes.get(session_id)
-                if process is not None and process.poll() is None:
-                    process.terminate()
-                    logger.info(
-                        "terminated expired playback process session_id=%s", session_id
-                    )
+            self._stop_process(process, f"expiry session_id={session_id}")
             if output_directory:
                 shutil.rmtree(output_directory, ignore_errors=True)
             with self._lock:
@@ -1453,11 +1538,7 @@ class PlaybackManager:
             raise HTTPException(404, "Playback session not found.")
         with self._lock:
             process = self._processes.get(session_id)
-            if process is not None and process.poll() is None:
-                process.terminate()
-                logger.info(
-                    "cancelled playback session_id=%s user_id=%s", session_id, user_id
-                )
+        self._stop_process(process, f"client_cancel user_id={user_id} session_id={session_id}")
         self.db.execute(
             "UPDATE playback_sessions SET state='stopping' WHERE id=? AND user_id=?",
             (session_id, user_id),

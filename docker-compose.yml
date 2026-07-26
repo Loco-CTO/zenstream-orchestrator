@@ -11,8 +11,8 @@ services:
       # optional and are only needed for development or custom tool builds.
       FFMPEG_PATH: "${FFMPEG_PATH:-}"
       FFPROBE_PATH: "${FFPROBE_PATH:-}"
-      MAX_TRANSCODES: "${MAX_TRANSCODES:-2}"
-      MAX_TRANSCODES_PER_USER: "${MAX_TRANSCODES_PER_USER:-1}"
+      MAX_TRANSCODES: "${MAX_TRANSCODES:-0}"
+      MAX_TRANSCODES_PER_USER: "${MAX_TRANSCODES_PER_USER:-0}"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}"
       ORCHESTRATOR_HOST: 0.0.0.0
       ORCHESTRATOR_PORT: 9088

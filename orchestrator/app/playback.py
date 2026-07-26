@@ -117,9 +117,13 @@ class PlaybackManager:
                     ],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=60,
                     check=True,
                 )
+                if not completed.stdout:
+                    raise json.JSONDecodeError("FFprobe returned no JSON output", "", 0)
                 payload = json.loads(completed.stdout)
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
                 logger.warning(

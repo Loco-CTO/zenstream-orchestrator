@@ -270,10 +270,23 @@ async def update_admin_playback_settings(
 ):
     _admin_headers(Username, TOKEN)
     data = await request.json()
+    current = PlaybackSettings().get()
+    width = data.get("trickplayFrameWidth", current["trickplayFrameWidth"])
+    height = data.get("trickplayFrameHeight")
+    if height is None:
+        try:
+            height = int(width) * 9 // 16
+        except (TypeError, ValueError):
+            height = current["trickplayFrameHeight"]
     try:
-        return PlaybackSettings().set(
-            data.get("maxTranscodes"), data.get("maxTranscodesPerUser")
+        values = PlaybackSettings().set(
+            data.get("maxTranscodes", current["maxTranscodes"]),
+            data.get("maxTranscodesPerUser", current["maxTranscodesPerUser"]),
+            width,
+            height,
+            data.get("trickplayIntervalSeconds", current["trickplayIntervalSeconds"]),
         )
+        return values
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 

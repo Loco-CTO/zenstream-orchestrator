@@ -12,7 +12,7 @@ class MemoryDatabase:
     def execute(self, query, params=None):
         if query.startswith("SELECT"):
             return [self.row] if self.row else []
-        self.row = (params[0], params[1])
+        self.row = tuple(params[:5])
         return []
 
 
@@ -21,11 +21,11 @@ class PlaybackSettingsTest(unittest.TestCase):
         settings = PlaybackSettings(MemoryDatabase())
         self.assertEqual(
             settings.get(),
-            {"maxTranscodes": 0, "maxTranscodesPerUser": 0},
+            {"maxTranscodes": 0, "maxTranscodesPerUser": 0, "trickplayFrameWidth": 320, "trickplayFrameHeight": 180, "trickplayIntervalSeconds": 10},
         )
         self.assertEqual(
             settings.set(0, 0),
-            {"maxTranscodes": 0, "maxTranscodesPerUser": 0},
+            {"maxTranscodes": 0, "maxTranscodesPerUser": 0, "trickplayFrameWidth": 320, "trickplayFrameHeight": 180, "trickplayIntervalSeconds": 10},
         )
 
     def test_unlimited_global_does_not_clamp_user_limit(self):
@@ -36,7 +36,7 @@ class PlaybackSettingsTest(unittest.TestCase):
         ):
             self.assertEqual(
                 PlaybackSettings(MemoryDatabase()).get(),
-                {"maxTranscodes": 0, "maxTranscodesPerUser": 4},
+                {"maxTranscodes": 0, "maxTranscodesPerUser": 4, "trickplayFrameWidth": 320, "trickplayFrameHeight": 180, "trickplayIntervalSeconds": 10},
             )
 
     def test_defaults_follow_environment_until_saved(self):
@@ -48,7 +48,7 @@ class PlaybackSettingsTest(unittest.TestCase):
             settings = PlaybackSettings(MemoryDatabase())
             self.assertEqual(
                 settings.get(),
-                {"maxTranscodes": 4, "maxTranscodesPerUser": 2},
+                {"maxTranscodes": 4, "maxTranscodesPerUser": 2, "trickplayFrameWidth": 320, "trickplayFrameHeight": 180, "trickplayIntervalSeconds": 10},
             )
 
     def test_saved_values_round_trip(self):
@@ -56,7 +56,7 @@ class PlaybackSettingsTest(unittest.TestCase):
         settings = PlaybackSettings(database)
         self.assertEqual(
             settings.set(6, 3),
-            {"maxTranscodes": 6, "maxTranscodesPerUser": 3},
+            {"maxTranscodes": 6, "maxTranscodesPerUser": 3, "trickplayFrameWidth": 320, "trickplayFrameHeight": 180, "trickplayIntervalSeconds": 10},
         )
         self.assertEqual(settings.get(), settings.set(6, 3))
 
@@ -71,9 +71,19 @@ class PlaybackSettingsTest(unittest.TestCase):
     def test_unlimited_global_or_user_limit_is_valid(self):
         self.assertEqual(
             PlaybackSettings.normalize(0, 4),
-            {"maxTranscodes": 0, "maxTranscodesPerUser": 4},
+            {"maxTranscodes": 0, "maxTranscodesPerUser": 4, "trickplayFrameWidth": 320, "trickplayFrameHeight": 180, "trickplayIntervalSeconds": 10},
         )
         self.assertEqual(
             PlaybackSettings.normalize(4, 0),
-            {"maxTranscodes": 4, "maxTranscodesPerUser": 0},
+            {"maxTranscodes": 4, "maxTranscodesPerUser": 0, "trickplayFrameWidth": 320, "trickplayFrameHeight": 180, "trickplayIntervalSeconds": 10},
         )
+
+    def test_trickplay_frame_width_derives_an_exact_16_by_9_height(self):
+        self.assertEqual(
+            PlaybackSettings.normalize(0, 0, 640, 360, 60)["trickplayFrameHeight"],
+            360,
+        )
+        with self.assertRaisesRegex(ValueError, "divisible by 16"):
+            PlaybackSettings.normalize(0, 0, 321, 181, 10)
+        with self.assertRaisesRegex(ValueError, "between 1 and 60"):
+            PlaybackSettings.normalize(0, 0, 320, 180, 61)

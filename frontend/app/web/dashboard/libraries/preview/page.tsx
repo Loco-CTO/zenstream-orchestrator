@@ -45,6 +45,19 @@ type Item = {
 	}[];
 	primaryProvider?: string | null;
 	children?: Child[];
+	trickplay?: TrickplayAsset | null;
+};
+
+type TrickplayAsset = {
+	mediaFileId: string;
+	frameWidth: number;
+	frameHeight: number;
+	intervalSeconds: number;
+	state: "queued" | "generating" | "ready" | "failed" | string;
+	generation?: string | null;
+	error?: string | null;
+	frameCount: number;
+	sheets: { index: number; frameCount: number }[];
 };
 
 type MetadataPerson = { name?: string; role?: string };
@@ -758,6 +771,13 @@ function EntityDetailView({
 							/>
 						)}
 						{!metadataPending && <MetadataSummary detail={detail} />}
+						{detail.trickplay && (
+							<TrickplayAssetPanel
+								entityId={detail.id}
+								asset={detail.trickplay}
+								session={session}
+							/>
+						)}
 					</div>
 					<div className="min-w-0">
 						{childLabel && (
@@ -815,6 +835,97 @@ function EntityDetailView({
 				</div>
 			)}
 		</div>
+	);
+}
+
+function TrickplayAssetPanel({
+	entityId,
+	asset,
+	session,
+}: {
+	entityId: string;
+	asset: TrickplayAsset;
+	session: Session;
+}) {
+	const [selectedSheet, setSelectedSheet] = useState(0);
+	const [url, setUrl] = useState("");
+	const [loadError, setLoadError] = useState("");
+	const sheet = asset.sheets.find((entry) => entry.index === selectedSheet) || asset.sheets[0];
+	useEffect(() => {
+		if (asset.state !== "ready" || !asset.generation || !sheet) {
+			setUrl("");
+			return;
+		}
+		const controller = new AbortController();
+		let objectUrl = "";
+		setLoadError("");
+		adminFetch(
+			`/api/admin/library-items/${entityId}/trickplay/${asset.generation}/${sheet.index}.jpg`,
+			session,
+			{ signal: controller.signal },
+		)
+			.then(async (response) => {
+				if (!response.ok) throw new Error("The trickplay sheet could not be loaded.");
+				objectUrl = URL.createObjectURL(await response.blob());
+				setUrl(objectUrl);
+			})
+			.catch((error) => {
+				if ((error as Error).name !== "AbortError")
+					setLoadError("The trickplay sheet could not be loaded.");
+			});
+		return () => {
+			controller.abort();
+			if (objectUrl) URL.revokeObjectURL(objectUrl);
+		};
+	}, [asset.generation, asset.state, entityId, session, sheet]);
+	const status = asset.state === "ready" ? "Ready" : asset.state === "failed" ? "Failed" : "Pending";
+	return (
+		<section className="space-y-3">
+			<div className="flex items-center justify-between gap-3">
+				<p className="text-xs uppercase tracking-[.18em] material-muted">Trickplay assets</p>
+				<span className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${asset.state === "ready" ? "border-emerald-300/30 text-emerald-200" : asset.state === "failed" ? "border-red-300/30 text-red-200" : "border-amber-300/30 text-amber-200"}`}>
+					{status}
+				</span>
+			</div>
+			<div className="material-surface overflow-hidden rounded-xl border border-white/10">
+				<div className="grid grid-cols-3 gap-3 border-b border-white/10 px-3 py-3 text-xs material-muted">
+					<span>{asset.frameWidth} × {asset.frameHeight} px</span>
+					<span>{asset.intervalSeconds}s interval</span>
+					<span>{asset.frameCount} frames</span>
+				</div>
+				{asset.state === "ready" && sheet ? (
+					<div className="space-y-3 p-3">
+						{asset.sheets.length > 1 && (
+							<label className="block text-xs material-muted">
+								Sprite sheet
+								<select
+									value={sheet.index}
+									onChange={(event) => setSelectedSheet(Number(event.target.value))}
+									className="console-input mt-1 h-9 w-full rounded-lg px-2 text-sm"
+								>
+									{asset.sheets.map((entry) => (
+										<option key={entry.index} value={entry.index}>
+											Sheet {entry.index + 1} ({entry.frameCount} frames)
+										</option>
+									))}
+								</select>
+							</label>
+						)}
+						{url ? (
+							<img src={url} alt={`Trickplay sprite sheet ${sheet.index + 1}`} className="max-h-[360px] w-full rounded-lg bg-black object-contain" />
+						) : (
+							<div className="flex aspect-video items-center justify-center rounded-lg bg-black text-xs material-muted">
+								{loadError || "Loading sprite sheet…"}
+							</div>
+						)}
+					</div>
+				) : (
+					<p className="px-3 py-4 text-xs material-muted">
+						{asset.error || "No ready sprite sheets yet. The scheduled trickplay task will generate them."}
+					</p>
+				)}
+			</div>
+		</section>
 	);
 }
 

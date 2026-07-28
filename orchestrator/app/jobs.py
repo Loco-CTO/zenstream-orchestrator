@@ -13,6 +13,7 @@ from app.library_cleanup import cleanup_orphans
 from app.providers import ProviderError
 from app.metadata_services import MetadataIngestService
 from app.logging_config import get_logger
+from app.trickplay import TrickplayExtractor
 
 
 logger = get_logger("jobs")
@@ -156,6 +157,19 @@ class JobStore:
             self.db.execute(
                 "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
                 (now(), now(), cleanup["id"]),
+            )
+        trickplay = self.ensure(
+            "trickplay_extract",
+            "Extract trickplay sheets",
+            "Generate cached sprite sheets for indexed video sources.",
+            "trickplay_extract",
+            60,
+            {},
+        )
+        if trickplay["lastRunAt"] is None:
+            self.db.execute(
+                "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+                (now(), now(), trickplay["id"]),
             )
 
     def ensure_library(self, library: dict) -> dict:
@@ -569,6 +583,16 @@ class JobScheduler:
             self.condition.notify_all()
         return run
 
+    def enqueue_trickplay_extraction(self) -> dict:
+        definition = self.store.by_key("trickplay_extract")
+        if not definition:
+            self.store.ensure_defaults()
+            definition = self.store.by_key("trickplay_extract")
+        run, _ = self.store.create_or_get_active_run(definition)
+        with self.condition:
+            self.condition.notify_all()
+        return run
+
     def terminate(self, definition_id: str, run_id: str) -> dict | None:
         runs = [
             run for run in self.store.runs(definition_id, 100) if run["id"] == run_id
@@ -707,6 +731,10 @@ class JobScheduler:
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
+                )
+            elif kind == "trickplay_extract":
+                TrickplayExtractor().run(
+                    run_id, self.store, self.cancel_events[run_id].is_set
                 )
             else:
                 self.store.update_run(

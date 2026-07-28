@@ -1,18 +1,34 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
+import { IconPhoto, IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 
 type PlaybackSettings = {
 	maxTranscodes: number;
 	maxTranscodesPerUser: number;
+	trickplayFrameWidth: number;
+	trickplayIntervalSeconds: number;
 };
 
 const DEFAULTS: PlaybackSettings = {
 	maxTranscodes: 0,
 	maxTranscodesPerUser: 0,
+	trickplayFrameWidth: 320,
+	trickplayIntervalSeconds: 10,
 };
+
+function validTrickplaySettings(width: number, intervalSeconds: number) {
+	return (
+		Number.isInteger(width) &&
+		width >= 160 &&
+		width <= 640 &&
+		width % 16 === 0 &&
+		Number.isInteger(intervalSeconds) &&
+		intervalSeconds >= 1 &&
+		intervalSeconds <= 60
+	);
+}
 
 export default function PlaybackPage() {
 	const [session, setSession] = useState<Session | null>(null);
@@ -28,6 +44,8 @@ export default function PlaybackPage() {
 		if (response.ok) {
 			const maxTranscodes = Number(data?.maxTranscodes);
 			const maxTranscodesPerUser = Number(data?.maxTranscodesPerUser);
+			const trickplayFrameWidth = Number(data?.trickplayFrameWidth);
+			const trickplayIntervalSeconds = Number(data?.trickplayIntervalSeconds);
 			setSettings({
 				maxTranscodes: Number.isFinite(maxTranscodes)
 					? maxTranscodes
@@ -35,6 +53,14 @@ export default function PlaybackPage() {
 				maxTranscodesPerUser: Number.isFinite(maxTranscodesPerUser)
 					? maxTranscodesPerUser
 					: DEFAULTS.maxTranscodesPerUser,
+				trickplayFrameWidth:
+					Number.isFinite(trickplayFrameWidth) && trickplayFrameWidth > 0
+						? trickplayFrameWidth
+						: DEFAULTS.trickplayFrameWidth,
+				trickplayIntervalSeconds:
+					Number.isFinite(trickplayIntervalSeconds) && trickplayIntervalSeconds > 0
+						? trickplayIntervalSeconds
+						: DEFAULTS.trickplayIntervalSeconds,
 			});
 		} else {
 			setMessage(data?.detail || "Could not load playback settings.");
@@ -53,21 +79,54 @@ export default function PlaybackPage() {
 	async function save(event: FormEvent) {
 		event.preventDefault();
 		if (!session) return;
+		if (!validTrickplaySettings(settings.trickplayFrameWidth, settings.trickplayIntervalSeconds)) {
+			setMessage("Choose a frame width from 160 to 640 in 16 px steps and an interval from 1 to 60 seconds.");
+			return;
+		}
 		setSaving(true);
 		const response = await adminFetch("/api/admin/playback/settings", session, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(settings),
+			body: JSON.stringify({
+				...settings,
+				trickplayFrameHeight: (settings.trickplayFrameWidth * 9) / 16,
+			}),
 		});
 		const data = await response.json().catch(() => null);
 		setMessage(
 			response.ok
-				? "Playback limits saved. New sessions use the updated limits."
+				? "Playback settings saved. New sessions use the updated limits."
 				: data?.detail || "Could not save playback limits.",
 		);
-		if (response.ok) setSettings(data);
+		if (response.ok) {
+			setSettings((current) => ({
+				maxTranscodes: Number.isFinite(Number(data?.maxTranscodes))
+					? Number(data.maxTranscodes)
+					: current.maxTranscodes,
+				maxTranscodesPerUser: Number.isFinite(Number(data?.maxTranscodesPerUser))
+					? Number(data.maxTranscodesPerUser)
+					: current.maxTranscodesPerUser,
+				trickplayFrameWidth:
+					Number.isFinite(Number(data?.trickplayFrameWidth)) &&
+					Number(data.trickplayFrameWidth) > 0
+						? Number(data.trickplayFrameWidth)
+						: current.trickplayFrameWidth,
+				trickplayIntervalSeconds:
+					Number.isFinite(Number(data?.trickplayIntervalSeconds)) &&
+					Number(data.trickplayIntervalSeconds) > 0
+						? Number(data.trickplayIntervalSeconds)
+						: current.trickplayIntervalSeconds,
+			}));
+		}
 		setSaving(false);
 	}
+
+	const trickplayFrameWidth = Math.max(1, settings.trickplayFrameWidth);
+	const trickplayFrameHeight = (trickplayFrameWidth * 9) / 16;
+	const trickplaySettingsAreValid = validTrickplaySettings(
+		settings.trickplayFrameWidth,
+		settings.trickplayIntervalSeconds,
+	);
 
 	return (
 		<div>
@@ -143,10 +202,99 @@ export default function PlaybackPage() {
 					<div className="flex items-center gap-3">
 						<button
 							type="submit"
-							disabled={loading || saving}
+							disabled={loading || saving || !trickplaySettingsAreValid}
 							className="console-button rounded-xl px-4 py-3 text-sm font-semibold disabled:opacity-40"
 						>
 							{saving ? "Saving…" : "Save playback limits"}
+						</button>
+						{message && <p className="text-sm console-muted">{message}</p>}
+					</div>
+				</form>
+			</section>
+			<section className="console-card mt-5 max-w-3xl rounded-2xl p-6">
+				<div className="flex items-start justify-between gap-4">
+					<div>
+						<h2 className="text-xl font-bold">Timeline previews</h2>
+						<p className="mt-3 text-sm leading-6 console-muted">
+							Choose the size of each extracted timeline-preview frame. Frames
+							are always 16:9; narrower source media is fitted fully inside a
+							black frame.
+						</p>
+					</div>
+					<IconPhoto className="text-[#8fe4cf]" size={22} />
+				</div>
+				<form onSubmit={save} className="mt-6 space-y-5">
+					<label className="block">
+						<span className="text-sm font-semibold">Frame width</span>
+						<span className="mt-1 block text-xs console-muted">
+							Frame height is locked to 16:9: {trickplayFrameWidth} × {trickplayFrameHeight} px.
+						</span>
+						<input
+							type="number"
+							min={160}
+							max={640}
+							step={16}
+							value={settings.trickplayFrameWidth}
+							onChange={(event) =>
+								setSettings((current) => ({
+									...current,
+									trickplayFrameWidth: Number(event.target.value),
+								}))
+							}
+							className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none"
+						/>
+					</label>
+					<div>
+						<span className="text-sm font-semibold">Presets</span>
+						<div className="mt-3 flex flex-wrap gap-2">
+							{[160, 320, 640].map((width) => (
+								<button
+									key={width}
+									type="button"
+									onClick={() =>
+										setSettings((current) => ({
+											...current,
+											trickplayFrameWidth: width,
+										}))
+									}
+									className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${settings.trickplayFrameWidth === width ? "border-[#8fe4cf] bg-[#8fe4cf]/15 text-[#b6f5e4]" : "border-white/15 text-white/75 hover:border-white/35"}`}
+								>
+									{width} × {(width * 9) / 16}
+								</button>
+							))}
+						</div>
+					</div>
+					<label className="block">
+						<span className="text-sm font-semibold">Frame interval</span>
+						<span className="mt-1 block text-xs console-muted">
+							Seconds between extracted frames. Shorter intervals make seeking previews more precise and use more storage.
+						</span>
+						<input
+							type="number"
+							min={1}
+							max={60}
+							step={1}
+							value={settings.trickplayIntervalSeconds}
+							onChange={(event) =>
+								setSettings((current) => ({
+									...current,
+									trickplayIntervalSeconds: Number(event.target.value),
+								}))
+							}
+							className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none"
+						/>
+					</label>
+					<div className="flex items-center gap-3">
+						<button
+							type="submit"
+							disabled={
+								loading ||
+								saving ||
+								!trickplaySettingsAreValid
+							}
+							className="console-button rounded-xl px-4 py-3 text-sm font-semibold disabled:opacity-40"
+						>
+							{saving ? "Saving…" : "Save timeline preview settings"}
 						</button>
 						{message && <p className="text-sm console-muted">{message}</p>}
 					</div>

@@ -29,12 +29,53 @@ from app.providers import (
     ProviderError,
 )
 from app.logging_config import get_logger
+from app.trickplay import TrickplayExtractor
 
 
 router = APIRouter(prefix="/api/admin")
 logger = get_logger("library_api")
 store = LibraryStore()
 credentials = MetadataCredentials()
+
+
+def _trickplay_asset(entity_id: str) -> dict | None:
+    tables = {
+        row[0]
+        for row in store.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if not {"trickplay_assets", "trickplay_sheets"}.issubset(tables):
+        return None
+    rows = store.db.execute(
+        "SELECT media_file_id,frame_width,frame_height,interval_seconds,state,output_key,error "
+        "FROM trickplay_assets WHERE entity_id=? ORDER BY updated_at DESC LIMIT 1",
+        (entity_id,),
+    )
+    if not rows:
+        return None
+    media_file_id, width, height, interval, state, generation, error = rows[0]
+    value = {
+        "mediaFileId": media_file_id,
+        "frameWidth": width,
+        "frameHeight": height,
+        "intervalSeconds": interval,
+        "state": state,
+        "generation": generation,
+        "error": error,
+        "frameCount": 0,
+        "sheets": [],
+    }
+    if state != "ready" or not generation:
+        return value
+    sheets = store.db.execute(
+        "SELECT sheet_index,frame_count FROM trickplay_sheets "
+        "WHERE media_file_id=? AND output_key=? ORDER BY sheet_index",
+        (media_file_id, generation),
+    )
+    value["frameCount"] = sum(row[1] for row in sheets)
+    value["sheets"] = [
+        {"index": row[0], "frameCount": row[1]} for row in sheets
+    ]
+    return value
 
 
 def require_admin(username: str | None, token: str | None) -> str:
@@ -105,6 +146,8 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     value["displayName"] = (
         Path(row[4]).name if row[4] else row[3].replace("_", " ").title()
     )
+    if row[3] in {"movie", "episode"}:
+        value["trickplay"] = _trickplay_asset(entity_id)
     children = store.db.execute(
         "SELECT id,entity_type,relative_path,season_number,episode_number,track_number FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
         (entity_id,),
@@ -639,6 +682,22 @@ async def get_item(
         _metadata_for, item, locale, False, False
     )
     return item
+
+
+@router.get("/library-items/{entity_id}/trickplay/{generation}/{sheet_index}.jpg")
+async def get_trickplay_sheet(
+    entity_id: str,
+    generation: str,
+    sheet_index: int,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    item = _entity(entity_id)
+    if item["type"] not in {"movie", "episode"}:
+        raise HTTPException(404, "Trickplay sheet not found.")
+    path = TrickplayExtractor().sheet_path(entity_id, generation, sheet_index)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.get("/library-items/{entity_id}/matches")

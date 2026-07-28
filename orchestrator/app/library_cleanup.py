@@ -193,6 +193,37 @@ def _remove_cached_files(db, tables: set[str], paths: set[str]) -> None:
             continue
 
 
+def _trickplay_media_ids(db, tables: set[str], entity_ids: list[str]) -> set[str]:
+    if "trickplay_assets" not in tables or not entity_ids:
+        return set()
+    values = set()
+    for batch in _chunks(entity_ids):
+        values.update(
+            row[0]
+            for row in db.execute(
+                f"SELECT media_file_id FROM trickplay_assets WHERE entity_id IN ({_placeholders(batch)})",
+                batch,
+            )
+        )
+    return values
+
+
+def _remove_trickplay_files(db, media_file_ids: set[str]) -> None:
+    if not media_file_ids or not db.db_file:
+        return
+    root = (Path(db.db_file).parent / "trickplay-cache").resolve()
+    for media_file_id in media_file_ids:
+        try:
+            target = (root / media_file_id).resolve()
+            target.relative_to(root)
+            if target.is_dir():
+                import shutil
+
+                shutil.rmtree(target, ignore_errors=True)
+        except (OSError, ValueError):
+            continue
+
+
 def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
     tables = _table_names(db)
     if "library_entities" not in tables or "entity_provider_ids" not in tables:
@@ -203,6 +234,7 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
     )
     provider_keys = _provider_keys(db, entity_ids)
     image_paths = _image_paths(db, tables, provider_keys)
+    trickplay_media_ids = _trickplay_media_ids(db, tables, entity_ids)
 
     with db.transaction() as cursor:
         if entity_ids:
@@ -228,6 +260,7 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
         _purge_orphan_metadata(cursor, tables)
 
     _remove_cached_files(db, tables, image_paths)
+    _remove_trickplay_files(db, trickplay_media_ids)
     return True
 
 

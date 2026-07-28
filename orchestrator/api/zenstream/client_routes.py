@@ -18,12 +18,14 @@ from app.models.metadata import MetadataLanguageSettings
 from app.client_auth import account_from_access, issue_ticket, require_account
 from app.logging_config import get_logger
 from app.playback import PlaybackManager, ffmpeg_path
+from app.trickplay import TrickplayExtractor
 from api.zenstream.library_routes import require_admin
 
 
 router = APIRouter()
 catalog = Catalog()
 media = PlaybackManager()
+trickplay = TrickplayExtractor()
 logger = get_logger("playback_routes")
 
 
@@ -275,6 +277,29 @@ async def negotiate_playback(entity_id: str, request: Request):
     return await asyncio.to_thread(
         media.negotiate, account["id"], entity_id, await request.json()
     )
+
+
+@router.get("/api/playback/items/{entity_id}/trickplay")
+async def trickplay_manifest(entity_id: str, request: Request, sourceId: str | None = Query(None)):
+    account, _ = require_account(request)
+    catalog.require_entity(account["id"], entity_id)
+    payload = await asyncio.to_thread(trickplay.manifest, account["id"], entity_id, sourceId)
+    if payload["state"] != "ready":
+        return Response(
+            content=json.dumps(payload),
+            status_code=202,
+            headers={"Retry-After": "5"},
+            media_type="application/json",
+        )
+    return payload
+
+
+@router.get("/api/playback/items/{entity_id}/trickplay/{generation}/{sheet_index}.jpg")
+async def trickplay_sheet(entity_id: str, generation: str, sheet_index: int, request: Request):
+    account = account_from_access(request)
+    catalog.require_entity(account["id"], entity_id)
+    path = await asyncio.to_thread(trickplay.sheet_path, entity_id, generation, sheet_index)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.api_route("/api/playback/items/{entity_id}/stream", methods=["GET", "HEAD"])

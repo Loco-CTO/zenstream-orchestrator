@@ -534,6 +534,12 @@ class LibraryScanner:
             self._fetch_seen_locales(should_terminate)
             self._reconcile_moved_entities(library_id, root)
             self._prune_missing_entities(library_id, root)
+            from app.trickplay import TrickplayStore
+
+            if TrickplayStore(self.db).queue_pending(library_id):
+                from app.jobs import scheduler
+
+                scheduler.enqueue_trickplay_extraction()
             finished = now()
             self.store.update_job(
                 job_id,

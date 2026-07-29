@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from app.config import Config
+from app.images import LocalArtworkCache, blurhash_for_image
 from app.logging_config import get_logger
 
 try:
@@ -534,12 +535,20 @@ class LibraryScanner:
             self._fetch_seen_locales(should_terminate)
             self._reconcile_moved_entities(library_id, root)
             self._prune_missing_entities(library_id, root)
+            LocalArtworkCache(self.db).prune()
             from app.trickplay import TrickplayStore
 
             if TrickplayStore(self.db).queue_pending(library_id):
                 from app.jobs import scheduler
 
                 scheduler.enqueue_trickplay_extraction()
+            from app.intro_outro import IntroOutroStore
+
+            intro_outro = IntroOutroStore(self.db)
+            if intro_outro.settings()["scanOnAdded"] and intro_outro.queue_pending(library_id):
+                from app.jobs import scheduler
+
+                scheduler.enqueue_intro_outro_detection()
             finished = now()
             self.store.update_job(
                 job_id,
@@ -780,6 +789,14 @@ class LibraryScanner:
             new_values = replacement[0]
             try:
                 with self.db.transaction() as cursor:
+                    # The stable entity cannot claim the renamed path while
+                    # the newly indexed replacement still owns its unique
+                    # (library, type, path) tuple.  Vacate it transactionally
+                    # before transferring the stable identity.
+                    cursor.execute(
+                        "UPDATE library_entities SET relative_path=? WHERE id=?",
+                        (f"__zenstream_move__/{new_id}", new_id),
+                    )
                     cursor.execute(
                         "UPDATE library_entities SET relative_path=?,parent_id=?,season_number=?,episode_number=?,episode_end_number=?,disc_number=?,track_number=?,updated_at=? WHERE id=?",
                         (*new_values, now(), old_id),
@@ -889,19 +906,32 @@ class LibraryScanner:
             if provider not in {"tmdb", "tvdb", "musicbrainz"}:
                 continue
             for locale in locales:
+                force_credit_refresh = False
                 cached = self.db.execute(
                     "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
                     (provider, entity_type, str(provider_id), locale),
                 )
                 if cached and entity_id not in self._scan_provider_identity_changed and entity_id not in self._scan_delta["added"]:
-                    continue
+                    document = ingest.metadata_service.cache.get(
+                        provider, entity_type, str(provider_id), locale
+                    )
+                    if document and (
+                        provider == "musicbrainz"
+                        or entity_type not in {"movie", "series", "season", "episode"}
+                        or "credits" in document
+                    ):
+                        ingest.ingest_document(
+                            provider, entity_type, str(provider_id), locale, document
+                        )
+                        continue
+                    force_credit_refresh = document is not None
                 try:
                     ingest.ingest_locale(
                         provider,
                         entity_type,
                         str(provider_id),
                         locale,
-                        force=False,
+                        force=force_credit_refresh,
                     )
                 except Exception as error:
                     logger.warning(
@@ -1692,6 +1722,8 @@ class LibraryScanner:
             result["removed"] += 1
             if old[2] == "media":
                 result["content_changed"] = True
+        if has_hash:
+            self._materialize_local_artwork(entity_id, root)
         if result["added"] or result["updated"] or result["removed"]:
             self._mark_changed(entity_id)
         # Probe after the file rows are reconciled so playback never depends
@@ -1701,6 +1733,48 @@ class LibraryScanner:
 
             PlaybackManager().probe_entity(entity_id)
         return result
+
+    def _materialize_local_artwork(self, entity_id: str, root: Path) -> None:
+        cache = LocalArtworkCache(self.db)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(media_files)")}
+        select_hash = ",image_blur_hash" if "image_blur_hash" in columns else ""
+        for values in self.db.execute(
+            f"SELECT id,relative_path,file_hash{select_hash} FROM media_files WHERE entity_id=? AND role='image'",
+            (entity_id,),
+        ):
+            file_id, relative_path, content_hash, *stored = values
+            stored_blur_hash = stored[0] if stored else None
+            target = cache.path(content_hash)
+            if target is None:
+                continue
+            source = root / relative_path
+            if not target.is_file() or not target.stat().st_size:
+                if not source.is_file():
+                    continue
+                try:
+                    cache.materialize(source, content_hash)
+                except Exception as error:
+                    logger.warning(
+                        "local artwork WebP encoding failed entity_id=%s path=%s error=%s",
+                        entity_id,
+                        relative_path,
+                        error,
+                    )
+                    continue
+            if "image_blur_hash" not in columns or stored_blur_hash:
+                continue
+            try:
+                self.db.execute(
+                    "UPDATE media_files SET image_blur_hash=? WHERE id=?",
+                    (blurhash_for_image(target), file_id),
+                )
+            except Exception as error:
+                logger.warning(
+                    "local artwork BlurHash encoding failed entity_id=%s path=%s error=%s",
+                    entity_id,
+                    relative_path,
+                    error,
+                )
 
     @staticmethod
     def _walk_paths(directory: Path):

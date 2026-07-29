@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { adminFetch, readSession } from "../components/admin-client";
+import { PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
 export default function InvitesPage() {
 	const [invite, setInvite] = useState("");
 	const [message, setMessage] = useState("");
@@ -23,16 +24,19 @@ export default function InvitesPage() {
 		setMessage("Invite copied to clipboard.");
 	}
 	return (
-		<div>
-			<h1 className="pb-5 text-3xl font-semibold tracking-tight">Invites</h1>
-			<div className="console-card mt-8 max-w-2xl rounded-2xl p-6">
+		<div className="max-w-3xl">
+			<PageHeader
+				title="Invites"
+				description="Create a secure, single-use registration link for a new ZenStream user."
+			/>
+			<SurfaceCard className="mt-7 max-w-2xl p-6">
 				<h2 className="text-xl font-bold">Create a registration invite</h2>
 				<p className="mt-2 text-sm leading-6 console-muted">
 					Generate a link for a new ZenStream user. Treat invite links as
 					credentials.
 				</p>
 				{invite && (
-					<div className="mt-6 break-all rounded-xl border border-[#55c9b0]/25 bg-[#55c9b0]/10 p-4 text-sm text-[#b7f5e6]">
+					<div className="mt-6 break-all rounded-xl border border-[#aeb9ff]/25 bg-[#aeb9ff]/10 p-4 text-sm text-[#e8eaff]">
 						{invite}
 					</div>
 				)}
@@ -52,8 +56,8 @@ export default function InvitesPage() {
 						</button>
 					)}
 				</div>
-				{message && <p className="mt-4 text-sm text-[#8fe4cf]">{message}</p>}
-			</div>
+				{message && <StatusMessage>{message}</StatusMessage>}
+			</SurfaceCard>
 		</div>
 	);
 }

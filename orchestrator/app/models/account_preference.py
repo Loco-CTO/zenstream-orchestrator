@@ -80,29 +80,31 @@ class AccountPreference:
 
     def subtitle_style(self) -> dict:
         rows = self.db.execute(
-            "SELECT subtitle_font_family,subtitle_bold,subtitle_text_scale,subtitle_font_color,subtitle_border_size,subtitle_border_color,subtitle_background_color,subtitle_background_opacity FROM account_preferences WHERE user_id=?",
+            "SELECT subtitle_renderer,subtitle_font_family,subtitle_bold,subtitle_text_scale,subtitle_font_color,subtitle_border_size,subtitle_border_color,subtitle_background_color,subtitle_background_opacity FROM account_preferences WHERE user_id=?",
             (self.user_id,),
         )
         if not rows:
             return dict(DEFAULT_SUBTITLE_STYLE)
         row = rows[0]
         return {
-            "fontFamily": row[0],
-            "bold": bool(row[1]),
-            "textScale": row[2],
-            "fontColor": row[3],
-            "borderSize": row[4],
-            "borderColor": row[5],
-            "backgroundColor": row[6],
-            "backgroundOpacity": row[7],
+            "renderer": row[0],
+            "fontFamily": row[1],
+            "bold": bool(row[2]),
+            "textScale": row[3],
+            "fontColor": row[4],
+            "borderSize": row[5],
+            "borderColor": row[6],
+            "backgroundColor": row[7],
+            "backgroundOpacity": row[8],
         }
 
     def set_subtitle_style(self, value: dict) -> dict:
         style = validate_subtitle_style(value)
         self._ensure()
         self.db.execute(
-            "UPDATE account_preferences SET subtitle_font_family=?,subtitle_bold=?,subtitle_text_scale=?,subtitle_font_color=?,subtitle_border_size=?,subtitle_border_color=?,subtitle_background_color=?,subtitle_background_opacity=? WHERE user_id=?",
+            "UPDATE account_preferences SET subtitle_renderer=?,subtitle_font_family=?,subtitle_bold=?,subtitle_text_scale=?,subtitle_font_color=?,subtitle_border_size=?,subtitle_border_color=?,subtitle_background_color=?,subtitle_background_opacity=? WHERE user_id=?",
             (
+                style["renderer"],
                 style["fontFamily"],
                 int(style["bold"]),
                 style["textScale"],

@@ -28,6 +28,8 @@ from app.playback import ffmpeg_path, ffprobe_path
 from app.client_auth import bearer_token, websocket_account
 from app.models.account import Account
 from app.models.playback_settings import PlaybackSettings
+from app.intro_outro import IntroOutroStore
+from app.jobs import scheduler
 from api.zenstream.version import _main_version
 from version import __version__
 
@@ -289,6 +291,24 @@ async def update_admin_playback_settings(
         return values
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
+
+
+@router.get("/api/admin/intro-outro/settings")
+async def admin_intro_outro_settings(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    _admin_headers(Username, TOKEN)
+    store = IntroOutroStore()
+    definition = scheduler.store.by_key("intro_outro_detect")
+    return {**store.settings(), "task": definition}
+
+
+@router.put("/api/admin/intro-outro/settings")
+async def update_admin_intro_outro_settings(
+    request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    _admin_headers(Username, TOKEN)
+    return IntroOutroStore().update_settings(await request.json())
 
 
 @router.get("/api/admin/accounts")
@@ -628,10 +648,27 @@ async def syncplay_command(group_id: str, request: Request):
                 pause_reason="readiness",
             )
             return
+        if action == "seek":
+            cursor.execute(
+                "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 THEN 1 ELSE 0 END,ready_generation=-1 WHERE group_id=?",
+                (group_id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                position=float(position),
+                playing=0,
+                resume=1,
+                anchor_position=float(position),
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="paused",
+                pause_reason="seek",
+            )
+            return
         requested = bool(data.get("playing", state["playing"]))
-        if action == "seek" and state["resumeWhenReady"]:
-            requested = True
-        elif action == "play":
+        if action == "play":
             requested = True
         elif action == "pause":
             requested = False

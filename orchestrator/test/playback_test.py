@@ -89,8 +89,8 @@ class PlaybackTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             manager = object.__new__(PlaybackManager)
             manager.db = MagicMock()
+            manager._cleanup_expired = MagicMock()
             manager.db.execute.side_effect = [
-                [],
                 [(str(Path(directory)), "failed", "FFMPEG_FAILED", '{"stage":"ffmpeg"}')],
             ]
             with self.assertRaises(HTTPException) as context:
@@ -268,6 +268,44 @@ class PlaybackTest(unittest.TestCase):
         self.assertEqual(error.status_code, 409)
         self.assertEqual(error.detail["code"], "MEDIA_NOT_READY")
 
+    def test_source_metadata_uses_the_default_source_without_starting_playback(self):
+        manager = object.__new__(PlaybackManager)
+        manager.sources = MagicMock(
+            return_value=[
+                {
+                    "id": "source-1",
+                    "mediaFileId": "file-1",
+                    "container": "mkv",
+                    "streams": [
+                        {
+                            "index": 1,
+                            "codec_type": "audio",
+                            "tags": {"language": "en"},
+                        }
+                    ],
+                    "path": "C:/private/movie.mkv",
+                }
+            ]
+        )
+
+        source = manager.source_metadata("user-1", "entity-1")
+
+        self.assertEqual(source, {
+            "id": "source-1",
+            "streams": [{"index": 1, "codec_type": "audio", "tags": {"language": "en"}}],
+        })
+        manager.sources.assert_called_once_with("user-1", "entity-1")
+
+    def test_source_metadata_reports_unready_media(self):
+        manager = object.__new__(PlaybackManager)
+        manager.sources = MagicMock(return_value=[])
+
+        with self.assertRaises(HTTPException) as context:
+            manager.source_metadata("user-1", "entity-1")
+
+        self.assertEqual(context.exception.status_code, 409)
+        self.assertEqual(context.exception.detail["code"], "MEDIA_NOT_READY")
+
     @patch("app.playback.issue_ticket", return_value="ticket")
     def test_negotiate_selects_requested_source(self, _ticket):
         manager = object.__new__(PlaybackManager)
@@ -321,10 +359,16 @@ class PlaybackTest(unittest.TestCase):
         result = manager.negotiate(
             "user-1",
             "entity-1",
-            {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+            {
+                "containers": ["mp4"],
+                "videoCodecs": ["h264"],
+                "audioCodecs": ["aac"],
+                "startPositionSeconds": 42,
+            },
         )
 
         self.assertEqual(result["mode"], "direct")
+        self.assertEqual(result["startPositionSeconds"], 42.0)
         self.assertIsNone(result.get("sessionId"))
         manager._transcode.assert_not_called()
 

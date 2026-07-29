@@ -1113,6 +1113,8 @@ class LibraryMetadataTest(unittest.TestCase):
         ) as request:
             payload = client.details("season", "489132", "en")
         self.assertNotIn("translation", payload)
+        self.assertEqual(payload["data"]["name"], "Default title")
+        self.assertEqual(request.call_count, 2)
 
     def test_tvdb_original_language_is_normalized_to_canonical_locale(self):
         client = TVDBClient({"apiKey": "test"})
@@ -1122,8 +1124,6 @@ class LibraryMetadataTest(unittest.TestCase):
             {"data": {"name": "Example", "originalLanguage": "eng"}},
         )
         self.assertEqual(value["originalLanguage"], "en")
-        self.assertEqual(payload["data"]["name"], "Default title")
-        self.assertEqual(request.call_count, 2)
 
     def test_tvdb_normalization_preserves_localized_trailer_url(self):
         client = TVDBClient({"apiKey": "test"})

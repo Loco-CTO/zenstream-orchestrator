@@ -6,6 +6,7 @@ import {
 	saveSession,
 	Session,
 } from "../components/admin-client";
+import { PageHeader, StatusMessage } from "../components/dashboard-surface";
 export default function ProfilePage() {
 	const [session, setSession] = useState<Session | null>(null);
 	const [username, setUsername] = useState("");
@@ -38,13 +39,14 @@ export default function ProfilePage() {
 		setMessage("Profile updated successfully.");
 	}
 	return (
-		<div>
-			<h1 className="pb-5 text-3xl font-semibold tracking-tight">
-				Profile & security
-			</h1>
+		<div className="max-w-3xl">
+			<PageHeader
+				title="Profile & security"
+				description="Update the credentials used to administer this ZenStream server."
+			/>
 			<form
 				onSubmit={submit}
-				className="console-card mt-8 max-w-xl rounded-2xl p-6"
+				className="console-card mt-7 max-w-xl rounded-2xl p-6"
 			>
 				<h2 className="text-xl font-bold">Administrator credentials</h2>
 				<p className="mt-2 text-sm leading-6 console-muted">
@@ -73,7 +75,7 @@ export default function ProfilePage() {
 				<button className="console-button mt-6 rounded-xl px-4 py-3 text-sm font-semibold">
 					Save changes
 				</button>
-				{message && <p className="mt-4 text-sm text-[#8fe4cf]">{message}</p>}
+				{message && <StatusMessage>{message}</StatusMessage>}
 			</form>
 		</div>
 	);

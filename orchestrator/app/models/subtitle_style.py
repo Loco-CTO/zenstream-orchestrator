@@ -5,6 +5,7 @@ import re
 
 SUPPORTED_LOCALES = {"en", "ja"}
 DEFAULT_SUBTITLE_STYLE = {
+    "renderer": "native",
     "fontFamily": "sans",
     "bold": False,
     "textScale": 100,
@@ -14,6 +15,7 @@ DEFAULT_SUBTITLE_STYLE = {
     "backgroundColor": "#000000",
     "backgroundOpacity": 0,
 }
+SUBTITLE_RENDERERS = {"native", "overlay"}
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -44,6 +46,8 @@ def validate_subtitle_style(value: dict) -> dict:
             raise ValueError(f"{key} must be a six-digit hex color.")
     if result["fontFamily"] not in {"sans", "serif", "mono"}:
         raise ValueError("fontFamily must be sans, serif, or mono.")
+    if result["renderer"] not in SUBTITLE_RENDERERS:
+        raise ValueError("renderer must be native or overlay.")
     if not isinstance(result["bold"], bool):
         raise ValueError("bold must be a boolean.")
     return result

@@ -16,7 +16,7 @@ class TrickplayTest(unittest.TestCase):
                 "height": 180,
                 "intervalSeconds": 10,
             },
-            Path("sheet-%05d.jpg"),
+            Path("sheet-%05d.webp"),
         )
         graph = command[command.index("-vf") + 1]
         self.assertEqual(
@@ -26,6 +26,8 @@ class TrickplayTest(unittest.TestCase):
             "tile=10x10:padding=0:margin=0",
         )
         self.assertEqual(FRAMES_PER_SHEET, 100)
+        self.assertEqual(command[command.index("-c:v") + 1], "libwebp")
+        self.assertEqual(command[command.index("-quality") + 1], "85")
 
     def test_output_keys_change_for_source_or_extraction_settings(self):
         self.assertNotEqual(

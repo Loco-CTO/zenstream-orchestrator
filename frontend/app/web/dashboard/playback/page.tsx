@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { IconPhoto, IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
 
 type PlaybackSettings = {
 	maxTranscodes: number;
@@ -129,14 +130,11 @@ export default function PlaybackPage() {
 	);
 
 	return (
-		<div>
-			<div className="flex items-center gap-3 pb-5">
-				<div>
-					<p className="console-kicker">Server capacity</p>
-					<h1 className="mt-2 text-3xl font-semibold tracking-tight">
-						Playback
-					</h1>
-				</div>
+		<div className="max-w-3xl">
+			<PageHeader
+				title="Playback"
+				description="Set the server capacity available to HLS transcodes and timeline preview extraction."
+				actions={
 				<button
 					onClick={() => session && void load(session)}
 					className="material-icon-button"
@@ -145,8 +143,10 @@ export default function PlaybackPage() {
 				>
 					<IconRefresh size={17} />
 				</button>
-			</div>
-			<section className="console-card max-w-3xl rounded-2xl p-6">
+				}
+			/>
+			{message && <StatusMessage>{message}</StatusMessage>}
+			<SurfaceCard className="mt-7 p-6">
 				<div className="flex items-start justify-between gap-4">
 					<div>
 						<h2 className="text-xl font-bold">Transcoding limits</h2>
@@ -156,7 +156,7 @@ export default function PlaybackPage() {
 							against these limits.
 						</p>
 					</div>
-					<IconPlayerPlay className="text-[#8fe4cf]" size={22} />
+					<IconPlayerPlay className="text-[#aeb9ff]" size={22} />
 				</div>
 				<form onSubmit={save} className="mt-6 space-y-5">
 					<label className="block">
@@ -207,11 +207,10 @@ export default function PlaybackPage() {
 						>
 							{saving ? "Saving…" : "Save playback limits"}
 						</button>
-						{message && <p className="text-sm console-muted">{message}</p>}
 					</div>
 				</form>
-			</section>
-			<section className="console-card mt-5 max-w-3xl rounded-2xl p-6">
+			</SurfaceCard>
+			<SurfaceCard className="mt-5 p-6">
 				<div className="flex items-start justify-between gap-4">
 					<div>
 						<h2 className="text-xl font-bold">Timeline previews</h2>
@@ -221,7 +220,7 @@ export default function PlaybackPage() {
 							black frame.
 						</p>
 					</div>
-					<IconPhoto className="text-[#8fe4cf]" size={22} />
+					<IconPhoto className="text-[#aeb9ff]" size={22} />
 				</div>
 				<form onSubmit={save} className="mt-6 space-y-5">
 					<label className="block">
@@ -257,7 +256,7 @@ export default function PlaybackPage() {
 											trickplayFrameWidth: width,
 										}))
 									}
-									className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${settings.trickplayFrameWidth === width ? "border-[#8fe4cf] bg-[#8fe4cf]/15 text-[#b6f5e4]" : "border-white/15 text-white/75 hover:border-white/35"}`}
+									className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${settings.trickplayFrameWidth === width ? "border-[#aeb9ff] bg-[#aeb9ff]/15 text-[#e8eaff]" : "border-white/15 text-white/75 hover:border-white/35"}`}
 								>
 									{width} × {(width * 9) / 16}
 								</button>
@@ -296,10 +295,9 @@ export default function PlaybackPage() {
 						>
 							{saving ? "Saving…" : "Save timeline preview settings"}
 						</button>
-						{message && <p className="text-sm console-muted">{message}</p>}
 					</div>
 				</form>
-			</section>
+			</SurfaceCard>
 		</div>
 	);
 }

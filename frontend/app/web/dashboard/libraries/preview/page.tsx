@@ -8,6 +8,7 @@ import {
 	IconArrowLeft,
 	IconChevronLeft,
 	IconChevronRight,
+	IconPlayerPlay,
 	IconPhoto,
 	IconRefresh,
 	IconSearch,
@@ -58,6 +59,23 @@ type TrickplayAsset = {
 	error?: string | null;
 	frameCount: number;
 	sheets: { index: number; frameCount: number }[];
+};
+
+type IntroOutroInspection = {
+	sourceId?: string;
+	durationSeconds?: number;
+	state: string;
+	error?: string | null;
+	updatedAt?: string | null;
+	segments: { type: "intro" | "outro"; startSeconds: number; endSeconds: number }[];
+	fingerprints: {
+		type: "intro" | "outro";
+		startSeconds: number;
+		endSeconds: number;
+		pointCount: number;
+		sampleSeconds: number;
+		values: number[];
+	}[];
 };
 
 type MetadataPerson = { name?: string; role?: string };
@@ -307,15 +325,15 @@ function LibraryViewPage() {
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
 	if (!libraryId)
 		return (
-			<div className="material-surface rounded-xl p-8 text-sm material-muted">
+			<div className="dashboard-card p-8 text-sm material-muted">
 				Choose a library from the Libraries tab.
 			</div>
 		);
 	return (
-		<div className="w-full max-w-none">
+		<div className="dashboard-page">
 			{navigation.length === 0 ? (
 				<>
-					<div className="material-topbar">
+					<div className="dashboard-page-header material-topbar">
 						<div>
 							<Link href="/web/dashboard/libraries" className="material-back">
 								<IconArrowLeft size={15} />
@@ -339,8 +357,8 @@ function LibraryViewPage() {
 								entries
 							</p>
 						</div>
-						<div className="flex items-center gap-3">
-							<label className="material-input flex h-10 min-w-64 items-center gap-2 rounded-lg px-3">
+						<div className="dashboard-toolbar flex items-center gap-3">
+							<label className="material-input flex h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-3 sm:min-w-64">
 								<IconSearch size={16} className="material-muted" />
 								<input
 									value={searchInput}
@@ -367,7 +385,7 @@ function LibraryViewPage() {
 									setLocale(event.target.value);
 									setItems([]);
 								}}
-								className="material-input h-10 rounded-lg px-3 text-sm outline-none"
+								className="material-input h-11 rounded-lg px-3 text-sm outline-none"
 								aria-label="Metadata language"
 							>
 								<option value="" disabled>
@@ -396,7 +414,7 @@ function LibraryViewPage() {
 						</button>
 					)}
 					{error && (
-						<div className="material-alert mt-6">
+						<div className="dashboard-alert material-alert mt-6" role="alert">
 							<IconAlertCircle size={18} />
 							<span className="flex-1">{error}</span>
 							<button
@@ -408,7 +426,7 @@ function LibraryViewPage() {
 						</div>
 					)}
 					{loading && !items.length && !error && (
-						<div className="material-surface mt-7 rounded-xl p-8 text-sm material-muted">
+						<div className="dashboard-card mt-7 p-8 text-sm material-muted">
 							Loading entries…
 						</div>
 					)}
@@ -431,7 +449,7 @@ function LibraryViewPage() {
 									/>
 								))}
 								{!items.length && (
-									<div className="material-surface col-span-full rounded-xl p-8 text-sm material-muted">
+									<div className="dashboard-card col-span-full p-8 text-sm material-muted">
 										{searchQuery
 											? "No matching entries."
 											: "No entries on this page."}
@@ -543,16 +561,18 @@ function EpisodeCard({
 		<button
 			type="button"
 			onClick={onOpen}
-			className="material-surface group flex min-w-0 w-full overflow-hidden rounded-xl text-left transition hover:-translate-y-0.5 hover:bg-[#282828] hover:shadow-xl hover:shadow-black/30"
+			className="material-surface group flex min-w-0 w-full max-w-[42rem] overflow-hidden rounded-xl text-left transition hover:-translate-y-0.5 hover:bg-[#282828] hover:shadow-xl hover:shadow-black/30"
 		>
-			<EntityPoster
-				entityId={item.id}
-				session={session}
-				locale={locale}
-				alt=""
-				landscape
-			/>
-			<div className="min-w-0 flex-1 p-4">
+			<div className="w-36 shrink-0 sm:w-44">
+				<EntityPoster
+					entityId={item.id}
+					session={session}
+					locale={locale}
+					alt=""
+					landscape
+				/>
+			</div>
+			<div className="min-w-0 flex-1 self-center p-4">
 				<p className="truncate text-sm font-semibold">{label}</p>
 				<p className="mt-2 text-xs material-muted">
 					S{item.seasonNumber ?? "—"}E{item.episodeNumber ?? "—"}
@@ -636,7 +656,7 @@ function EntityPoster({
 	}, [entityId, imageType, locale, session]);
 	return (
 		<div
-			className={`flex ${landscape ? "aspect-video" : "aspect-[2/3]"} items-center justify-center overflow-hidden bg-[#0d0e13]`}
+			className={`flex ${landscape ? "aspect-video" : "aspect-[2/3]"} items-center justify-center overflow-hidden bg-[#0d0d0e]`}
 		>
 			{url && state === "ready" ? (
 				<img
@@ -647,7 +667,7 @@ function EntityPoster({
 				/>
 			) : (
 				<IconPhoto
-					className={state === "missing" ? "material-muted" : "text-[#b9c3ff]"}
+					className={state === "missing" ? "material-muted" : "text-[#aeb9ff]"}
 					size={28}
 				/>
 			)}
@@ -717,13 +737,14 @@ function EntityDetailView({
 							? "Items"
 							: "";
 	const episodeView = detail?.type === "season";
+	const hasChildren = children.length > 0;
 	return (
-		<div className="min-h-[calc(100vh-7rem)]">
+		<div className="dashboard-page min-h-[calc(100vh-7rem)]">
 			<button onClick={onBack} className="material-back">
 				<IconArrowLeft size={17} />
 				Back
 			</button>
-			<div className="mt-6 flex items-start justify-between gap-4">
+			<div className="dashboard-page-header mt-6 flex items-start justify-between gap-4">
 				<div>
 					<p className="text-xs uppercase tracking-[.18em] material-muted">
 						{detail?.type || entry.type}
@@ -748,7 +769,7 @@ function EntityDetailView({
 				</button>
 			</div>
 			{error && (
-				<div className="material-alert mt-5">
+				<div className="dashboard-alert material-alert mt-5" role="alert">
 					<IconAlertCircle size={18} />
 					{error}
 					<button
@@ -760,8 +781,14 @@ function EntityDetailView({
 				</div>
 			)}
 			{detail && (
-				<div className="mt-7 grid items-start gap-8 lg:grid-cols-[240px_minmax(0,1fr)]">
-					<div className="space-y-5">
+				<div
+					className={
+						hasChildren
+							? "mt-7 grid items-start gap-8 lg:grid-cols-[240px_minmax(0,1fr)]"
+							: "mt-7 space-y-6"
+					}
+				>
+					<div className={`space-y-5 ${hasChildren ? "" : "max-w-[240px]"}`}>
 						{!metadataPending && (
 							<ArtworkGallery
 								entityId={entry.id}
@@ -770,8 +797,8 @@ function EntityDetailView({
 								title={detail.metadata?.title || ""}
 							/>
 						)}
-						{!metadataPending && <MetadataSummary detail={detail} />}
-						{detail.trickplay && (
+						{hasChildren && !metadataPending && <MetadataSummary detail={detail} />}
+						{hasChildren && detail.trickplay && (
 							<TrickplayAssetPanel
 								entityId={detail.id}
 								asset={detail.trickplay}
@@ -780,17 +807,18 @@ function EntityDetailView({
 						)}
 					</div>
 					<div className="min-w-0">
-						{childLabel && (
-							<div className="mb-5">
-								<p className="text-xs uppercase tracking-[.18em] material-muted">
-									{childLabel}
-								</p>
-								<p className="mt-1 text-sm material-muted">
-									Choose an item to continue
-								</p>
-							</div>
-						)}
-						{children.length ? (
+						{hasChildren ? (
+							<>
+								{childLabel && (
+									<div className="mb-5">
+										<p className="text-xs uppercase tracking-[.18em] material-muted">
+											{childLabel}
+										</p>
+										<p className="mt-1 text-sm material-muted">
+											Choose an item to continue
+										</p>
+									</div>
+								)}
 							<div
 								className={
 									episodeView
@@ -825,10 +853,28 @@ function EntityDetailView({
 										/>
 									),
 								)}
-							</div>
+								</div>
+							</>
 						) : (
-							<div className="material-surface rounded-xl p-6 text-sm material-muted">
-								No child entries available.
+							<div className="space-y-5">
+								<section className="dashboard-card p-6">
+									<p className="console-kicker">Item information</p>
+									{!metadataPending && (
+										<div className="mt-5 max-w-4xl text-sm leading-6">
+											<MetadataSummary detail={detail} />
+										</div>
+									)}
+								</section>
+								{detail.trickplay && (
+									<TrickplayAssetPanel
+										entityId={detail.id}
+										asset={detail.trickplay}
+										session={session}
+									/>
+								)}
+								{detail.type === "episode" && (
+									<IntroOutroInspectionPanel entityId={detail.id} session={session} />
+								)}
 							</div>
 						)}
 					</div>
@@ -836,6 +882,169 @@ function EntityDetailView({
 			)}
 		</div>
 	);
+}
+
+function IntroOutroInspectionPanel({
+	entityId,
+	session,
+}: {
+	entityId: string;
+	session: Session;
+}) {
+	const [inspection, setInspection] = useState<IntroOutroInspection | null>(null);
+	const [error, setError] = useState("");
+	const [audioUrl, setAudioUrl] = useState("");
+	const [audioKind, setAudioKind] = useState<"intro" | "outro" | null>(null);
+	const [loadingAudio, setLoadingAudio] = useState<"intro" | "outro" | null>(null);
+	const audioUrlRef = useRef("");
+	useEffect(() => {
+		const controller = new AbortController();
+		setInspection(null);
+		setError("");
+		adminFetch(`/api/admin/library-items/${entityId}/intro-outro`, session, {
+			signal: controller.signal,
+		})
+			.then(async (response) => {
+				if (!response.ok) throw new Error("Intro and outro inspection could not be loaded.");
+				setInspection((await response.json()) as IntroOutroInspection);
+			})
+			.catch((caught) => {
+				if ((caught as Error).name !== "AbortError")
+					setError(caught instanceof Error ? caught.message : "Intro and outro inspection could not be loaded.");
+			});
+		return () => controller.abort();
+	}, [entityId, session]);
+	useEffect(
+		() => () => {
+			if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+		},
+		[],
+	);
+	const loadAudio = async (kind: "intro" | "outro") => {
+		setLoadingAudio(kind);
+		setError("");
+		try {
+			const response = await adminFetch(
+				`/api/admin/library-items/${entityId}/intro-outro/${kind}.mp3`,
+				session,
+			);
+			if (!response.ok) throw new Error("The detected audio clip could not be loaded.");
+			const nextUrl = URL.createObjectURL(await response.blob());
+			if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+			audioUrlRef.current = nextUrl;
+			setAudioUrl(nextUrl);
+			setAudioKind(kind);
+		} catch (caught) {
+			setError(caught instanceof Error ? caught.message : "The detected audio clip could not be loaded.");
+		} finally {
+			setLoadingAudio(null);
+		}
+	};
+	const state = inspection?.state === "scanned" ? "Ready" : inspection?.state === "failed" ? "Failed" : "Pending";
+	return (
+		<section className="dashboard-card space-y-4 p-5">
+			<div className="flex flex-wrap items-center justify-between gap-3">
+				<div>
+					<p className="console-kicker">Intro & outro inspection</p>
+					<p className="mt-1 text-sm material-muted">
+						Detected ranges and a downsampled Chromaprint bit-density preview. This is not an audio waveform.
+					</p>
+				</div>
+				<span className="rounded-full border border-[#aeb9ff]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#aeb9ff]">
+					{state}
+				</span>
+			</div>
+			{error && <p className="material-alert text-sm">{error}</p>}
+			{inspection ? (
+				<div className="grid gap-4 lg:grid-cols-2">
+					{(["intro", "outro"] as const).map((kind) => {
+						const fingerprint = inspection.fingerprints.find((item) => item.type === kind);
+						const segment = inspection.segments.find((item) => item.type === kind);
+						return (
+							<FingerprintPreview
+								key={kind}
+								kind={kind}
+								fingerprint={fingerprint}
+								segment={segment}
+								durationSeconds={inspection.durationSeconds || 0}
+								loading={loadingAudio === kind}
+								onListen={() => void loadAudio(kind)}
+							/>
+						);
+					})}
+				</div>
+			) : !error ? (
+				<p className="text-sm material-muted">Loading inspection…</p>
+			) : null}
+			{audioUrl && audioKind && (
+				<div className="rounded-lg border border-white/10 bg-black/20 p-3">
+					<p className="mb-2 text-xs font-medium capitalize text-white/80">{audioKind} audio preview (first 30 seconds)</p>
+					<audio controls autoPlay src={audioUrl} className="w-full" />
+				</div>
+			)}
+		</section>
+	);
+}
+
+function FingerprintPreview({
+	kind,
+	fingerprint,
+	segment,
+	durationSeconds,
+	loading,
+	onListen,
+}: {
+	kind: "intro" | "outro";
+	fingerprint?: IntroOutroInspection["fingerprints"][number];
+	segment?: IntroOutroInspection["segments"][number];
+	durationSeconds: number;
+	loading: boolean;
+	onListen: () => void;
+}) {
+	const values = fingerprint?.values || [];
+	const points = values
+		.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 320},${64 - (value / 32) * 56 - 4}`)
+		.join(" ");
+	const start = segment?.startSeconds ?? fingerprint?.startSeconds ?? 0;
+	const end = segment?.endSeconds ?? fingerprint?.endSeconds ?? 0;
+	const left = durationSeconds > 0 ? Math.min(100, (start / durationSeconds) * 100) : 0;
+	const width = durationSeconds > 0 ? Math.max(1, Math.min(100 - left, ((end - start) / durationSeconds) * 100)) : 0;
+	return (
+		<div className="rounded-xl border border-white/10 bg-black/15 p-4">
+			<div className="flex items-center justify-between gap-3">
+				<p className="text-sm font-semibold capitalize">{kind}</p>
+				{segment ? (
+					<button onClick={onListen} disabled={loading} className="material-text-button inline-flex items-center gap-1 disabled:opacity-50">
+						<IconPlayerPlay size={14} />
+						{loading ? "Preparing…" : "Listen"}
+					</button>
+				) : null}
+			</div>
+			<p className="mt-1 text-xs material-muted">
+				{fingerprint?.pointCount ? `${fingerprint.pointCount.toLocaleString()} fingerprint points` : "No fingerprint data yet"}
+			</p>
+			{values.length > 1 ? (
+				<svg viewBox="0 0 320 64" role="img" aria-label={`${kind} Chromaprint bit-density preview`} className="mt-3 h-20 w-full rounded bg-black/35">
+					<polyline fill="none" stroke="#aeb9ff" strokeWidth="2" points={points} />
+				</svg>
+			) : (
+				<div className="mt-3 flex h-20 items-center justify-center rounded bg-black/35 text-xs material-muted">Waiting for audio fingerprinting</div>
+			)}
+			<div className="mt-3">
+				<div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+					<div className={segment ? "h-full rounded-full bg-[#aeb9ff]" : "h-full rounded-full bg-white/20"} style={{ marginLeft: `${left}%`, width: `${width}%` }} />
+				</div>
+				<p className="mt-2 text-xs material-muted">
+					{segment ? `Detected ${formatDuration(segment.startSeconds)}–${formatDuration(segment.endSeconds)}` : `Fingerprint window ${formatDuration(start)}–${formatDuration(end)}`}
+				</p>
+			</div>
+		</div>
+	);
+}
+
+function formatDuration(value: number) {
+	const seconds = Math.max(0, Math.floor(value || 0));
+	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function TrickplayAssetPanel({
@@ -860,7 +1069,7 @@ function TrickplayAssetPanel({
 		let objectUrl = "";
 		setLoadError("");
 		adminFetch(
-			`/api/admin/library-items/${entityId}/trickplay/${asset.generation}/${sheet.index}.jpg`,
+			`/api/admin/library-items/${entityId}/trickplay/${asset.generation}/${sheet.index}.webp`,
 			session,
 			{ signal: controller.signal },
 		)
@@ -883,7 +1092,7 @@ function TrickplayAssetPanel({
 		<section className="space-y-3">
 			<div className="flex items-center justify-between gap-3">
 				<p className="text-xs uppercase tracking-[.18em] material-muted">Trickplay assets</p>
-				<span className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${asset.state === "ready" ? "border-emerald-300/30 text-emerald-200" : asset.state === "failed" ? "border-red-300/30 text-red-200" : "border-amber-300/30 text-amber-200"}`}>
+				<span className="rounded-full border border-[#aeb9ff]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#aeb9ff]">
 					{status}
 				</span>
 			</div>
@@ -949,7 +1158,7 @@ function ArtworkGallery({
 				{artworkTypes.map((imageType) => (
 					<div
 						key={imageType}
-						className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0e13]"
+						className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0d0e]"
 					>
 						<EntityPoster
 							entityId={entityId}
@@ -1015,7 +1224,7 @@ function MetadataSummary({ detail }: { detail: Item }) {
 							href={trailer.url}
 							target="_blank"
 							rel="noreferrer"
-							className="mr-2 text-cyan-300 hover:underline"
+							className="mr-2 text-[#aeb9ff] hover:underline"
 						>
 							{trailer.name || trailer.language || `Trailer ${index + 1}`}
 						</a>

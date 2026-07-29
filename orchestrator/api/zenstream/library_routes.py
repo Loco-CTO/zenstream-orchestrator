@@ -11,6 +11,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
 from app.config import Config
+from app.images import LocalArtworkCache
 from app.library import LibraryRuntime, LibraryStore, runtime
 from app.jobs import scheduler
 from app.models.admin import Admin
@@ -30,6 +31,7 @@ from app.providers import (
 )
 from app.logging_config import get_logger
 from app.trickplay import TrickplayExtractor
+from app.intro_outro import IntroOutroStore, render_audio_preview
 
 
 router = APIRouter(prefix="/api/admin")
@@ -684,7 +686,7 @@ async def get_item(
     return item
 
 
-@router.get("/library-items/{entity_id}/trickplay/{generation}/{sheet_index}.jpg")
+@router.get("/library-items/{entity_id}/trickplay/{generation}/{sheet_index}.webp")
 async def get_trickplay_sheet(
     entity_id: str,
     generation: str,
@@ -697,7 +699,50 @@ async def get_trickplay_sheet(
     if item["type"] not in {"movie", "episode"}:
         raise HTTPException(404, "Trickplay sheet not found.")
     path = TrickplayExtractor().sheet_path(entity_id, generation, sheet_index)
-    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+    return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/library-items/{entity_id}/intro-outro")
+async def get_intro_outro_inspection(
+    entity_id: str,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    item = _entity(entity_id)
+    if item["type"] != "episode":
+        raise HTTPException(404, "Intro and outro inspection is only available for episodes.")
+    return IntroOutroStore(store.db).inspection(entity_id)
+
+
+@router.get("/library-items/{entity_id}/intro-outro/{kind}.mp3")
+async def get_intro_outro_audio_preview(
+    entity_id: str,
+    kind: str,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    item = _entity(entity_id)
+    if item["type"] != "episode":
+        raise HTTPException(404, "Audio previews are only available for episodes.")
+    try:
+        clip = IntroOutroStore(store.db).preview_clip(entity_id, kind)
+        content = await asyncio.to_thread(
+            render_audio_preview,
+            clip["path"],
+            clip["startSeconds"],
+            min(30.0, clip["durationSeconds"]),
+        )
+    except ValueError as error:
+        raise HTTPException(404, str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(503, str(error)) from error
+    return Response(
+        content=content,
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @router.get("/library-items/{entity_id}/matches")
@@ -787,16 +832,25 @@ async def get_image(
     if not library:
         raise HTTPException(404, "Library not found.")
     local = store.db.execute(
-        "SELECT relative_path FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path",
+        "SELECT relative_path,file_hash FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path",
         (entity_id,),
     )
     if library["directory"]:
-        for (relative_path,) in local:
+        for relative_path, content_hash in local:
             if not _local_image_for_type(relative_path, imageType):
                 continue
             path = Path(library["directory"]) / relative_path
             if path.is_file():
-                return FileResponse(path)
+                cached = LocalArtworkCache(store.db).path(content_hash)
+                if cached and cached.is_file():
+                    return FileResponse(
+                        cached,
+                        media_type="image/webp",
+                        headers={"X-ZenStream-Image-State": "ready"},
+                    )
+                return Response(
+                    status_code=404, headers={"X-ZenStream-Image-State": "error"}
+                )
     # Library previews must never turn a cache miss into provider work. Scans
     # and the administrator-triggered backfill own metadata population.
     metadata = await asyncio.to_thread(_metadata_for, item, locale, False, False)
@@ -838,7 +892,9 @@ async def get_image(
     for (local_path,) in cached_file:
         if local_path and Path(local_path).is_file():
             return FileResponse(
-                local_path, headers={"X-ZenStream-Image-State": "ready"}
+                local_path,
+                media_type="image/webp",
+                headers={"X-ZenStream-Image-State": "ready"},
             )
     return Response(
         status_code=202,

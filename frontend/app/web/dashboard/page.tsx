@@ -11,6 +11,7 @@ import {
 	IconUsers,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "./components/admin-client";
+import { PageHeader, SectionHeader, SurfaceCard } from "./components/dashboard-surface";
 
 type Overview = {
 	users: number;
@@ -67,8 +68,10 @@ export default function DashboardOverview() {
 		: [];
 	return (
 		<div className="max-w-6xl">
-			<div className="flex items-center gap-3 border-b console-divider pb-5">
-				<h1 className="text-3xl font-semibold tracking-tight">Dashboard</h1>
+			<PageHeader
+				title="Dashboard"
+				description="A concise view of people, background work, and server configuration."
+				actions={
 				<button
 					onClick={() => {
 						const current = readSession();
@@ -83,7 +86,8 @@ export default function DashboardOverview() {
 				>
 					<IconRefresh size={17} />
 				</button>
-			</div>
+				}
+			/>
 			<section className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
 				{stats.map(([label, value, href, Icon]) => (
 					<Link
@@ -100,23 +104,17 @@ export default function DashboardOverview() {
 				))}
 			</section>
 			<div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-				<section className="console-card rounded-xl">
-					<div className="flex items-center justify-between border-b console-divider px-5 py-4">
-						<div>
-							<p className="console-kicker">Scheduler</p>
-							<h2 className="mt-1 text-lg font-semibold">Background tasks</h2>
-						</div>
-						<Link href="/web/dashboard/jobs" className="text-xs text-[#8fe4cf]">
+				<SurfaceCard>
+					<SectionHeader kicker="Scheduler" title="Background tasks" action={<Link href="/web/dashboard/jobs" className="text-xs text-[#aeb9ff]">
 							Manage all
-						</Link>
-					</div>
+						</Link>} />
 					{tasks.map((task) => (
 						<Link
 							href={"/web/dashboard/jobs?jobId=" + task.id}
 							key={task.id}
 							className="flex items-center gap-3 border-b console-divider px-5 py-4 last:border-0 hover:bg-white/[.035]"
 						>
-							<IconClock size={17} className="text-[#8fe4cf]" />
+							<IconClock size={17} className="text-[#aeb9ff]" />
 							<span className="min-w-0 flex-1">
 								<span className="block truncate text-sm">{task.name}</span>
 								<span className="mt-1 block text-xs console-muted">
@@ -134,8 +132,8 @@ export default function DashboardOverview() {
 							No scheduled work yet.
 						</p>
 					)}
-				</section>
-				<section className="console-card rounded-xl p-5">
+				</SurfaceCard>
+				<SurfaceCard className="p-5">
 					<p className="console-kicker">Shortcuts</p>
 					<h2 className="mt-1 text-lg font-semibold">Configuration</h2>
 					<div className="mt-5 space-y-2">
@@ -143,7 +141,7 @@ export default function DashboardOverview() {
 							href="/web/dashboard/libraries"
 							className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"
 						>
-							<IconLibrary size={17} className="text-[#8fe4cf]" />
+							<IconLibrary size={17} className="text-[#aeb9ff]" />
 							Libraries
 							<IconArrowUpRight size={15} className="ml-auto console-muted" />
 						</Link>
@@ -151,7 +149,7 @@ export default function DashboardOverview() {
 							href="/web/dashboard/metadata"
 							className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"
 						>
-							<IconDatabase size={17} className="text-[#8fe4cf]" />
+							<IconDatabase size={17} className="text-[#aeb9ff]" />
 							Metadata
 							<IconArrowUpRight size={15} className="ml-auto console-muted" />
 						</Link>
@@ -159,7 +157,7 @@ export default function DashboardOverview() {
 							href="/web/dashboard/profile"
 							className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"
 						>
-							<IconUsers size={17} className="text-[#8fe4cf]" />
+							<IconUsers size={17} className="text-[#aeb9ff]" />
 							Account security
 							<IconArrowUpRight size={15} className="ml-auto console-muted" />
 						</Link>
@@ -167,7 +165,7 @@ export default function DashboardOverview() {
 					<p className="mt-6 border-t console-divider pt-4 text-xs console-muted">
 						Signed in as {session?.username || "administrator"}
 					</p>
-				</section>
+				</SurfaceCard>
 			</div>
 		</div>
 	);

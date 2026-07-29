@@ -14,6 +14,7 @@ from app.providers import ProviderError
 from app.metadata_services import MetadataIngestService
 from app.logging_config import get_logger
 from app.trickplay import TrickplayExtractor
+from app.intro_outro import IntroOutroDetector
 
 
 logger = get_logger("jobs")
@@ -170,6 +171,19 @@ class JobStore:
             self.db.execute(
                 "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
                 (now(), now(), trickplay["id"]),
+            )
+        intro_outro = self.ensure(
+            "intro_outro_detect",
+            "Detect intros and outros",
+            "Compare cached audio fingerprints for unscanned TV episodes.",
+            "intro_outro_detect",
+            60,
+            {},
+        )
+        if intro_outro["lastRunAt"] is None:
+            self.db.execute(
+                "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+                (now(), now(), intro_outro["id"]),
             )
 
     def ensure_library(self, library: dict) -> dict:
@@ -593,6 +607,16 @@ class JobScheduler:
             self.condition.notify_all()
         return run
 
+    def enqueue_intro_outro_detection(self) -> dict:
+        definition = self.store.by_key("intro_outro_detect")
+        if not definition:
+            self.store.ensure_defaults()
+            definition = self.store.by_key("intro_outro_detect")
+        run, _ = self.store.create_or_get_active_run(definition)
+        with self.condition:
+            self.condition.notify_all()
+        return run
+
     def terminate(self, definition_id: str, run_id: str) -> dict | None:
         runs = [
             run for run in self.store.runs(definition_id, 100) if run["id"] == run_id
@@ -734,6 +758,10 @@ class JobScheduler:
                 )
             elif kind == "trickplay_extract":
                 TrickplayExtractor().run(
+                    run_id, self.store, self.cancel_events[run_id].is_set
+                )
+            elif kind == "intro_outro_detect":
+                IntroOutroDetector().run(
                     run_id, self.store, self.cancel_events[run_id].is_set
                 )
             else:

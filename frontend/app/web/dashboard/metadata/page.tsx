@@ -10,6 +10,7 @@ import {
 	IconX,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { PageHeader, StatusMessage } from "../components/dashboard-surface";
 
 type ProviderState = {
 	configured: boolean;
@@ -142,11 +143,11 @@ export default function MetadataPage() {
 	}
 
 	return (
-		<div>
-			<div className="flex items-center gap-3 pb-5">
-				<h1 className="text-3xl font-semibold tracking-tight">
-					Provider connections
-				</h1>
+		<div className="max-w-6xl">
+			<PageHeader
+				title="Provider connections"
+				description="Choose the metadata languages and services used while library content is indexed."
+				actions={
 				<button
 					onClick={() => session && load(session)}
 					className="material-icon-button"
@@ -155,8 +156,9 @@ export default function MetadataPage() {
 				>
 					<IconRefresh size={17} />
 				</button>
-			</div>
-			<div className="mt-8 grid gap-6 lg:grid-cols-2">
+				}
+			/>
+			<div className="mt-7 grid gap-6 lg:grid-cols-2">
 				<section className="console-card rounded-2xl p-6 lg:col-span-2">
 					<div className="flex items-start justify-between gap-4">
 						<div>
@@ -168,7 +170,7 @@ export default function MetadataPage() {
 								items; unavailable provider translations are skipped.
 							</p>
 						</div>
-						<IconMusic className="text-[#8fe4cf]" size={22} />
+						<IconMusic className="text-[#aeb9ff]" size={22} />
 					</div>
 					<div className="mt-5 flex flex-wrap gap-2">
 						{locales.map((locale) => (
@@ -243,7 +245,7 @@ export default function MetadataPage() {
 							<p className="console-kicker">Movies and secondary TV metadata</p>
 							<h2 className="mt-2 text-xl font-bold">TMDB</h2>
 						</div>
-						<IconKey className="text-[#8fe4cf]" size={22} />
+						<IconKey className="text-[#aeb9ff]" size={22} />
 					</div>
 					<p className="mt-3 text-sm console-muted">
 						Use a TMDB v3 API key or v4 read access token.
@@ -290,7 +292,7 @@ export default function MetadataPage() {
 							<p className="console-kicker">Series and collection metadata</p>
 							<h2 className="mt-2 text-xl font-bold">TheTVDB</h2>
 						</div>
-						<IconKey className="text-[#8fe4cf]" size={22} />
+						<IconKey className="text-[#aeb9ff]" size={22} />
 					</div>
 					<p className="mt-3 text-sm console-muted">
 						A subscriber PIN is optional for licensed keys and required for some
@@ -333,7 +335,7 @@ export default function MetadataPage() {
 				</form>
 				<div className="console-card rounded-2xl p-6 lg:col-span-2">
 					<div className="flex items-start gap-4">
-						<span className="rounded-xl bg-[#55c9b0]/10 p-3 text-[#8fe4cf]">
+						<span className="rounded-xl bg-[#aeb9ff]/10 p-3 text-[#aeb9ff]">
 							<IconMusic size={22} />
 						</span>
 						<div>
@@ -349,7 +351,7 @@ export default function MetadataPage() {
 							<p className="mt-4 text-xs console-muted">
 								Metadata provided by{" "}
 								<a
-									className="text-[#8fe4cf]"
+									className="text-[#aeb9ff]"
 									href="https://musicbrainz.org/"
 									target="_blank"
 									rel="noreferrer"
@@ -358,7 +360,7 @@ export default function MetadataPage() {
 								</a>{" "}
 								and artwork by the{" "}
 								<a
-									className="text-[#8fe4cf]"
+									className="text-[#aeb9ff]"
 									href="https://coverartarchive.org/"
 									target="_blank"
 									rel="noreferrer"
@@ -371,17 +373,12 @@ export default function MetadataPage() {
 					</div>
 				</div>
 			</div>
-			{message && (
-				<p className="mt-5 flex items-center gap-2 text-sm text-[#8fe4cf]">
-					<IconRefresh size={16} />
-					{message}
-				</p>
-			)}
+			{message && <StatusMessage>{message}</StatusMessage>}
 			<p className="mt-8 text-xs leading-5 console-muted">
 				This product uses the TMDB API but is not endorsed or certified by TMDB.
 				Metadata provided by{" "}
 				<a
-					className="text-[#8fe4cf]"
+					className="text-[#aeb9ff]"
 					href="https://thetvdb.com/"
 					target="_blank"
 					rel="noreferrer"
@@ -399,7 +396,7 @@ function ProviderStatus({ state }: { state?: ProviderState }) {
 		<p className="mt-4 flex items-center gap-2 text-xs console-muted">
 			{state?.configured ? (
 				<>
-					<IconCheck size={15} className="text-[#8fe4cf]" />
+					<IconCheck size={15} className="text-[#aeb9ff]" />
 					Configured
 					{state.validatedAt
 						? ` · validated ${new Date(state.validatedAt).toLocaleString()}`

@@ -11,7 +11,8 @@ from pathlib import Path
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
-from app.catalog import Catalog
+from app.catalog import Catalog, LOCAL_ARTWORK_NAMES
+from app.images import LocalArtworkCache
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
@@ -19,6 +20,7 @@ from app.client_auth import account_from_access, issue_ticket, require_account
 from app.logging_config import get_logger
 from app.playback import PlaybackManager, ffmpeg_path
 from app.trickplay import TrickplayExtractor
+from app.intro_outro import IntroOutroStore
 from api.zenstream.library_routes import require_admin
 
 
@@ -26,6 +28,7 @@ router = APIRouter()
 catalog = Catalog()
 media = PlaybackManager()
 trickplay = TrickplayExtractor()
+intro_outro = IntroOutroStore()
 logger = get_logger("playback_routes")
 
 
@@ -133,9 +136,25 @@ async def libraries(request: Request):
 
 
 @router.get("/api/catalog/home")
-async def home(request: Request, language: str | None = Query(None)):
+async def home(
+    request: Request,
+    language: str | None = Query(None),
+    section: str | None = Query(None),
+):
     account, _ = require_account(request)
-    return catalog.home(account["id"], _preferred(account, language))
+    if section is None:
+        return catalog.home(account["id"], _preferred(account, language))
+    preferred = _preferred(account, language)
+    if section == "featured":
+        return {"latestItems": catalog.home_featured(account["id"], preferred)}
+    if section == "continueWatching":
+        return {"continueWatching": catalog.home_continue_watching(account["id"], preferred)}
+    if section == "nextUp":
+        return {"nextUp": catalog.home_next_up(account["id"], preferred)}
+    if section == "derived":
+        return catalog.home_derived(account["id"], preferred)
+    else:
+        raise HTTPException(400, "Unsupported home section.")
 
 
 def _preferred(account: dict, supplied: str | None) -> str:
@@ -210,7 +229,7 @@ async def similar(entity_id: str, request: Request, language: str | None = Query
 @router.get("/api/catalog/items/{entity_id}/metadata")
 async def item_metadata(entity_id: str, request: Request, language: str = Query(...)):
     account, _ = require_account(request)
-    return catalog.metadata(account["id"], entity_id, language)
+    return catalog.metadata(account["id"], entity_id, language, include_credits=True)
 
 
 @router.get("/api/catalog/items/{entity_id}/images/{image_type}")
@@ -225,31 +244,17 @@ async def item_image(
     directory = (
         Path(library_rows[0][0]) if library_rows and library_rows[0][0] else None
     )
-    local_names = {
-        "Primary": {
-            "poster",
-            "folder",
-            "cover",
-            "primary",
-            "tvshow",
-            "movie",
-            "season",
-        },
-        "Backdrop": {"backdrop", "fanart", "background"},
-        "Logo": {"logo", "clearlogo", "clear-logo"},
-        "Banner": {"banner"},
-    }
     if directory:
-        for (relative_path,) in catalog.db.execute(
-            "SELECT relative_path FROM media_files WHERE entity_id=? AND role='image'",
+        for relative_path, content_hash in catalog.db.execute(
+            "SELECT relative_path,file_hash FROM media_files WHERE entity_id=? AND role='image'",
             (entity_id,),
         ):
             candidate = directory / relative_path
-            if (
-                candidate.stem.lower() in local_names.get(image_type, set())
-                and candidate.is_file()
-            ):
-                return FileResponse(candidate)
+            if candidate.stem.lower() in LOCAL_ARTWORK_NAMES.get(image_type, set()) and candidate.is_file():
+                cached = LocalArtworkCache(catalog.db).path(content_hash)
+                if cached and cached.is_file():
+                    return FileResponse(cached, media_type="image/webp")
+                raise HTTPException(404, "Image not found.")
     image = catalog.selected_image(account["id"], entity_id, language, image_type)
     if not image:
         raise HTTPException(404, "Image not found.")
@@ -258,11 +263,20 @@ async def item_image(
         (image_type, image.get("url")),
     )
     if rows and rows[0][0] and Path(rows[0][0]).is_file():
-        return FileResponse(rows[0][0])
+        return FileResponse(rows[0][0], media_type="image/webp")
     return Response(
         status_code=202,
         headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"},
     )
+
+
+@router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
+async def person_image(entity_id: str, person_id: str, request: Request):
+    account = account_from_access(request)
+    image = catalog.person_image(account["id"], entity_id, person_id)
+    if image is None:
+        raise HTTPException(404, "Person image not found.")
+    return FileResponse(image, media_type="image/webp")
 
 
 @router.patch("/api/catalog/items/{entity_id}/state")
@@ -277,6 +291,12 @@ async def negotiate_playback(entity_id: str, request: Request):
     return await asyncio.to_thread(
         media.negotiate, account["id"], entity_id, await request.json()
     )
+
+
+@router.get("/api/playback/items/{entity_id}/source")
+async def playback_source_metadata(entity_id: str, request: Request):
+    account, _ = require_account(request)
+    return await asyncio.to_thread(media.source_metadata, account["id"], entity_id)
 
 
 @router.get("/api/playback/items/{entity_id}/trickplay")
@@ -294,12 +314,19 @@ async def trickplay_manifest(entity_id: str, request: Request, sourceId: str | N
     return payload
 
 
-@router.get("/api/playback/items/{entity_id}/trickplay/{generation}/{sheet_index}.jpg")
+@router.get("/api/playback/items/{entity_id}/segments")
+async def playback_segments(entity_id: str, request: Request, sourceId: str | None = Query(None)):
+    account, _ = require_account(request)
+    catalog.require_entity(account["id"], entity_id)
+    return await asyncio.to_thread(intro_outro.segments, entity_id, sourceId)
+
+
+@router.get("/api/playback/items/{entity_id}/trickplay/{generation}/{sheet_index}.webp")
 async def trickplay_sheet(entity_id: str, generation: str, sheet_index: int, request: Request):
     account = account_from_access(request)
     catalog.require_entity(account["id"], entity_id)
     path = await asyncio.to_thread(trickplay.sheet_path, entity_id, generation, sheet_index)
-    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+    return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.api_route("/api/playback/items/{entity_id}/stream", methods=["GET", "HEAD"])
@@ -366,9 +393,7 @@ async def playback_output(session_id: str, filename: str, request: Request):
         filename,
         account["id"],
     )
-    path = await asyncio.to_thread(
-        media.session_file, account["id"], session_id, filename
-    )
+    path = await asyncio.to_thread(media.session_file, account["id"], session_id, filename)
     if path.suffix.lower() == ".m3u8":
         access = request.query_params.get("access") or ""
         lines = []

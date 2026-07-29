@@ -82,6 +82,16 @@ def _image_paths(
     return paths
 
 
+def _person_image_paths(db, tables: set[str]) -> set[str]:
+    if "people" not in tables:
+        return set()
+    return {
+        row[0]
+        for row in db.execute("SELECT local_path FROM people WHERE local_path IS NOT NULL")
+        if row[0]
+    }
+
+
 def _delete_entity_rows(cursor, tables: set[str], entity_ids: list[str]) -> None:
     for batch in _chunks(entity_ids):
         placeholders = _placeholders(batch)
@@ -98,6 +108,11 @@ def _delete_entity_rows(cursor, tables: set[str], entity_ids: list[str]) -> None
         if "catalog_search" in tables:
             cursor.execute(
                 f"DELETE FROM catalog_search WHERE entity_id IN ({placeholders})",
+                batch,
+            )
+        if "entity_person_credits" in tables:
+            cursor.execute(
+                f"DELETE FROM entity_person_credits WHERE entity_id IN ({placeholders})",
                 batch,
             )
         if "media_files" in tables:
@@ -174,6 +189,10 @@ def _purge_orphan_inventory(cursor, tables: set[str]) -> None:
             WHERE NOT EXISTS (SELECT 1 FROM libraries l WHERE l.id=s.library_id)
                OR NOT EXISTS (SELECT 1 FROM libraries l WHERE l.id=s.source_library_id)"""
         )
+    if {"people", "entity_person_credits"} <= tables:
+        cursor.execute(
+            "DELETE FROM people AS p WHERE NOT EXISTS (SELECT 1 FROM entity_person_credits c WHERE c.person_id=p.id)"
+        )
 
 
 def _remove_cached_files(db, tables: set[str], paths: set[str]) -> None:
@@ -188,6 +207,21 @@ def _remove_cached_files(db, tables: set[str], paths: set[str]) -> None:
             if not db.execute(
                 "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1", (str(path),)
             ):
+                resolved.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            continue
+
+
+def _remove_person_cached_files(db, tables: set[str], paths: set[str]) -> None:
+    if not paths or "people" not in tables or not db.db_file:
+        return
+    cache_root = (Path(db.db_file).parent / "people-cache").resolve()
+    for raw_path in paths:
+        try:
+            path = Path(raw_path)
+            resolved = path.resolve()
+            resolved.relative_to(cache_root)
+            if not db.execute("SELECT 1 FROM people WHERE local_path=? LIMIT 1", (str(path),)):
                 resolved.unlink(missing_ok=True)
         except (OSError, ValueError):
             continue
@@ -234,6 +268,7 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
     )
     provider_keys = _provider_keys(db, entity_ids)
     image_paths = _image_paths(db, tables, provider_keys)
+    person_image_paths = _person_image_paths(db, tables)
     trickplay_media_ids = _trickplay_media_ids(db, tables, entity_ids)
 
     with db.transaction() as cursor:
@@ -260,7 +295,11 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
         _purge_orphan_metadata(cursor, tables)
 
     _remove_cached_files(db, tables, image_paths)
+    _remove_person_cached_files(db, tables, person_image_paths)
     _remove_trickplay_files(db, trickplay_media_ids)
+    from app.images import LocalArtworkCache
+
+    LocalArtworkCache(db).prune()
     return True
 
 

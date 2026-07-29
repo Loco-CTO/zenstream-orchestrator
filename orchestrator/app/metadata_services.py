@@ -19,8 +19,10 @@ from app.models.metadata import (
     IMAGE_LANGUAGE_SCHEMA,
     MetadataCache,
     MetadataLanguageSettings,
+    iso_now,
 )
 from app.logging_config import get_logger
+from app.images import blurhash_for_image, encode_webp_bytes
 
 
 logger = get_logger("metadata")
@@ -243,6 +245,7 @@ class MetadataReadService:
         provider_ids: Iterable[dict],
         requested: str,
     ) -> dict:
+        provider_ids = list(provider_ids)
         raw = self.resolve_raw(entity_type, provider_ids, requested)
         original = raw.get("originalLanguage")
         providers = self.providers(entity_type)
@@ -252,12 +255,22 @@ class MetadataReadService:
                 raw.get("images", []), requested, image_type, original, providers
             )
             if choice:
-                selected[image_type] = {
+                image = {
                     "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={requested}",
                     "language": choice.get("language"),
                     "width": choice.get("width") or 0,
                     "height": choice.get("height") or 0,
                 }
+                blur_hash = self._image_blur_hash(
+                    choice.get("provider"),
+                    entity_type,
+                    next((identity.get("id") for identity in provider_ids if identity.get("provider") == choice.get("provider")), None),
+                    image_type,
+                    choice.get("url"),
+                )
+                if blur_hash and image_type != "Logo":
+                    image["blurHash"] = blur_hash
+                selected[image_type] = image
         raw["images"] = selected
         return {
             "itemId": entity_id,
@@ -265,6 +278,23 @@ class MetadataReadService:
             "originalLanguage": original,
             "metadata": raw,
         }
+
+    def _image_blur_hash(
+        self,
+        provider: object,
+        entity_type: str,
+        provider_id: object,
+        image_type: str,
+        image_url: object,
+    ) -> str | None:
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")}
+        if "blur_hash" not in columns or not all(isinstance(value, str) and value for value in (provider, provider_id, image_url)):
+            return None
+        rows = self.db.execute(
+            "SELECT blur_hash FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=? AND blur_hash IS NOT NULL ORDER BY fetched_at DESC LIMIT 1",
+            (provider, entity_type, provider_id, image_type, image_url),
+        )
+        return rows[0][0] if rows and rows[0][0] else None
 
     @staticmethod
     def _localized_trailers(
@@ -331,6 +361,7 @@ class MetadataIngestService:
         metadata_service=None,
         settings: MetadataLanguageSettings | None = None,
         image_ingest=None,
+        credit_ingest=None,
     ):
         if metadata_service is None:
             from app.providers import MetadataService
@@ -343,6 +374,11 @@ class MetadataIngestService:
             if cache is not None and getattr(cache, "db", None) is not None:
                 image_ingest = MetadataImageIngestService(cache)
         self.image_ingest = image_ingest
+        if credit_ingest is None:
+            cache = getattr(metadata_service, "cache", None)
+            if cache is not None and getattr(cache, "db", None) is not None:
+                credit_ingest = PersonCreditIngestService(cache)
+        self.credit_ingest = credit_ingest
 
     def locales(self) -> list[str]:
         return self.settings.get()
@@ -405,6 +441,10 @@ class MetadataIngestService:
             self.image_ingest.ingest(
                 provider, entity_type, provider_id, locale, normalized
             )
+        if self.credit_ingest is not None:
+            self.credit_ingest.ingest(
+                provider, entity_type, provider_id, locale, normalized
+            )
         return normalized
 
 
@@ -414,7 +454,7 @@ class MetadataImageIngestService:
     MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
     def __init__(
-        self, cache, image_root: str | Path | None = None, downloader=None
+        self, cache, image_root: str | Path | None = None, downloader=None, encoder=None, hasher=None
     ):
         self.cache = cache
         self.db = cache.db
@@ -426,21 +466,23 @@ class MetadataImageIngestService:
                 image_root = Path(db_file).parent / "metadata-cache" / "images"
         self.image_root = Path(image_root) if image_root is not None else None
         self.downloader = downloader
+        self.encoder = encoder or encode_webp_bytes
+        self.hasher = hasher or blurhash_for_image
 
     @staticmethod
-    def _extension(url: str) -> str:
+    def _source_suffix(url: str) -> str:
         suffix = Path(urlparse(url).path).suffix.lower()
         return (
             suffix
             if suffix in {".jpg", ".jpeg", ".png", ".webp", ".avif"}
-            else ".jpg"
+            else ".image"
         )
 
     def _target(self, url: str) -> Path | None:
         if self.image_root is None:
             return None
         name = hashlib.sha256(url.encode("utf-8")).hexdigest()
-        return self.image_root / f"{name}{self._extension(url)}"
+        return self.image_root / f"{name}.webp"
 
     def _download(self, url: str, target: Path) -> None:
         if self.downloader is not None:
@@ -466,9 +508,9 @@ class MetadataImageIngestService:
         if len(content) > self.MAX_IMAGE_BYTES:
             raise ValueError("provider image exceeds the 20 MiB limit")
         target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-        temporary.write_bytes(content)
-        temporary.replace(target)
+        self.encoder(content, target, self._source_suffix(url))
+        if not target.is_file() or not target.stat().st_size:
+            raise RuntimeError("WebP encoder did not produce an image.")
 
     def ingest(
         self,
@@ -507,6 +549,11 @@ class MetadataImageIngestService:
                 else:
                     self._download(url, target)
                     ready += 1
+                blur_hash = None
+                try:
+                    blur_hash = self.hasher(target)
+                except Exception as error:
+                    logger.warning("metadata image BlurHash encoding failed type=%s url=%s error=%s", image_type, url, error)
                 self.cache.put_image(
                     provider,
                     entity_type,
@@ -514,6 +561,7 @@ class MetadataImageIngestService:
                     image.get("language"),
                     image_type,
                     url,
+                    blur_hash,
                     str(target),
                 )
             except Exception as error:
@@ -529,3 +577,129 @@ class MetadataImageIngestService:
                     error,
                 )
         return {"ready": ready, "failed": failed, "skipped": skipped}
+
+
+class PersonCreditIngestService:
+    """Materialize primary-provider video credits and their cached portraits."""
+
+    def __init__(self, cache, image_root: str | Path | None = None):
+        self.cache = cache
+        self.db = cache.db
+        db_file = getattr(self.db, "db_file", None)
+        self.image_root = (
+            Path(image_root)
+            if image_root is not None
+            else Path(db_file).parent / "people-cache"
+            if db_file and db_file != ":memory:"
+            else None
+        )
+        self.images = MetadataImageIngestService(cache, image_root=self.image_root)
+
+    def _tables_ready(self) -> bool:
+        names = {
+            row[0]
+            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        return {"people", "person_localizations", "entity_person_credits"} <= names
+
+    @staticmethod
+    def _records(document: dict) -> list[tuple[str, int, dict]]:
+        credits = document.get("credits") if isinstance(document, dict) else None
+        if not isinstance(credits, dict):
+            return []
+        values = []
+        for credit_type in ("cast", "crew"):
+            source = credits.get(credit_type)
+            if not isinstance(source, list):
+                continue
+            for index, record in enumerate(source):
+                if isinstance(record, dict) and str(record.get("name") or "").strip():
+                    values.append((credit_type, index, record))
+        return values
+
+    def _portrait(self, person_id: str, image_url: object) -> None:
+        if not isinstance(image_url, str) or not image_url:
+            return
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or self.image_root is None:
+            return
+        target = self.images._target(image_url)
+        if target is None:
+            return
+        try:
+            if not target.is_file() or not target.stat().st_size:
+                self.images._download(image_url, target)
+            blur_hash = None
+            try:
+                blur_hash = self.images.hasher(target)
+            except Exception as error:
+                logger.warning("person portrait BlurHash encoding failed url=%s error=%s", image_url, error)
+            self.db.execute(
+                "UPDATE people SET image_url=?,local_path=?,image_blur_hash=?,updated_at=? WHERE id=?",
+                (image_url, str(target), blur_hash, iso_now(), person_id),
+            )
+        except Exception as error:
+            logger.warning("person portrait ingest failed person_id=%s url=%s error=%s", person_id, image_url, error)
+
+    def _person_id(self, provider: str, identity: str, name: str, locale: str, image_url: object) -> str:
+        rows = self.db.execute(
+            "SELECT id FROM people WHERE provider=? AND provider_person_id=?",
+            (provider, identity),
+        )
+        person_id = rows[0][0] if rows else str(uuid.uuid4())
+        now = iso_now()
+        if rows:
+            self.db.execute("UPDATE people SET updated_at=? WHERE id=?", (now, person_id))
+        else:
+            self.db.execute(
+                "INSERT INTO people(id,provider,provider_person_id,created_at,updated_at) VALUES(?,?,?,?,?)",
+                (person_id, provider, identity, now, now),
+            )
+        self.db.execute(
+            "INSERT INTO person_localizations(person_id,locale,name,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(person_id,locale) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at",
+            (person_id, locale, name, now),
+        )
+        self._portrait(person_id, image_url)
+        return person_id
+
+    def ingest(self, provider: str, entity_type: str, provider_id: str, locale: str, document: dict) -> None:
+        if provider not in {"tmdb", "tvdb"} or entity_type not in {"movie", "series", "season", "episode"}:
+            return
+        if not self._tables_ready():
+            return
+        records = self._records(document)
+        entity_ids = [
+            row[0]
+            for row in self.db.execute(
+                "SELECT p.entity_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
+                "WHERE p.provider=? AND p.provider_id=? AND p.is_primary=1 AND e.entity_type=?",
+                (provider, provider_id, entity_type),
+            )
+        ]
+        for entity_id in entity_ids:
+            credits = []
+            for credit_type, fallback_order, record in records:
+                name = str(record.get("name") or "").strip()
+                source_id = str(record.get("id") or "").strip()
+                role = str(record.get("role") or "").strip() or None
+                department = str(record.get("department") or "").strip() or None
+                order = record.get("order", fallback_order)
+                try:
+                    order = int(order)
+                except (TypeError, ValueError):
+                    order = fallback_order
+                identity = source_id or "credit:" + hashlib.sha256(
+                    f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode("utf-8")
+                ).hexdigest()
+                person_id = self._person_id(provider, identity, name, locale, record.get("imageUrl"))
+                credits.append((str(uuid.uuid4()), entity_id, person_id, provider, locale, credit_type, role, department, order))
+            with self.db.transaction() as cursor:
+                cursor.execute(
+                    "DELETE FROM entity_person_credits WHERE entity_id=? AND provider=? AND locale=?",
+                    (entity_id, provider, locale),
+                )
+                cursor.executemany(
+                    "INSERT INTO entity_person_credits(id,entity_id,person_id,provider,locale,credit_type,role,department,credit_order) VALUES(?,?,?,?,?,?,?,?,?)",
+                    credits,
+                )

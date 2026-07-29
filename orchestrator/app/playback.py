@@ -407,6 +407,23 @@ class PlaybackManager:
             for row in rows
         ]
 
+    def source_metadata(self, user_id: str, entity_id: str) -> dict:
+        sources = self.sources(user_id, entity_id)
+        if not sources:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "MEDIA_NOT_READY",
+                    "message": "Media has not been probed or is unavailable.",
+                },
+                headers={"Retry-After": "2"},
+            )
+        source = sources[0]
+        return {
+            "id": source["id"],
+            "streams": source.get("streams") or [],
+        }
+
     @staticmethod
     def _profile_values(profile: dict, key: str, defaults: set[str]) -> set[str]:
         if key not in profile or profile[key] is None:
@@ -625,6 +642,10 @@ class PlaybackManager:
             profile.get("maxStreamingBitrate"),
         )
         access = issue_ticket(user_id, "resource", 6 * 60 * 60, entity=entity_id)
+        start_time = max(0.0, float(profile.get("startPositionSeconds") or 0.0))
+        duration_seconds = max(0.0, float(source.get("durationSeconds") or 0.0))
+        if duration_seconds > 0:
+            start_time = min(start_time, duration_seconds)
         if selected_mode == "direct":
             return {
                 "mode": "direct",
@@ -634,7 +655,7 @@ class PlaybackManager:
                 "audioStreamId": profile.get("audioStreamId"),
                 "url": f"/api/playback/items/{entity_id}/stream?sourceId={source['id']}&access={access}",
                 "mimeType": self._mime(source),
-                "startPositionSeconds": 0.0,
+                "startPositionSeconds": start_time,
                 "durationSeconds": source.get("durationSeconds"),
             }
         if direct_only:
@@ -645,10 +666,6 @@ class PlaybackManager:
                     "message": "The selected media cannot be played directly by this client.",
                 },
             )
-        start_time = max(0.0, float(profile.get("startPositionSeconds") or 0.0))
-        start_time = min(
-            start_time, max(0.0, float(source.get("durationSeconds") or 0.0))
-        )
         transcode_mode = selected_mode
         result = self._transcode(
             user_id, entity_id, source, access, profile, start_time, transcode_mode

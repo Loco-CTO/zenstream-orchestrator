@@ -243,14 +243,15 @@ class MetadataCache:
         locale: str | None,
         image_type: str,
         image_url: str,
+        blur_hash: str | None = None,
         local_path: str | None = None,
     ) -> None:
         if image_type not in ARTWORK_CATEGORY_SET:
             raise ValueError(f"Unsupported image type '{image_type}'.")
         now = utc_now()
         self.db.execute(
-            "INSERT INTO metadata_images(provider, entity_type, provider_id, locale, image_type, image_url, local_path, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(provider, entity_type, provider_id, locale, image_type, image_url) DO UPDATE SET local_path=excluded.local_path, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
+            "INSERT INTO metadata_images(provider, entity_type, provider_id, locale, image_type, image_url, blur_hash, local_path, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(provider, entity_type, provider_id, locale, image_type, image_url) DO UPDATE SET blur_hash=excluded.blur_hash, local_path=excluded.local_path, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
             (
                 provider,
                 entity_type,
@@ -258,6 +259,7 @@ class MetadataCache:
                 locale,
                 image_type,
                 image_url,
+                blur_hash,
                 local_path,
                 now.isoformat(),
                 (now + timedelta(days=7)).isoformat(),

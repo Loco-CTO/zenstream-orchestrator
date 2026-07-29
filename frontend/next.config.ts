@@ -8,15 +8,16 @@ const nextConfig: NextConfig = {
   distDir: isDevelopment ? ".next-dev" : ".next",
   turbopack: { root: __dirname },
   trailingSlash: true,
-  async rewrites() {
-    if (!isDevelopment) return [];
-    return [
+  ...(isDevelopment ? {
+    async rewrites() {
+      return [
       {
         source: "/api/:path*",
         destination: `${process.env.ORCHESTRATOR_API_URL ?? "http://127.0.0.1:9090"}/api/:path*`,
       },
     ];
-  },
+    },
+  } : {}),
 };
 
 export default nextConfig;

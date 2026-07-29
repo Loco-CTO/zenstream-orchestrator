@@ -9,9 +9,18 @@ from fastapi import HTTPException
 
 from app.config import Config
 from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
-from app.metadata_domain import choose_artwork
+from app.metadata_domain import choose_artwork, fallback_tiers, locale_variants
 from app.metadata_services import MetadataReadService
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
+from app.images import LocalArtworkCache
+
+
+LOCAL_ARTWORK_NAMES = {
+    "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
+    "Backdrop": {"backdrop", "fanart", "background"},
+    "Logo": {"logo", "clearlogo", "clear-logo"},
+    "Banner": {"banner"},
+}
 
 
 def _now() -> str:
@@ -116,15 +125,129 @@ class Catalog:
     def _read_service(self) -> MetadataReadService:
         return MetadataReadService(self.db)
 
-    def metadata(self, user_id: str, entity_id: str, language: str) -> dict:
+    def metadata(
+        self, user_id: str, entity_id: str, language: str, include_credits: bool = False
+    ) -> dict:
         row = self.require_entity(user_id, entity_id)
         configured = MetadataLanguageSettings().get()
         language = normalize_metadata_locale(language)
         if language not in configured:
             raise HTTPException(400, "Metadata language is not configured.")
-        return self._read_service().resolve_public(
+        resolved = self._read_service().resolve_public(
             entity_id, row[3], self._provider_ids(entity_id, row[3]), language
         )
+        images = resolved["metadata"].get("images")
+        if isinstance(images, dict):
+            for image_type, image in images.items():
+                if not isinstance(image, dict):
+                    continue
+                if image_type == "Logo":
+                    image.pop("blurHash", None)
+                    continue
+                local = self.local_artwork(entity_id, image_type)
+                if local is None:
+                    continue
+                image.pop("blurHash", None)
+                if local[1]:
+                    image["blurHash"] = local[1]
+        if include_credits:
+            resolved["metadata"]["credits"] = self.credits(
+                user_id, entity_id, language, resolved["metadata"].get("originalLanguage")
+            )
+        return resolved
+
+    def credits(
+        self, user_id: str, entity_id: str, language: str, original_language: str | None = None
+    ) -> dict[str, list[dict]]:
+        self.require_entity(user_id, entity_id)
+        if not self._has_table("entity_person_credits"):
+            return {"cast": [], "crew": []}
+        available = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT DISTINCT locale FROM entity_person_credits WHERE entity_id=?",
+                (entity_id,),
+            )
+        }
+        configured = MetadataLanguageSettings().get()
+        tiers = fallback_tiers(
+            language, original_language, media=False, include_english="en" in configured
+        )
+        result = {"cast": [], "crew": []}
+        for credit_type in ("cast", "crew"):
+            selected_locale = None
+            for tier in tiers:
+                for variant in locale_variants(tier, available):
+                    if self.db.execute(
+                        "SELECT 1 FROM entity_person_credits WHERE entity_id=? AND locale=? AND credit_type=? LIMIT 1",
+                        (entity_id, variant, credit_type),
+                    ):
+                        selected_locale = variant
+                        break
+                if selected_locale:
+                    break
+            if not selected_locale:
+                continue
+            rows = self.db.execute(
+                "SELECT c.person_id,COALESCE(l.name,''),c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash "
+                "FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
+                "LEFT JOIN person_localizations l ON l.person_id=p.id AND l.locale=c.locale "
+                "WHERE c.entity_id=? AND c.locale=? AND c.credit_type=? "
+                "ORDER BY c.credit_order,c.id",
+                (entity_id, selected_locale, credit_type),
+            )
+            for person_id, name, role, department, order, local_path, blur_hash in rows:
+                value = {"id": person_id, "name": name, "order": order}
+                if credit_type == "cast":
+                    value["character"] = role
+                else:
+                    value["job"] = role
+                    value["department"] = department
+                if local_path and Path(local_path).is_file():
+                    value["image"] = {
+                        "url": f"/api/catalog/items/{entity_id}/people/{person_id}/image"
+                    }
+                    if blur_hash:
+                        value["image"]["blurHash"] = blur_hash
+                result[credit_type].append(value)
+        return result
+
+    def person_image(self, user_id: str, entity_id: str, person_id: str) -> Path | None:
+        self.require_entity(user_id, entity_id)
+        if not self._has_table("entity_person_credits"):
+            return None
+        rows = self.db.execute(
+            "SELECT p.local_path FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
+            "WHERE c.entity_id=? AND c.person_id=? AND p.local_path IS NOT NULL LIMIT 1",
+            (entity_id, person_id),
+        )
+        if not rows or not rows[0][0]:
+            return None
+        path = Path(rows[0][0])
+        return path if path.is_file() else None
+
+    def local_artwork(self, entity_id: str, image_type: str) -> tuple[Path, str | None] | None:
+        row = self._entity_row(entity_id)
+        if not row or image_type not in LOCAL_ARTWORK_NAMES:
+            return None
+        directory_rows = self.db.execute("SELECT directory FROM libraries WHERE id=?", (row[1],))
+        if not directory_rows or not directory_rows[0][0]:
+            return None
+        columns = {value[1] for value in self.db.execute("PRAGMA table_info(media_files)")}
+        if not columns:
+            return None
+        blur_field = ",image_blur_hash" if "image_blur_hash" in columns else ""
+        cache = LocalArtworkCache(self.db)
+        for values in self.db.execute(
+            f"SELECT relative_path,file_hash{blur_field} FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path COLLATE NOCASE",
+            (entity_id,),
+        ):
+            relative_path, content_hash, *blur_hash = values
+            candidate = Path(directory_rows[0][0]) / relative_path
+            cached = cache.path(content_hash)
+            if candidate.stem.lower() in LOCAL_ARTWORK_NAMES[image_type] and candidate.is_file() and cached and cached.is_file():
+                return cached, blur_hash[0] if blur_hash else None
+        return None
 
     def selected_image(
         self, user_id: str, entity_id: str, language: str, image_type: str
@@ -148,7 +271,7 @@ class Catalog:
 
     def item(self, user_id: str, entity_id: str, language: str) -> dict:
         row = self.require_entity(user_id, entity_id)
-        metadata = self.metadata(user_id, entity_id, language)["metadata"]
+        metadata = self.metadata(user_id, entity_id, language, include_credits=True)["metadata"]
         if row[3] == "collection":
             allowed = self.allowed_libraries(user_id)
             placeholders = ",".join("?" for _ in allowed)
@@ -165,7 +288,9 @@ class Catalog:
                 "SELECT id FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
                 (entity_id,),
             )
-        return self._serialize(user_id, row, metadata, [child[0] for child in children])
+        return self._serialize(
+            user_id, row, metadata, [child[0] for child in children], language=language
+        )
 
     def _relationship_graph(self, user_id: str) -> tuple[dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]]:
         allowed = self.allowed_libraries(user_id)
@@ -290,18 +415,27 @@ class Catalog:
         metadata: dict,
         children: list[str] | None = None,
         dates: dict | None = None,
+        series_name: str | None = None,
+        language: str | None = None,
     ) -> dict:
         season_id = row[2] if row[3] == "episode" else None
         series_id = row[2] if row[3] == "season" else None
         if season_id:
             parent = self._entity_row(season_id)
             series_id = parent[2] if parent else None
+        series_primary_image = (
+            self._series_primary_image(user_id, series_id, language)
+            if row[3] == "episode" and series_id and language
+            else None
+        )
         return {
             "id": row[0],
             "libraryId": row[1],
             "parentId": row[2],
             "type": row[3],
             "seriesId": series_id,
+            "seriesName": series_name,
+            "seriesPrimaryImage": series_primary_image,
             "seasonId": season_id,
             "name": metadata.get("title") or Path(row[4] or "").stem or row[3].title(),
             "seasonNumber": row[5],
@@ -315,6 +449,19 @@ class Catalog:
             "userState": self._state(user_id, row[0]),
             "childIds": children or [],
         }
+
+    def _series_primary_image(
+        self, user_id: str, series_id: str, language: str
+    ) -> dict | None:
+        try:
+            series = self.metadata(user_id, series_id, language)["metadata"]
+        except HTTPException as error:
+            if error.status_code != 404:
+                raise
+            return None
+        images = series.get("images")
+        primary = images.get("Primary") if isinstance(images, dict) else None
+        return primary if isinstance(primary, dict) else None
 
     def _date_values(
         self, library_id: str, allowed_library_ids: set[str] | None = None
@@ -341,7 +488,7 @@ class Catalog:
         media: dict[str, list[str]] = {}
         if self._has_table("media_files"):
             for entity_id, modified_ns in self.db.execute(
-                f"SELECT entity_id,modified_ns FROM media_files WHERE role IN ('video','audio') AND entity_id IN (SELECT id FROM library_entities WHERE library_id IN ({placeholders})) AND modified_ns IS NOT NULL",
+                f"SELECT entity_id,modified_ns FROM media_files WHERE role='media' AND entity_id IN (SELECT id FROM library_entities WHERE library_id IN ({placeholders})) AND modified_ns IS NOT NULL",
                 list(scope),
             ):
                 media.setdefault(entity_id, []).append(
@@ -399,7 +546,11 @@ class Catalog:
         values = []
         for row in rows:
             metadata = self.metadata(user_id, row[0], language)["metadata"]
-            values.append(self._serialize(user_id, row, metadata, dates=dates.get(row[0])))
+            values.append(
+                self._serialize(
+                    user_id, row, metadata, dates=dates.get(row[0]), language=language
+                )
+            )
         hierarchy_parent = None
         if parent_id:
             hierarchy_parent = self.require_entity(user_id, parent_id)[3]
@@ -512,7 +663,9 @@ class Catalog:
                 language_rank = locale_order.index(locale)
                 candidate = (match_rank, language_rank, float(fts_score or 0), title)
                 best = min(best, candidate) if best is not None else candidate
-            ranked.append((*best, row[0], self._serialize(user_id, row, metadata)))
+            ranked.append(
+                (*best, row[0], self._serialize(user_id, row, metadata, language=language))
+            )
         ranked.sort(key=lambda value: value[:3])
         values = [value[5] for value in ranked]
         start = (page - 1) * page_size
@@ -531,12 +684,14 @@ class Catalog:
         current_row = self._state_row(user_id, entity_id)
         current = self._direct_state(current_row)
         try:
-            position = max(0.0, float(changes.get("positionSeconds", current["positionSeconds"])))
-            duration = max(0.0, float(changes.get("durationSeconds", current["durationSeconds"])))
+            position = float(changes.get("positionSeconds", current["positionSeconds"]))
+            duration = float(changes.get("durationSeconds", current["durationSeconds"]))
         except (TypeError, ValueError) as error:
             raise HTTPException(400, "Invalid playback position.") from error
         if not math.isfinite(position) or not math.isfinite(duration):
             raise HTTPException(400, "Invalid playback position.")
+        position = max(0.0, position)
+        duration = max(0.0, duration)
         explicit_played = changes.get("played")
         played = (
             bool(explicit_played)
@@ -608,7 +763,10 @@ class Catalog:
         )
         values = [
             self._serialize(
-                user_id, row, self.metadata(user_id, row[0], language)["metadata"]
+                user_id,
+                row,
+                self.metadata(user_id, row[0], language)["metadata"],
+                language=language,
             )
             for row in rows
         ]
@@ -658,11 +816,204 @@ class Catalog:
                         -score,
                         str(metadata.get("title") or "").casefold(),
                         row[0],
-                        self._serialize(user_id, row, metadata),
+                        self._serialize(user_id, row, metadata, language=language),
                     )
                 )
         ranked.sort(key=lambda value: value[:3])
         return {"items": [value[3] for value in ranked[:limit]]}
+
+    def _home_series_name(
+        self,
+        user_id: str,
+        language: str,
+        series_id: str | None,
+        names: dict[str, str],
+    ) -> str | None:
+        if not series_id:
+            return None
+        if series_id not in names:
+            series_row = self._entity_row(series_id)
+            series_metadata = self.metadata(user_id, series_id, language)["metadata"]
+            names[series_id] = str(
+                series_metadata.get("title")
+                or Path(series_row[4] if series_row else "").stem
+                or "Series"
+            )
+        return names[series_id]
+
+    def _home_discovery_items(
+        self, user_id: str, language: str, allowed: set[str]
+    ) -> list[dict]:
+        placeholders = ",".join("?" for _ in allowed)
+        rows = self.db.execute(
+            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection') ORDER BY created_at DESC LIMIT 100",
+            list(allowed),
+        )
+        dates = self._date_values("", allowed)
+        return [
+            self._serialize(
+                user_id,
+                row,
+                self.metadata(user_id, row[0], language)["metadata"],
+                dates=dates.get(row[0]),
+                language=language,
+            )
+            for row in rows
+        ]
+
+    def home_featured(self, user_id: str, language: str) -> list[dict]:
+        allowed = self.allowed_libraries(user_id)
+        if not allowed:
+            return []
+        return self._home_discovery_items(user_id, language, allowed)[:25]
+
+    def home_continue_watching(self, user_id: str, language: str) -> list[dict]:
+        allowed = self.allowed_libraries(user_id)
+        if not allowed:
+            return []
+        placeholders = ",".join("?" for _ in allowed)
+        rows = self.db.execute(
+            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id "
+            f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
+            f"LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
+            f"LEFT JOIN library_entities series ON series.id=season.parent_id "
+            f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND s.duration_seconds>0 AND s.position_seconds/s.duration_seconds>=0.02 AND s.position_seconds/s.duration_seconds<0.9 ORDER BY s.last_played_at DESC LIMIT 18",
+            [user_id, *allowed],
+        )
+        series_names: dict[str, str] = {}
+        return [
+            self._serialize(
+                user_id,
+                row[:10],
+                self.metadata(user_id, row[0], language)["metadata"],
+                series_name=self._home_series_name(user_id, language, row[10], series_names),
+                language=language,
+            )
+            for row in rows
+        ]
+
+    def home_next_up(self, user_id: str, language: str) -> list[dict]:
+        allowed = self.allowed_libraries(user_id)
+        if not allowed:
+            return []
+        placeholders = ",".join("?" for _ in allowed)
+        rows = self.db.execute(
+            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id "
+            f"FROM library_entities e JOIN library_entities season ON season.id=e.parent_id JOIN library_entities series ON series.id=season.parent_id "
+            f"WHERE e.entity_type='episode' AND e.library_id IN ({placeholders}) ORDER BY series.id,e.season_number,e.episode_number,e.relative_path COLLATE NOCASE",
+            list(allowed),
+        )
+        by_series: dict[str, list[tuple]] = {}
+        for row in rows:
+            by_series.setdefault(row[10], []).append(row[:10])
+        series_names: dict[str, str] = {}
+        next_up = []
+        for series_id, episodes in by_series.items():
+            states = [self._state(user_id, episode[0]) for episode in episodes]
+            if not any(state["played"] or state["positionSeconds"] > 0 for state in states):
+                continue
+            candidate = next(
+                (episode for episode, state in zip(episodes, states) if not state["played"]),
+                None,
+            )
+            if candidate:
+                next_up.append(
+                    self._serialize(
+                        user_id,
+                        candidate,
+                        self.metadata(user_id, candidate[0], language)["metadata"],
+                        series_name=self._home_series_name(user_id, language, series_id, series_names),
+                        language=language,
+                    )
+                )
+        next_up.sort(key=lambda value: value["userState"].get("lastPlayedAt") or "", reverse=True)
+        return next_up[:18]
+
+    def home_derived(
+        self, user_id: str, language: str, discovery_items: list[dict] | None = None
+    ) -> dict:
+        allowed = self.allowed_libraries(user_id)
+        empty = {"myList": [], "recentlyPlayed": [], "genreRows": []}
+        if not allowed:
+            return empty
+        placeholders = ",".join("?" for _ in allowed)
+        favorite_rows = self.db.execute(
+            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders})",
+            [user_id, *allowed],
+        )
+        my_list = [
+            self._serialize(
+                user_id,
+                row,
+                self.metadata(user_id, row[0], language)["metadata"],
+                language=language,
+            )
+            for row in favorite_rows
+        ]
+        my_list.sort(
+            key=lambda value: (str(value.get("name") or "").casefold(), value["id"])
+        )
+
+        recent_rows = self.db.execute(
+            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id "
+            f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
+            f"LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
+            f"LEFT JOIN library_entities series ON series.id=season.parent_id "
+            f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND e.entity_type IN ('movie','episode') "
+            f"AND s.last_played_at IS NOT NULL AND NOT (s.duration_seconds>0 AND s.position_seconds/s.duration_seconds>=0.02 AND s.position_seconds/s.duration_seconds<0.9) "
+            f"ORDER BY s.last_played_at DESC,e.id LIMIT 18",
+            [user_id, *allowed],
+        )
+        series_names: dict[str, str] = {}
+        recently_played = [
+            self._serialize(
+                user_id,
+                row[:10],
+                self.metadata(user_id, row[0], language)["metadata"],
+                series_name=self._home_series_name(user_id, language, row[10], series_names),
+                language=language,
+            )
+            for row in recent_rows
+        ]
+
+        candidates = discovery_items or self._home_discovery_items(
+            user_id, language, allowed
+        )
+        genre_candidates = [
+            item for item in candidates if item.get("type") in {"movie", "series"}
+        ]
+        genre_names: dict[str, str] = {}
+        genre_counts: dict[str, int] = {}
+        for item in genre_candidates:
+            metadata = item.get("metadata") or {}
+            tags = metadata.get("genres") or metadata.get("tags") or []
+            item_genres = {
+                tag.strip().casefold(): tag.strip()
+                for tag in tags
+                if isinstance(tag, str) and tag.strip()
+            }
+            for key, genre in item_genres.items():
+                genre_names.setdefault(key, genre)
+                genre_counts[key] = genre_counts.get(key, 0) + 1
+        genre_rows = []
+        for key in sorted(
+            genre_counts, key=lambda value: (-genre_counts[value], genre_names[value].casefold())
+        )[:3]:
+            items = [
+                item
+                for item in genre_candidates
+                if any(
+                    isinstance(tag, str) and tag.strip().casefold() == key
+                    for tag in ((item.get("metadata") or {}).get("genres") or (item.get("metadata") or {}).get("tags") or [])
+                )
+            ][:18]
+            if items:
+                genre_rows.append({"genre": genre_names[key], "items": items})
+        return {
+            "myList": my_list[:18],
+            "recentlyPlayed": recently_played,
+            "genreRows": genre_rows,
+        }
 
     def home(self, user_id: str, language: str) -> dict:
         allowed = self.allowed_libraries(user_id)
@@ -672,25 +1023,43 @@ class Catalog:
                 "continueWatching": [],
                 "nextUp": [],
                 "libraryRows": [],
+                "myList": [],
+                "recentlyPlayed": [],
+                "genreRows": [],
             }
         placeholders = ",".join("?" for _ in allowed)
-        rows = self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection') ORDER BY created_at DESC LIMIT 100",
-            list(allowed),
-        )
-        items = [
-            self._serialize(
-                user_id, row, self.metadata(user_id, row[0], language)["metadata"]
-            )
-            for row in rows
-        ]
+        dates = self._date_values("", allowed)
+        items = self._home_discovery_items(user_id, language, allowed)
         resume_rows = self.db.execute(
-            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND s.duration_seconds>0 AND s.position_seconds/s.duration_seconds>=0.02 AND s.position_seconds/s.duration_seconds<0.9 ORDER BY s.last_played_at DESC LIMIT 18",
+            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id "
+            f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
+            f"LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
+            f"LEFT JOIN library_entities series ON series.id=season.parent_id "
+            f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND s.duration_seconds>0 AND s.position_seconds/s.duration_seconds>=0.02 AND s.position_seconds/s.duration_seconds<0.9 ORDER BY s.last_played_at DESC LIMIT 18",
             [user_id, *allowed],
         )
+        series_names: dict[str, str] = {}
+
+        def series_name(series_id: str | None) -> str | None:
+            if not series_id:
+                return None
+            if series_id not in series_names:
+                series_row = self._entity_row(series_id)
+                series_metadata = self.metadata(user_id, series_id, language)["metadata"]
+                series_names[series_id] = str(
+                    series_metadata.get("title")
+                    or Path(series_row[4] if series_row else "").stem
+                    or "Series"
+                )
+            return series_names[series_id]
+
         resume = [
             self._serialize(
-                user_id, row, self.metadata(user_id, row[0], language)["metadata"]
+                user_id,
+                row[:10],
+                self.metadata(user_id, row[0], language)["metadata"],
+                series_name=series_name(row[10]),
+                language=language,
             )
             for row in resume_rows
         ]
@@ -704,7 +1073,7 @@ class Catalog:
         by_series = {}
         for row in next_rows:
             by_series.setdefault(row[10], []).append(row[:10])
-        for episodes in by_series.values():
+        for series_id, episodes in by_series.items():
             states = [self._state(user_id, episode[0]) for episode in episodes]
             if not any(
                 state["played"] or state["positionSeconds"] > 0 for state in states
@@ -724,6 +1093,8 @@ class Catalog:
                         user_id,
                         candidate,
                         self.metadata(user_id, candidate[0], language)["metadata"],
+                        series_name=series_name(series_id),
+                        language=language,
                     )
                 )
         next_up.sort(
@@ -732,6 +1103,50 @@ class Catalog:
         library_rows = []
         by_library = {library["id"]: library for library in self.libraries(user_id)}
         for library_id, library in by_library.items():
+            newly_added = []
+            if self._has_table("media_files") and library["type"] in {"movies", "tv_series"}:
+                entity_type = "movie" if library["type"] == "movies" else "episode"
+                playable_rows = self.db.execute(
+                    "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at "
+                    "FROM library_entities e WHERE e.library_id=? AND e.entity_type=? "
+                    "AND EXISTS (SELECT 1 FROM media_files f WHERE f.entity_id=e.id AND f.role='media')",
+                    (library_id, entity_type),
+                )
+                for playable_row in playable_rows:
+                    episode_series_id = None
+                    if entity_type == "episode":
+                        season = self._entity_row(playable_row[2])
+                        episode_series_id = season[2] if season else None
+                    newly_added.append(
+                        self._serialize(
+                            user_id,
+                            playable_row,
+                            self.metadata(user_id, playable_row[0], language)["metadata"],
+                            dates=dates.get(playable_row[0]),
+                            series_name=series_name(episode_series_id),
+                            language=language,
+                        )
+                    )
+                newly_added.sort(
+                    key=lambda value: (
+                        str(value.get("name") or "").casefold(),
+                        value["id"],
+                    )
+                )
+                newly_added.sort(
+                    key=lambda value: value.get("lastAddedAt") or "", reverse=True
+                )
+                newly_added = newly_added[:18]
+            if newly_added:
+                library_rows.append(
+                    {
+                        "libraryId": library_id,
+                        "libraryName": library["name"],
+                        "titleKey": "newlyAddedOn",
+                        "stackEpisodes": library["type"] == "tv_series",
+                        "items": newly_added,
+                    }
+                )
             library_items = [
                 value for value in items if value["libraryId"] == library_id
             ]
@@ -768,4 +1183,5 @@ class Catalog:
             "continueWatching": resume,
             "nextUp": next_up[:18],
             "libraryRows": library_rows,
+            **self.home_derived(user_id, language, items),
         }

@@ -9,6 +9,7 @@ import {
 	IconTrash,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { ConfirmDialog, EmptyState, PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
 
 type Library = {
 	id: string;
@@ -38,6 +39,7 @@ export default function LibrariesPage() {
 	const [watch, setWatch] = useState(true);
 	const [interval, setIntervalValue] = useState(1440);
 	const [message, setMessage] = useState("");
+	const [libraryToRemove, setLibraryToRemove] = useState<Library | null>(null);
 
 	async function load(current = session) {
 		if (!current) return;
@@ -93,13 +95,7 @@ export default function LibrariesPage() {
 		load();
 	}
 	async function remove(library: Library) {
-		if (
-			!session ||
-			!window.confirm(
-				"Remove " + library.name + "? Media files will not be deleted.",
-			)
-		)
-			return;
+		if (!session) return;
 		const response = await adminFetch(
 			"/api/admin/libraries/" + library.id,
 			session,
@@ -110,13 +106,25 @@ export default function LibrariesPage() {
 				? "Library removed; files were left untouched."
 				: "Could not remove library.",
 		);
+		setLibraryToRemove(null);
 		load();
 	}
 
 	return (
 		<div className="max-w-6xl">
-			<div className="flex flex-wrap items-center gap-3 border-b console-divider pb-5">
-				<h1 className="text-3xl font-semibold tracking-tight">Media sources</h1>
+			<ConfirmDialog
+				open={Boolean(libraryToRemove)}
+				title="Remove library?"
+				description={`Remove ${libraryToRemove?.name || "this library"} from ZenStream. Its media files will remain untouched on disk.`}
+				confirmLabel="Remove library"
+				destructive
+				onClose={() => setLibraryToRemove(null)}
+				onConfirm={() => libraryToRemove && void remove(libraryToRemove)}
+			/>
+			<PageHeader
+				title="Media sources"
+				description="Connect media roots, monitor scans, and assemble collection libraries."
+				actions={
 				<button
 					onClick={() => load()}
 					aria-label="Refresh libraries"
@@ -125,9 +133,11 @@ export default function LibrariesPage() {
 				>
 					<IconRefresh size={17} />
 				</button>
-			</div>
+				}
+			/>
+			{message && <StatusMessage>{message}</StatusMessage>}
 			<div className="mt-7 grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
-				<section className="console-card overflow-hidden rounded-xl">
+				<SurfaceCard className="overflow-hidden">
 					<div className="border-b console-divider px-5 py-4 text-xs uppercase tracking-[.16em] console-muted">
 						Configured libraries{" "}
 						<span className="ml-2 normal-case tracking-normal">
@@ -140,7 +150,7 @@ export default function LibrariesPage() {
 							className="flex items-start justify-between gap-4 border-b console-divider px-5 py-5 last:border-0"
 						>
 							<div className="flex min-w-0 items-start gap-3">
-								<span className="rounded-lg bg-[#55c9b0]/10 p-2.5 text-[#8fe4cf]">
+								<span className="rounded-lg bg-[#aeb9ff]/10 p-2.5 text-[#aeb9ff]">
 									<IconFolder size={18} />
 								</span>
 								<div className="min-w-0">
@@ -169,7 +179,7 @@ export default function LibrariesPage() {
 										"/web/dashboard/libraries/view?libraryId=" +
 										encodeURIComponent(library.id)
 									}
-									className="rounded-lg border console-divider px-3 py-2 text-xs text-[#8fe4cf]"
+									className="rounded-lg border console-divider px-3 py-2 text-xs text-[#aeb9ff]"
 								>
 									View
 								</Link>
@@ -181,9 +191,9 @@ export default function LibrariesPage() {
 									<IconRefresh size={16} />
 								</button>
 								<button
-									onClick={() => remove(library)}
+								onClick={() => setLibraryToRemove(library)}
 									aria-label="Remove"
-									className="rounded-lg border console-divider p-2 console-muted hover:bg-red-400/10 hover:text-red-200"
+									className="rounded-lg border console-divider p-2 console-muted hover:bg-[#aeb9ff]/10 hover:text-[#aeb9ff]"
 								>
 									<IconTrash size={16} />
 								</button>
@@ -191,11 +201,9 @@ export default function LibrariesPage() {
 						</article>
 					))}
 					{!libraries.length && (
-						<div className="px-5 py-12 text-center text-sm console-muted">
-							No libraries yet. Add your first media root.
-						</div>
+						<EmptyState>No libraries yet. Add your first media root.</EmptyState>
 					)}
-				</section>
+				</SurfaceCard>
 				<form onSubmit={create} className="console-card rounded-xl p-5">
 					<p className="console-kicker">New library</p>
 					<h2 className="mt-2 text-lg font-semibold">Add source</h2>
@@ -284,7 +292,6 @@ export default function LibrariesPage() {
 						<IconPlus size={16} />
 						Create and scan
 					</button>
-					{message && <p className="mt-4 text-xs text-[#8fe4cf]">{message}</p>}
 				</form>
 			</div>
 		</div>

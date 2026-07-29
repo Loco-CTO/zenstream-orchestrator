@@ -443,28 +443,29 @@ class TMDBClient(ProviderClient):
         )
         genres = payload.get("genres") or payload.get("tags") or []
         credits = payload.get("credits") or {}
+        normalized_credits = {"cast": [], "crew": []}
         people = []
-        for person in (credits.get("cast") or []) + (credits.get("crew") or []):
-            profile = person.get("profile_path")
-            entry = {
-                "id": str(person.get("id")) if person.get("id") is not None else None,
-                "name": person.get("name"),
-                "role": person.get("character")
-                or person.get("job")
-                or person.get("known_for_department"),
-                "department": person.get("known_for_department")
-                or person.get("department"),
-            }
-            if profile:
-                entry["image"] = _image(
-                    PRIMARY,
-                    f"https://image.tmdb.org/t/p/w500{profile}",
-                    provider="tmdb",
-                    source_type="profile",
-                    width=500,
-                )
-            if entry["name"]:
-                people.append(entry)
+        for credit_type, source in (("cast", credits.get("cast") or []), ("crew", credits.get("crew") or [])):
+            for order, person in enumerate(source):
+                if not isinstance(person, dict):
+                    continue
+                profile = person.get("profile_path")
+                entry = {
+                    "id": str(person.get("id")) if person.get("id") is not None else None,
+                    "name": person.get("name"),
+                    "role": person.get("character")
+                    or person.get("job")
+                    or person.get("known_for_department"),
+                    "department": person.get("known_for_department")
+                    or person.get("department"),
+                    "creditType": credit_type,
+                    "order": person.get("order", order),
+                }
+                if profile:
+                    entry["imageUrl"] = f"https://image.tmdb.org/t/p/w500{profile}"
+                if entry["name"]:
+                    normalized_credits[credit_type].append(entry)
+                    people.append(entry)
         videos = _normalize_trailers(
             (payload.get("videos") or {}).get("results", []), "tmdb"
         )
@@ -489,6 +490,7 @@ class TMDBClient(ProviderClient):
             "originalLanguage": payload.get("original_language"),
             "trailers": videos,
             "people": people,
+            "credits": normalized_credits,
             "provider": "tmdb",
             "providerId": provider_id,
             "ids": ids,
@@ -846,19 +848,28 @@ class TVDBClient(ProviderClient):
                     self._language_code_for_artwork(str(trailer["language"]))
                     or trailer["language"]
                 )
+        normalized_credits = {"cast": [], "crew": []}
         people = []
-        for person in data.get("characters", []) or data.get("people", []) or []:
+        for order, person in enumerate(data.get("characters", []) or data.get("people", []) or []):
+            if not isinstance(person, dict):
+                continue
             image = person.get("image") or person.get("imageUrl")
+            role = person.get("role") or person.get("character")
+            department = person.get("department") or person.get("peopleType") or person.get("type")
+            kind = str(person.get("creditType") or person.get("type") or person.get("peopleType") or "").lower()
+            credit_type = "crew" if person.get("job") or any(value in kind for value in ("crew", "director", "writer", "producer")) else "cast"
             entry = {
                 "id": str(person.get("id")) if person.get("id") is not None else None,
                 "name": person.get("name") or person.get("personName"),
-                "role": person.get("role") or person.get("character"),
+                "role": role or person.get("job"),
+                "department": department,
+                "creditType": credit_type,
+                "order": person.get("sort") or person.get("order") or order,
             }
             if image:
-                entry["image"] = _image(
-                    PRIMARY, image, provider="tvdb", source_type="person"
-                )
+                entry["imageUrl"] = image
             if entry["name"]:
+                normalized_credits[credit_type].append(entry)
                 people.append(entry)
         images, extra_images = _tvdb_images(
             entity_type, data, self._language_code_for_artwork, self._artwork_type
@@ -902,6 +913,7 @@ class TVDBClient(ProviderClient):
             or data.get("originalLanguage"),
             "trailers": trailers,
             "people": people,
+            "credits": normalized_credits,
             "provider": "tvdb",
             "providerId": provider_id,
             "ids": ids,

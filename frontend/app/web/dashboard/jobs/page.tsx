@@ -12,6 +12,7 @@ import {
 	IconSettings,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { ConfirmDialog, EmptyState, PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
 
 type Run = {
 	id: string;
@@ -40,13 +41,13 @@ type Job = {
 };
 
 const stateColor: Record<string, string> = {
-	completed: "text-[#8fe4cf]",
-	running: "text-sky-300",
-	terminating: "text-orange-300",
-	terminated: "text-orange-300",
-	queued: "text-amber-300",
-	failed: "text-red-300",
-	error: "text-red-300",
+	completed: "text-[#aeb9ff]",
+	running: "text-[#aeb9ff]",
+	terminating: "text-[#aeb9ff]",
+	terminated: "text-[#aeb9ff]",
+	queued: "text-[#aeb9ff]",
+	failed: "text-[#aeb9ff]",
+	error: "text-[#aeb9ff]",
 	idle: "console-muted",
 };
 const activeStates = new Set(["queued", "running", "terminating"]);
@@ -59,6 +60,7 @@ export default function JobsPage() {
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
 	const [message, setMessage] = useState("");
+	const [confirmTerminate, setConfirmTerminate] = useState(false);
 	const selected = useMemo(
 		() => jobs.find((job) => job.id === selectedId) || jobs[0],
 		[jobs, selectedId],
@@ -134,13 +136,7 @@ export default function JobsPage() {
 	}
 
 	async function terminate() {
-		if (
-			!session ||
-			!selected ||
-			!activeRun ||
-			!window.confirm("Terminate the active run for " + selected.name + "?")
-		)
-			return;
+		if (!session || !selected || !activeRun) return;
 		const response = await adminFetch(
 			"/api/admin/jobs/" + selected.id + "/runs/" + activeRun.id + "/terminate",
 			session,
@@ -151,13 +147,25 @@ export default function JobsPage() {
 				? "Termination requested."
 				: "Could not terminate the task run.",
 		);
+		setConfirmTerminate(false);
 		load();
 	}
 
 	return (
 		<div className="max-w-6xl">
-			<div className="flex flex-wrap items-center gap-3 border-b console-divider pb-5">
-				<h1 className="text-3xl font-semibold tracking-tight">Tasks</h1>
+			<ConfirmDialog
+				open={confirmTerminate}
+				title="Terminate active task run?"
+				description={`This stops the active run for ${selected?.name || "this task"}. Incomplete work may be resumed by its scheduler later.`}
+				confirmLabel="Terminate run"
+				destructive
+				onClose={() => setConfirmTerminate(false)}
+				onConfirm={() => void terminate()}
+			/>
+			<PageHeader
+				title="Tasks"
+				description="Review scheduled work, tune its cadence, and manage active runs."
+				actions={
 				<button
 					onClick={() => load()}
 					className="material-icon-button"
@@ -166,9 +174,11 @@ export default function JobsPage() {
 				>
 					<IconRefresh size={17} />
 				</button>
-			</div>
+				}
+			/>
+			{message && <StatusMessage>{message}</StatusMessage>}
 			<div className="mt-7 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-				<section className="console-card overflow-hidden rounded-xl">
+				<SurfaceCard className="overflow-hidden">
 					<div className="border-b console-divider px-5 py-4 text-xs uppercase tracking-[.16em] console-muted">
 						All tasks{" "}
 						<span className="ml-2 normal-case tracking-normal">
@@ -191,8 +201,8 @@ export default function JobsPage() {
 									className={
 										"rounded-full border p-2 " +
 										(job.lastState === "failed"
-											? "border-red-400/30 text-red-300"
-											: "border-white/10 text-[#8fe4cf]")
+											? "border-[#aeb9ff]/30 text-[#aeb9ff]"
+											: "border-white/10 text-[#aeb9ff]")
 									}
 								>
 									<IconClock size={16} />
@@ -218,13 +228,11 @@ export default function JobsPage() {
 						))
 					)}
 					{!loading && !jobs.length && (
-						<div className="p-8 text-sm console-muted">
-							No scheduled tasks are configured.
-						</div>
+						<EmptyState>No scheduled tasks are configured.</EmptyState>
 					)}
-				</section>
+				</SurfaceCard>
 				{selected && (
-					<aside className="console-card rounded-xl p-5">
+					<aside className="console-card rounded-2xl p-5">
 						<div className="flex items-start justify-between gap-3">
 							<div>
 								<p className="console-kicker">Task settings</p>
@@ -291,9 +299,9 @@ export default function JobsPage() {
 							</button>
 							{activeRun && (
 								<button
-									onClick={terminate}
+								onClick={() => setConfirmTerminate(true)}
 									disabled={activeRun.state === "terminating"}
-									className="col-span-2 flex items-center justify-center gap-2 rounded-lg border border-orange-400/30 px-3 py-2.5 text-sm text-orange-200 hover:bg-orange-400/10 disabled:opacity-50"
+									className="col-span-2 flex items-center justify-center gap-2 rounded-lg border border-[#aeb9ff]/30 px-3 py-2.5 text-sm text-[#aeb9ff] hover:bg-[#aeb9ff]/10 disabled:opacity-50"
 								>
 									<IconPlayerStop size={15} />
 									{activeRun.state === "terminating"
@@ -302,9 +310,6 @@ export default function JobsPage() {
 								</button>
 							)}
 						</div>
-						{message && (
-							<p className="mt-4 text-xs text-[#8fe4cf]">{message}</p>
-						)}
 						<div className="mt-8 border-t console-divider pt-5">
 							<p className="text-xs uppercase tracking-[.14em] console-muted">
 								Recent runs

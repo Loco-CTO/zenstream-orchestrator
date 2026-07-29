@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from app.client_auth import issue_ticket
 from app.config import Config
+from app.images import WEBP_QUALITY
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
@@ -188,7 +189,9 @@ class TrickplayExtractor:
         )
         return [
             executable, "-hide_banner", "-loglevel", "error", "-y", "-i", str(asset["path"]),
-            "-map", "0:v:0", "-an", "-vf", filter_graph, "-q:v", "4", "-start_number", "0", str(output_pattern),
+            "-map", "0:v:0", "-an", "-vf", filter_graph,
+            "-c:v", "libwebp", "-quality", str(WEBP_QUALITY), "-compression_level", "6",
+            "-start_number", "0", str(output_pattern),
         ]
 
     def extract(self, asset: dict) -> None:
@@ -199,12 +202,12 @@ class TrickplayExtractor:
         with tempfile.TemporaryDirectory(dir=root, prefix=".tmp-") as temporary:
             temporary_root = Path(temporary)
             completed = subprocess.run(
-                self.command(asset, temporary_root / "sheet-%05d.jpg"),
+                self.command(asset, temporary_root / "sheet-%05d.webp"),
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600, check=False,
             )
             if completed.returncode != 0:
                 raise RuntimeError((completed.stderr or "FFmpeg trickplay extraction failed.").strip()[-1000:])
-            images = sorted(temporary_root.glob("sheet-*.jpg"))
+            images = sorted(temporary_root.glob("sheet-*.webp"))
             if not images:
                 raise RuntimeError("FFmpeg did not produce trickplay sheets.")
             output_key = self.store.output_key(asset["fingerprint"], asset["width"], asset["height"], asset["intervalSeconds"])
@@ -339,7 +342,7 @@ class TrickplayExtractor:
             "sheets": [
                 {
                     "index": index, "firstFrame": first_frame, "frameCount": frame_count,
-                    "url": f"/api/playback/items/{entity_id}/trickplay/{output_key}/{index}.jpg?access={ticket}",
+                    "url": f"/api/playback/items/{entity_id}/trickplay/{output_key}/{index}.webp?access={ticket}",
                 }
                 for index, first_frame, frame_count in rows
             ],

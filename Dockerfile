@@ -15,13 +15,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ORCHESTRATOR_HOST=0.0.0.0 \
     ORCHESTRATOR_PORT=9088
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/* && \
+    ffmpeg -hide_banner -muxers 2>&1 | grep -q chromaprint && \
+    pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini ./
 COPY .main-version.json ./
 COPY migrations/ ./migrations/
 COPY assets/ ./assets/
 COPY --from=media-tools /ffmpeg ./assets/ffmpeg/linux/ffmpeg
 COPY --from=media-tools /ffprobe ./assets/ffmpeg/linux/ffprobe
+RUN cp /usr/bin/ffmpeg ./assets/ffmpeg/linux/ffmpeg && \
+    cp /usr/bin/ffprobe ./assets/ffmpeg/linux/ffprobe && \
+    ./assets/ffmpeg/linux/ffmpeg -hide_banner -h muxer=chromaprint 2>&1 | grep -q fp_format
 COPY orchestrator/ ./orchestrator/
 COPY --from=dashboard-build /frontend/out/ ./orchestrator/web/
 EXPOSE 9088

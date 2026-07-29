@@ -13,7 +13,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from app.models import Invite
 from app.models.admin import Admin
@@ -561,7 +561,7 @@ async def syncplay_leave(group_id: str, request: Request):
             "group": state,
         }
     )
-    return JSONResponse(content=None, status_code=204)
+    return Response(status_code=204)
 
 
 @router.patch("/api/syncplay/groups/{group_id}")

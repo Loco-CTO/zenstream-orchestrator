@@ -308,7 +308,17 @@ async def update_admin_intro_outro_settings(
     request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
     _admin_headers(Username, TOKEN)
-    return IntroOutroStore().update_settings(await request.json())
+    settings = IntroOutroStore().update_settings(await request.json())
+    scheduler.enqueue_intro_outro_detection()
+    return settings
+
+
+@router.post("/api/admin/intro-outro/clear")
+async def clear_admin_intro_outro_segments(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    _admin_headers(Username, TOKEN)
+    return {"removedSegments": IntroOutroStore().clear_segments()}
 
 
 @router.get("/api/admin/accounts")

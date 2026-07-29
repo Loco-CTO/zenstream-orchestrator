@@ -16,10 +16,6 @@ from app.playback import PLAYABLE_ROLE, ffmpeg_path
 
 logger = get_logger("intro_outro")
 SAMPLE_SECONDS = 4096.0 / 11025.0 / 3.0
-INTRO_MAX_SECONDS = 120.0
-INTRO_MIN_SECONDS = 15.0
-OUTRO_MAX_SECONDS = 300.0
-OUTRO_MIN_SECONDS = 15.0
 MIN_MATCH_DENSITY = 0.55
 DEFAULTS = {
     "scanOnAdded": True,
@@ -41,6 +37,42 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def normalize_settings(values: dict | None = None) -> dict:
+    values = {**DEFAULTS, **(values or {})}
+    def integer(key: str, minimum: int, maximum: int):
+        try:
+            return max(minimum, min(maximum, int(values[key])))
+        except (TypeError, ValueError):
+            return DEFAULTS[key]
+    def decimal(key: str, minimum: float, maximum: float):
+        try:
+            return max(minimum, min(maximum, float(values[key])))
+        except (TypeError, ValueError):
+            return DEFAULTS[key]
+    result = {
+        "scanOnAdded": bool(values["scanOnAdded"]),
+        "analysisPercent": integer("analysisPercent", 1, 50),
+        "analysisLengthLimitMinutes": integer("analysisLengthLimitMinutes", 1, 60),
+        "scanIntroduction": bool(values["scanIntroduction"]),
+        "scanCredits": bool(values["scanCredits"]),
+        "minimumIntroDuration": integer("minimumIntroDuration", 1, 600),
+        "maximumIntroDuration": integer("maximumIntroDuration", 1, 600),
+        "minimumCreditsDuration": integer("minimumCreditsDuration", 1, 1800),
+        "maximumCreditsAnalysisSeconds": integer("maximumCreditsAnalysisSeconds", 15, 1800),
+        "maximumFingerprintPointDifferences": integer("maximumFingerprintPointDifferences", 0, 32),
+        "maximumTimeSkipSeconds": decimal("maximumTimeSkipSeconds", 0.1, 10),
+        "invertedIndexShift": integer("invertedIndexShift", 0, 8),
+    }
+    result["maximumIntroDuration"] = max(result["minimumIntroDuration"], result["maximumIntroDuration"])
+    result["maximumCreditsAnalysisSeconds"] = max(result["minimumCreditsDuration"], result["maximumCreditsAnalysisSeconds"])
+    return result
+
+
+def analysis_key(settings: dict) -> str:
+    data = {key: settings[key] for key in ("analysisPercent", "analysisLengthLimitMinutes", "scanIntroduction", "scanCredits", "maximumCreditsAnalysisSeconds")}
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
 class IntroOutroStore:
     def __init__(self, db=None):
         self.db = db or Config().database
@@ -55,23 +87,47 @@ class IntroOutroStore:
 
     def settings(self) -> dict:
         if not self.available():
-            return {"scanOnAdded": True}
-        rows = self.db.execute("SELECT scan_on_added FROM intro_outro_settings WHERE id=1")
-        return {"scanOnAdded": bool(rows[0][0]) if rows else True}
+            return dict(DEFAULTS)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(intro_outro_settings)")}
+        names = [
+            ("scanOnAdded", "scan_on_added"), ("analysisPercent", "analysis_percent"),
+            ("analysisLengthLimitMinutes", "analysis_length_limit_minutes"), ("scanIntroduction", "scan_introduction"),
+            ("scanCredits", "scan_credits"), ("minimumIntroDuration", "minimum_intro_duration"),
+            ("maximumIntroDuration", "maximum_intro_duration"), ("minimumCreditsDuration", "minimum_credits_duration"),
+            ("maximumCreditsAnalysisSeconds", "maximum_credits_analysis_seconds"),
+            ("maximumFingerprintPointDifferences", "maximum_fingerprint_point_differences"),
+            ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"), ("invertedIndexShift", "inverted_index_shift"),
+        ]
+        selected = [(key, column) for key, column in names if column in columns]
+        rows = self.db.execute("SELECT " + ",".join(column for _, column in selected) + " FROM intro_outro_settings WHERE id=1")
+        values = dict(DEFAULTS)
+        if rows:
+            values.update({key: value for (key, _), value in zip(selected, rows[0])})
+        return normalize_settings(values)
 
     def update_settings(self, values: dict) -> dict:
-        current = self.settings()
-        scan_on_added = bool(values.get("scanOnAdded", current["scanOnAdded"]))
+        normalized = normalize_settings({**self.settings(), **values})
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(intro_outro_settings)")}
+        mappings = [("scanOnAdded", "scan_on_added"), ("analysisPercent", "analysis_percent"), ("analysisLengthLimitMinutes", "analysis_length_limit_minutes"), ("scanIntroduction", "scan_introduction"), ("scanCredits", "scan_credits"), ("minimumIntroDuration", "minimum_intro_duration"), ("maximumIntroDuration", "maximum_intro_duration"), ("minimumCreditsDuration", "minimum_credits_duration"), ("maximumCreditsAnalysisSeconds", "maximum_credits_analysis_seconds"), ("maximumFingerprintPointDifferences", "maximum_fingerprint_point_differences"), ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"), ("invertedIndexShift", "inverted_index_shift")]
+        selected = [(key, column) for key, column in mappings if column in columns]
         self.db.execute(
-            "INSERT INTO intro_outro_settings(id,scan_on_added,updated_at) VALUES(1,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET scan_on_added=excluded.scan_on_added,updated_at=excluded.updated_at",
-            (int(scan_on_added), now()),
+            "INSERT INTO intro_outro_settings(id," + ",".join(column for _, column in selected) + ",updated_at) VALUES(1," + ",".join("?" for _ in selected) + ",?) "
+            "ON CONFLICT(id) DO UPDATE SET " + ",".join(f"{column}=excluded.{column}" for _, column in selected) + ",updated_at=excluded.updated_at",
+            [int(normalized[key]) if isinstance(normalized[key], bool) else normalized[key] for key, _ in selected] + [now()],
         )
-        return {"scanOnAdded": scan_on_added}
+        return normalized
 
-    def queue_pending(self, library_id: str | None = None) -> int:
+    def clear_segments(self) -> int:
+        rows = self.db.execute("SELECT COUNT(*) FROM intro_outro_segments")
+        count = int(rows[0][0] or 0) if rows else 0
+        self.db.execute("DELETE FROM intro_outro_segments")
+        return count
+
+    def queue_pending(self, library_id: str | None = None, settings: dict | None = None) -> int:
         if not self.available():
             return 0
+        settings = settings or self.settings()
+        fingerprint_settings_key = analysis_key(settings)
         params: list[object] = [PLAYABLE_ROLE]
         scope = ""
         if library_id:
@@ -92,17 +148,17 @@ class IntroOutroStore:
         for media_file_id, entity_id, season_id, file_hash, size, modified_ns in rows:
             source_fingerprint = self.source_key(file_hash, size, modified_ns)
             existing = self.db.execute(
-                "SELECT source_fingerprint FROM intro_outro_assets WHERE media_file_id=?", (media_file_id,)
+                "SELECT source_fingerprint,analysis_key FROM intro_outro_assets WHERE media_file_id=?", (media_file_id,)
             )
-            if existing and existing[0][0] == source_fingerprint:
+            if existing and existing[0][0] == source_fingerprint and existing[0][1] == fingerprint_settings_key:
                 continue
             timestamp = now()
             self.db.execute(
-                "INSERT INTO intro_outro_assets(media_file_id,entity_id,season_id,source_fingerprint,state,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(media_file_id) DO UPDATE SET "
-                "entity_id=excluded.entity_id,season_id=excluded.season_id,source_fingerprint=excluded.source_fingerprint,"
+                "INSERT INTO intro_outro_assets(media_file_id,entity_id,season_id,source_fingerprint,analysis_key,state,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(media_file_id) DO UPDATE SET "
+                "entity_id=excluded.entity_id,season_id=excluded.season_id,source_fingerprint=excluded.source_fingerprint,analysis_key=excluded.analysis_key,"
                 "intro_fingerprint=NULL,outro_fingerprint=NULL,state='queued',error=NULL,updated_at=excluded.updated_at",
-                (media_file_id, entity_id, season_id, source_fingerprint, "queued", timestamp, timestamp),
+                (media_file_id, entity_id, season_id, source_fingerprint, fingerprint_settings_key, "queued", timestamp, timestamp),
             )
             self.db.execute("DELETE FROM intro_outro_segments WHERE media_file_id=?", (media_file_id,))
             queued += 1
@@ -131,12 +187,11 @@ class IntroOutroStore:
             "durationSeconds": float(row[4] or 0), "path": Path(row[5]) / row[6],
         }
 
-    def mark_fingerprinted(self, asset: dict, intro: bytes, outro: bytes) -> None:
-        state = "scanned" if intro and outro else "failed"
+    def mark_fingerprinted(self, asset: dict, intro: bytes | None, outro: bytes | None) -> None:
         self.db.execute(
-            "UPDATE intro_outro_assets SET intro_fingerprint=?,outro_fingerprint=?,state=?,error=?,updated_at=? "
+            "UPDATE intro_outro_assets SET intro_fingerprint=?,outro_fingerprint=?,state='scanned',error=NULL,updated_at=? "
             "WHERE media_file_id=? AND source_fingerprint=? AND state='generating'",
-            (intro, outro, state, None if state == "scanned" else "No usable audio fingerprint.", now(), asset["mediaFileId"], asset["sourceFingerprint"]),
+            (intro, outro, now(), asset["mediaFileId"], asset["sourceFingerprint"]),
         )
 
     def mark_failed(self, asset: dict, error: str) -> None:
@@ -145,10 +200,16 @@ class IntroOutroStore:
             (error[:1000], now(), asset["mediaFileId"], asset["sourceFingerprint"]),
         )
 
-    def recompute_season(self, season_id: str) -> int:
+    def recompute_all(self, settings: dict) -> int:
+        rows = self.db.execute(
+            "SELECT DISTINCT season_id FROM intro_outro_assets WHERE state='scanned'"
+        )
+        return sum(self.recompute_season(row[0], settings) for row in rows)
+
+    def recompute_season(self, season_id: str, settings: dict) -> int:
         rows = self.db.execute(
             "SELECT media_file_id,intro_fingerprint,outro_fingerprint FROM intro_outro_assets "
-            "WHERE season_id=? AND state='scanned' AND intro_fingerprint IS NOT NULL AND outro_fingerprint IS NOT NULL",
+            "WHERE season_id=? AND state='scanned'",
             (season_id,),
         )
         if len(rows) < 2:
@@ -159,24 +220,30 @@ class IntroOutroStore:
         selected: dict[tuple[str, str], tuple[float, float]] = {}
         for index, left in enumerate(rows):
             for right in rows[index + 1:]:
-                for kind, column, minimum, maximum, offset in (
-                    ("intro", 1, INTRO_MIN_SECONDS, INTRO_MAX_SECONDS, 0.0),
-                    ("outro", 2, OUTRO_MIN_SECONDS, OUTRO_MAX_SECONDS, None),
-                ):
+                kinds = []
+                if settings["scanIntroduction"]:
+                    kinds.append(("intro", 1, settings["minimumIntroDuration"], settings["maximumIntroDuration"], 0.0))
+                if settings["scanCredits"]:
+                    kinds.append(("outro", 2, settings["minimumCreditsDuration"], settings["maximumCreditsAnalysisSeconds"], None))
+                for kind, column, minimum, maximum, offset in kinds:
                     left_points = decode_fingerprint(left[column])
                     right_points = decode_fingerprint(right[column])
-                    result = shared_region(left_points, right_points, minimum, maximum)
+                    result = shared_region(left_points, right_points, settings, minimum, maximum)
                     if not result:
                         continue
                     left_start, left_end, right_start, right_end = result
-                    left_offset = offset if offset is not None else max(0.0, self._duration(left[0]) - OUTRO_MAX_SECONDS)
-                    right_offset = offset if offset is not None else max(0.0, self._duration(right[0]) - OUTRO_MAX_SECONDS)
-                    self._choose(selected, left[0], kind, left_start + left_offset, left_end + left_offset)
-                    self._choose(selected, right[0], kind, right_start + right_offset, right_end + right_offset)
-        self.db.executemany(
-            "INSERT INTO intro_outro_segments(media_file_id,segment_type,start_seconds,end_seconds) VALUES(?,?,?,?)",
-            [(media_file_id, kind, start, end) for (media_file_id, kind), (start, end) in selected.items()],
-        )
+                    left_duration = self._duration(left[0])
+                    right_duration = self._duration(right[0])
+                    left_offset = offset if offset is not None else max(0.0, left_duration - settings["maximumCreditsAnalysisSeconds"])
+                    right_offset = offset if offset is not None else max(0.0, right_duration - settings["maximumCreditsAnalysisSeconds"])
+                    self._choose(selected, left[0], kind, left_start + left_offset, min(left_duration, left_end + left_offset))
+                    self._choose(selected, right[0], kind, right_start + right_offset, min(right_duration, right_end + right_offset))
+        if selected:
+            with self.db.transaction() as cursor:
+                cursor.executemany(
+                    "INSERT INTO intro_outro_segments(media_file_id,segment_type,start_seconds,end_seconds) VALUES(?,?,?,?)",
+                    [(media_file_id, kind, start, end) for (media_file_id, kind), (start, end) in selected.items()],
+                )
         return len(selected)
 
     def _duration(self, media_file_id: str) -> float:
@@ -230,8 +297,9 @@ class IntroOutroStore:
             "SELECT segment_type,start_seconds,end_seconds FROM intro_outro_segments WHERE media_file_id=? ORDER BY segment_type",
             (media_file_id,),
         )
-        intro_duration = min(duration * 0.25, 600.0)
-        outro_duration = min(OUTRO_MAX_SECONDS, duration)
+        settings = self.settings()
+        intro_duration = min(duration * settings["analysisPercent"] / 100.0, settings["analysisLengthLimitMinutes"] * 60.0)
+        outro_duration = min(float(settings["maximumCreditsAnalysisSeconds"]), duration)
         outro_start = max(0.0, duration - outro_duration)
         return {
             "sourceId": source_id,
@@ -356,42 +424,44 @@ def _bits(value: int) -> int:
     return value.bit_count()
 
 
-def shared_region(left: tuple[int, ...], right: tuple[int, ...], minimum: float, maximum: float):
+def shared_region(left: tuple[int, ...], right: tuple[int, ...], settings: dict, minimum: float, maximum: float):
     if not left or not right:
         return None
-    right_index: dict[int, int] = {}
+    right_index: dict[int, list[int]] = {}
     for index, point in enumerate(right):
-        right_index.setdefault(point, index)
+        right_index.setdefault(point, []).append(index)
     shifts: set[int] = set()
     for left_index, point in enumerate(left):
-        for delta in range(-2, 3):
-            right_position = right_index.get((point + delta) & 0xFFFFFFFF)
-            if right_position is not None:
+        for delta in range(-settings["invertedIndexShift"], settings["invertedIndexShift"] + 1):
+            for right_position in right_index.get((point + delta) & 0xFFFFFFFF, ()):
                 shifts.add(right_position - left_index)
     best = None
-    max_gap = max(1, int(MAX_TIME_SKIP_SECONDS / SAMPLE_SECONDS))
+    max_gap = max(1, int(settings["maximumTimeSkipSeconds"] / SAMPLE_SECONDS))
     for shift in shifts:
         start = max(0, -shift)
         stop = min(len(left), len(right) - shift)
-        run_start = run_end = None
+        run_start = run_end = match_count = None
         previous = None
         for left_index in range(start, stop):
-            if _bits(left[left_index] ^ right[left_index + shift]) > MAX_POINT_DIFFERENCES:
+            if _bits(left[left_index] ^ right[left_index + shift]) > settings["maximumFingerprintPointDifferences"]:
                 continue
             if previous is None or left_index - previous > max_gap:
                 if run_start is not None:
-                    best = _select_region(best, run_start, run_end, shift, minimum, maximum)
+                    best = _select_region(best, run_start, run_end, match_count, shift, minimum, maximum)
                 run_start = left_index
+                match_count = 0
             run_end = left_index
+            match_count += 1
             previous = left_index
         if run_start is not None:
-            best = _select_region(best, run_start, run_end, shift, minimum, maximum)
+            best = _select_region(best, run_start, run_end, match_count, shift, minimum, maximum)
     return best
 
 
-def _select_region(best, start: int, end: int, shift: int, minimum: float, maximum: float):
+def _select_region(best, start: int, end: int, matches: int, shift: int, minimum: float, maximum: float):
     duration = (end - start + 1) * SAMPLE_SECONDS
-    if duration < minimum or duration > maximum:
+    density = matches / (end - start + 1)
+    if duration < minimum or duration > maximum or density < MIN_MATCH_DENSITY:
         return best
     candidate = (start * SAMPLE_SECONDS, (end + 1) * SAMPLE_SECONDS, (start + shift) * SAMPLE_SECONDS, (end + shift + 1) * SAMPLE_SECONDS)
     return candidate if best is None or duration > best[1] - best[0] else best
@@ -428,7 +498,8 @@ class IntroOutroDetector:
 
     def run(self, run_id: str, job_store, should_terminate=None) -> None:
         should_terminate = should_terminate or (lambda: False)
-        queued = self.store.queue_pending()
+        settings = self.store.settings()
+        queued = self.store.queue_pending(settings=settings)
         job_store.update_run(run_id, state="running", started_at=now(), message="Detecting intro and outro segments")
         completed = failures = markers = 0
         while not should_terminate():
@@ -437,12 +508,12 @@ class IntroOutroDetector:
                 break
             try:
                 duration = asset["durationSeconds"]
-                intro_duration = min(duration * 0.25, 600.0)
-                outro_start = max(0.0, duration - OUTRO_MAX_SECONDS)
-                intro = self._fingerprint(asset["path"], 0.0, intro_duration, should_terminate)
-                outro = self._fingerprint(asset["path"], outro_start, min(OUTRO_MAX_SECONDS, duration), should_terminate)
+                intro_duration = min(duration * settings["analysisPercent"] / 100.0, settings["analysisLengthLimitMinutes"] * 60.0)
+                outro_duration = min(duration, float(settings["maximumCreditsAnalysisSeconds"]))
+                outro_start = max(0.0, duration - outro_duration)
+                intro = self._fingerprint(asset["path"], 0.0, intro_duration, should_terminate) if settings["scanIntroduction"] else None
+                outro = self._fingerprint(asset["path"], outro_start, outro_duration, should_terminate) if settings["scanCredits"] else None
                 self.store.mark_fingerprinted(asset, intro, outro)
-                markers += self.store.recompute_season(asset["seasonId"])
                 completed += 1
                 job_store.update_run(run_id, progress_current=completed, progress_total=max(completed, queued), message=f"Fingerprinting episode {completed}")
             except Exception as error:
@@ -457,4 +528,5 @@ class IntroOutroDetector:
             message = f"Fingerprinted {completed} episodes; {failures} failed"
             job_store.update_run(run_id, state="failed", progress_current=completed, progress_total=max(completed + failures, queued), finished_at=now(), message=message, error=message)
         else:
-            job_store.update_run(run_id, state="completed", progress_current=completed, progress_total=max(completed, queued), finished_at=now(), message=f"Detected {markers} intro/outro markers" if completed else "Intro and outro detection is current")
+            markers = self.store.recompute_all(settings)
+            job_store.update_run(run_id, state="completed", progress_current=completed, progress_total=max(completed, queued), finished_at=now(), message=f"Detected {markers} intro/outro markers" if markers else "Intro and outro detection is current")

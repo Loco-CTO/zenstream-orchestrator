@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.intro_outro import (
-    INTRO_MIN_SECONDS,
+    DEFAULTS,
     SAMPLE_SECONDS,
     IntroOutroDetector,
     audio_preview_command,
@@ -39,15 +39,21 @@ class IntroOutroTest(unittest.TestCase):
         self.assertEqual(command[-1], "-")
 
     def test_finds_a_long_shared_region_after_an_offset(self):
-        points = max(130, int(INTRO_MIN_SECONDS / SAMPLE_SECONDS) + 4)
-        shared = tuple(range(1000, 1000 + points))
-        result = shared_region((0xFFFFFFFF, 0xFFFFFFFE, *shared), (0xAAAA0000, 0xAAAA0001, 0xAAAA0002, *shared), 15, 120)
+        points = max(130, int(DEFAULTS["minimumIntroDuration"] / SAMPLE_SECONDS) + 4)
+        shared = tuple((1000 + index) * 0x9E3779B1 & 0xFFFFFFFF for index in range(points))
+        result = shared_region((0xFFFFFFFF, 0xFFFFFFFE, *shared), (0xAAAA0000, 0xAAAA0001, 0xAAAA0002, *shared), DEFAULTS, 15, 120)
         self.assertIsNotNone(result)
         left_start, left_end, right_start, right_end = result
         self.assertAlmostEqual(left_start, 2 * SAMPLE_SECONDS)
-        self.assertGreaterEqual(left_end - left_start, INTRO_MIN_SECONDS)
+        self.assertGreaterEqual(left_end - left_start, DEFAULTS["minimumIntroDuration"])
         self.assertAlmostEqual(right_start, 3 * SAMPLE_SECONDS)
         self.assertAlmostEqual(right_end - right_start, left_end - left_start)
 
     def test_rejects_short_matches(self):
-        self.assertIsNone(shared_region(tuple(range(30)), tuple(range(30)), 15, 120))
+        self.assertIsNone(shared_region(tuple(range(30)), tuple(range(30)), DEFAULTS, 15, 120))
+
+    def test_rejects_sparse_near_matches(self):
+        points = int(DEFAULTS["minimumIntroDuration"] / SAMPLE_SECONDS) + 10
+        left = tuple(0xFFFFFFFF if index % 5 else index for index in range(points))
+        right = tuple(0 if index % 5 else index for index in range(points))
+        self.assertIsNone(shared_region(left, right, DEFAULTS, 15, 120))

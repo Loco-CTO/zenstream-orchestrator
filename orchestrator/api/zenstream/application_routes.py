@@ -128,7 +128,7 @@ async def _disconnect_cleanup(user, participant, epoch):
 
 
 def _static_roots():
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     web = root / "web"
     if not web.is_dir():
         web = root.parent / "frontend" / "out"

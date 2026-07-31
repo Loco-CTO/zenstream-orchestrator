@@ -6,6 +6,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class DockerLayoutTest(unittest.TestCase):
+    def test_dashboard_static_root_is_the_orchestrator_web_directory(self):
+        from api.zenstream.application_routes import _static_roots
+
+        web_root, assets_root = _static_roots()
+
+        self.assertEqual(web_root, PROJECT_ROOT / "orchestrator" / "web")
+        self.assertEqual(assets_root, PROJECT_ROOT / "assets")
+
     def test_docker_image_includes_alembic_configuration_and_migrations(self):
         dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 

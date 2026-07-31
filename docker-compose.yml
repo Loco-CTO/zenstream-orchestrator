@@ -17,8 +17,10 @@ services:
       ORCHESTRATOR_HOST: 0.0.0.0
       ORCHESTRATOR_PORT: 9088
     volumes:
-      - orchestrator-sqlite:/app/sqlite
+      # Media is mounted read-only. Set LIBRARY_PATH to an existing host
+      # directory; the administrator dashboard should use /media (or a child).
+      - "${LIBRARY_PATH:?Set LIBRARY_PATH}:/media:ro"
+      # This holds SQLite plus all generated metadata, artwork, and trickplay
+      # caches. Keep it separate from the media library and do not make it read-only.
+      - "${METADATA_PATH:-./metadata}:/app/sqlite"
     restart: unless-stopped
-
-volumes:
-  orchestrator-sqlite:

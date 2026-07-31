@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import re
+import ssl
 import unicodedata
 from typing import Any
 from pathlib import Path
@@ -573,6 +574,9 @@ class TMDBClient(ProviderClient):
 
 class TVDBClient(ProviderClient):
     base_url = "https://api4.thetvdb.com/v4"
+    _tls_context = ssl.create_default_context()
+    _tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    _tls_context.maximum_version = ssl.TLSVersion.TLSv1_2
     _tokens: dict[str, tuple[str, float]] = {}
     _lock = threading.Lock()
     _language_catalog_lock = threading.Lock()
@@ -600,7 +604,10 @@ class TVDBClient(ProviderClient):
             body["pin"] = self.credentials["pin"]
         try:
             response = httpx.post(
-                f"{self.base_url}/login", json=body, timeout=self.timeout
+                f"{self.base_url}/login",
+                json=body,
+                timeout=self.timeout,
+                verify=self._tls_context,
             )
             response.raise_for_status()
             token = response.json()["data"]["token"]
@@ -615,6 +622,9 @@ class TVDBClient(ProviderClient):
         with self._lock:
             self._tokens[cache_key] = (token, time.time() + 30 * 24 * 60 * 60)
         return token
+
+    def _get(self, url: str, **kwargs) -> dict:
+        return super()._get(url, verify=self._tls_context, **kwargs)
 
     def _request(self, path: str, params: dict | None = None) -> dict:
         headers = {

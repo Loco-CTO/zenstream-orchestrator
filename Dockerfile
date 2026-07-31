@@ -5,7 +5,7 @@ WORKDIR /frontend
 COPY frontend/package.json ./
 COPY frontend/ ./
 RUN npm install --ignore-scripts --no-audit --no-fund
-RUN npm run build
+RUN npm run build && test -f /frontend/out/web/login/index.html
 
 FROM python:3.14-slim
 WORKDIR /app

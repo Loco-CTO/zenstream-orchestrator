@@ -3,7 +3,6 @@ FROM mwader/static-ffmpeg:7.1.1 AS media-tools
 FROM node:26-slim AS dashboard-build
 WORKDIR /frontend
 COPY frontend/package.json ./
-COPY frontend/package-lock.json ./
 COPY frontend/ ./
 RUN npm install --ignore-scripts --no-audit --no-fund
 RUN npm run build

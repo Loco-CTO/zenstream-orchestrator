@@ -1,4 +1,4 @@
-FROM mwader/static-ffmpeg:7.1.1 AS media-tools
+FROM mwader/static-ffmpeg:8.1.2 AS media-tools
 
 FROM node:26-slim AS dashboard-build
 WORKDIR /frontend

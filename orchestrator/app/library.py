@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
@@ -1052,6 +1053,11 @@ class LibraryScanner:
             message="Resolving provider metadata",
         )
         service = MetadataService()
+        if library_type == "movies" and rows:
+            self._resolve_movies_parallel(
+                library_id, rows, job_id, should_terminate
+            )
+            return
         for index, (
             entity_id,
             entity_type,
@@ -1138,6 +1144,87 @@ class LibraryScanner:
                 library_id, entity_id, entity_type, query, index, len(rows),
             )
         self._seed_all_children(library_id, service, job_id, should_terminate)
+
+    def _resolve_movies_parallel(
+        self,
+        library_id: str,
+        rows: list[tuple],
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> None:
+        configured = int(os.getenv("METADATA_ROOT_WORKERS", "4"))
+        workers = max(1, min(8, configured))
+
+        def resolve(row: tuple, index: int) -> None:
+            from app.providers import MetadataService, ProviderError
+
+            entity_id, entity_type, relative_path, _season, _episode = row
+            self._check_termination(should_terminate)
+            query, year = _inventory_query(relative_path or "")
+            logger.info(
+                "metadata movie start library_id=%s entity_id=%s query=%s index=%s/%s",
+                library_id, entity_id, query, index, len(rows),
+            )
+            service = MetadataService()
+            explicit = [
+                {"provider": value[0], "id": value[2]}
+                for value in self.db.execute(
+                    "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                    (entity_id,),
+                )
+            ]
+            try:
+                result = service.resolve_inventory_entity(
+                    entity_type, query, year, explicit
+                )
+                self._ids(
+                    entity_id,
+                    [
+                        (value["provider"], "movie", value["id"])
+                        for value in result["providerIds"]
+                    ],
+                )
+                for value in result["providerIds"]:
+                    self._fetch_configured_locales(
+                        service,
+                        value["provider"],
+                        entity_type,
+                        str(value["id"]),
+                        required=True,
+                    )
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
+                    (now(), entity_id),
+                )
+                message = f"Resolved {query}"
+                logger.info(
+                    "metadata movie complete library_id=%s entity_id=%s query=%s index=%s/%s",
+                    library_id, entity_id, query, index, len(rows),
+                )
+            except (ProviderError, ValueError, OSError) as error:
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
+                    (now(), entity_id),
+                )
+                logger.exception(
+                    "metadata movie failed; continuing library_id=%s entity_id=%s query=%s error=%s",
+                    library_id, entity_id, query, error,
+                )
+                message = f"Metadata failed for {query}; continuing"
+            self.store.update_job(
+                job_id, progress_current=index, message=message
+            )
+
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="zenstream-metadata-roots"
+        ) as executor:
+            futures = [
+                executor.submit(resolve, row, index)
+                for index, row in enumerate(rows, start=1)
+            ]
+            for future in as_completed(futures):
+                self._check_termination(should_terminate)
+                future.result()
 
     def _resolve_series_immediately(
         self,

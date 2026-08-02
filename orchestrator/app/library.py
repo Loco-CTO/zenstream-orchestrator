@@ -560,6 +560,7 @@ class LibraryScanner:
         self.store.update_job(
             job_id, state="running", started_at=started, message="Discovering media"
         )
+        self._start_heartbeat(library_id, job_id)
         self._scan_seen_ids = set()
         self._scan_created_ids = []
         self._scan_delta = {
@@ -573,6 +574,12 @@ class LibraryScanner:
         self._scan_complete = False
         try:
             self._check_termination(should_terminate)
+            self._set_stage(
+                job_id,
+                f"Discovering {library['type']} roots",
+                root=str(root),
+                targets=sorted(targets) if targets else None,
+            )
             if library["type"] == "movies":
                 count = self._scan_movies(
                     library_id, root, job_id, should_terminate, targets
@@ -592,18 +599,24 @@ class LibraryScanner:
                 )
             self._scan_complete = True
             if library["type"] != "tv_series":
+                self._set_stage(job_id, "Resolving new or changed metadata")
                 self._resolve_and_seed(
                     library_id, library["type"], job_id, should_terminate
                 )
+            self._set_stage(job_id, "Populating changed metadata locales")
             self._fetch_seen_locales(should_terminate)
+            self._set_stage(job_id, "Reconciling moved entities")
             self._reconcile_moved_entities(library_id, root)
+            self._set_stage(job_id, "Pruning missing entities")
             self._prune_missing_entities(library_id, root)
+            self._set_stage(job_id, "Pruning local artwork cache")
             LocalArtworkCache(self.db).prune()
             from app.trickplay import TrickplayStore
 
             if self._scan_delta["content_changed"] and TrickplayStore(
                 self.db
             ).queue_pending(library_id):
+                self._set_stage(job_id, "Queueing trickplay extraction")
                 from app.jobs import scheduler
 
                 scheduler.enqueue_trickplay_extraction()
@@ -615,6 +628,7 @@ class LibraryScanner:
                 and intro_outro.settings()["scanOnAdded"]
                 and intro_outro.queue_pending(library_id)
             ):
+                self._set_stage(job_id, "Queueing intro/outro detection")
                 from app.jobs import scheduler
 
                 scheduler.enqueue_intro_outro_detection()

@@ -905,19 +905,20 @@ class LibraryScanner:
         )
 
     def _fetch_seen_locales(self, should_terminate: Callable[[], bool]) -> None:
-        """Ensure rescans also populate newly configured locales for existing IDs."""
+        """Populate configured locales only for inventory changes from this scan."""
         from app.metadata_services import MetadataIngestService
         from app.providers import MetadataService
 
         ingest = MetadataIngestService(MetadataService())
+        metadata_candidates = self._metadata_candidates()
         rows = (
             self.db.execute(
                 "SELECT e.id,e.entity_type,p.provider,p.identifier_type,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.id IN ({})".format(
-                    ",".join("?" * len(self._scan_seen_ids))
+                    ",".join("?" * len(metadata_candidates))
                 ),
-                list(self._scan_seen_ids),
+                list(metadata_candidates),
             )
-            if self._scan_seen_ids
+            if metadata_candidates
             else []
         )
         locales = ingest.locales()

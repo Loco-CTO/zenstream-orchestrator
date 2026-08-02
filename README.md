@@ -117,5 +117,5 @@ Distributed under the GPL-3.0 license. See [`LICENSE`](/LICENSE) for more inform
 <br>
 
 <div align="center">
-	<p><small>Copyright © 2024 <a href="https://rystal.net">Rystal</a>. All rights reserved.</small></p>
+	<p><small>Copyright © 2026 <a href="https://rystal.net">Rystal</a>. All rights reserved.</small></p>
 </div>

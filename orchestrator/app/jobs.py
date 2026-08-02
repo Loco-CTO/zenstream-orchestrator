@@ -771,6 +771,7 @@ class JobScheduler:
                     error=f"Unsupported job kind: {kind}",
                     finished_at=now(),
                 )
+            logger.info("scheduled job complete run_id=%s kind=%s", run_id, kind)
         except JobTerminated:
             self.store.update_run(
                 run_id,

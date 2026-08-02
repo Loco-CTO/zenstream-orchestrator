@@ -912,20 +912,15 @@ class LibraryScanner:
                     "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
                     (provider, entity_type, str(provider_id), locale),
                 )
-                if cached and entity_id not in self._scan_provider_identity_changed and entity_id not in self._scan_delta["added"]:
+                if cached:
                     document = ingest.metadata_service.cache.get(
                         provider, entity_type, str(provider_id), locale
                     )
-                    if document and (
-                        provider == "musicbrainz"
-                        or entity_type not in {"movie", "series", "season", "episode"}
-                        or "credits" in document
-                    ):
+                    if document:
                         ingest.ingest_document(
                             provider, entity_type, str(provider_id), locale, document
                         )
                         continue
-                    force_credit_refresh = document is not None
                 try:
                     ingest.ingest_locale(
                         provider,

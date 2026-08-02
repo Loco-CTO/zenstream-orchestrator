@@ -1917,12 +1917,14 @@ class LibraryJobControlTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
         self.db.execute(
-            "CREATE TABLE libraries (id TEXT PRIMARY KEY, scan_state TEXT, scan_error TEXT, updated_at TEXT)"
+            "CREATE TABLE libraries (id TEXT PRIMARY KEY, name TEXT, type TEXT, directory TEXT, watch_enabled INTEGER, scan_interval_minutes INTEGER, scan_state TEXT, scan_error TEXT, last_scan_started_at TEXT, last_scan_finished_at TEXT, created_at TEXT, updated_at TEXT)"
         )
         self.db.execute(
             "CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)"
         )
-        self.db.execute("INSERT INTO libraries VALUES('library-1','ready',NULL,'before')")
+        self.db.execute(
+            "INSERT INTO libraries VALUES('library-1','Library','movies','C:/tmp',1,1440,'ready',NULL,NULL,NULL,'before','before')"
+        )
         store = LibraryStore.__new__(LibraryStore)
         store.db = self.db
         self.runtime = LibraryRuntime.__new__(LibraryRuntime)
@@ -1980,6 +1982,25 @@ class LibraryJobControlTest(unittest.TestCase):
             self.db.execute("SELECT COUNT(*) FROM library_jobs WHERE state='queued'")[0][0],
             0,
         )
+
+    def test_watcher_reconcile_scopes_move_to_top_level_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.db.execute(
+                "UPDATE libraries SET directory=? WHERE id='library-1'", (str(root),)
+            )
+
+            self.runtime.request_reconcile(
+                "library-1",
+                str(root / "Original" / "Season 1" / "Episode.mkv"),
+                str(root / "Renamed" / "Season 1" / "Episode.mkv"),
+            )
+
+            self.assertEqual(
+                self.runtime._reconcile_targets["library-1"],
+                {"Original", "Renamed"},
+            )
+            self.assertIn("library-1", self.runtime._reconcile_due)
 
 
 if __name__ == "__main__":

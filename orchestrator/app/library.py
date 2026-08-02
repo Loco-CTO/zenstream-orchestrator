@@ -1211,6 +1211,16 @@ class LibraryScanner:
                     library_id, entity_id, query, error,
                 )
                 message = f"Metadata failed for {query}; continuing"
+            except Exception as error:
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
+                    (now(), entity_id),
+                )
+                logger.exception(
+                    "unexpected metadata movie failure; continuing library_id=%s entity_id=%s query=%s error=%s",
+                    library_id, entity_id, query, error,
+                )
+                message = f"Metadata failed for {query}; continuing"
             self.store.update_job(
                 job_id, progress_current=index, message=message
             )

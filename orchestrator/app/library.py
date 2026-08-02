@@ -2621,7 +2621,7 @@ class LibraryRuntime:
             )
             pending.update(targets)
             if not existing:
-                self._job_targets[job_id] = pending.copy()
+                getattr(self, "_job_targets", {}).update({job_id: pending.copy()})
                 pending.clear()
         job = self.store.job(job_id)
         with self.condition:

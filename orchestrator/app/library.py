@@ -2116,11 +2116,26 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
         targets: set[str] | None = None,
     ) -> int:
+        self._set_stage(
+            job_id,
+            "Enumerating movie roots",
+            root=str(root),
+            targets=sorted(targets) if targets else None,
+        )
+        enumeration_started = time.monotonic()
         entries = [
             path
             for path in self._target_entries(root, targets)
             if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS
         ]
+        logger.info(
+            "library scan root enumeration complete library_id=%s job_id=%s type=movies root=%s entries=%s duration_seconds=%.1f",
+            library_id,
+            job_id,
+            root,
+            len(entries),
+            time.monotonic() - enumeration_started,
+        )
         self.store.update_job(job_id, progress_total=len(entries))
         count = 0
         for entry in entries:
@@ -2153,9 +2168,24 @@ class LibraryScanner:
     ) -> int:
         from app.providers import MetadataService
 
+        self._set_stage(
+            job_id,
+            "Enumerating TV series roots",
+            root=str(root),
+            targets=sorted(targets) if targets else None,
+        )
+        enumeration_started = time.monotonic()
         series_dirs = [
             path for path in self._target_entries(root, targets) if path.is_dir()
         ]
+        logger.info(
+            "library scan root enumeration complete library_id=%s job_id=%s type=tv_series root=%s entries=%s duration_seconds=%.1f",
+            library_id,
+            job_id,
+            root,
+            len(series_dirs),
+            time.monotonic() - enumeration_started,
+        )
         self.store.update_job(job_id, progress_total=len(series_dirs))
         episode_count = 0
         service = MetadataService() if resolve_immediately else None
@@ -3006,7 +3036,12 @@ class LibraryRuntime:
         try:
             if kind in {"scan", "reconcile", "collection_rebuild"}:
                 targets = self._job_targets.pop(job_id, None)
-                self.scanner.scan(
+                # A scan owns mutable traversal state and diagnostics.  Do not
+                # share one scanner between concurrent library workers: a movie
+                # scan could otherwise overwrite a TV scan's stage, delta, and
+                # heartbeat message.
+                scanner = LibraryScanner(self.store)
+                scanner.scan(
                     library_id,
                     job_id,
                     self._cancel_events[job_id].is_set,

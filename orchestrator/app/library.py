@@ -840,7 +840,7 @@ class LibraryScanner:
         )
         if not rows or any(not row[1] for row in rows):
             return None
-        return "|".join(f"{role}:{file_hash}" for role, file_hash in rows)
+        return "|".join(f"{role}:{fingerprint}" for role, fingerprint in rows)
 
     def _reconcile_moved_entities(self, library_id: str, root: Path) -> None:
         """Match newly discovered leaf entities to vanished paths by unique hash."""

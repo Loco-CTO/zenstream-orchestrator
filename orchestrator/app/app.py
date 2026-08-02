@@ -15,6 +15,7 @@ from api.zenstream.library_routes import router as library_router
 from app.config import load_config
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
+from app.metadata_services import asset_executor
 from app.playback import PlaybackManager
 from version import __version__
 
@@ -32,6 +33,7 @@ async def lifespan(_app: FastAPI):
         PlaybackManager.stop_all()
         job_scheduler.stop()
         library_runtime.stop()
+        asset_executor.shutdown()
         await hub.broadcast({"type": "system", "event": "shutdown"})
 
 

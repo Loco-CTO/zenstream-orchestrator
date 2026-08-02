@@ -4,6 +4,7 @@ import threading
 import time
 import re
 import ssl
+import os
 import unicodedata
 from typing import Any
 from pathlib import Path
@@ -232,7 +233,8 @@ class ProviderLanguageCatalog:
 
 class ProviderClient:
     def __init__(self, timeout: float = 20):
-        self.timeout = timeout
+        configured = float(os.getenv("METADATA_PROVIDER_TIMEOUT_SECONDS", str(timeout)))
+        self.timeout = max(3.0, min(60.0, configured))
 
     def _get(self, url: str, **kwargs) -> dict:
         try:

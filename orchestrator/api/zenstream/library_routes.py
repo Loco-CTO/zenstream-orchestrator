@@ -440,7 +440,10 @@ async def create_library(
         "collection_rebuild" if library["type"] == "collection" else "scan",
     )
     scheduler.refresh_library_definition(library)
-    runtime.refresh_watchers()
+    # Watchdog.stop()/join() and recursive scheduling can touch a large media
+    # tree.  Keep that synchronous filesystem work away from the ASGI event
+    # loop so a library change cannot make every request appear unavailable.
+    await asyncio.to_thread(runtime.refresh_watchers)
     library["sourceLibraryIds"] = store.sources(library["id"])
     library["jobId"] = job["id"]
     return library
@@ -479,7 +482,7 @@ async def update_library(
         library_id, "collection_rebuild" if library["type"] == "collection" else "scan"
     )
     scheduler.refresh_library_definition(library)
-    runtime.refresh_watchers()
+    await asyncio.to_thread(runtime.refresh_watchers)
     library["sourceLibraryIds"] = store.sources(library_id)
     return library
 
@@ -496,7 +499,7 @@ async def delete_library(
     if not store.delete(library_id):
         raise HTTPException(404, "Library not found.")
     scheduler.remove_library_definition(library_id)
-    runtime.refresh_watchers()
+    await asyncio.to_thread(runtime.refresh_watchers)
 
 
 @router.post("/libraries/{library_id}/scan", status_code=202)

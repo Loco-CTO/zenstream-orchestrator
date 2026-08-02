@@ -146,6 +146,26 @@ class CatalogTest(unittest.TestCase):
         )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_hierarchy_pagination_avoids_metadata_for_unselected_rows(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        calls = []
+
+        def metadata(_user_id, entity_id, _language):
+            calls.append(entity_id)
+            return {"metadata": {"title": entity_id}}
+
+        catalog.metadata = metadata
+
+        result = catalog.list_items(
+            user_id, "allowed", "en", parent_id="season-1", page_size=2
+        )
+
+        self.assertEqual([item["id"] for item in result["items"]], ["episode-1", "episode-2"])
+        self.assertNotIn("episode-10", calls)
+        self.assertNotIn("episode-unset", calls)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_episode_serialization_includes_the_resolved_series_poster(self, _languages):
         user_id = self.seed_series_hierarchy()
         catalog = self.catalog()

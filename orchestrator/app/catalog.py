@@ -542,18 +542,57 @@ class Catalog:
             "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id=? AND parent_id IS ?",
             (library_id, parent_id),
         )
+        hierarchy_parent = None
+        if parent_id:
+            hierarchy_parent = self.require_entity(user_id, parent_id)[3]
+        total = len(rows)
+        display_rows = rows
+        if sort_by is None and hierarchy_parent in {"series", "season"}:
+            def row_hierarchy_key(row):
+                season = row[5]
+                episode = row[6]
+                if hierarchy_parent == "season":
+                    return (
+                        episode is None,
+                        episode if episode is not None else 0,
+                        row[0],
+                    )
+                return (
+                    season is None,
+                    season if season is not None else 0,
+                    episode is None,
+                    episode if episode is not None else 0,
+                    row[0],
+                )
+
+            ordered_rows = sorted(rows, key=row_hierarchy_key)
+            start = (page - 1) * page_size
+            display_rows = ordered_rows[start : start + page_size]
         dates = self._date_values(library_id, self.allowed_libraries(user_id))
+        if sort_by in {"added", "lastAdded"} and display_rows is rows:
+            date_field = "addedAt" if sort_by == "added" else "lastAddedAt"
+            grouped_rows: dict[str, list] = {}
+            for row in rows:
+                date_value = (dates.get(row[0]) or {}).get(date_field, "")
+                grouped_rows.setdefault(date_value, []).append(row)
+            ordered_dates = sorted(
+                grouped_rows, reverse=sort_order.lower() == "descending"
+            )
+            candidate_rows = []
+            end = (page - 1) * page_size + page_size
+            for date_value in ordered_dates:
+                candidate_rows.extend(grouped_rows[date_value])
+                if len(candidate_rows) >= end:
+                    break
+            display_rows = candidate_rows
         values = []
-        for row in rows:
+        for row in display_rows:
             metadata = self.metadata(user_id, row[0], language)["metadata"]
             values.append(
                 self._serialize(
                     user_id, row, metadata, dates=dates.get(row[0]), language=language
                 )
             )
-        hierarchy_parent = None
-        if parent_id:
-            hierarchy_parent = self.require_entity(user_id, parent_id)[3]
         if sort_by is None and hierarchy_parent in {"series", "season"}:
             def hierarchy_key(value):
                 season = value.get("seasonNumber")
@@ -584,7 +623,13 @@ class Catalog:
                 "runtime": lambda value: value["metadata"].get("runtimeMinutes") or 0,
             }.get(selected_sort, lambda value: str(value.get("name") or "").casefold())
             values.sort(key=lambda value: (key(value), str(value.get("name") or "").casefold(), value["id"]), reverse=reverse)
-        total = len(values)
+        if sort_by is None and hierarchy_parent in {"series", "season"}:
+            return {
+                "items": values,
+                "page": page,
+                "pageSize": page_size,
+                "total": total,
+            }
         start = (page - 1) * page_size
         return {
             "items": values[start : start + page_size],

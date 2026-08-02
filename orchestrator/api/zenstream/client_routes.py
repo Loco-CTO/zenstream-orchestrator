@@ -132,7 +132,7 @@ async def set_subtitles(request: Request):
 @router.get("/api/catalog/libraries")
 async def libraries(request: Request):
     account, _ = require_account(request)
-    return {"libraries": catalog.libraries(account["id"])}
+    return {"libraries": await asyncio.to_thread(catalog.libraries, account["id"])}
 
 
 @router.get("/api/catalog/home")
@@ -142,17 +142,33 @@ async def home(
     section: str | None = Query(None),
 ):
     account, _ = require_account(request)
+    preferred = await asyncio.to_thread(_preferred, account, language)
     if section is None:
-        return catalog.home(account["id"], _preferred(account, language))
-    preferred = _preferred(account, language)
+        return await asyncio.to_thread(
+            catalog.home, account["id"], preferred
+        )
     if section == "featured":
-        return {"latestItems": catalog.home_featured(account["id"], preferred)}
+        return {
+            "latestItems": await asyncio.to_thread(
+                catalog.home_featured, account["id"], preferred
+            )
+        }
     if section == "continueWatching":
-        return {"continueWatching": catalog.home_continue_watching(account["id"], preferred)}
+        return {
+            "continueWatching": await asyncio.to_thread(
+                catalog.home_continue_watching, account["id"], preferred
+            )
+        }
     if section == "nextUp":
-        return {"nextUp": catalog.home_next_up(account["id"], preferred)}
+        return {
+            "nextUp": await asyncio.to_thread(
+                catalog.home_next_up, account["id"], preferred
+            )
+        }
     if section == "derived":
-        return catalog.home_derived(account["id"], preferred)
+        return await asyncio.to_thread(
+            catalog.home_derived, account["id"], preferred
+        )
     else:
         raise HTTPException(400, "Unsupported home section.")
 
@@ -173,10 +189,12 @@ async def items(
     sortOrder: str = Query("ascending"),
 ):
     account, _ = require_account(request)
-    return catalog.list_items(
+    preferred = await asyncio.to_thread(_preferred, account, language)
+    return await asyncio.to_thread(
+        catalog.list_items,
         account["id"],
         libraryId,
-        _preferred(account, language),
+        preferred,
         parent_id=parentId,
         page=page,
         page_size=pageSize,
@@ -194,8 +212,14 @@ async def search(
     pageSize: int = Query(40, ge=1, le=100),
 ):
     account, _ = require_account(request)
-    return catalog.search(
-        account["id"], query, _preferred(account, language), page, pageSize
+    preferred = await asyncio.to_thread(_preferred, account, language)
+    return await asyncio.to_thread(
+        catalog.search,
+        account["id"],
+        query,
+        preferred,
+        page,
+        pageSize,
     )
 
 
@@ -209,27 +233,42 @@ async def favorites(
     sortOrder: str = Query("ascending"),
 ):
     account, _ = require_account(request)
-    return catalog.favorites(
-        account["id"], _preferred(account, language), page, pageSize, sortBy, sortOrder
+    preferred = await asyncio.to_thread(_preferred, account, language)
+    return await asyncio.to_thread(
+        catalog.favorites,
+        account["id"],
+        preferred,
+        page,
+        pageSize,
+        sortBy,
+        sortOrder,
     )
 
 
 @router.get("/api/catalog/items/{entity_id}")
 async def item(entity_id: str, request: Request, language: str | None = Query(None)):
     account, _ = require_account(request)
-    return catalog.item(account["id"], entity_id, _preferred(account, language))
+    preferred = await asyncio.to_thread(_preferred, account, language)
+    return await asyncio.to_thread(
+        catalog.item, account["id"], entity_id, preferred
+    )
 
 
 @router.get("/api/catalog/items/{entity_id}/similar")
 async def similar(entity_id: str, request: Request, language: str | None = Query(None)):
     account, _ = require_account(request)
-    return catalog.similar(account["id"], entity_id, _preferred(account, language))
+    preferred = await asyncio.to_thread(_preferred, account, language)
+    return await asyncio.to_thread(
+        catalog.similar, account["id"], entity_id, preferred
+    )
 
 
 @router.get("/api/catalog/items/{entity_id}/metadata")
 async def item_metadata(entity_id: str, request: Request, language: str = Query(...)):
     account, _ = require_account(request)
-    return catalog.metadata(account["id"], entity_id, language, include_credits=True)
+    return await asyncio.to_thread(
+        catalog.metadata, account["id"], entity_id, language, include_credits=True
+    )
 
 
 @router.get("/api/catalog/items/{entity_id}/images/{image_type}")
@@ -273,7 +312,9 @@ async def item_image(
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
     account = account_from_access(request)
-    image = catalog.person_image(account["id"], entity_id, person_id)
+    image = await asyncio.to_thread(
+        catalog.person_image, account["id"], entity_id, person_id
+    )
     if image is None:
         raise HTTPException(404, "Person image not found.")
     return FileResponse(image, media_type="image/webp")
@@ -282,7 +323,10 @@ async def person_image(entity_id: str, person_id: str, request: Request):
 @router.patch("/api/catalog/items/{entity_id}/state")
 async def update_item_state(entity_id: str, request: Request):
     account, _ = require_account(request)
-    return catalog.update_state(account["id"], entity_id, await request.json())
+    state = await request.json()
+    return await asyncio.to_thread(
+        catalog.update_state, account["id"], entity_id, state
+    )
 
 
 @router.post("/api/playback/items/{entity_id}/negotiate")

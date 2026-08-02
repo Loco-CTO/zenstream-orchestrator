@@ -190,7 +190,7 @@ class LibraryMetadataTest(unittest.TestCase):
                         scanner._scan_movies("library-1", root, "job-1", lambda: False)
                         fingerprint.assert_not_called()
 
-                    os.utime(video, ns=(first_mtime + 1, first_mtime + 1))
+                    os.utime(video, ns=(first_mtime + 2_000_000_000, first_mtime + 2_000_000_000))
                     self._prepare_incremental_scan(scanner)
                     scanner._scan_movies("library-1", root, "job-1", lambda: False)
                     self.assertEqual(fingerprint.call_count, 1)

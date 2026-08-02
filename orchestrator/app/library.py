@@ -677,6 +677,8 @@ class LibraryScanner:
                 library_id, "error", error=summary, finished=now()
             )
             raise
+        finally:
+            self._stop_heartbeat()
 
     @staticmethod
     def _check_termination(should_terminate: Callable[[], bool]) -> None:
@@ -1938,10 +1940,31 @@ class LibraryScanner:
             role = media_role(path)
             if not role:
                 continue
+            file_started = time.monotonic()
+            logger.info(
+                "library scan file stat start entity_id=%s path=%s role=%s",
+                entity_id,
+                path,
+                role,
+            )
             try:
                 stat = path.stat()
             except OSError:
+                logger.warning(
+                    "library scan file stat failed entity_id=%s path=%s duration_seconds=%.1f",
+                    entity_id,
+                    path,
+                    time.monotonic() - file_started,
+                )
                 continue
+            logger.info(
+                "library scan file stat complete entity_id=%s path=%s size=%s modified_ns=%s duration_seconds=%.1f",
+                entity_id,
+                path,
+                stat.st_size,
+                stat.st_mtime_ns,
+                time.monotonic() - file_started,
+            )
             language = sidecar_language(path) if role in {"subtitle", "lyrics"} else None
             relative_path = relative(str(root), str(path))
             key = (relative_path, role)
@@ -1951,7 +1974,20 @@ class LibraryScanner:
             if old and old[5] == stat.st_size and old[6] == stat.st_mtime_ns and (not has_hash or old_hash):
                 result["unchanged"] += 1
                 continue
+            hash_started = time.monotonic()
+            logger.info(
+                "library scan file hash start entity_id=%s path=%s size=%s",
+                entity_id,
+                path,
+                stat.st_size,
+            )
             file_hash = _sha256_file(path)
+            logger.info(
+                "library scan file hash complete entity_id=%s path=%s duration_seconds=%.1f",
+                entity_id,
+                path,
+                time.monotonic() - hash_started,
+            )
             if old:
                 content_changed = old_hash != file_hash if has_hash else True
                 self.db.execute(
@@ -1993,7 +2029,20 @@ class LibraryScanner:
         if result["content_changed"]:
             from app.playback import PlaybackManager
 
+            probe_started = time.monotonic()
+            logger.info(
+                "library scan probe start entity_id=%s files_added=%s files_updated=%s files_removed=%s",
+                entity_id,
+                result["added"],
+                result["updated"],
+                result["removed"],
+            )
             PlaybackManager().probe_entity(entity_id)
+            logger.info(
+                "library scan probe complete entity_id=%s duration_seconds=%.1f",
+                entity_id,
+                time.monotonic() - probe_started,
+            )
         return result
 
     def _materialize_local_artwork(self, entity_id: str, root: Path) -> None:
@@ -2112,6 +2161,22 @@ class LibraryScanner:
         service = MetadataService() if resolve_immediately else None
         for series_index, series_dir in enumerate(series_dirs, start=1):
             self._check_termination(should_terminate)
+            series_started = time.monotonic()
+            self._set_stage(
+                job_id,
+                f"Indexing series {series_index}/{len(series_dirs)}: {series_dir.name}",
+                seriesIndex=series_index,
+                total=len(series_dirs),
+                path=str(series_dir),
+            )
+            logger.info(
+                "library scan series start library_id=%s job_id=%s series_index=%s series_total=%s path=%s",
+                library_id,
+                job_id,
+                series_index,
+                len(series_dirs),
+                series_dir,
+            )
             series = self._entity(
                 library_id, None, "series", relative(str(root), str(series_dir))
             )
@@ -2130,6 +2195,13 @@ class LibraryScanner:
             ):
                 season_dirs.append(series_dir)
             for season_dir in season_dirs:
+                logger.info(
+                    "library scan season start library_id=%s job_id=%s series_id=%s path=%s",
+                    library_id,
+                    job_id,
+                    series,
+                    season_dir,
+                )
                 match = SEASON_RE.match(season_dir.name)
                 season_folder_number = (
                     int(match.group(1))
@@ -2213,6 +2285,27 @@ class LibraryScanner:
                         ],
                     )
                     episode_count += 1
+                    if episode_count == 1 or episode_count % 10 == 0:
+                        self.store.update_job(
+                            job_id,
+                            message=f"Scanning {series_dir.name}: {episode_count} episodes",
+                        )
+                        logger.info(
+                            "library scan series progress library_id=%s job_id=%s series=%s episodes=%s current_path=%s",
+                            library_id,
+                            job_id,
+                            series_dir.name,
+                            episode_count,
+                            media,
+                        )
+                logger.info(
+                    "library scan season complete library_id=%s job_id=%s series_id=%s path=%s episodes_total=%s",
+                    library_id,
+                    job_id,
+                    series,
+                    season_dir,
+                    episode_count,
+                )
             self._files(
                 series, root, [path for path in series_dir.iterdir() if path.is_file()]
             )
@@ -2229,9 +2322,18 @@ class LibraryScanner:
                 if row[0] in self._scan_seen_ids
             )
             if service and needs_resolution:
-                self.store.update_job(
+                self._set_stage(
                     job_id,
-                    message=f"Resolving metadata for {series_dir.name} ({series_index}/{len(series_dirs)})",
+                    f"Resolving metadata for {series_dir.name} ({series_index}/{len(series_dirs)})",
+                    seriesId=series,
+                    path=str(series_dir),
+                )
+                logger.info(
+                    "library scan series metadata start library_id=%s job_id=%s series_id=%s path=%s",
+                    library_id,
+                    job_id,
+                    series,
+                    series_dir,
                 )
                 try:
                     self._resolve_series_immediately(
@@ -2261,10 +2363,27 @@ class LibraryScanner:
                         progress_current=series_index,
                         message=f"Metadata failed for {series_dir.name}; continuing",
                     )
+                else:
+                    logger.info(
+                        "library scan series metadata complete library_id=%s job_id=%s series_id=%s path=%s",
+                        library_id,
+                        job_id,
+                        series,
+                        series_dir,
+                    )
             self.store.update_job(
                 job_id,
                 progress_current=series_index,
                 message=f"Indexed {series_dir.name} ({episode_count} episodes)",
+            )
+            logger.info(
+                "library scan series complete library_id=%s job_id=%s series_id=%s path=%s episodes_total=%s duration_seconds=%.1f",
+                library_id,
+                job_id,
+                series,
+                series_dir,
+                episode_count,
+                time.monotonic() - series_started,
             )
         self._scan_complete = True
         return len(series_dirs)

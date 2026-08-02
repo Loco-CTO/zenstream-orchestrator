@@ -185,9 +185,15 @@ class LibraryMetadataTest(unittest.TestCase):
                 )[0][0]
 
                 with patch("app.playback.PlaybackManager") as playback:
+                    with patch("app.library._quick_fingerprint", wraps=_quick_fingerprint) as fingerprint:
+                        self._prepare_incremental_scan(scanner)
+                        scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                        fingerprint.assert_not_called()
+
                     os.utime(video, ns=(first_mtime + 1, first_mtime + 1))
                     self._prepare_incremental_scan(scanner)
                     scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                    self.assertEqual(fingerprint.call_count, 1)
                     self.assertEqual(
                         db.execute("SELECT id,quick_fingerprint FROM media_files")[0],
                         (file_id, first_fingerprint),
@@ -201,6 +207,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     video.write_bytes(b"changed content")
                     self._prepare_incremental_scan(scanner)
                     scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                    self.assertEqual(fingerprint.call_count, 2)
                     self.assertEqual(
                         db.execute("SELECT id FROM media_files")[0][0], file_id
                     )

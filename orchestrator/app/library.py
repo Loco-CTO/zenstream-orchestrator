@@ -1113,6 +1113,7 @@ class LibraryScanner:
                     entity_type,
                     str(value["id"]),
                     required=True,
+                    progress=lambda message: self.store.update_job(job_id, message=message),
                 )
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
@@ -1187,9 +1188,17 @@ class LibraryScanner:
                     "metadata series locales start series_id=%s provider=%s provider_id=%s",
                     series_id, value["provider"], value["id"],
                 )
-                self._fetch_configured_locales(service, value["provider"], "series", str(value["id"]), required=True)
+                self._fetch_configured_locales(
+                    service,
+                    value["provider"],
+                    "series",
+                    str(value["id"]),
+                    required=True,
+                    progress=lambda message: self.store.update_job(job_id, message=message),
+                )
             logger.info("metadata series match complete series_id=%s", series_id)
         self._aggregate_series_children(series_id, service)
+        self.store.update_job(job_id, message=f"Resolved series hierarchy ({series_id})")
         logger.info("metadata series hierarchy complete series_id=%s", series_id)
         # The series hierarchy is useful for bulk caching but can omit an
         # episode from the returned aggregate.  Season details are the
@@ -1487,6 +1496,7 @@ class LibraryScanner:
         entity_type: str,
         provider_id: str,
         required: bool = False,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         from app.metadata_services import MetadataIngestService
 
@@ -1497,8 +1507,30 @@ class LibraryScanner:
         ingest = MetadataIngestService(service)
         locales = ingest.locales()
         for locale in locales:
+            if progress:
+                progress(
+                    f"Fetching {provider} {entity_type} {provider_id} metadata ({locale})"
+                )
+            logger.info(
+                "metadata locale start provider=%s entity_type=%s provider_id=%s locale=%s",
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+            )
             try:
                 ingest.ingest_locale(provider, entity_type, provider_id, locale, force=False)
+                if progress:
+                    progress(
+                        f"Cached {provider} {entity_type} {provider_id} metadata ({locale})"
+                    )
+                logger.info(
+                    "metadata locale complete provider=%s entity_type=%s provider_id=%s locale=%s",
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                )
             except Exception as error:
                 errors.append(f"{locale}: {type(error).__name__}: {error}")
                 logger.warning(

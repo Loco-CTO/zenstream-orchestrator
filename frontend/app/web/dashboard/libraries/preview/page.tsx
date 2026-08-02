@@ -258,9 +258,13 @@ function LibraryViewPage() {
 		setParent(null);
 		setNavigation([]);
 		setItems([]);
-		if (current && locale) void load(current, null, 1);
 		return () => abortRef.current?.abort();
-	}, [libraryId, locale]);
+	}, [libraryId]);
+
+	useEffect(() => {
+		if (session && locale && navigation.length === 0)
+			void load(session, null, 1);
+	}, [locale, load, navigation.length, session]);
 
 	useEffect(() => {
 		if (session && locale && navigation.length === 0 && searchQuery !== undefined)
@@ -299,14 +303,15 @@ function LibraryViewPage() {
 	}, [navigation.length]);
 
 	function openItem(item: Navigable) {
-		const nextStack = [
-			...navigation,
-			{
-				id: item.id,
-				type: item.type,
-				label: item.displayName || item.relativePath || item.type,
-			},
-		];
+		const nextEntry = {
+			id: item.id,
+			type: item.type,
+			label: item.displayName || item.relativePath || item.type,
+		};
+		const nextStack =
+			navigation[navigation.length - 1]?.id === item.id
+				? navigation
+				: [...navigation, nextEntry];
 		setNavigation(nextStack);
 		const next = new URLSearchParams(params.toString());
 		next.set("entityId", item.id);

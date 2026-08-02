@@ -442,7 +442,7 @@ class MetadataMissingJob:
                         provider, entity_type, provider_id, locale
                     ):
                         raise ProviderError("Provider returned no cacheable metadata")
-                except (ProviderError, ValueError) as error:
+                except (ProviderError, ValueError, OSError) as error:
                     failure = {
                         "provider": provider,
                         "entityType": entity_type,

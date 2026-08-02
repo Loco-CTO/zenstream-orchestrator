@@ -2187,7 +2187,12 @@ class LibraryScanner:
                 discovered_ids.extend(parse_nfo_ids(nfo))
             if discovered_ids:
                 self._replace_ids(entity, discovered_ids)
-            self._files(entity, root, [path for path in files if path.is_file()])
+            self._files(
+                entity,
+                root,
+                [path for path in files if path.is_file()],
+                job_id=job_id,
+            )
             count += 1
             self.store.update_job(
                 job_id, progress_current=count, message=f"Indexed {entry.name}"
@@ -2351,6 +2356,7 @@ class LibraryScanner:
                             and sidecar.stem.startswith(media.stem)
                             and sidecar != media
                         ],
+                        job_id=job_id,
                     )
                     episode_count += 1
                     if episode_count == 1 or episode_count % 10 == 0:
@@ -2375,7 +2381,10 @@ class LibraryScanner:
                     episode_count,
                 )
             self._files(
-                series, root, [path for path in series_dir.iterdir() if path.is_file()]
+                series,
+                root,
+                [path for path in series_dir.iterdir() if path.is_file()],
+                job_id=job_id,
             )
             children = self.db.execute(
                 "SELECT id FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season'))",

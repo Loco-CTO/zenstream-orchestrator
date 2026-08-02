@@ -237,13 +237,29 @@ class ProviderClient:
         self.timeout = max(3.0, min(60.0, configured))
 
     def _get(self, url: str, **kwargs) -> dict:
+        started = time.monotonic()
+        client_name = type(self).__name__
+        request_params = dict(kwargs.get("params") or {})
+        request_params.pop("api_key", None)
+        logger.info(
+            "metadata provider request start client=%s url=%s timeout_seconds=%.1f params=%s",
+            client_name,
+            url,
+            self.timeout,
+            request_params,
+        )
         try:
-            request_params = dict(kwargs.get("params") or {})
-            request_params.pop("api_key", None)
             logger.debug("provider request url=%s params=%s", url, request_params)
             response = httpx.get(url, timeout=self.timeout, **kwargs)
             response.raise_for_status()
             payload = response.json()
+            logger.info(
+                "metadata provider request complete client=%s url=%s status=%s duration_seconds=%.1f",
+                client_name,
+                url,
+                response.status_code,
+                time.monotonic() - started,
+            )
             logger.debug(
                 "provider response url=%s status=%s payload=%s",
                 url,
@@ -252,6 +268,13 @@ class ProviderClient:
             )
             return payload
         except (httpx.HTTPError, ValueError) as error:
+            logger.warning(
+                "metadata provider request failed client=%s url=%s duration_seconds=%.1f error=%s",
+                client_name,
+                url,
+                time.monotonic() - started,
+                error,
+            )
             logger.debug(
                 "provider request failed url=%s error=%s", url, error, exc_info=True
             )
@@ -604,6 +627,12 @@ class TVDBClient(ProviderClient):
         body = {"apikey": key}
         if self.credentials.get("pin"):
             body["pin"] = self.credentials["pin"]
+        started = time.monotonic()
+        logger.info(
+            "metadata provider login start client=%s timeout_seconds=%.1f",
+            type(self).__name__,
+            self.timeout,
+        )
         try:
             response = httpx.post(
                 f"{self.base_url}/login",
@@ -613,13 +642,31 @@ class TVDBClient(ProviderClient):
             )
             response.raise_for_status()
             token = response.json()["data"]["token"]
+            logger.info(
+                "metadata provider login complete client=%s status=%s duration_seconds=%.1f",
+                type(self).__name__,
+                response.status_code,
+                time.monotonic() - started,
+            )
         except httpx.HTTPStatusError as error:
+            logger.warning(
+                "metadata provider login failed client=%s duration_seconds=%.1f status=%s",
+                type(self).__name__,
+                time.monotonic() - started,
+                error.response.status_code,
+            )
             if error.response.status_code in {401, 403}:
                 raise ProviderError(
                     "TheTVDB rejected the API key or subscriber PIN. Use a v4 project API key; user-supported keys also require the matching subscriber PIN."
                 ) from error
             raise ProviderError(str(error)) from error
         except (httpx.HTTPError, KeyError, ValueError) as error:
+            logger.warning(
+                "metadata provider login failed client=%s duration_seconds=%.1f error=%s",
+                type(self).__name__,
+                time.monotonic() - started,
+                error,
+            )
             raise ProviderError(str(error)) from error
         with self._lock:
             self._tokens[cache_key] = (token, time.time() + 30 * 24 * 60 * 60)

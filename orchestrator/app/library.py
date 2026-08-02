@@ -103,12 +103,25 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
-def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+QUICK_FINGERPRINT_SAMPLE_SIZE = 1024 * 1024
+
+
+def _quick_fingerprint(path: Path, size: int | None = None) -> tuple[str, int]:
+    file_size = int(size if size is not None else path.stat().st_size)
     digest = hashlib.sha256()
+    digest.update(f"size:{file_size}".encode("ascii"))
     with path.open("rb") as handle:
-        while chunk := handle.read(chunk_size):
-            digest.update(chunk)
-    return digest.hexdigest()
+        first = handle.read(QUICK_FINGERPRINT_SAMPLE_SIZE)
+        digest.update(b"first:")
+        digest.update(first)
+        bytes_read = len(first)
+        if file_size > QUICK_FINGERPRINT_SAMPLE_SIZE:
+            handle.seek(max(QUICK_FINGERPRINT_SAMPLE_SIZE, file_size - QUICK_FINGERPRINT_SAMPLE_SIZE))
+            last = handle.read(QUICK_FINGERPRINT_SAMPLE_SIZE)
+            digest.update(b"last:")
+            digest.update(last)
+            bytes_read += len(last)
+    return digest.hexdigest(), bytes_read
 
 
 def normalized_path(path: str) -> str:
@@ -817,12 +830,12 @@ class LibraryScanner:
         self._scan_delta["removed"].update(missing)
 
     def _entity_fingerprint(self, entity_id: str) -> str | None:
-        if "file_hash" not in {
+        if "quick_fingerprint" not in {
             row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
         }:
             return None
         rows = self.db.execute(
-            "SELECT role,file_hash FROM media_files WHERE entity_id=? AND role='media' ORDER BY role,relative_path",
+            "SELECT role,quick_fingerprint FROM media_files WHERE entity_id=? AND role='media' ORDER BY role,relative_path",
             (entity_id,),
         )
         if not rows or any(not row[1] for row in rows):
@@ -831,7 +844,7 @@ class LibraryScanner:
 
     def _reconcile_moved_entities(self, library_id: str, root: Path) -> None:
         """Match newly discovered leaf entities to vanished paths by unique hash."""
-        if "file_hash" not in {
+        if "quick_fingerprint" not in {
             row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
         }:
             return
@@ -906,13 +919,13 @@ class LibraryScanner:
                     }
                     old_files = list(
                         cursor.execute(
-                            "SELECT id,relative_path,role,language,flags,size,modified_ns,file_hash FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
+                            "SELECT id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
                             (old_id,),
                         )
                     ) if "media_files" in tables else []
                     new_files = list(
                         cursor.execute(
-                            "SELECT id,relative_path,role,language,flags,size,modified_ns,file_hash FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
+                            "SELECT id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
                             (new_id,),
                         )
                     ) if "media_files" in tables else []
@@ -925,7 +938,7 @@ class LibraryScanner:
                         if old_file[2] != new_file[2]:
                             continue
                         cursor.execute(
-                            "UPDATE media_files SET relative_path=?,role=?,language=?,flags=?,size=?,modified_ns=?,file_hash=? WHERE id=?",
+                            "UPDATE media_files SET relative_path=?,role=?,language=?,flags=?,size=?,modified_ns=?,quick_fingerprint=? WHERE id=?",
                             (*new_file[1:8], old_file[0]),
                         )
                         if "media_sources" in tables:
@@ -1944,10 +1957,10 @@ class LibraryScanner:
             row[1]
             for row in self.db.execute("PRAGMA table_info(media_files)")
         }
-        has_hash = "file_hash" in columns
-        select_hash = ",file_hash" if has_hash else ""
+        has_fingerprint = "quick_fingerprint" in columns
+        select_fingerprint = ",quick_fingerprint" if has_fingerprint else ""
         existing_rows = self.db.execute(
-            f"SELECT id,relative_path,role,language,flags,size,modified_ns{select_hash} FROM media_files WHERE entity_id=?",
+            f"SELECT id,relative_path,role,language,flags,size,modified_ns{select_fingerprint} FROM media_files WHERE entity_id=?",
             (entity_id,),
         )
         existing = {(row[1], row[2]): row for row in existing_rows}
@@ -1994,46 +2007,47 @@ class LibraryScanner:
             key = (relative_path, role)
             seen.add(key)
             old = existing.get(key)
-            old_hash = old[7] if old and has_hash else None
-            if old and old[5] == stat.st_size and old[6] == stat.st_mtime_ns and (not has_hash or old_hash):
+            old_fingerprint = old[7] if old and has_fingerprint else None
+            if old and old[5] == stat.st_size and old[6] == stat.st_mtime_ns:
                 result["unchanged"] += 1
                 continue
-            hash_started = time.monotonic()
+            fingerprint_started = time.monotonic()
             if job_id:
                 self._set_stage(
                     job_id,
-                    f"Hashing {path.name} ({stat.st_size} bytes)",
+                    f"Fingerprinting {path.name} ({stat.st_size} bytes)",
                     entityId=entity_id,
                     path=str(path),
                     size=stat.st_size,
                 )
             logger.info(
-                "library scan file hash start entity_id=%s path=%s size=%s",
+                "library scan file fingerprint start entity_id=%s path=%s size=%s",
                 entity_id,
                 path,
                 stat.st_size,
             )
-            file_hash = _sha256_file(path)
+            quick_fingerprint, bytes_read = _quick_fingerprint(path, stat.st_size)
             logger.info(
-                "library scan file hash complete entity_id=%s path=%s duration_seconds=%.1f",
+                "library scan file fingerprint complete entity_id=%s path=%s bytes_read=%s duration_seconds=%.1f",
                 entity_id,
                 path,
-                time.monotonic() - hash_started,
+                bytes_read,
+                time.monotonic() - fingerprint_started,
             )
             if old:
-                content_changed = old_hash != file_hash if has_hash else True
+                content_changed = old_fingerprint != quick_fingerprint if has_fingerprint else True
                 self.db.execute(
-                    f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',file_hash=?' if has_hash else ''} WHERE id=?",
-                    ([language, None, stat.st_size, stat.st_mtime_ns, file_hash, old[0]] if has_hash else [language, None, stat.st_size, stat.st_mtime_ns, old[0]]),
+                    f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=?' if has_fingerprint else ''} WHERE id=?",
+                    ([language, None, stat.st_size, stat.st_mtime_ns, quick_fingerprint, old[0]] if has_fingerprint else [language, None, stat.st_size, stat.st_mtime_ns, old[0]]),
                 )
                 result["updated"] += 1
                 if content_changed and role == "media":
                     result["content_changed"] = True
             else:
-                if has_hash:
+                if has_fingerprint:
                     self.db.execute(
-                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,file_hash) VALUES(?,?,?,?,?,?,?,?,?)",
-                        (new_id(), entity_id, relative_path, role, language, None, stat.st_size, stat.st_mtime_ns, file_hash),
+                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (new_id(), entity_id, relative_path, role, language, None, stat.st_size, stat.st_mtime_ns, quick_fingerprint),
                     )
                 else:
                     self.db.execute(
@@ -2050,14 +2064,14 @@ class LibraryScanner:
             result["removed"] += 1
             if old[2] == "media":
                 result["content_changed"] = True
-        if has_hash:
+        if has_fingerprint:
             self._materialize_local_artwork(entity_id, root)
         if result["added"] or result["removed"] or result["content_changed"]:
             self._mark_changed(
                 entity_id, content_changed=result["content_changed"]
             )
         # Probe after the file rows are reconciled so playback never depends
-        # on a stale source row. A same-hash timestamp touch does not probe.
+        # on a stale source row. A same-fingerprint timestamp touch does not probe.
         if result["content_changed"]:
             from app.playback import PlaybackManager
 
@@ -2086,9 +2100,9 @@ class LibraryScanner:
     def _materialize_local_artwork(self, entity_id: str, root: Path) -> None:
         cache = LocalArtworkCache(self.db)
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(media_files)")}
-        select_hash = ",image_blur_hash" if "image_blur_hash" in columns else ""
+        select_blur_hash = ",image_blur_hash" if "image_blur_hash" in columns else ""
         for values in self.db.execute(
-            f"SELECT id,relative_path,file_hash{select_hash} FROM media_files WHERE entity_id=? AND role='image'",
+            f"SELECT id,relative_path,quick_fingerprint{select_blur_hash} FROM media_files WHERE entity_id=? AND role='image'",
             (entity_id,),
         ):
             file_id, relative_path, content_hash, *stored = values

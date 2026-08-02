@@ -18,6 +18,7 @@ from app.intro_outro import IntroOutroDetector
 
 
 logger = get_logger("jobs")
+analysis_slot = threading.Semaphore(1)
 
 
 def now() -> str:
@@ -792,12 +793,18 @@ class JobScheduler:
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
             elif kind == "trickplay_extract":
-                TrickplayExtractor().run(
-                    run_id, self.store, self.cancel_events[run_id].is_set
+                self._run_analysis(
+                    run_id,
+                    kind,
+                    TrickplayExtractor(),
+                    self.cancel_events[run_id].is_set,
                 )
             elif kind == "intro_outro_detect":
-                IntroOutroDetector().run(
-                    run_id, self.store, self.cancel_events[run_id].is_set
+                self._run_analysis(
+                    run_id,
+                    kind,
+                    IntroOutroDetector(),
+                    self.cancel_events[run_id].is_set,
                 )
             else:
                 self.store.update_run(
@@ -839,6 +846,33 @@ class JobScheduler:
                 )
                 if row:
                     self.active_definitions.discard(row[0][0])
+
+    def _run_analysis(self, run_id, kind, worker, should_terminate):
+        waited = False
+        while not analysis_slot.acquire(timeout=0.25):
+            if should_terminate():
+                raise JobTerminated()
+            if not waited:
+                logger.info(
+                    "analysis job waiting for media-analysis capacity run_id=%s kind=%s",
+                    run_id,
+                    kind,
+                )
+                waited = True
+        try:
+            logger.info(
+                "analysis job acquired media-analysis capacity run_id=%s kind=%s",
+                run_id,
+                kind,
+            )
+            worker.run(run_id, self.store, should_terminate)
+        finally:
+            analysis_slot.release()
+            logger.info(
+                "analysis job released media-analysis capacity run_id=%s kind=%s",
+                run_id,
+                kind,
+            )
 
 
 scheduler = JobScheduler(library_runtime)

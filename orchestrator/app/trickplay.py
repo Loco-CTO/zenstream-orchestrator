@@ -188,7 +188,7 @@ class TrickplayExtractor:
             f"tile={SHEET_COLUMNS}x{SHEET_ROWS}:padding=0:margin=0"
         )
         return [
-            executable, "-hide_banner", "-loglevel", "error", "-y", "-i", str(asset["path"]),
+            executable, "-hide_banner", "-loglevel", "error", "-threads", "1", "-y", "-i", str(asset["path"]),
             "-map", "0:v:0", "-an", "-vf", filter_graph,
             "-c:v", "libwebp", "-quality", str(WEBP_QUALITY), "-compression_level", "6",
             "-start_number", "0", str(output_pattern),

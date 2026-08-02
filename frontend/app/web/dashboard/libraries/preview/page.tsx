@@ -127,6 +127,7 @@ function LibraryViewPage() {
 	const libraryId = params.get("libraryId") || "";
 	const urlEntityId = params.get("entityId");
 	const urlEntityPathValue = params.get("entityPath") || "";
+	const urlLocale = params.get("locale");
 	const [session, setSession] = useState<Session | null>(null);
 	const [items, setItems] = useState<Item[]>([]);
 	const [libraryName, setLibraryName] = useState("");
@@ -225,9 +226,16 @@ function LibraryViewPage() {
 				setLocales(configured);
 				setLanguageOptions(Array.isArray(value.options) ? value.options : []);
 				setLocale((currentLocale) =>
-					configured.includes(currentLocale)
-						? currentLocale
-						: configured[0] || "",
+					(urlLocale && configured.includes(urlLocale)
+						? urlLocale
+						: currentLocale && configured.includes(currentLocale)
+							? currentLocale
+							: window.localStorage.getItem("zenstream.admin.metadataLocale") &&
+								  configured.includes(
+									window.localStorage.getItem("zenstream.admin.metadataLocale") || "",
+								  )
+							? window.localStorage.getItem("zenstream.admin.metadataLocale") || ""
+							: configured[0] || ""),
 				);
 			})
 			.catch((caught) => {
@@ -241,7 +249,7 @@ function LibraryViewPage() {
 		return () => {
 			cancelled = true;
 		};
-	}, [libraryId]);
+	}, [libraryId, urlLocale]);
 
 	useEffect(() => {
 		const timer = window.setTimeout(
@@ -394,8 +402,16 @@ function LibraryViewPage() {
 							<select
 								value={locale}
 								disabled={!locales.length}
-								onChange={(event) => {
-									setLocale(event.target.value);
+									onChange={(event) => {
+									const nextLocale = event.target.value;
+									setLocale(nextLocale);
+									window.localStorage.setItem(
+										"zenstream.admin.metadataLocale",
+										nextLocale,
+									);
+									const next = new URLSearchParams(params.toString());
+									next.set("locale", nextLocale);
+									router.replace(`${pathname}?${next.toString()}`);
 									setItems([]);
 								}}
 								className="material-input h-11 rounded-lg px-3 text-sm outline-none"

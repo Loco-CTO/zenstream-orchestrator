@@ -27,9 +27,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class _CatalogDatabase:
+    def __init__(self, database):
+        self._database = database
+
+    def execute(self, query, params=None):
+        return self._database.read_execute(query, params)
+
+    def transaction(self):
+        return self._database.transaction()
+
+
 class Catalog:
     def __init__(self):
-        self.db = Config().database
+        self.db = _CatalogDatabase(Config().database)
 
     def allowed_libraries(self, user_id: str) -> set[str]:
         return {

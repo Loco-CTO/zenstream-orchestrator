@@ -1932,7 +1932,13 @@ class LibraryScanner:
                     continue
                 self._ids(episode_id, [("tvdb", "episode", str(match["id"]))])
 
-    def _files(self, entity_id: str, root: Path, files: Iterable[Path]) -> dict:
+    def _files(
+        self,
+        entity_id: str,
+        root: Path,
+        files: Iterable[Path],
+        job_id: str | None = None,
+    ) -> dict:
         """Reconcile media rows in place and return a scan delta."""
         columns = {
             row[1]
@@ -1959,6 +1965,13 @@ class LibraryScanner:
                 role,
             )
             try:
+                if job_id:
+                    self._set_stage(
+                        job_id,
+                        f"Inspecting {path.name}",
+                        entityId=entity_id,
+                        path=str(path),
+                    )
                 stat = path.stat()
             except OSError:
                 logger.warning(
@@ -1986,6 +1999,14 @@ class LibraryScanner:
                 result["unchanged"] += 1
                 continue
             hash_started = time.monotonic()
+            if job_id:
+                self._set_stage(
+                    job_id,
+                    f"Hashing {path.name} ({stat.st_size} bytes)",
+                    entityId=entity_id,
+                    path=str(path),
+                    size=stat.st_size,
+                )
             logger.info(
                 "library scan file hash start entity_id=%s path=%s size=%s",
                 entity_id,
@@ -2041,6 +2062,12 @@ class LibraryScanner:
             from app.playback import PlaybackManager
 
             probe_started = time.monotonic()
+            if job_id:
+                self._set_stage(
+                    job_id,
+                    "Probing changed media",
+                    entityId=entity_id,
+                )
             logger.info(
                 "library scan probe start entity_id=%s files_added=%s files_updated=%s files_removed=%s",
                 entity_id,

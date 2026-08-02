@@ -173,6 +173,20 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     return value
 
 
+def _image_entities(item: dict, image_type: str) -> list[dict]:
+    entities = [item]
+    if image_type != "Primary" or item.get("type") not in {"season", "episode"}:
+        return entities
+    seen = {item["id"]}
+    parent_id = item.get("parentId")
+    while parent_id and parent_id not in seen:
+        parent = _entity(parent_id)
+        entities.append(parent)
+        seen.add(parent_id)
+        parent_id = parent.get("parentId")
+    return entities
+
+
 def _metadata_for(
     item: dict, locale: str, fetch: bool = False, fallback: bool = True
 ) -> dict | None:
@@ -831,34 +845,49 @@ async def get_image(
             f"Unsupported image type '{imageType}'. Expected one of: {', '.join(sorted(IMAGE_TYPES))}",
         )
     item = _entity(entity_id, locale)
-    library = store.get(item["libraryId"])
-    if not library:
-        raise HTTPException(404, "Library not found.")
-    local = store.db.execute(
-        "SELECT relative_path,file_hash FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path",
-        (entity_id,),
-    )
-    if library["directory"]:
-        for relative_path, content_hash in local:
-            if not _local_image_for_type(relative_path, imageType):
-                continue
-            path = Path(library["directory"]) / relative_path
-            if path.is_file():
-                cached = LocalArtworkCache(store.db).path(content_hash)
-                if cached and cached.is_file():
-                    return FileResponse(
-                        cached,
-                        media_type="image/webp",
-                        headers={"X-ZenStream-Image-State": "ready"},
-                    )
-                return Response(
-                    status_code=404, headers={"X-ZenStream-Image-State": "error"}
-                )
+    pending = False
+    for candidate in _image_entities(item, imageType):
+        library = store.get(candidate["libraryId"])
+        if not library:
+            raise HTTPException(404, "Library not found.")
+        local = store.db.execute(
+            "SELECT relative_path,file_hash FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path",
+            (candidate["id"],),
+        )
+        if library["directory"]:
+            for relative_path, content_hash in local:
+                if not _local_image_for_type(relative_path, imageType):
+                    continue
+                path = Path(library["directory"]) / relative_path
+                if path.is_file():
+                    cached = LocalArtworkCache(store.db).path(content_hash)
+                    if cached and cached.is_file():
+                        return FileResponse(
+                            cached,
+                            media_type="image/webp",
+                            headers={"X-ZenStream-Image-State": "ready"},
+                        )
+                    continue
     # Library previews must never turn a cache miss into provider work. Scans
     # and the administrator-triggered backfill own metadata population.
-    metadata = await asyncio.to_thread(_metadata_for, item, locale, False, False)
-    if not metadata:
-        if item.get("providerIds"):
+    image = None
+    for candidate in _image_entities(item, imageType):
+        metadata = await asyncio.to_thread(_metadata_for, candidate, locale, False, False)
+        if not metadata:
+            pending = pending or bool(candidate.get("providerIds"))
+            continue
+        read_service = MetadataReadService(store.db)
+        image = choose_artwork(
+            metadata.get("images", []),
+            locale,
+            imageType,
+            metadata.get("originalLanguage"),
+            read_service.providers(candidate["type"]),
+        )
+        if image:
+            break
+    if not image:
+        if pending:
             logger.info(
                 "image pending entity_id=%s locale=%s image_type=%s",
                 entity_id,
@@ -869,24 +898,11 @@ async def get_image(
                 status_code=202,
                 headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"},
             )
-        else:
-            logger.warning(
-                "image unavailable because entity has no provider IDs entity_id=%s image_type=%s",
-                entity_id,
-                imageType,
-            )
-            return Response(
-                status_code=404, headers={"X-ZenStream-Image-State": "error"}
-            )
-    read_service = MetadataReadService(store.db)
-    image = choose_artwork(
-        metadata.get("images", []),
-        locale,
-        imageType,
-        metadata.get("originalLanguage"),
-        read_service.providers(item["type"]),
-    )
-    if not image:
+        logger.warning(
+            "image unavailable because entity has no cached artwork entity_id=%s image_type=%s",
+            entity_id,
+            imageType,
+        )
         return Response(status_code=404, headers={"X-ZenStream-Image-State": "missing"})
     cached_file = store.db.execute(
         "SELECT local_path FROM metadata_images WHERE image_type=? AND image_url=?",

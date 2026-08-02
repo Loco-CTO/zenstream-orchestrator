@@ -1048,6 +1048,30 @@ class LibraryMetadataTest(unittest.TestCase):
             library_routes._local_image_for_type("Series/poster.jpg", "Backdrop")
         )
 
+    def test_primary_image_candidates_include_series_for_seasons_and_episodes(self):
+        values = {
+            "episode": {
+                "id": "episode-1",
+                "type": "episode",
+                "parentId": "season-1",
+            },
+            "season-1": {
+                "id": "season-1",
+                "type": "season",
+                "parentId": "series-1",
+            },
+            "series-1": {"id": "series-1", "type": "series", "parentId": None},
+        }
+        with patch.object(library_routes, "_entity", side_effect=values.__getitem__):
+            self.assertEqual(
+                [value["id"] for value in library_routes._image_entities(values["episode"], "Primary")],
+                ["episode-1", "season-1", "series-1"],
+            )
+            self.assertEqual(
+                [value["id"] for value in library_routes._image_entities(values["episode"], "Backdrop")],
+                ["episode-1"],
+            )
+
     def test_provider_match_rejects_ambiguous_candidates(self):
         with self.assertRaises(ProviderError):
             _select_match(

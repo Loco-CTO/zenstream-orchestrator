@@ -10,12 +10,14 @@ from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import (
     EPISODE_RE,
+    QUICK_FINGERPRINT_SAMPLE_SIZE,
     LibraryRuntime,
     LibraryScanner,
     LibraryStore,
     guess_media,
     normalized_path,
     provider_ids,
+    _quick_fingerprint,
 )
 from app.library_cleanup import cleanup_entities, cleanup_library, cleanup_orphans
 from app.models.metadata import (
@@ -79,7 +81,7 @@ class LibraryMetadataTest(unittest.TestCase):
             "CREATE TABLE entity_provider_ids (entity_id TEXT, provider TEXT, identifier_type TEXT, provider_id TEXT, is_primary INTEGER, PRIMARY KEY(entity_id, provider, identifier_type))"
         )
         db.execute(
-            "CREATE TABLE media_files (id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT, language TEXT, flags TEXT, size INTEGER, modified_ns INTEGER, file_hash TEXT, UNIQUE(entity_id, relative_path, role))"
+            "CREATE TABLE media_files (id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT, language TEXT, flags TEXT, size INTEGER, modified_ns INTEGER, quick_fingerprint TEXT, UNIQUE(entity_id, relative_path, role))"
         )
         db.execute(
             "CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT, kind TEXT, state TEXT, progress_current INTEGER DEFAULT 0, progress_total INTEGER DEFAULT 0, message TEXT)"
@@ -163,7 +165,7 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
-    def test_media_file_hash_reuses_row_and_only_content_changes_probe(self):
+    def test_media_file_quick_fingerprint_reuses_row_and_only_content_changes_probe(self):
         db, scanner = self._scanner_db()
         try:
             with tempfile.TemporaryDirectory() as directory:
@@ -175,8 +177,8 @@ class LibraryMetadataTest(unittest.TestCase):
 
                 self._prepare_incremental_scan(scanner)
                 scanner._scan_movies("library-1", root, "job-1", lambda: False)
-                file_id, first_hash, first_mtime = db.execute(
-                    "SELECT id,file_hash,modified_ns FROM media_files"
+                file_id, first_fingerprint, first_mtime = db.execute(
+                    "SELECT id,quick_fingerprint,modified_ns FROM media_files"
                 )[0]
                 first_entity_updated_at = db.execute(
                     "SELECT updated_at FROM library_entities"
@@ -187,8 +189,8 @@ class LibraryMetadataTest(unittest.TestCase):
                     self._prepare_incremental_scan(scanner)
                     scanner._scan_movies("library-1", root, "job-1", lambda: False)
                     self.assertEqual(
-                        db.execute("SELECT id,file_hash FROM media_files")[0],
-                        (file_id, first_hash),
+                        db.execute("SELECT id,quick_fingerprint FROM media_files")[0],
+                        (file_id, first_fingerprint),
                     )
                     self.assertEqual(
                         db.execute("SELECT updated_at FROM library_entities")[0][0],
@@ -205,6 +207,31 @@ class LibraryMetadataTest(unittest.TestCase):
                     playback.return_value.probe_entity.assert_called_once()
         finally:
             db.close()
+
+    def test_quick_fingerprint_samples_only_file_edges(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.bin"
+            sample = QUICK_FINGERPRINT_SAMPLE_SIZE
+            path.write_bytes(b"a" * sample + b"middle" * sample + b"b" * sample)
+            fingerprint, bytes_read = _quick_fingerprint(path)
+            self.assertEqual(bytes_read, sample * 2)
+
+            data = bytearray(path.read_bytes())
+            data[sample + 10] = ord("c")
+            path.write_bytes(data)
+            middle_fingerprint, middle_bytes_read = _quick_fingerprint(path)
+            self.assertEqual(middle_bytes_read, sample * 2)
+            self.assertEqual(middle_fingerprint, fingerprint)
+
+            data[10] = ord("z")
+            path.write_bytes(data)
+            first_fingerprint, _ = _quick_fingerprint(path)
+            self.assertNotEqual(first_fingerprint, fingerprint)
+
+            data[-10] = ord("z")
+            path.write_bytes(data)
+            last_fingerprint, _ = _quick_fingerprint(path)
+            self.assertNotEqual(last_fingerprint, first_fingerprint)
 
     def test_targeted_movie_scan_only_visits_affected_root(self):
         db, scanner = self._scanner_db()

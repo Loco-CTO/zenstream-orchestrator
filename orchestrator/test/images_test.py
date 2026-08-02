@@ -20,7 +20,7 @@ class LocalArtworkCacheTest(unittest.TestCase):
             root = Path(directory)
             db = DatabaseHandler("sqlite", {}, str(root / "orchestrator.db"))
             try:
-                db.execute("CREATE TABLE media_files(file_hash TEXT,role TEXT)")
+                db.execute("CREATE TABLE media_files(quick_fingerprint TEXT,role TEXT)")
                 source = root / "poster.jpg"
                 source.write_bytes(b"source")
                 content_hash = hashlib.sha256(source.read_bytes()).hexdigest()

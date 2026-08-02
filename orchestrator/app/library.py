@@ -1061,6 +1061,10 @@ class LibraryScanner:
         ) in enumerate(rows, start=1):
             self._check_termination(should_terminate)
             query, year = _inventory_query(relative_path or "")
+            logger.info(
+                "metadata root start library_id=%s entity_id=%s type=%s query=%s path=%s index=%s/%s",
+                library_id, entity_id, entity_type, query, relative_path, index, len(rows),
+            )
             explicit = [
                 {"provider": row[0], "id": row[2]}
                 for row in self.db.execute(
@@ -1099,6 +1103,10 @@ class LibraryScanner:
                 values.append((value["provider"], identifier_type, value["id"]))
             self._ids(entity_id, values)
             for value in result["providerIds"]:
+                logger.info(
+                    "metadata root locales start entity_id=%s type=%s provider=%s provider_id=%s",
+                    entity_id, entity_type, value["provider"], value["id"],
+                )
                 self._fetch_configured_locales(
                     service,
                     value["provider"],
@@ -1121,6 +1129,10 @@ class LibraryScanner:
             self.store.update_job(
                 job_id, progress_current=index, message=f"Resolved {query}"
             )
+            logger.info(
+                "metadata root complete library_id=%s entity_id=%s type=%s query=%s index=%s/%s",
+                library_id, entity_id, entity_type, query, index, len(rows),
+            )
         self._seed_all_children(library_id, service, job_id, should_terminate)
 
     def _resolve_series_immediately(
@@ -1136,6 +1148,7 @@ class LibraryScanner:
         from app.providers import ProviderError
 
         self._check_termination(should_terminate)
+        logger.info("metadata series start library_id=%s series_id=%s path=%s", library_id, series_id, relative_path)
         if self._needs_metadata(series_id):
             query, year = _inventory_query(relative_path or "")
             explicit = [
@@ -1146,6 +1159,7 @@ class LibraryScanner:
                 )
             ]
             try:
+                logger.info("metadata series match start series_id=%s query=%s", series_id, query)
                 result = service.resolve_inventory_entity(
                     "series", query, year, explicit
                 )
@@ -1168,7 +1182,15 @@ class LibraryScanner:
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
                 (now(), series_id),
             )
+            for value in result["providerIds"]:
+                logger.info(
+                    "metadata series locales start series_id=%s provider=%s provider_id=%s",
+                    series_id, value["provider"], value["id"],
+                )
+                self._fetch_configured_locales(service, value["provider"], "series", str(value["id"]), required=True)
+            logger.info("metadata series match complete series_id=%s", series_id)
         self._aggregate_series_children(series_id, service)
+        logger.info("metadata series hierarchy complete series_id=%s", series_id)
         # The series hierarchy is useful for bulk caching but can omit an
         # episode from the returned aggregate.  Season details are the
         # authoritative TVDB source for exact episode IDs, so run the same
@@ -1177,6 +1199,7 @@ class LibraryScanner:
         self._seed_all_children(
             library_id, service, job_id, should_terminate, parent_id=series_id
         )
+        logger.info("metadata series complete library_id=%s series_id=%s", library_id, series_id)
 
     def _aggregate_series_children(self, series_id: str, service) -> None:
         """Map all discovered seasons and episodes from resolved parent IDs."""
@@ -1347,6 +1370,10 @@ class LibraryScanner:
             episode_number,
         ) in enumerate(rows, start=1):
             self._check_termination(should_terminate)
+            logger.info(
+                "metadata child start library_id=%s entity_id=%s type=%s provider_path=%s index=%s/%s",
+                library_id, entity_id, entity_type, relative_path, index, len(rows),
+            )
             provider_rows = self.db.execute(
                 "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
                 (entity_id,),
@@ -1447,6 +1474,10 @@ class LibraryScanner:
                 job_id,
                 progress_current=index,
                 message=f"Seeded {entity_type} {relative_path}",
+            )
+            logger.info(
+                "metadata child complete entity_id=%s type=%s index=%s/%s",
+                entity_id, entity_type, index, len(rows),
             )
 
     @staticmethod

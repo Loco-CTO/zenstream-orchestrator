@@ -1,4 +1,5 @@
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -16,8 +17,12 @@ from app.config import load_config
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
 from app.metadata_services import asset_executor
+from app.logging_config import get_logger
 from app.playback import PlaybackManager
 from version import __version__
+
+
+request_logger = get_logger("http")
 
 
 @asynccontextmanager
@@ -63,6 +68,21 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["TOKEN"],
 )
+
+
+@app.middleware("http")
+async def request_timing(request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - started) * 1000
+    request_logger.debug(
+        "request complete method=%s path=%s status=%s duration_ms=%.1f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 app.include_router(client_router)
 app.include_router(library_router)

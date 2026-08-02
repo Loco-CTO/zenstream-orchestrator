@@ -9,10 +9,10 @@ class PersonCreditIngestTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
         self.db.execute("CREATE TABLE library_entities(id TEXT PRIMARY KEY, entity_type TEXT)")
-        self.db.execute("CREATE TABLE entity_provider_ids(entity_id TEXT, provider TEXT, provider_id TEXT, is_primary INTEGER)")
+        self.db.execute("CREATE TABLE entity_provider_ids(entity_id TEXT, provider TEXT, provider_id TEXT, is_primary INTEGER, FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE)")
         self.db.execute("CREATE TABLE people(id TEXT PRIMARY KEY, provider TEXT, provider_person_id TEXT, image_url TEXT, local_path TEXT, image_blur_hash TEXT, created_at TEXT, updated_at TEXT, UNIQUE(provider,provider_person_id))")
-        self.db.execute("CREATE TABLE person_localizations(person_id TEXT, locale TEXT, name TEXT, updated_at TEXT, PRIMARY KEY(person_id,locale))")
-        self.db.execute("CREATE TABLE entity_person_credits(id TEXT PRIMARY KEY, entity_id TEXT, person_id TEXT, provider TEXT, locale TEXT, credit_type TEXT, role TEXT, department TEXT, credit_order INTEGER)")
+        self.db.execute("CREATE TABLE person_localizations(person_id TEXT, locale TEXT, name TEXT, updated_at TEXT, PRIMARY KEY(person_id,locale), FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE)")
+        self.db.execute("CREATE TABLE entity_person_credits(id TEXT PRIMARY KEY, entity_id TEXT, person_id TEXT, provider TEXT, locale TEXT, credit_type TEXT, role TEXT, department TEXT, credit_order INTEGER, FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE, FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE)")
         for entity_id, primary in (("movie-1", 1), ("movie-2", 1), ("movie-secondary", 0)):
             self.db.execute("INSERT INTO library_entities VALUES(?, 'movie')", (entity_id,))
             self.db.execute(
@@ -42,6 +42,7 @@ class PersonCreditIngestTest(unittest.TestCase):
             service.ingest("tmdb", "movie", "99", "en", document)
             self.assertEqual(self.db.execute("SELECT COUNT(*) FROM people")[0][0], 2)
             self.assertEqual(self.db.execute("SELECT COUNT(*) FROM entity_person_credits WHERE entity_id='movie-2'")[0][0], 2)
+            self.assertEqual(self.db.execute("PRAGMA foreign_key_check"), [])
 
 
 if __name__ == "__main__":

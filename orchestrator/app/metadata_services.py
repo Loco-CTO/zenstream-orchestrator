@@ -641,26 +641,25 @@ class PersonCreditIngestService:
         except Exception as error:
             logger.warning("person portrait ingest failed person_id=%s url=%s error=%s", person_id, image_url, error)
 
-    def _person_id(self, provider: str, identity: str, name: str, locale: str, image_url: object) -> str:
-        rows = self.db.execute(
+    def _person_id(self, cursor, provider: str, identity: str, name: str, locale: str) -> str:
+        rows = cursor.execute(
             "SELECT id FROM people WHERE provider=? AND provider_person_id=?",
             (provider, identity),
-        )
+        ).fetchall()
         person_id = rows[0][0] if rows else str(uuid.uuid4())
         now = iso_now()
         if rows:
-            self.db.execute("UPDATE people SET updated_at=? WHERE id=?", (now, person_id))
+            cursor.execute("UPDATE people SET updated_at=? WHERE id=?", (now, person_id))
         else:
-            self.db.execute(
+            cursor.execute(
                 "INSERT INTO people(id,provider,provider_person_id,created_at,updated_at) VALUES(?,?,?,?,?)",
                 (person_id, provider, identity, now, now),
             )
-        self.db.execute(
+        cursor.execute(
             "INSERT INTO person_localizations(person_id,locale,name,updated_at) VALUES(?,?,?,?) "
             "ON CONFLICT(person_id,locale) DO UPDATE SET name=excluded.name,updated_at=excluded.updated_at",
             (person_id, locale, name, now),
         )
-        self._portrait(person_id, image_url)
         return person_id
 
     def ingest(self, provider: str, entity_type: str, provider_id: str, locale: str, document: dict) -> None:
@@ -669,32 +668,34 @@ class PersonCreditIngestService:
         if not self._tables_ready():
             return
         records = self._records(document)
-        entity_ids = [
-            row[0]
-            for row in self.db.execute(
-                "SELECT p.entity_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
-                "WHERE p.provider=? AND p.provider_id=? AND p.is_primary=1 AND e.entity_type=?",
-                (provider, provider_id, entity_type),
-            )
-        ]
-        for entity_id in entity_ids:
-            credits = []
-            for credit_type, fallback_order, record in records:
-                name = str(record.get("name") or "").strip()
-                source_id = str(record.get("id") or "").strip()
-                role = str(record.get("role") or "").strip() or None
-                department = str(record.get("department") or "").strip() or None
-                order = record.get("order", fallback_order)
-                try:
-                    order = int(order)
-                except (TypeError, ValueError):
-                    order = fallback_order
-                identity = source_id or "credit:" + hashlib.sha256(
-                    f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode("utf-8")
-                ).hexdigest()
-                person_id = self._person_id(provider, identity, name, locale, record.get("imageUrl"))
-                credits.append((str(uuid.uuid4()), entity_id, person_id, provider, locale, credit_type, role, department, order))
-            with self.db.transaction() as cursor:
+        portraits = []
+        with self.db.transaction() as cursor:
+            entity_ids = [
+                row[0]
+                for row in cursor.execute(
+                    "SELECT p.entity_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
+                    "WHERE p.provider=? AND p.provider_id=? AND p.is_primary=1 AND e.entity_type=?",
+                    (provider, provider_id, entity_type),
+                ).fetchall()
+            ]
+            for entity_id in entity_ids:
+                credits = []
+                for credit_type, fallback_order, record in records:
+                    name = str(record.get("name") or "").strip()
+                    source_id = str(record.get("id") or "").strip()
+                    role = str(record.get("role") or "").strip() or None
+                    department = str(record.get("department") or "").strip() or None
+                    order = record.get("order", fallback_order)
+                    try:
+                        order = int(order)
+                    except (TypeError, ValueError):
+                        order = fallback_order
+                    identity = source_id or "credit:" + hashlib.sha256(
+                        f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode("utf-8")
+                    ).hexdigest()
+                    person_id = self._person_id(cursor, provider, identity, name, locale)
+                    portraits.append((person_id, record.get("imageUrl")))
+                    credits.append((str(uuid.uuid4()), entity_id, person_id, provider, locale, credit_type, role, department, order))
                 cursor.execute(
                     "DELETE FROM entity_person_credits WHERE entity_id=? AND provider=? AND locale=?",
                     (entity_id, provider, locale),
@@ -703,3 +704,5 @@ class PersonCreditIngestService:
                     "INSERT INTO entity_person_credits(id,entity_id,person_id,provider,locale,credit_type,role,department,credit_order) VALUES(?,?,?,?,?,?,?,?,?)",
                     credits,
                 )
+        for person_id, image_url in portraits:
+            self._portrait(person_id, image_url)

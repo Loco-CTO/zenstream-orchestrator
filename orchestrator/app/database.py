@@ -17,6 +17,7 @@ class DatabaseHandler:
         self.create_query = create_query
         self.db_file = db_file
         self.connection = None
+        self.read_connection = None
         self.lock = threading.RLock()
         self.connect()
 
@@ -28,8 +29,18 @@ class DatabaseHandler:
     def _connect_sqlite(self, db_file):
         """Connect to a SQLite database."""
         try:
-            self.connection = sqlite3.connect(db_file, check_same_thread=False)
+            self.connection = sqlite3.connect(db_file, check_same_thread=False, timeout=5.0)
             self.connection.execute("PRAGMA foreign_keys = ON")
+            self.connection.execute("PRAGMA busy_timeout = 5000")
+            if db_file != ":memory:":
+                self.connection.execute("PRAGMA journal_mode = WAL")
+                self.read_connection = sqlite3.connect(
+                    db_file, check_same_thread=False, timeout=2.0
+                )
+                self.read_connection.execute("PRAGMA query_only = ON")
+                self.read_connection.execute("PRAGMA busy_timeout = 2000")
+            else:
+                self.read_connection = self.connection
         except sqlite3.Error as e:
             print(f"Error connecting to SQLite: {e}")
 
@@ -66,6 +77,19 @@ class DatabaseHandler:
             finally:
                 cursor.close()
 
+    def read_execute(self, query, params=None):
+        """Execute a read without waiting on the writer connection lock."""
+        connection = self.read_connection or self.connection
+        cursor = connection.cursor()
+        try:
+            cursor.execute(query, params or ())
+            return cursor.fetchall()
+        except sqlite3.Error as e:
+            print(f"Database read error: {e}")
+            return e
+        finally:
+            cursor.close()
+
     def fetchall(self):
         """Fetch all rows from the database."""
         cursor = self.connection.cursor()
@@ -92,3 +116,5 @@ class DatabaseHandler:
         """Close the database connection."""
         if self.connection:
             self.connection.close()
+        if self.read_connection and self.read_connection is not self.connection:
+            self.read_connection.close()

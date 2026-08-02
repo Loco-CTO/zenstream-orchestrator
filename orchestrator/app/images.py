@@ -197,7 +197,7 @@ class LocalArtworkCache:
             hashes = {
                 row[0].lower()
                 for row in self.db.execute(
-                    "SELECT file_hash FROM media_files WHERE role='image' AND file_hash IS NOT NULL"
+                    "SELECT quick_fingerprint FROM media_files WHERE role='image' AND quick_fingerprint IS NOT NULL"
                 )
                 if self._valid_hash(row[0])
             }

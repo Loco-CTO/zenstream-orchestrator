@@ -178,6 +178,9 @@ class LibraryMetadataTest(unittest.TestCase):
                 file_id, first_hash, first_mtime = db.execute(
                     "SELECT id,file_hash,modified_ns FROM media_files"
                 )[0]
+                first_entity_updated_at = db.execute(
+                    "SELECT updated_at FROM library_entities"
+                )[0][0]
 
                 with patch("app.playback.PlaybackManager") as playback:
                     os.utime(video, ns=(first_mtime + 1, first_mtime + 1))
@@ -186,6 +189,10 @@ class LibraryMetadataTest(unittest.TestCase):
                     self.assertEqual(
                         db.execute("SELECT id,file_hash FROM media_files")[0],
                         (file_id, first_hash),
+                    )
+                    self.assertEqual(
+                        db.execute("SELECT updated_at FROM library_entities")[0][0],
+                        first_entity_updated_at,
                     )
                     playback.return_value.probe_entity.assert_not_called()
 
@@ -196,6 +203,36 @@ class LibraryMetadataTest(unittest.TestCase):
                         db.execute("SELECT id FROM media_files")[0][0], file_id
                     )
                     playback.return_value.probe_entity.assert_called_once()
+        finally:
+            db.close()
+
+    def test_targeted_movie_scan_only_visits_affected_root(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name in ("One", "Two"):
+                    folder = root / name
+                    folder.mkdir()
+                    (folder / f"{name}.mkv").write_bytes(name.encode())
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 2)
+
+                (root / "One" / "One.en.srt").write_text("subtitle")
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies(
+                    "library-1", root, "job-1", lambda: False, {"One"}
+                )
+
+                self.assertEqual(
+                    db.execute("SELECT progress_total FROM library_jobs WHERE id='job-1'")[0][0],
+                    1,
+                )
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 2
+                )
         finally:
             db.close()
 
@@ -1879,11 +1916,13 @@ class LibraryMetadataTest(unittest.TestCase):
 class LibraryJobControlTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
-        self.db.execute("CREATE TABLE libraries (id TEXT PRIMARY KEY)")
+        self.db.execute(
+            "CREATE TABLE libraries (id TEXT PRIMARY KEY, scan_state TEXT, scan_error TEXT, updated_at TEXT)"
+        )
         self.db.execute(
             "CREATE TABLE library_jobs (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT)"
         )
-        self.db.execute("INSERT INTO libraries VALUES('library-1')")
+        self.db.execute("INSERT INTO libraries VALUES('library-1','ready',NULL,'before')")
         store = LibraryStore.__new__(LibraryStore)
         store.db = self.db
         self.runtime = LibraryRuntime.__new__(LibraryRuntime)
@@ -1891,6 +1930,10 @@ class LibraryJobControlTest(unittest.TestCase):
         self.runtime.condition = threading.Condition()
         self.runtime._active_lock = threading.RLock()
         self.runtime._cancel_events = {}
+        self.runtime._active_jobs = set()
+        self.runtime._reconcile_due = {}
+        self.runtime._reconcile_targets = {}
+        self.runtime._job_targets = {}
 
     def tearDown(self):
         self.db.close()
@@ -1915,6 +1958,28 @@ class LibraryJobControlTest(unittest.TestCase):
 
         self.assertIsNone(self.runtime.enqueue("library-1", "reconcile"))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM library_jobs")[0][0], 0)
+
+    def test_restart_terminates_active_jobs_without_requeueing(self):
+        running = self.runtime.enqueue("library-1", "scan")
+        self.db.execute(
+            "UPDATE library_jobs SET state='running',started_at='before' WHERE id=?",
+            (running["id"],),
+        )
+
+        self.runtime._recover_active_jobs()
+
+        self.assertEqual(
+            self.db.execute("SELECT state FROM library_jobs WHERE id=?", (running["id"],))[0][0],
+            "terminated",
+        )
+        self.assertEqual(
+            self.db.execute("SELECT message FROM library_jobs WHERE id=?", (running["id"],))[0][0],
+            "Interrupted by Orchestrator restart; run scan manually",
+        )
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM library_jobs WHERE state='queued'")[0][0],
+            0,
+        )
 
 
 if __name__ == "__main__":

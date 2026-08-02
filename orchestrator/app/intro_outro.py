@@ -78,8 +78,8 @@ class IntroOutroStore:
         self.db = db or Config().database
 
     @staticmethod
-    def source_key(file_hash, size, modified_ns) -> str:
-        return str(file_hash or f"{int(size or 0)}:{int(modified_ns or 0)}")
+    def source_key(quick_fingerprint, size, modified_ns) -> str:
+        return str(quick_fingerprint or f"{int(size or 0)}:{int(modified_ns or 0)}")
 
     def available(self) -> bool:
         tables = {row[0] for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -134,7 +134,7 @@ class IntroOutroStore:
             scope = " AND episode.library_id=?"
             params.append(library_id)
         rows = self.db.execute(
-            "SELECT f.id,episode.id,season.id,f.file_hash,f.size,f.modified_ns "
+            "SELECT f.id,episode.id,season.id,f.quick_fingerprint,f.size,f.modified_ns "
             "FROM media_files f JOIN media_sources source ON source.media_file_id=f.id "
             "JOIN library_entities episode ON episode.id=f.entity_id "
             "JOIN library_entities season ON season.id=episode.parent_id AND season.entity_type='season' "
@@ -145,8 +145,8 @@ class IntroOutroStore:
             params,
         )
         queued = 0
-        for media_file_id, entity_id, season_id, file_hash, size, modified_ns in rows:
-            source_fingerprint = self.source_key(file_hash, size, modified_ns)
+        for media_file_id, entity_id, season_id, quick_fingerprint, size, modified_ns in rows:
+            source_fingerprint = self.source_key(quick_fingerprint, size, modified_ns)
             existing = self.db.execute(
                 "SELECT source_fingerprint,analysis_key FROM intro_outro_assets WHERE media_file_id=?", (media_file_id,)
             )

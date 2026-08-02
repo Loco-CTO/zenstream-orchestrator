@@ -851,7 +851,7 @@ async def get_image(
         if not library:
             raise HTTPException(404, "Library not found.")
         local = store.db.execute(
-            "SELECT relative_path,file_hash FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path",
+            "SELECT relative_path,quick_fingerprint FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path",
             (candidate["id"],),
         )
         if library["directory"]:

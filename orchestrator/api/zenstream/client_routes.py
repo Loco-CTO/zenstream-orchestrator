@@ -246,7 +246,7 @@ async def item_image(
     )
     if directory:
         for relative_path, content_hash in catalog.db.execute(
-            "SELECT relative_path,file_hash FROM media_files WHERE entity_id=? AND role='image'",
+            "SELECT relative_path,quick_fingerprint FROM media_files WHERE entity_id=? AND role='image'",
             (entity_id,),
         ):
             candidate = directory / relative_path

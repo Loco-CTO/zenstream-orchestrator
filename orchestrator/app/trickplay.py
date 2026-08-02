@@ -33,8 +33,8 @@ class TrickplayStore:
         self.db = db or Config().database
 
     @staticmethod
-    def fingerprint(file_hash, size, modified_ns) -> str:
-        return str(file_hash or f"{int(size or 0)}:{int(modified_ns or 0)}")
+    def fingerprint(quick_fingerprint, size, modified_ns) -> str:
+        return str(quick_fingerprint or f"{int(size or 0)}:{int(modified_ns or 0)}")
 
     @staticmethod
     def output_key(fingerprint: str, width: int, height: int, interval: int) -> str:
@@ -57,7 +57,7 @@ class TrickplayStore:
             scope = " AND e.library_id=?"
             params.append(library_id)
         rows = self.db.execute(
-            "SELECT f.id,f.entity_id,f.file_hash,f.size,f.modified_ns "
+            "SELECT f.id,f.entity_id,f.quick_fingerprint,f.size,f.modified_ns "
             "FROM media_files f "
             "JOIN library_entities e ON e.id=f.entity_id "
             "JOIN media_sources s ON s.media_file_id=f.id "
@@ -65,8 +65,8 @@ class TrickplayStore:
             params,
         )
         queued = 0
-        for media_file_id, entity_id, file_hash, size, modified_ns in rows:
-            fingerprint = self.fingerprint(file_hash, size, modified_ns)
+        for media_file_id, entity_id, quick_fingerprint, size, modified_ns in rows:
+            fingerprint = self.fingerprint(quick_fingerprint, size, modified_ns)
             existing = self.db.execute(
                 "SELECT source_fingerprint,frame_width,frame_height,interval_seconds,state "
                 "FROM trickplay_assets WHERE media_file_id=?",

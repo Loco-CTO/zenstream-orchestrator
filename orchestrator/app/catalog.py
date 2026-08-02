@@ -239,7 +239,7 @@ class Catalog:
         blur_field = ",image_blur_hash" if "image_blur_hash" in columns else ""
         cache = LocalArtworkCache(self.db)
         for values in self.db.execute(
-            f"SELECT relative_path,file_hash{blur_field} FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path COLLATE NOCASE",
+            f"SELECT relative_path,quick_fingerprint{blur_field} FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path COLLATE NOCASE",
             (entity_id,),
         ):
             relative_path, content_hash, *blur_hash = values

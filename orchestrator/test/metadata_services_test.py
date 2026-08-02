@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.database import DatabaseHandler
 from app.metadata_services import (
+    MetadataAssetExecutor,
     MetadataImageIngestService,
     MetadataIngestService,
     MetadataReadService,
@@ -54,6 +55,17 @@ class MetadataServicesTest(unittest.TestCase):
 
     def tearDown(self):
         self.db.close()
+
+    def test_asset_executor_deduplicates_pending_work(self):
+        executor = MetadataAssetExecutor(max_workers=1)
+        calls = []
+        try:
+            executor.submit(("tmdb", "movie", "10", "en", "digest"), lambda: calls.append(1))
+            executor.submit(("tmdb", "movie", "10", "en", "digest"), lambda: calls.append(2))
+            executor.drain(5)
+        finally:
+            executor.shutdown()
+        self.assertEqual(calls, [1])
 
     def _cache(self, locale, payload):
         payload = {"_imageLanguageSchema": 3, **payload}
@@ -130,7 +142,8 @@ class MetadataServicesTest(unittest.TestCase):
                 hasher=lambda target: "hash",
             )
             ingest = MetadataIngestService(
-                _Fetcher(), _Settings(["ja", "de"]), image_ingest=image_ingest
+                _Fetcher(), _Settings(["ja", "de"]), image_ingest=image_ingest,
+                background_assets=False,
             )
             ingest.ingest("tmdb", "movie", "10")
 
@@ -149,7 +162,8 @@ class MetadataServicesTest(unittest.TestCase):
                 hasher=lambda target: "hash",
             )
             ingest = MetadataIngestService(
-                _Fetcher(), _Settings(["en"]), image_ingest=image_ingest
+                _Fetcher(), _Settings(["en"]), image_ingest=image_ingest,
+                background_assets=False,
             )
             ingest.ingest_document(
                 "tvdb",

@@ -1088,9 +1088,12 @@ class LibraryScanner:
                     entity_type,
                     relative_path,
                 )
-                raise ValueError(
-                    f"Metadata resolution failed for {entity_type} '{query}' at '{relative_path}': {error}"
-                ) from error
+                self.store.update_job(
+                    job_id,
+                    progress_current=index,
+                    message=f"Metadata failed for {query}; continuing",
+                )
+                continue
             values = []
             for value in result["providerIds"]:
                 identifier_type = (

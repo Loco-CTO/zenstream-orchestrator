@@ -487,6 +487,56 @@ class LibraryScanner:
         }
         self._scan_provider_identity_changed: set[str] = set()
         self._scan_complete = False
+        self._stage_lock = threading.RLock()
+        self._stage = "idle"
+        self._stage_started = time.monotonic()
+        self._heartbeat_stop: threading.Event | None = None
+        self._heartbeat_thread: threading.Thread | None = None
+
+    def _set_stage(self, job_id: str, stage: str, **context) -> None:
+        with self._stage_lock:
+            self._stage = stage
+            self._stage_started = time.monotonic()
+        logger.info(
+            "library scan stage start job_id=%s stage=%s context=%s",
+            job_id,
+            stage,
+            context,
+        )
+        self.store.update_job(job_id, message=stage)
+
+    def _start_heartbeat(self, library_id: str, job_id: str) -> None:
+        self._heartbeat_stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not self._heartbeat_stop.wait(15):
+                with self._stage_lock:
+                    stage = self._stage
+                    elapsed = time.monotonic() - self._stage_started
+                message = f"Still working: {stage} ({elapsed:.0f}s)"
+                logger.warning(
+                    "library scan heartbeat library_id=%s job_id=%s stage=%s elapsed_seconds=%.1f",
+                    library_id,
+                    job_id,
+                    stage,
+                    elapsed,
+                )
+                self.store.update_job(job_id, message=message)
+
+        self._heartbeat_thread = threading.Thread(
+            target=heartbeat,
+            name=f"zenstream-scan-heartbeat-{job_id[:8]}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat(self) -> None:
+        if self._heartbeat_stop:
+            self._heartbeat_stop.set()
+        if self._heartbeat_thread:
+            self._heartbeat_thread.join(timeout=2)
+        self._heartbeat_stop = None
+        self._heartbeat_thread = None
 
     def scan(
         self,

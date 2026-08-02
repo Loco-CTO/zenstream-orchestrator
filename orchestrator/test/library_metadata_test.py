@@ -184,11 +184,12 @@ class LibraryMetadataTest(unittest.TestCase):
                     "SELECT updated_at FROM library_entities"
                 )[0][0]
 
-                with patch("app.playback.PlaybackManager") as playback:
-                    with patch("app.library._quick_fingerprint", wraps=_quick_fingerprint) as fingerprint:
-                        self._prepare_incremental_scan(scanner)
-                        scanner._scan_movies("library-1", root, "job-1", lambda: False)
-                        fingerprint.assert_not_called()
+                with patch("app.playback.PlaybackManager") as playback, patch(
+                    "app.library._quick_fingerprint", wraps=_quick_fingerprint
+                ) as fingerprint:
+                    self._prepare_incremental_scan(scanner)
+                    scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                    fingerprint.assert_not_called()
 
                     os.utime(video, ns=(first_mtime + 2_000_000_000, first_mtime + 2_000_000_000))
                     self._prepare_incremental_scan(scanner)

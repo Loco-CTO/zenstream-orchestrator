@@ -481,6 +481,7 @@ class LibraryScanner:
         self._scan_delta = {
             "added": set(),
             "changed": set(),
+            "content_changed": set(),
             "unchanged": set(),
             "removed": set(),
         }
@@ -492,6 +493,7 @@ class LibraryScanner:
         library_id: str,
         job_id: str,
         should_terminate: Callable[[], bool] | None = None,
+        targets: set[str] | None = None,
     ) -> None:
         should_terminate = should_terminate or (lambda: False)
         library = self.store.get(library_id)
@@ -513,6 +515,7 @@ class LibraryScanner:
         self._scan_delta = {
             "added": set(),
             "changed": set(),
+            "content_changed": set(),
             "unchanged": set(),
             "removed": set(),
         }
@@ -521,13 +524,22 @@ class LibraryScanner:
         try:
             self._check_termination(should_terminate)
             if library["type"] == "movies":
-                count = self._scan_movies(library_id, root, job_id, should_terminate)
+                count = self._scan_movies(
+                    library_id, root, job_id, should_terminate, targets
+                )
             elif library["type"] == "tv_series":
                 count = self._scan_series(
-                    library_id, root, job_id, should_terminate, resolve_immediately=True
+                    library_id,
+                    root,
+                    job_id,
+                    should_terminate,
+                    resolve_immediately=True,
+                    targets=targets,
                 )
             else:
-                count = self._scan_music(library_id, root, job_id, should_terminate)
+                count = self._scan_music(
+                    library_id, root, job_id, should_terminate, targets
+                )
             self._scan_complete = True
             if library["type"] != "tv_series":
                 self._resolve_and_seed(
@@ -539,14 +551,20 @@ class LibraryScanner:
             LocalArtworkCache(self.db).prune()
             from app.trickplay import TrickplayStore
 
-            if TrickplayStore(self.db).queue_pending(library_id):
+            if self._scan_delta["content_changed"] and TrickplayStore(
+                self.db
+            ).queue_pending(library_id):
                 from app.jobs import scheduler
 
                 scheduler.enqueue_trickplay_extraction()
             from app.intro_outro import IntroOutroStore
 
             intro_outro = IntroOutroStore(self.db)
-            if intro_outro.settings()["scanOnAdded"] and intro_outro.queue_pending(library_id):
+            if (
+                self._scan_delta["content_changed"]
+                and intro_outro.settings()["scanOnAdded"]
+                and intro_outro.queue_pending(library_id)
+            ):
                 from app.jobs import scheduler
 
                 scheduler.enqueue_intro_outro_detection()
@@ -629,27 +647,19 @@ class LibraryScanner:
                 "SELECT parent_id,season_number,episode_number,episode_end_number,disc_number,track_number FROM library_entities WHERE id=?",
                 (entity_id,),
             )
-            self.db.execute(
-                "UPDATE library_entities SET parent_id=?,season_number=?,episode_number=?,episode_end_number=?,disc_number=?,track_number=?,updated_at=? WHERE id=?",
-                (
-                    parent_id,
-                    fields["season_number"],
-                    fields["episode_number"],
-                    fields["episode_end_number"],
-                    fields["disc_number"],
-                    fields["track_number"],
-                    timestamp,
-                    entity_id,
-                ),
-            )
-            if before and tuple(before[0]) != (
+            next_values = (
                 parent_id,
                 fields["season_number"],
                 fields["episode_number"],
                 fields["episode_end_number"],
                 fields["disc_number"],
                 fields["track_number"],
-            ):
+            )
+            if before and tuple(before[0]) != next_values:
+                self.db.execute(
+                    "UPDATE library_entities SET parent_id=?,season_number=?,episode_number=?,episode_end_number=?,disc_number=?,track_number=?,updated_at=? WHERE id=?",
+                    (*next_values, timestamp, entity_id),
+                )
                 self._mark_changed(entity_id)
         else:
             entity_id = new_id()
@@ -675,9 +685,18 @@ class LibraryScanner:
         self._scan_seen_ids.add(entity_id)
         return entity_id
 
-    def _mark_changed(self, entity_id: str) -> None:
+    def _mark_changed(self, entity_id: str, *, content_changed: bool = False) -> None:
         self._scan_delta["changed"].add(entity_id)
         self._scan_delta["unchanged"].discard(entity_id)
+        if content_changed:
+            self._scan_delta["content_changed"].add(entity_id)
+
+    def _metadata_candidates(self) -> set[str]:
+        return (
+            set(self._scan_delta["added"])
+            | set(self._scan_delta["content_changed"])
+            | set(self._scan_provider_identity_changed)
+        )
 
     def _prune_missing_entities(self, library_id: str, root: Path | None = None) -> None:
         if not self._scan_complete:
@@ -1029,12 +1048,13 @@ class LibraryScanner:
             ),
             [library_id, *sorted(entity_types)],
         )
-        created_ids = set(self._scan_created_ids)
+        metadata_candidates = self._metadata_candidates()
         rows = [
             row
             for row in rows
             if row[0] in self._scan_seen_ids
-            and (row[0] in created_ids or self._needs_metadata(row[0]))
+            and row[0] in metadata_candidates
+            and self._needs_metadata(row[0])
         ]
         self.store.update_job(
             job_id,
@@ -1453,7 +1473,14 @@ class LibraryScanner:
                 "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND parent_id IS NOT NULL ORDER BY length(relative_path),relative_path",
                 (library_id,),
             )
-        rows = [row for row in rows if row[0] in self._scan_seen_ids]
+        metadata_candidates = self._metadata_candidates()
+        rows = [
+            row
+            for row in rows
+            if row[0] in self._scan_seen_ids
+            and row[0] in metadata_candidates
+            and self._needs_metadata(row[0])
+        ]
         self.store.update_job(
             job_id,
             progress_total=len(rows),
@@ -1892,8 +1919,10 @@ class LibraryScanner:
                 result["content_changed"] = True
         if has_hash:
             self._materialize_local_artwork(entity_id, root)
-        if result["added"] or result["updated"] or result["removed"]:
-            self._mark_changed(entity_id)
+        if result["added"] or result["removed"] or result["content_changed"]:
+            self._mark_changed(
+                entity_id, content_changed=result["content_changed"]
+            )
         # Probe after the file rows are reconciled so playback never depends
         # on a stale source row. A same-hash timestamp touch does not probe.
         if result["content_changed"]:

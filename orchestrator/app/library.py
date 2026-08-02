@@ -1983,16 +1983,28 @@ class LibraryScanner:
             yield from (current_path / name for name in directories)
             yield from (current_path / name for name in filenames)
 
+    @staticmethod
+    def _target_entries(root: Path, targets: set[str] | None) -> list[Path]:
+        if targets is None:
+            return list(root.iterdir())
+        entries = []
+        for target in sorted(targets):
+            candidate = root / target
+            if candidate.exists() or candidate.is_symlink():
+                entries.append(candidate)
+        return entries
+
     def _scan_movies(
         self,
         library_id: str,
         root: Path,
         job_id: str,
         should_terminate: Callable[[], bool],
+        targets: set[str] | None = None,
     ) -> int:
         entries = [
             path
-            for path in root.iterdir()
+            for path in self._target_entries(root, targets)
             if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS
         ]
         self.store.update_job(job_id, progress_total=len(entries))
@@ -2023,10 +2035,13 @@ class LibraryScanner:
         job_id: str,
         should_terminate: Callable[[], bool],
         resolve_immediately: bool = False,
+        targets: set[str] | None = None,
     ) -> int:
         from app.providers import MetadataService
 
-        series_dirs = [path for path in root.iterdir() if path.is_dir()]
+        series_dirs = [
+            path for path in self._target_entries(root, targets) if path.is_dir()
+        ]
         self.store.update_job(job_id, progress_total=len(series_dirs))
         episode_count = 0
         service = MetadataService() if resolve_immediately else None
@@ -2140,8 +2155,11 @@ class LibraryScanner:
                 "SELECT id FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season'))",
                 (library_id, series, series),
             )
-            needs_resolution = self._needs_metadata(series) or any(
-                self._needs_metadata(row[0])
+            metadata_candidates = self._metadata_candidates()
+            needs_resolution = (
+                series in metadata_candidates and self._needs_metadata(series)
+            ) or any(
+                row[0] in metadata_candidates and self._needs_metadata(row[0])
                 for row in children
                 if row[0] in self._scan_seen_ids
             )
@@ -2192,14 +2210,23 @@ class LibraryScanner:
         root: Path,
         job_id: str,
         should_terminate: Callable[[], bool],
+        targets: set[str] | None = None,
     ) -> int:
         album_dirs = []
         def traversal_error(error):
             raise error
 
-        for directory, _, filenames in os.walk(root, onerror=traversal_error):
-            if any(Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames):
-                album_dirs.append(Path(directory))
+        scan_roots = [root] if targets is None else self._target_entries(root, targets)
+        for scan_root in scan_roots:
+            if not scan_root.is_dir():
+                continue
+            for directory, _, filenames in os.walk(
+                scan_root, onerror=traversal_error
+            ):
+                if any(
+                    Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames
+                ):
+                    album_dirs.append(Path(directory))
         self.store.update_job(job_id, progress_total=len(album_dirs))
         count = 0
         artists: dict[str, str] = {}

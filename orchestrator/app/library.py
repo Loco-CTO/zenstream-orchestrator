@@ -2529,7 +2529,11 @@ class _LibraryChangeHandler(FileSystemEventHandler):
         self, event
     ):  # watchdog emits separate create/modify/delete/move events
         if not getattr(event, "is_directory", False):
-            self.runtime.request_reconcile(self.library_id)
+            self.runtime.request_reconcile(
+                self.library_id,
+                getattr(event, "src_path", None),
+                getattr(event, "dest_path", None),
+            )
 
 
 class LibraryRuntime:
@@ -2544,6 +2548,8 @@ class LibraryRuntime:
         self.observer = None
         self._watch_paths: set[str] = set()
         self._reconcile_due: dict[str, float] = {}
+        self._reconcile_targets: dict[str, set[str]] = {}
+        self._job_targets: dict[str, set[str]] = {}
         self._active_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_lock = threading.RLock()
@@ -2552,13 +2558,6 @@ class LibraryRuntime:
         if self.thread and self.thread.is_alive():
             return
         self._recover_active_jobs()
-        for library in self.store.list():
-            unresolved = self.store.db.execute(
-                "SELECT COUNT(*) FROM library_entities WHERE library_id=? AND match_status IN ('unresolved','failed')",
-                (library["id"],),
-            )[0][0]
-            if unresolved:
-                self.enqueue(library["id"], "scan")
         self.stop_event.clear()
         self._configure_watchers()
         self.thread = threading.Thread(
@@ -2588,7 +2587,12 @@ class LibraryRuntime:
         self._watch_paths.clear()
         self._configure_watchers()
 
-    def enqueue(self, library_id: str, kind: str = "scan") -> dict | None:
+    def enqueue(
+        self,
+        library_id: str,
+        kind: str = "scan",
+        targets: set[str] | None = None,
+    ) -> dict | None:
         # Scan, reconcile, and collection rebuild all mutate the same inventory.
         # Claim the task atomically so different triggers cannot overlap.
         with self.store.db.transaction() as cursor:
@@ -2611,6 +2615,14 @@ class LibraryRuntime:
                     "INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)",
                     (job_id, library_id, kind, now()),
                 )
+        if targets:
+            pending = getattr(self, "_reconcile_targets", {}).setdefault(
+                library_id, set()
+            )
+            pending.update(targets)
+            if not existing:
+                self._job_targets[job_id] = pending.copy()
+                pending.clear()
         job = self.store.job(job_id)
         with self.condition:
             self.condition.notify_all()
@@ -2672,36 +2684,40 @@ class LibraryRuntime:
                 self.condition.wait(timeout=min(0.25, remaining))
 
     def _recover_active_jobs(self) -> None:
-        """Resume one interrupted run per library and collapse stale duplicates."""
+        """Make interrupted inventory jobs terminal instead of restarting scans."""
         rows = self.store.db.execute(
             "SELECT id,library_id,state FROM library_jobs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC"
         )
-        by_library: dict[str, list[tuple[str, str]]] = {}
-        for job_id, library_id, state in rows:
-            by_library.setdefault(library_id, []).append((job_id, state))
         timestamp = now()
         with self.store.db.transaction() as cursor:
-            for library_id, jobs in by_library.items():
-                resumable = [job for job in jobs if job[1] != "terminating"]
-                keep_id = resumable[0][0] if resumable else None
-                for job_id, state in jobs:
-                    if job_id == keep_id:
-                        cursor.execute(
-                            "UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after Orchestrator restart',error=NULL,started_at=NULL,finished_at=NULL WHERE id=?",
-                            (job_id,),
-                        )
-                    else:
-                        cursor.execute(
-                            "UPDATE library_jobs SET state='terminated',message='Superseded by the active task run',error=NULL,finished_at=? WHERE id=?",
-                            (timestamp, job_id),
-                        )
+            for job_id, library_id, _state in rows:
+                cursor.execute(
+                    "UPDATE library_jobs SET state='terminated',message='Interrupted by Orchestrator restart; run scan manually',error=NULL,finished_at=? WHERE id=?",
+                    (timestamp, job_id),
+                )
                 cursor.execute(
                     "UPDATE libraries SET scan_state='idle',scan_error=NULL,updated_at=? WHERE id=?",
                     (timestamp, library_id),
                 )
 
-    def request_reconcile(self, library_id: str) -> None:
-        # Debounce bursts from copy/move operations into one reconcile job.
+    def request_reconcile(self, library_id: str, *paths: str | None) -> None:
+        """Debounce watcher changes into top-level, path-scoped reconciles."""
+        library = self.store.get(library_id)
+        if not library:
+            return
+        root = Path(library["directory"])
+        targets = self._reconcile_targets.setdefault(library_id, set())
+        for value in paths:
+            if not value:
+                continue
+            try:
+                relative_path = Path(value).relative_to(root)
+            except ValueError:
+                continue
+            if relative_path.parts:
+                targets.add(relative_path.parts[0])
+        if not targets:
+            return
         self._reconcile_due[library_id] = time.monotonic() + 5
         with self.condition:
             self.condition.notify_all()
@@ -2764,7 +2780,11 @@ class LibraryRuntime:
                 if time.monotonic() >= deadline
             ]
             for library_id in due:
-                self.enqueue(library_id, "reconcile")
+                self.enqueue(
+                    library_id,
+                    "reconcile",
+                    self._reconcile_targets.get(library_id, set()).copy(),
+                )
                 self._reconcile_due.pop(library_id, None)
             rows = self.store.db.execute(
                 "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
@@ -2801,8 +2821,12 @@ class LibraryRuntime:
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
         try:
             if kind in {"scan", "reconcile", "collection_rebuild"}:
+                targets = self._job_targets.pop(job_id, None)
                 self.scanner.scan(
-                    library_id, job_id, self._cancel_events[job_id].is_set
+                    library_id,
+                    job_id,
+                    self._cancel_events[job_id].is_set,
+                    targets=targets if kind == "reconcile" else None,
                 )
             else:
                 self.store.update_job(
@@ -2824,6 +2848,8 @@ class LibraryRuntime:
             with self._active_lock:
                 self._active_jobs.discard(job_id)
                 self._cancel_events.pop(job_id, None)
+            if self._reconcile_targets.get(library_id):
+                self._reconcile_due[library_id] = time.monotonic()
             with self.condition:
                 self.condition.notify_all()
 

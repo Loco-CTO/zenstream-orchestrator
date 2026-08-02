@@ -912,14 +912,10 @@ class LibraryScanner:
                     (provider, entity_type, str(provider_id), locale),
                 )
                 if cached:
-                    document = ingest.metadata_service.cache.get(
-                        provider, entity_type, str(provider_id), locale
-                    )
-                    if document:
-                        ingest.ingest_document(
-                            provider, entity_type, str(provider_id), locale, document
-                        )
-                        continue
+                    # A normal library scan is inventory-driven. Do not
+                    # rematerialize or refetch an already cached locale; the
+                    # explicit metadata refresh job owns that work.
+                    continue
                 try:
                     ingest.ingest_locale(
                         provider,

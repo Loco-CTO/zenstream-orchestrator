@@ -2034,14 +2034,34 @@ class LibraryScanner:
                     job_id,
                     message=f"Resolving metadata for {series_dir.name} ({series_index}/{len(series_dirs)})",
                 )
-                self._resolve_series_immediately(
-                    library_id,
-                    series,
-                    relative(str(root), str(series_dir)),
-                    service,
-                    job_id,
-                    should_terminate,
-                )
+                try:
+                    self._resolve_series_immediately(
+                        library_id,
+                        series,
+                        relative(str(root), str(series_dir)),
+                        service,
+                        job_id,
+                        should_terminate,
+                    )
+                except JobTerminated:
+                    raise
+                except Exception as error:
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='failed',match_method='scan_resolution',updated_at=? WHERE id=?",
+                        (now(), series),
+                    )
+                    logger.exception(
+                        "metadata series failed; continuing library_id=%s series_id=%s path=%s error=%s",
+                        library_id,
+                        series,
+                        relative(str(root), str(series_dir)),
+                        error,
+                    )
+                    self.store.update_job(
+                        job_id,
+                        progress_current=series_index,
+                        message=f"Metadata failed for {series_dir.name}; continuing",
+                    )
             self.store.update_job(
                 job_id,
                 progress_current=series_index,

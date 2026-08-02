@@ -225,17 +225,20 @@ function LibraryViewPage() {
 					: [];
 				setLocales(configured);
 				setLanguageOptions(Array.isArray(value.options) ? value.options : []);
-				setLocale((currentLocale) =>
-					(urlLocale && configured.includes(urlLocale)
+				const storedLocale = window.localStorage.getItem(
+					"zenstream.admin.metadataLocale",
+				);
+				const preferredLocale =
+					urlLocale && configured.includes(urlLocale)
 						? urlLocale
-						: currentLocale && configured.includes(currentLocale)
-							? currentLocale
-							: window.localStorage.getItem("zenstream.admin.metadataLocale") &&
-								  configured.includes(
-									window.localStorage.getItem("zenstream.admin.metadataLocale") || "",
-								  )
-							? window.localStorage.getItem("zenstream.admin.metadataLocale") || ""
-							: configured[0] || ""),
+						: storedLocale && configured.includes(storedLocale)
+							? storedLocale
+							: "";
+				setLocale((currentLocale) =>
+					preferredLocale ||
+					(currentLocale && configured.includes(currentLocale)
+						? currentLocale
+						: configured[0] || ""),
 				);
 			})
 			.catch((caught) => {
@@ -402,7 +405,7 @@ function LibraryViewPage() {
 							<select
 								value={locale}
 								disabled={!locales.length}
-									onChange={(event) => {
+								onChange={(event) => {
 									const nextLocale = event.target.value;
 									setLocale(nextLocale);
 									window.localStorage.setItem(

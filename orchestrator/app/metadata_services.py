@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
+import threading
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
@@ -26,6 +29,58 @@ from app.images import blurhash_for_image, encode_webp_bytes
 
 
 logger = get_logger("metadata")
+
+
+class MetadataAssetExecutor:
+    def __init__(self, max_workers: int | None = None):
+        configured = max_workers or int(os.getenv("METADATA_ASSET_WORKERS", "4"))
+        self.max_workers = max(1, min(16, configured))
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.max_workers, thread_name_prefix="zenstream-metadata-assets"
+        )
+        self._lock = threading.RLock()
+        self._pending: dict[tuple, Future] = {}
+        self._states: dict[tuple, str] = {}
+
+    def submit(self, key: tuple, work) -> str:
+        with self._lock:
+            current = self._pending.get(key)
+            if current is not None and not current.done():
+                return self._states.get(key, "pending")
+            self._states[key] = "pending"
+            future = self._executor.submit(work)
+            self._pending[key] = future
+
+            def finished(done: Future) -> None:
+                state = "complete"
+                try:
+                    done.result()
+                except Exception as error:
+                    state = "failed"
+                    logger.warning("metadata asset work failed key=%s error=%s", key, error)
+                with self._lock:
+                    self._states[key] = state
+                    self._pending.pop(key, None)
+
+            future.add_done_callback(finished)
+            return "pending"
+
+    def drain(self, timeout: float | None = None) -> None:
+        with self._lock:
+            futures = list(self._pending.values())
+        if futures:
+            wait(futures, timeout=timeout)
+
+    def shutdown(self, wait_timeout: float = 5) -> None:
+        self.drain(wait_timeout)
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def state(self, key: tuple) -> str | None:
+        with self._lock:
+            return self._states.get(key)
+
+
+asset_executor = MetadataAssetExecutor()
 
 
 def _canonical_metadata_language(value: object) -> str | None:
@@ -362,6 +417,7 @@ class MetadataIngestService:
         settings: MetadataLanguageSettings | None = None,
         image_ingest=None,
         credit_ingest=None,
+        background_assets: bool = True,
     ):
         if metadata_service is None:
             from app.providers import MetadataService
@@ -374,6 +430,7 @@ class MetadataIngestService:
             if cache is not None and getattr(cache, "db", None) is not None:
                 image_ingest = MetadataImageIngestService(cache)
         self.image_ingest = image_ingest
+        self.background_assets = background_assets
         if credit_ingest is None:
             cache = getattr(metadata_service, "cache", None)
             if cache is not None and getattr(cache, "db", None) is not None:
@@ -435,16 +492,29 @@ class MetadataIngestService:
         """Materialize a normalized document, including documents cached by aggregation."""
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
-        if self.image_ingest is not None:
-            # This intentionally runs for cache hits too, repairing metadata
-            # rows created before eager image ingestion was introduced.
-            self.image_ingest.ingest(
-                provider, entity_type, provider_id, locale, normalized
-            )
-        if self.credit_ingest is not None:
-            self.credit_ingest.ingest(
-                provider, entity_type, provider_id, locale, normalized
-            )
+        if self.image_ingest is not None or self.credit_ingest is not None:
+            def materialize_assets() -> None:
+                # Cache hits also run this path so rows created before eager
+                # asset ingestion are repaired without blocking metadata.
+                if self.image_ingest is not None:
+                    self.image_ingest.ingest(
+                        provider, entity_type, provider_id, locale, normalized
+                    )
+                if self.credit_ingest is not None:
+                    self.credit_ingest.ingest(
+                        provider, entity_type, provider_id, locale, normalized
+                    )
+
+            if self.background_assets:
+                digest = hashlib.sha256(
+                    json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
+                ).hexdigest()
+                asset_executor.submit(
+                    (provider, entity_type, provider_id, locale, digest),
+                    materialize_assets,
+                )
+            else:
+                materialize_assets()
         return normalized
 
 

@@ -260,7 +260,15 @@ function LibraryViewPage() {
 		setItems([]);
 		if (current && locale) void load(current, null, 1);
 		return () => abortRef.current?.abort();
-	}, [libraryId, locale, load]);
+	}, [libraryId, locale]);
+
+	useEffect(() => {
+		if (session && locale && navigation.length === 0 && searchQuery !== undefined)
+			void load(session, parent, 1);
+		// Search reloads must never clear an open series/season navigation stack.
+		// The library/locale effect above owns the initial root load.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [searchQuery]);
 
 	useEffect(() => {
 		const ids = urlEntityPathValue.split(",").filter(Boolean);

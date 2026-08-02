@@ -1449,6 +1449,17 @@ class LibraryScanner:
                 if not provider_id:
                     continue
                 for locale in ingest.locales():
+                    self.store.update_job(
+                        job_id,
+                        message=(
+                            f"Fetching {provider} {entity_type} metadata "
+                            f"{relative_path} ({index}/{len(rows)}, {locale})"
+                        ),
+                    )
+                    logger.info(
+                        "metadata child locale start entity_id=%s type=%s provider=%s provider_id=%s locale=%s",
+                        entity_id, entity_type, provider, provider_id, locale,
+                    )
                     try:
                         normalized = ingest.ingest_locale(
                             provider, entity_type, provider_id, locale, force=False
@@ -1458,6 +1469,10 @@ class LibraryScanner:
                             required_succeeded = True
                         self._persist_normalized_ids(entity_id, entity_type, normalized)
                         self._persist_child_ids(entity_id, normalized)
+                        logger.info(
+                            "metadata child locale complete entity_id=%s type=%s provider=%s provider_id=%s locale=%s",
+                            entity_id, entity_type, provider, provider_id, locale,
+                        )
                     except Exception as error:
                         errors.append(
                             f"{provider}/{locale}: {type(error).__name__}: {error}"
@@ -2012,6 +2027,10 @@ class LibraryScanner:
                 if row[0] in self._scan_seen_ids
             )
             if service and needs_resolution:
+                self.store.update_job(
+                    job_id,
+                    message=f"Resolving metadata for {series_dir.name} ({series_index}/{len(series_dirs)})",
+                )
                 self._resolve_series_immediately(
                     library_id,
                     series,

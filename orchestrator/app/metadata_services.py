@@ -560,9 +560,10 @@ class MetadataImageIngestService:
         else:
             import httpx
 
+            configured_timeout = float(os.getenv("METADATA_IMAGE_TIMEOUT_SECONDS", "20"))
             response = httpx.get(
                 url,
-                timeout=20,
+                timeout=max(3.0, min(60.0, configured_timeout)),
                 follow_redirects=True,
                 headers={"Accept": "image/*", "User-Agent": "ZenStream/metadata"},
             )

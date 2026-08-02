@@ -476,7 +476,7 @@ class IntroOutroDetector:
         executable = ffmpeg_path()
         if not executable:
             raise RuntimeError("FFmpeg is not available.")
-        return [executable, "-hide_banner", "-loglevel", "error", "-ss", str(start), "-i", str(path), "-t", str(duration), "-map", "0:a:0", "-ac", "2", "-f", "chromaprint", "-fp_format", "raw", "-"]
+        return [executable, "-hide_banner", "-loglevel", "error", "-threads", "1", "-ss", str(start), "-i", str(path), "-t", str(duration), "-map", "0:a:0", "-ac", "2", "-f", "chromaprint", "-fp_format", "raw", "-"]
 
     def _fingerprint(self, path: Path, start: float, duration: float, should_terminate) -> bytes:
         if not path.is_file():

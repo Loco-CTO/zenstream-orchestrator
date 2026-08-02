@@ -489,6 +489,7 @@ class LibraryScanner:
         self._scan_complete = False
         self._stage_lock = threading.RLock()
         self._stage = "idle"
+        self._stage_context: dict = {}
         self._stage_started = time.monotonic()
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
@@ -496,6 +497,7 @@ class LibraryScanner:
     def _set_stage(self, job_id: str, stage: str, **context) -> None:
         with self._stage_lock:
             self._stage = stage
+            self._stage_context = context
             self._stage_started = time.monotonic()
         logger.info(
             "library scan stage start job_id=%s stage=%s context=%s",
@@ -512,8 +514,17 @@ class LibraryScanner:
             while not self._heartbeat_stop.wait(15):
                 with self._stage_lock:
                     stage = self._stage
+                    context = dict(self._stage_context)
                     elapsed = time.monotonic() - self._stage_started
-                message = f"Still working: {stage} ({elapsed:.0f}s)"
+                context_text = " ".join(
+                    f"{key}={value}"
+                    for key, value in context.items()
+                    if value is not None
+                )
+                message = f"Still working: {stage}"
+                if context_text:
+                    message += f" [{context_text}]"
+                message += f" ({elapsed:.0f}s)"
                 logger.warning(
                     "library scan heartbeat library_id=%s job_id=%s stage=%s elapsed_seconds=%.1f",
                     library_id,

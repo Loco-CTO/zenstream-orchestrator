@@ -1,4 +1,5 @@
 import json
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -59,9 +60,19 @@ class MetadataServicesTest(unittest.TestCase):
     def test_asset_executor_deduplicates_pending_work(self):
         executor = MetadataAssetExecutor(max_workers=1)
         calls = []
+        started = threading.Event()
+        release = threading.Event()
+
+        def first_work():
+            calls.append(1)
+            started.set()
+            release.wait(5)
+
         try:
-            executor.submit(("tmdb", "movie", "10", "en", "digest"), lambda: calls.append(1))
+            executor.submit(("tmdb", "movie", "10", "en", "digest"), first_work)
+            self.assertTrue(started.wait(5))
             executor.submit(("tmdb", "movie", "10", "en", "digest"), lambda: calls.append(2))
+            release.set()
             executor.drain(5)
         finally:
             executor.shutdown()

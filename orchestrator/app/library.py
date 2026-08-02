@@ -907,7 +907,6 @@ class LibraryScanner:
             if provider not in {"tmdb", "tvdb", "musicbrainz"}:
                 continue
             for locale in locales:
-                force_credit_refresh = False
                 cached = self.db.execute(
                     "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
                     (provider, entity_type, str(provider_id), locale),
@@ -927,7 +926,7 @@ class LibraryScanner:
                         entity_type,
                         str(provider_id),
                         locale,
-                        force=force_credit_refresh,
+                        force=False,
                     )
                 except Exception as error:
                     logger.warning(

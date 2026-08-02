@@ -393,7 +393,13 @@ class MetadataMissingJob:
         self.store = store
         self.db = store.db
 
-    def run(self, run_id: str, definition: dict, should_terminate=None) -> None:
+    def run(
+        self,
+        run_id: str,
+        definition: dict,
+        should_terminate=None,
+        force: bool = False,
+    ) -> None:
         should_terminate = should_terminate or (lambda: False)
         ingest = MetadataIngestService()
         locales = ingest.locales()
@@ -426,14 +432,12 @@ class MetadataMissingJob:
                     cached = ingest.metadata_service.cache.get(
                         provider, entity_type, provider_id, locale
                     )
-                    if cached:
+                    if cached and not force:
                         ingest.ingest_document(
                             provider, entity_type, provider_id, locale, cached
                         )
                     else:
-                        ingest.ingest_locale(
-                            provider, entity_type, provider_id, locale, force=False
-                        )
+                        ingest.ingest_locale(provider, entity_type, provider_id, locale, force=force)
                     if not ingest.metadata_service.cache.get(
                         provider, entity_type, provider_id, locale
                     ):
@@ -472,7 +476,10 @@ class MetadataMissingJob:
                 message=summary,
                 error=summary,
                 error_details=json.dumps(
-                    {"operation": "metadata_missing", "failures": failures}
+                    {
+                        "operation": "metadata_refresh" if force else "metadata_missing",
+                        "failures": failures,
+                    }
                 ),
             )
         else:
@@ -600,6 +607,22 @@ class JobScheduler:
         if not definition:
             self.store.ensure_defaults()
             definition = self.store.by_key("metadata_missing")
+        run, _ = self.store.create_or_get_active_run(definition)
+        with self.condition:
+            self.condition.notify_all()
+        return run
+
+    def enqueue_metadata_refresh(self) -> dict:
+        definition = self.store.by_key("metadata_refresh")
+        if not definition:
+            definition = self.store.ensure(
+                "metadata_refresh",
+                "Refresh metadata",
+                "Refetch all indexed provider metadata, artwork, and credits.",
+                "metadata_refresh",
+                43200,
+                {},
+            )
         run, _ = self.store.create_or_get_active_run(definition)
         with self.condition:
             self.condition.notify_all()
@@ -759,6 +782,10 @@ class JobScheduler:
             if kind == "metadata_missing":
                 MetadataMissingJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
+                )
+            elif kind == "metadata_refresh":
+                MetadataMissingJob(self.store).run(
+                    run_id, definition, self.cancel_events[run_id].is_set, force=True
                 )
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(

@@ -28,6 +28,7 @@ from app.models.metadata import (
 from app.logging_config import get_logger
 from app.images import blurhash_for_image, encode_webp_bytes
 from app.worker_config import configured_worker_limit
+from app.foreground import active_requests
 
 
 logger = get_logger("metadata")
@@ -36,7 +37,7 @@ logger = get_logger("metadata")
 class MetadataAssetExecutor:
     def __init__(self, max_workers: int | None = None):
         self.max_workers = (
-            configured_worker_limit("METADATA_ASSET_WORKERS", 64)
+            configured_worker_limit("METADATA_ASSET_WORKERS", 64, default=2)
             if max_workers is None
             else max(1, min(64, max_workers))
         )
@@ -54,7 +55,12 @@ class MetadataAssetExecutor:
             if current is not None and not current.done():
                 return self._states.get(key, "pending")
             self._states[key] = "pending"
-            future = self._executor.submit(work)
+            def throttled_work():
+                while active_requests():
+                    threading.Event().wait(0.05)
+                return work()
+
+            future = self._executor.submit(throttled_work)
             self._pending[key] = future
 
             def finished(done: Future) -> None:

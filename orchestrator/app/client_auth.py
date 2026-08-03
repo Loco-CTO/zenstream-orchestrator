@@ -21,7 +21,9 @@ def bearer_token(value: str | None) -> str | None:
 
 def require_account(request: Request) -> tuple[dict, str]:
     token = bearer_token(request.headers.get("authorization"))
-    account = Account().authenticate_token(token)
+    account = getattr(request.state, "authenticated", None)
+    if account is None:
+        account = Account().authenticate_token(token)
     if not account or not token:
         raise HTTPException(401, "Authentication required.")
     return account, token
@@ -29,7 +31,9 @@ def require_account(request: Request) -> tuple[dict, str]:
 
 def optional_account(request: Request) -> tuple[dict, str] | None:
     token = bearer_token(request.headers.get("authorization"))
-    account = Account().authenticate_token(token)
+    account = getattr(request.state, "authenticated", None)
+    if account is None:
+        account = Account().authenticate_token(token)
     return (account, token) if account and token else None
 
 
@@ -75,7 +79,7 @@ def account_from_access(request: Request, kind: str = "resource") -> dict:
     if authenticated:
         return authenticated[0]
     payload = read_ticket(request.query_params.get("access"), kind)
-    rows = Account().db.execute(
+    rows = Account().db.read_execute(
         "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users WHERE id=?",
         (payload.get("uid"),),
     )
@@ -92,7 +96,7 @@ def websocket_account(websocket: WebSocket) -> dict | None:
         payload = read_ticket(ticket, "socket")
     except HTTPException:
         return None
-    rows = Account().db.execute(
+    rows = Account().db.read_execute(
         "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users WHERE id=?",
         (payload.get("uid"),),
     )

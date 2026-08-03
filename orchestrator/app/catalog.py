@@ -196,7 +196,7 @@ class Catalog:
             for row in self.db.execute(
                 "SELECT DISTINCT parent.library_id "
                 "FROM library_entities parent "
-                "JOIN library_entities child INDEXED BY idx_library_entities_parent_id "
+                "JOIN library_entities child "
                 "ON child.parent_id=parent.id "
                 f"WHERE parent.library_id IN ({placeholders})",
                 sorted(library_ids),
@@ -1536,23 +1536,35 @@ class Catalog:
         self, user_id: str, language: str, allowed: set[str]
     ) -> list[dict]:
         placeholders = ",".join("?" for _ in allowed)
-        rows = self.db.execute(
+        context = self._context(user_id)
+        select_rows = lambda: self.db.execute(
             f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection') ORDER BY created_at DESC LIMIT 36",
             list(allowed),
+        )
+        rows = (
+            context.measure("home_discovery_sql", select_rows)
+            if context
+            else select_rows()
         )
         self._preload_projected_states(user_id, [row[0] for row in rows])
         self._preload_projected_metadata(user_id, [row[0] for row in rows], language)
         dates = self._date_values("", allowed, {row[0] for row in rows})
-        return [
-            self._serialize(
-                user_id,
-                row,
-                self.metadata(user_id, row[0], language)["metadata"],
-                dates=dates.get(row[0]),
-                language=language,
-            )
-            for row in rows
-        ]
+        def serialize_rows():
+            return [
+                self._serialize(
+                    user_id,
+                    row,
+                    self.metadata(user_id, row[0], language)["metadata"],
+                    dates=dates.get(row[0]),
+                    language=language,
+                )
+                for row in rows
+            ]
+        return (
+            context.measure("serialization", serialize_rows)
+            if context
+            else serialize_rows()
+        )
 
     @_catalog_read
     def home_featured(self, user_id: str, language: str) -> list[dict]:
@@ -1760,7 +1772,7 @@ class Catalog:
                 )
             batch = self.db.execute(
                 f"SELECT {columns},f.modified_ns,f.id "
-                "FROM media_files f INDEXED BY idx_media_files_role_modified_entity "
+                "FROM media_files f "
                 "JOIN library_entities e ON e.id=f.entity_id "
                 "WHERE f.role='media' AND e.library_id=? AND e.entity_type=?"
                 f"{cursor_filter} ORDER BY f.modified_ns DESC,f.entity_id,f.id LIMIT 256",
@@ -1898,10 +1910,17 @@ class Catalog:
                         "items": released,
                     }
                 )
+        context = self._context(user_id)
+        derived = lambda: self.home_derived(user_id, language, items)
+        derived_rows = (
+            context.measure("home_derived", derived)
+            if context
+            else derived()
+        )
         return {
             "latestItems": items[:25],
             "continueWatching": resume,
             "nextUp": next_up[:18],
             "libraryRows": library_rows,
-            **self.home_derived(user_id, language, items),
+            **derived_rows,
         }

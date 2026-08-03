@@ -46,11 +46,8 @@ class Admin:
         return token
 
     def authenticate(self, token: str) -> bool:
-        self._db.execute(
-            "DELETE FROM admin_sessions WHERE datetime(expiration) < datetime('now')"
-        )
         return bool(
-            self._db.execute(
+            self._db.read_execute(
                 "SELECT 1 FROM admin_sessions s JOIN admins a ON a.username = s.username "
                 "WHERE s.username = ? AND s.token = ? AND a.disabled = 0",
                 (self.username, token),
@@ -65,7 +62,7 @@ class Admin:
     def list_accounts(self) -> list[dict]:
         return [
             {"username": row[0], "is_root": bool(row[1]), "disabled": bool(row[2])}
-            for row in self._db.execute(
+            for row in self._db.read_execute(
                 "SELECT username, is_root, disabled FROM admins ORDER BY username"
             )
         ]
@@ -97,7 +94,7 @@ class Admin:
         )
 
     def profile(self) -> dict | None:
-        rows = self._db.execute(
+        rows = self._db.read_execute(
             "SELECT username, is_root, disabled FROM admins WHERE username = ?",
             (self.username,),
         )

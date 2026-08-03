@@ -47,6 +47,9 @@ class _CatalogDatabase:
         self._database = database
 
     def execute(self, query, params=None):
+        context = Catalog._read_context.get() if "Catalog" in globals() else None
+        if context is not None:
+            context.query_count += 1
         return self._database.read_execute(query, params)
 
     def transaction(self):
@@ -85,6 +88,8 @@ class _CatalogReadContext:
         self.date_rollup_hits = 0
         self.date_fallback_roots = 0
         self.date_scan_states: set[str] = set()
+        self.selected_rows = 0
+        self.query_count = 0
 
     def measure(self, stage: str, action):
         started = time.perf_counter()
@@ -123,6 +128,14 @@ def _catalog_read(method):
                         + ",".join(sorted(context.date_scan_states)),
                     )
                     if part
+                )
+            if context is not None:
+                details = " ".join(
+                    part for part in (
+                        details,
+                        f"selected_rows={context.selected_rows}",
+                        f"query_count={context.query_count}",
+                    ) if part
                 )
             log = logger.warning if elapsed > 2 else logger.debug
             log(
@@ -187,6 +200,19 @@ class Catalog:
     def _has_table(self, name: str) -> bool:
         return self._table_exists(name)
 
+    def _read_model_ready(self) -> bool:
+        if not all(
+            self._has_table(name)
+            for name in (
+                "catalog_entity_summary",
+                "catalog_item_projection",
+                "catalog_read_model_status",
+            )
+        ):
+            return False
+        rows = self.db.execute("SELECT state FROM catalog_read_model_status WHERE id=1")
+        return bool(rows and rows[0][0] == "ready")
+
     def _library_supports_last_added(self, library_ids: set[str]) -> set[str]:
         if not library_ids:
             return set()
@@ -194,11 +220,10 @@ class Catalog:
         supported = {
             row[0]
             for row in self.db.execute(
-                "SELECT DISTINCT parent.library_id "
-                "FROM library_entities parent "
-                "JOIN library_entities child "
-                "ON child.parent_id=parent.id "
-                f"WHERE parent.library_id IN ({placeholders})",
+                "SELECT l.id FROM libraries l "
+                f"WHERE l.id IN ({placeholders}) AND EXISTS ("
+                "SELECT 1 FROM library_entities child "
+                "WHERE child.library_id=l.id AND child.parent_id IS NOT NULL LIMIT 1)",
                 sorted(library_ids),
             )
         }
@@ -334,9 +359,16 @@ class Catalog:
         projected = context.projected_metadata.get((entity_id, language)) if context else None
         if projected is not None and not include_credits:
             return {"metadata": projected}
-        if not include_credits and self._has_table("catalog_metadata_projection"):
+        projection_table = (
+            "catalog_item_projection"
+            if self._read_model_ready() and self._has_table("catalog_item_projection")
+            else "catalog_metadata_projection"
+            if self._has_table("catalog_metadata_projection")
+            else None
+        )
+        if not include_credits and projection_table:
             rows = self.db.execute(
-                "SELECT payload FROM catalog_metadata_projection WHERE entity_id=? AND locale=?",
+                f"SELECT payload FROM {projection_table} WHERE entity_id=? AND locale=?",
                 (entity_id, language),
             )
             if rows:
@@ -710,12 +742,43 @@ class Catalog:
 
     def _preload_projected_states(self, user_id: str, entity_ids: list[str]) -> None:
         context = self._context(user_id)
-        if context is None or not entity_ids or not self._has_table("catalog_user_rollups"):
+        if context is None or not entity_ids:
             return
         missing = [entity_id for entity_id in entity_ids if entity_id not in context.projected_states]
         if not missing:
             return
         placeholders = ",".join("?" for _ in missing)
+        if self._read_model_ready() and self._has_table("catalog_user_summary"):
+            rows = self.db.execute(
+                f"SELECT e.id,COALESCE(s.favorite,0),COALESCE(s.played,0),COALESCE(s.play_count,0),"
+                f"COALESCE(u.played_leaf_count,0),COALESCE(x.playable_leaf_count,0),"
+                f"COALESCE(s.position_seconds,0),COALESCE(s.duration_seconds,0),s.last_played_at "
+                f"FROM library_entities e JOIN catalog_entity_summary x ON x.entity_id=e.id "
+                f"LEFT JOIN user_item_state s ON s.user_id=? AND s.entity_id=e.id "
+                f"LEFT JOIN catalog_user_summary u ON u.user_id=? AND u.entity_id=e.id "
+                f"WHERE e.id IN ({placeholders})",
+                [user_id, user_id, *missing],
+            )
+            context.projected_states.update(
+                {
+                    row[0]: (
+                        row[1],
+                        bool(row[2]) or (int(row[4]) == int(row[5]) and int(row[5]) > 0),
+                        row[3],
+                        row[4],
+                        max(0, int(row[5]) - int(row[4])),
+                        row[6],
+                        row[7],
+                        row[8],
+                    )
+                    for row in rows
+                }
+            )
+            missing = [entity_id for entity_id in missing if entity_id not in context.projected_states]
+            if not missing:
+                return
+        if not self._has_table("catalog_user_rollups"):
+            return
         rows = self.db.execute(
             f"SELECT entity_id,favorite,played,play_count,played_leaf_count,unplayed_leaf_count,position_seconds,duration_seconds,last_played_at FROM catalog_user_rollups WHERE user_id=? AND entity_id IN ({placeholders})",
             [user_id, *missing],
@@ -777,11 +840,20 @@ class Catalog:
         self, user_id: str, entity_ids: list[str], language: str
     ) -> None:
         context = self._context(user_id)
-        if context is None or not entity_ids or not self._has_table("catalog_metadata_projection"):
+        if context is None or not entity_ids:
             return
         placeholders = ",".join("?" for _ in entity_ids)
+        table = (
+            "catalog_item_projection"
+            if self._read_model_ready() and self._has_table("catalog_item_projection")
+            else "catalog_metadata_projection"
+            if self._has_table("catalog_metadata_projection")
+            else None
+        )
+        if table is None:
+            return
         rows = self.db.execute(
-            f"SELECT entity_id,payload FROM catalog_metadata_projection WHERE locale=? AND entity_id IN ({placeholders})",
+            f"SELECT entity_id,payload FROM {table} WHERE locale=? AND entity_id IN ({placeholders})",
             [language, *entity_ids],
         )
         for entity_id, payload in rows:
@@ -791,6 +863,43 @@ class Catalog:
                 continue
             if isinstance(value, dict):
                 context.projected_metadata[(entity_id, language)] = value
+
+    def _seed_hydration_rows(self, user_id: str, rows: list[tuple], language: str) -> None:
+        context = self._context(user_id)
+        if context is None or not rows:
+            return
+        context.selected_rows += len(rows)
+        context.entity_rows.update({row[0]: row for row in rows})
+        parent_ids = {row[2] for row in rows if row[2]}
+        for _ in range(2):
+            missing = [entity_id for entity_id in parent_ids if entity_id not in context.entity_rows]
+            if not missing:
+                break
+            placeholders = ",".join("?" for _ in missing)
+            parent_rows = self.db.execute(
+                f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at "
+                f"FROM library_entities WHERE id IN ({placeholders})",
+                missing,
+            )
+            context.entity_rows.update({row[0]: row for row in parent_rows})
+            parent_ids.update(row[2] for row in parent_rows if row[2])
+        self._preload_projected_states(user_id, list(context.entity_rows))
+        self._preload_projected_metadata(user_id, list(context.entity_rows), language)
+
+    def _hydrate_rows(
+        self, user_id: str, rows: list[tuple], language: str, dates: dict[str, dict] | None = None
+    ) -> list[dict]:
+        self._seed_hydration_rows(user_id, rows, language)
+        return [
+            self._serialize(
+                user_id,
+                row,
+                self.metadata(user_id, row[0], language)["metadata"],
+                dates=(dates or {}).get(row[0]),
+                language=language,
+            )
+            for row in rows
+        ]
 
     def _projected_page_rows(
         self,
@@ -831,6 +940,82 @@ class Catalog:
             "LIMIT ? OFFSET ?",
             (language, library_id, parent_id, page_size, offset),
         )
+
+    def _list_items_read_model(
+        self,
+        user_id: str,
+        library: dict,
+        language: str,
+        *,
+        parent_id: str | None,
+        page: int,
+        page_size: int,
+        sort_by: str | None,
+        sort_order: str,
+    ) -> dict:
+        library_id = library["id"]
+        offset = max(0, page - 1) * page_size
+        count_rows = self.db.execute(
+            "SELECT COUNT(*) FROM library_entities WHERE library_id=? AND parent_id IS ?",
+            (library_id, parent_id),
+        )
+        total = int(count_rows[0][0] or 0) if count_rows else 0
+        direction = "DESC" if sort_order.lower() == "descending" else "ASC"
+        params: list[object] = [language, library_id, parent_id]
+        if sort_by in {"added", "lastAdded"}:
+            order_column = "s.added_sort_ns" if sort_by == "added" else "s.last_added_sort_ns"
+            select_dates = "s.added_sort_ns,s.last_added_sort_ns"
+            order = f"{order_column} {direction},e.id {direction}"
+            query = (
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
+                "e.episode_number,e.episode_end_number,e.created_at,e.updated_at," + select_dates + " "
+                "FROM library_entities e JOIN catalog_entity_summary s ON s.entity_id=e.id "
+                "WHERE e.library_id=? AND e.parent_id IS ? ORDER BY " + order + " LIMIT ? OFFSET ?"
+            )
+            params = [library_id, parent_id, page_size, offset]
+        elif sort_by in {"rating", "title", "release", "runtime"} or sort_by is None:
+            projection_order = {
+                "rating": "p.rating_sort",
+                "title": "p.title_sort",
+                "release": "p.release_sort",
+                "runtime": "p.runtime_sort",
+            }.get(sort_by, "p.title_sort")
+            if parent_id:
+                parent_row = self._entity_row(parent_id)
+                if parent_row and parent_row[3] in {"series", "season"} and sort_by is None:
+                    projection_order = (
+                        "e.season_number IS NOT NULL,e.season_number,e.episode_number IS NOT NULL,"
+                        "e.episode_number,e.relative_path COLLATE NOCASE,e.id"
+                    )
+            query = (
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
+                "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                "FROM library_entities e JOIN catalog_item_projection p ON p.entity_id=e.id AND p.locale=? "
+                "WHERE e.library_id=? AND e.parent_id IS ? ORDER BY " + projection_order + " " + direction + ",e.id " + direction + " LIMIT ? OFFSET ?"
+            )
+            params.extend([page_size, offset])
+        else:
+            query = (
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
+                "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                "FROM library_entities e WHERE e.library_id=? AND e.parent_id IS ? "
+                "ORDER BY e.relative_path COLLATE NOCASE,e.id LIMIT ? OFFSET ?"
+            )
+            params = [library_id, parent_id, page_size, offset]
+        rows = self.db.execute(query, params)
+        dates: dict[str, dict] = {}
+        if sort_by in {"added", "lastAdded"}:
+            dates = {
+                row[0]: {
+                    "addedAt": _date_from_ns(row[10]) or row[8],
+                    "lastAddedAt": _date_from_ns(row[11]) or row[8],
+                }
+                for row in rows
+            }
+        values = self._hydrate_rows(user_id, [row[:10] for row in rows], language, dates)
+        if self._context(user_id):
+            self._context(user_id).timings.setdefault("candidate_selection", 0.0)
+        return {"items": values, "page": page, "pageSize": page_size, "total": total}
 
     def _serialize(
         self,
@@ -930,6 +1115,49 @@ class Catalog:
             if not requested_root_ids:
                 context.date_values[cache_key] = cached_roots
                 return cached_roots
+
+        if self._read_model_ready():
+            def resolve_indexed() -> dict[str, dict[str, str]]:
+                placeholders = ",".join("?" for _ in scope)
+                params: list[object] = list(scope)
+                root_filter = ""
+                if requested_root_ids is not None:
+                    if not requested_root_ids:
+                        return {}
+                    root_params = sorted(requested_root_ids)
+                    root_filter = f" AND e.id IN ({','.join('?' for _ in root_params)})"
+                    params.extend(root_params)
+                rows = self.db.execute(
+                    "SELECT e.id,e.created_at,e.library_id,s.added_sort_ns,s.last_added_sort_ns "
+                    "FROM library_entities e JOIN catalog_entity_summary s ON s.entity_id=e.id "
+                    f"WHERE e.library_id IN ({placeholders}){root_filter}",
+                    params,
+                )
+                scan_rows = self.db.execute(
+                    f"SELECT id,scan_state FROM libraries WHERE id IN ({placeholders})",
+                    list(scope),
+                )
+                if context:
+                    context.date_requested_roots += len(rows)
+                    context.date_rollup_hits += len(rows)
+                    context.date_scan_states.update(row[1] for row in scan_rows)
+                values = {
+                    row[0]: {
+                        "addedAt": _date_from_ns(row[3]) or row[1] or "",
+                        "lastAddedAt": _date_from_ns(row[4]) or row[1] or "",
+                    }
+                    for row in rows
+                }
+                if context:
+                    context.date_values[cache_key] = values
+                    if requested_root_ids is not None:
+                        context.date_root_values.update(
+                            {(scope_key, entity_id): value for entity_id, value in values.items()}
+                        )
+                return values
+
+            values = context.measure("date_values", resolve_indexed) if context else resolve_indexed()
+            return values
 
         def resolve() -> dict[str, dict[str, str]]:
             placeholders = ",".join("?" for _ in scope)
@@ -1157,6 +1385,17 @@ class Catalog:
             parent = self.require_entity(user_id, parent_id)
             if parent[1] != library_id:
                 raise HTTPException(404, "Item not found.")
+        if self._read_model_ready():
+            return self._list_items_read_model(
+                user_id,
+                library,
+                language,
+                parent_id=parent_id,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
         rows = self.db.execute(
             "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id=? AND parent_id IS ?",
             (library_id, parent_id),

@@ -2220,6 +2220,9 @@ class LibraryScanner:
                 [path for path in files if path.is_file()],
                 job_id=job_id,
             )
+            from app.catalog_read_model import CatalogReadModel
+
+            CatalogReadModel(self.db).refresh_roots([entity])
             if (
                 entity in self._scan_created_ids
                 or file_delta["content_changed"]
@@ -2460,6 +2463,9 @@ class LibraryScanner:
                 [path for path in series_dir.iterdir() if path.is_file()],
                 job_id=job_id,
             )
+            from app.catalog_read_model import CatalogReadModel
+
+            CatalogReadModel(self.db).refresh_roots([series])
             children = self.db.execute(
                 "SELECT id FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season'))",
                 (library_id, series, series),

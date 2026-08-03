@@ -42,7 +42,7 @@ class MetadataLanguageSettings:
         self.db = Config().database
 
     def get(self) -> list[str]:
-        rows = self.db.execute(
+        rows = self.db.read_execute(
             "SELECT value FROM metadata_settings WHERE key='locales'"
         )
         if not rows:

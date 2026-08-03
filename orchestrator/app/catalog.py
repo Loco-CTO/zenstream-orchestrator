@@ -622,25 +622,29 @@ class Catalog:
         if self._has_table("collection_members"):
             collection_step = f"""
                 UNION
-                SELECT entity_tree.root_id, member.source_entity_id
-                FROM entity_tree
-                JOIN collection_members member
-                  ON member.collection_entity_id = entity_tree.entity_id
+                SELECT member.collection_entity_id, member.source_entity_id
+                FROM collection_members member
+                JOIN library_entities collection
+                  ON collection.id = member.collection_entity_id
                 JOIN library_entities source ON source.id = member.source_entity_id
-                WHERE source.library_id IN ({placeholders})
+                WHERE collection.library_id IN ({placeholders})
+                  AND source.library_id IN ({placeholders})
             """
-            collection_params = list(scope)
+            collection_params = [*scope, *scope]
         date_rows = self.db.execute(
             f"""
-            WITH RECURSIVE entity_tree(root_id, entity_id) AS (
+            WITH RECURSIVE edges(parent_id, child_id) AS (
+                SELECT parent_id, id
+                FROM library_entities
+                WHERE parent_id IS NOT NULL AND library_id IN ({placeholders})
+                {collection_step}
+            ), entity_tree(root_id, entity_id) AS (
                 SELECT id, id FROM library_entities
                 WHERE library_id IN ({placeholders})
                 UNION ALL
-                SELECT entity_tree.root_id, child.id
+                SELECT entity_tree.root_id, edges.child_id
                 FROM entity_tree
-                JOIN library_entities child ON child.parent_id = entity_tree.entity_id
-                WHERE child.library_id IN ({placeholders})
-                {collection_step}
+                JOIN edges ON edges.parent_id = entity_tree.entity_id
             )
             SELECT entity_tree.root_id, MIN(media_files.modified_ns), MAX(media_files.modified_ns)
             FROM entity_tree
@@ -650,7 +654,7 @@ class Catalog:
              AND media_files.modified_ns IS NOT NULL
             GROUP BY entity_tree.root_id
             """,
-            list(scope) + list(scope) + collection_params,
+            list(scope) + collection_params + list(scope),
         )
         values = {}
         for entity_id, added_ns, last_added_ns in date_rows:

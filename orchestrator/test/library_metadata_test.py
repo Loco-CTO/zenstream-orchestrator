@@ -2052,6 +2052,18 @@ class LibraryJobControlTest(unittest.TestCase):
             "terminated",
         )
 
+    def test_requeued_job_executes_using_the_same_job_id(self):
+        job = self.runtime.enqueue("library-1", "scan")
+        self.runtime._recover_active_jobs()
+        self.runtime._cancel_events[job["id"]] = threading.Event()
+
+        with patch("app.library.LibraryScanner.scan") as scan:
+            self.runtime._execute_job(job["id"], "library-1", "scan")
+
+        scan.assert_called_once_with(
+            "library-1", job["id"], unittest.mock.ANY, targets=None
+        )
+
     def test_watcher_reconcile_scopes_move_to_top_level_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

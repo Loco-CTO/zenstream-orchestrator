@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -276,7 +277,7 @@ class CatalogTest(unittest.TestCase):
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (series_id, "allowed", None, "series", series_id, None, None, None, None, "2026", "2026"),
             )
-            for episode_index in range(26 if series_index < 76 else 25):
+            for episode_index in range(26 if series_index < 82 else 25):
                 episode_id = f"{series_id}-episode-{episode_index}"
                 self.db.execute(
                     "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -308,13 +309,16 @@ class CatalogTest(unittest.TestCase):
         catalog._relationship_graph_uncached = counted_graph
         self.db.execute = counted_execute
         try:
+            started = time.monotonic()
             result = catalog.list_items(user_id, "allowed", "en", page_size=40)
+            elapsed = time.monotonic() - started
         finally:
             self.db.execute = execute
 
         self.assertEqual(len(result["items"]), 40)
         self.assertEqual(graph_calls, 1)
         self.assertEqual(state_queries, 1)
+        self.assertLess(elapsed, 2.0)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_newly_added_uses_playable_file_times_and_leaf_items(self, _languages):

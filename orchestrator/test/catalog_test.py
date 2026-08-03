@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from app.catalog import Catalog
+from app.catalog import Catalog, _CatalogReadContext
 from app.database import DatabaseHandler
 from app.models.account import Account
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
@@ -309,6 +309,76 @@ class CatalogTest(unittest.TestCase):
         values = self.catalog()._date_values("collections", {"allowed", "collections"})
 
         self.assertEqual(values["collection-1"]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_library_capability_probe_uses_parent_index(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        self.db.execute(
+            "CREATE INDEX idx_library_entities_parent_id "
+            "ON library_entities(parent_id) WHERE parent_id IS NOT NULL"
+        )
+        plan = self.db.execute(
+            "EXPLAIN QUERY PLAN SELECT DISTINCT parent.library_id "
+            "FROM library_entities parent "
+            "JOIN library_entities child ON child.parent_id=parent.id "
+            "WHERE parent.library_id IN (?)",
+            ("allowed",),
+        )
+        plan_text = " ".join(row[3] for row in plan)
+        self.assertIn("SEARCH child", plan_text)
+        self.assertNotIn("SCAN child", plan_text)
+        libraries = self.catalog().libraries(user_id)
+        self.assertTrue(libraries[0]["supportsLastAdded"])
+
+    def test_date_values_cache_overlapping_roots(self):
+        self.seed_series_hierarchy()
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES(?,?,?,?,?)",
+            ("file-1", "episode-1", "episode-1.mkv", "media", 1_800_000_000_000_000_000),
+        )
+        catalog = self.catalog()
+        token = catalog._read_context.set(_CatalogReadContext(catalog, "series"))
+        execute = self.db.execute
+        date_queries = []
+
+        def counted_execute(query, params=None):
+            if "FROM media_files WHERE role='media'" in query:
+                date_queries.append(query)
+            return execute(query, params)
+
+        try:
+            self.db.execute = counted_execute
+            first = catalog._date_values("allowed", {"allowed"}, {"episode-1", "episode-2"})
+            second = catalog._date_values("allowed", {"allowed"}, {"episode-1"})
+        finally:
+            self.db.execute = execute
+            catalog._read_context.reset(token)
+
+        self.assertEqual(first["episode-1"], second["episode-1"])
+        self.assertEqual(len(date_queries), 1)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_next_up_returns_without_episode_scan_when_user_has_no_state(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        queries = []
+        execute = self.db.execute
+
+        def counted_execute(query, params=None):
+            queries.append(query)
+            return execute(query, params)
+
+        self.db.execute = counted_execute
+        try:
+            result = catalog.home_next_up(user_id, "en")
+        finally:
+            self.db.execute = execute
+
+        self.assertEqual(result, [])
+        self.assertFalse(any("ROW_NUMBER" in query for query in queries))
 
     def test_partial_rollups_compute_only_missing_requested_roots(self):
         self.seed_series_hierarchy()

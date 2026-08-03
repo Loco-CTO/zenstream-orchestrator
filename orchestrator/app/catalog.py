@@ -1550,6 +1550,45 @@ class Catalog:
             locale_order.append("en")
         locale_order.append("original")
         locale_placeholders = ",".join("?" for _ in locale_order)
+        if self._read_model_ready():
+            locale_rank = "CASE " + " ".join(
+                f"WHEN p.locale=? THEN {index}" for index, _ in enumerate(locale_order)
+            ) + " ELSE 99 END"
+            title_rank = (
+                "CASE WHEN p.title_sort=? THEN 0 WHEN p.title_sort LIKE ? || '%' THEN 1 "
+                "WHEN p.title_sort LIKE '%' || ? || '%' THEN 2 ELSE 3 END"
+            )
+            if len(wanted) >= 3 and self._has_table("catalog_search"):
+                source = (
+                    "SELECT p.entity_id,MIN(" + title_rank + ") AS match_rank,"
+                    "MIN(" + locale_rank + ") AS locale_rank,MIN(bm25(catalog_search)) AS score "
+                    "FROM catalog_search JOIN catalog_item_projection p ON p.entity_id=catalog_search.entity_id AND p.locale=catalog_search.locale "
+                    f"WHERE catalog_search MATCH ? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) "
+                    "GROUP BY p.entity_id"
+                )
+                match_params = [wanted, wanted, wanted, *locale_order, f'"{wanted.replace(chr(34), chr(34) * 2)}"', *allowed, *locale_order]
+            else:
+                source = (
+                    "SELECT p.entity_id,CASE WHEN p.title_sort=? THEN 0 ELSE 2 END AS match_rank,"
+                    "MIN(" + locale_rank + ") AS locale_rank,0.0 AS score "
+                    "FROM catalog_search_grams g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
+                    f"WHERE g.gram=? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) GROUP BY p.entity_id"
+                )
+                match_params = [wanted, wanted, *locale_order, *allowed, *locale_order]
+            total_rows = self.db.execute(f"SELECT COUNT(*) FROM ({source}) matches", match_params)
+            total = int(total_rows[0][0] or 0) if total_rows else 0
+            if not total:
+                return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+            page_rows = self.db.execute(
+                "WITH matches AS (" + source + ") "
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                "FROM matches JOIN library_entities e ON e.id=matches.entity_id "
+                "WHERE e.entity_type IN ('movie','series','collection') "
+                "ORDER BY matches.match_rank,matches.locale_rank,matches.score,e.id LIMIT ? OFFSET ?",
+                [*match_params, page_size, max(0, page - 1) * page_size],
+            )
+            values = self._hydrate_rows(user_id, list(page_rows), language)
+            return {"items": values, "page": page, "pageSize": page_size, "total": total}
         if len(wanted) >= 3:
             indexed = self.db.execute(
                 f"SELECT entity_id,locale,title,bm25(catalog_search) FROM catalog_search WHERE catalog_search MATCH ? AND library_id IN ({placeholders}) AND locale IN ({locale_placeholders})",
@@ -1688,6 +1727,31 @@ class Catalog:
         if not allowed:
             return {"items": [], "page": page, "pageSize": page_size, "total": 0}
         placeholders = ",".join("?" for _ in allowed)
+        if self._read_model_ready():
+            total_rows = self.db.execute(
+                f"SELECT COUNT(*) FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders})",
+                [user_id, *allowed],
+            )
+            total = int(total_rows[0][0] or 0) if total_rows else 0
+            direction = "DESC" if sort_order.lower() == "descending" else "ASC"
+            order = "p.title_sort" if sort_by.lower() not in {"datecreated", "dateadded"} else "x.added_sort_ns"
+            rows = self.db.execute(
+                f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,x.added_sort_ns,x.last_added_sort_ns "
+                f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id JOIN catalog_entity_summary x ON x.entity_id=e.id "
+                f"JOIN catalog_item_projection p ON p.entity_id=e.id AND p.locale=? "
+                f"WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders}) "
+                f"ORDER BY {order} {direction},e.id {direction} LIMIT ? OFFSET ?",
+                [language, user_id, *allowed, page_size, max(0, page - 1) * page_size],
+            )
+            dates = {
+                row[0]: {
+                    "addedAt": _date_from_ns(row[10]) or row[8],
+                    "lastAddedAt": _date_from_ns(row[11]) or row[8],
+                }
+                for row in rows
+            }
+            values = self._hydrate_rows(user_id, [row[:10] for row in rows], language, dates)
+            return {"items": values, "page": page, "pageSize": page_size, "total": total}
         rows = self.db.execute(
             f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders})",
             [user_id, *allowed],
@@ -1729,6 +1793,25 @@ class Catalog:
             for value in (source.get("genres") or source.get("tags") or [])
         }
         allowed = self.allowed_libraries(user_id)
+        if self._read_model_ready() and self._has_table("catalog_item_genres") and allowed:
+            genre_rows = self.db.execute(
+                "SELECT genre_key FROM catalog_item_genres WHERE entity_id=? AND locale=?",
+                (entity_id, normalize_metadata_locale(language)),
+            )
+            keys = [row[0] for row in genre_rows]
+            if keys:
+                allowed_placeholders = ",".join("?" for _ in allowed)
+                genre_placeholders = ",".join("?" for _ in keys)
+                rows = self.db.execute(
+                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,COUNT(DISTINCT g.genre_key) AS score,p.title_sort "
+                    "FROM catalog_item_genres g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
+                    "JOIN library_entities e ON e.id=g.entity_id "
+                    f"WHERE g.locale=? AND g.genre_key IN ({genre_placeholders}) AND e.id<>? AND e.library_id IN ({allowed_placeholders}) AND e.entity_type=? "
+                    "GROUP BY e.id ORDER BY score DESC,p.title_sort,e.id LIMIT ?",
+                    [normalize_metadata_locale(language), *keys, entity_id, *allowed, source_row[3], limit],
+                )
+                values = self._hydrate_rows(user_id, [row[:10] for row in rows], language)
+                return {"items": values}
         placeholders = ",".join("?" for _ in allowed)
         rows = self.db.execute(
             f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE id<>? AND library_id IN ({placeholders}) AND entity_type=?",

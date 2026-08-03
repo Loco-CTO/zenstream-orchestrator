@@ -15,6 +15,7 @@ from app.metadata_services import MetadataIngestService
 from app.logging_config import get_logger
 from app.trickplay import TrickplayExtractor
 from app.intro_outro import IntroOutroDetector
+from app.foreground import active_requests
 
 
 logger = get_logger("jobs")
@@ -860,6 +861,19 @@ class JobScheduler:
                 )
                 waited = True
         try:
+            pressure_logged = False
+            while active_requests():
+                if should_terminate():
+                    raise JobTerminated()
+                if not pressure_logged:
+                    logger.info(
+                        "analysis job yielding to foreground traffic run_id=%s kind=%s active_requests=%s",
+                        run_id,
+                        kind,
+                        active_requests(),
+                    )
+                    pressure_logged = True
+                time.sleep(0.05)
             logger.info(
                 "analysis job acquired media-analysis capacity run_id=%s kind=%s",
                 run_id,

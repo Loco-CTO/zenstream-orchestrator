@@ -617,6 +617,19 @@ class Catalog:
                 entity_id: {"addedAt": row[3] or "", "lastAddedAt": row[3] or ""}
                 for entity_id, row in entities.items()
             }
+        collection_step = ""
+        collection_params: list[str] = []
+        if self._has_table("collection_members"):
+            collection_step = f"""
+                UNION
+                SELECT entity_tree.root_id, member.source_entity_id
+                FROM entity_tree
+                JOIN collection_members member
+                  ON member.collection_entity_id = entity_tree.entity_id
+                JOIN library_entities source ON source.id = member.source_entity_id
+                WHERE source.library_id IN ({placeholders})
+            """
+            collection_params = list(scope)
         date_rows = self.db.execute(
             f"""
             WITH RECURSIVE entity_tree(root_id, entity_id) AS (
@@ -627,6 +640,7 @@ class Catalog:
                 FROM entity_tree
                 JOIN library_entities child ON child.parent_id = entity_tree.entity_id
                 WHERE child.library_id IN ({placeholders})
+                {collection_step}
             )
             SELECT entity_tree.root_id, MIN(media_files.modified_ns), MAX(media_files.modified_ns)
             FROM entity_tree
@@ -636,7 +650,7 @@ class Catalog:
              AND media_files.modified_ns IS NOT NULL
             GROUP BY entity_tree.root_id
             """,
-            list(scope) + list(scope),
+            list(scope) + list(scope) + collection_params,
         )
         values = {}
         for entity_id, added_ns, last_added_ns in date_rows:
@@ -665,7 +679,7 @@ class Catalog:
         sort_by: str | None = None,
         sort_order: str = "ascending",
     ) -> dict:
-        self.require_library(user_id, library_id)
+        library = self.require_library(user_id, library_id)
         if parent_id:
             parent = self.require_entity(user_id, parent_id)
             if parent[1] != library_id:
@@ -701,7 +715,8 @@ class Catalog:
             start = (page - 1) * page_size
             display_rows = ordered_rows[start : start + page_size]
         context = self._context(user_id)
-        date_values = lambda: self._date_values(library_id, {library_id})
+        date_scope = self.allowed_libraries(user_id) if library["type"] == "collection" else {library_id}
+        date_values = lambda: self._date_values(library_id, date_scope)
         dates = context.measure("date_sort", date_values) if context else date_values()
         if sort_by in {"added", "lastAdded"} and display_rows is rows:
             date_field = "addedAt" if sort_by == "added" else "lastAddedAt"

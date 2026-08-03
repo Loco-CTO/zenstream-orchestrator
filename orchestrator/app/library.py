@@ -16,7 +16,7 @@ from typing import Callable, Iterable
 from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
 from app.logging_config import get_logger
-from app.worker_config import configured_worker_limit, worker_pool_size
+from app.worker_config import configured_worker_limit
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -1254,8 +1254,7 @@ class LibraryScanner:
         job_id: str,
         should_terminate: Callable[[], bool],
     ) -> None:
-        workers = configured_worker_limit("METADATA_ROOT_WORKERS", 8)
-        workers = worker_pool_size(workers, len(rows))
+        workers = configured_worker_limit("METADATA_ROOT_WORKERS", 64)
 
         def resolve(row: tuple, index: int) -> None:
             from app.providers import MetadataService, ProviderError

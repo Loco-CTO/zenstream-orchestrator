@@ -1070,10 +1070,10 @@ class Catalog:
     ) -> list[dict]:
         placeholders = ",".join("?" for _ in allowed)
         rows = self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection') ORDER BY created_at DESC LIMIT 100",
+            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection') ORDER BY created_at DESC LIMIT 36",
             list(allowed),
         )
-        dates = self._date_values("", allowed)
+        dates = self._date_values("", allowed, {row[0] for row in rows})
         return [
             self._serialize(
                 user_id,
@@ -1125,36 +1125,29 @@ class Catalog:
             return []
         placeholders = ",".join("?" for _ in allowed)
         rows = self.db.execute(
-            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id "
-            f"FROM library_entities e JOIN library_entities season ON season.id=e.parent_id JOIN library_entities series ON series.id=season.parent_id "
-            f"WHERE e.entity_type='episode' AND e.library_id IN ({placeholders}) ORDER BY series.id,e.season_number,e.episode_number,e.relative_path COLLATE NOCASE",
-            list(allowed),
+            f"WITH episode_state AS ("
+            f" SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id AS series_id,"
+            f" COALESCE(s.played,0) AS played,COALESCE(s.position_seconds,0) AS position_seconds,COALESCE(s.last_played_at,'') AS last_played_at"
+            f" FROM library_entities e JOIN library_entities season ON season.id=e.parent_id JOIN library_entities series ON series.id=season.parent_id"
+            f" LEFT JOIN user_item_state s ON s.entity_id=e.id AND s.user_id=?"
+            f" WHERE e.entity_type='episode' AND e.library_id IN ({placeholders})"
+            f" ), started AS (SELECT series_id,MAX(CASE WHEN played=1 OR position_seconds>0 THEN 1 ELSE 0 END) AS started FROM episode_state GROUP BY series_id), ranked AS ("
+            f" SELECT episode_state.*,ROW_NUMBER() OVER (PARTITION BY series_id ORDER BY season_number,episode_number,relative_path COLLATE NOCASE) AS item_rank"
+            f" FROM episode_state JOIN started USING(series_id) WHERE started=1 AND played=0"
+            f" ) SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at,series_id,last_played_at FROM ranked WHERE item_rank=1 ORDER BY last_played_at DESC,id LIMIT 18",
+            [user_id, *allowed],
         )
-        by_series: dict[str, list[tuple]] = {}
-        for row in rows:
-            by_series.setdefault(row[10], []).append(row[:10])
         series_names: dict[str, str] = {}
-        next_up = []
-        for series_id, episodes in by_series.items():
-            states = [self._state(user_id, episode[0]) for episode in episodes]
-            if not any(state["played"] or state["positionSeconds"] > 0 for state in states):
-                continue
-            candidate = next(
-                (episode for episode, state in zip(episodes, states) if not state["played"]),
-                None,
+        return [
+            self._serialize(
+                user_id,
+                row[:10],
+                self.metadata(user_id, row[0], language)["metadata"],
+                series_name=self._home_series_name(user_id, language, row[10], series_names),
+                language=language,
             )
-            if candidate:
-                next_up.append(
-                    self._serialize(
-                        user_id,
-                        candidate,
-                        self.metadata(user_id, candidate[0], language)["metadata"],
-                        series_name=self._home_series_name(user_id, language, series_id, series_names),
-                        language=language,
-                    )
-                )
-        next_up.sort(key=lambda value: value["userState"].get("lastPlayedAt") or "", reverse=True)
-        return next_up[:18]
+            for row in rows
+        ]
 
     @_catalog_read
     def home_derived(
@@ -1257,7 +1250,6 @@ class Catalog:
                 "genreRows": [],
             }
         placeholders = ",".join("?" for _ in allowed)
-        dates = self._date_values("", allowed)
         items = self._home_discovery_items(user_id, language, allowed)
         resume_rows = self.db.execute(
             f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id "
@@ -1337,19 +1329,15 @@ class Catalog:
                 entity_type = "movie" if library["type"] == "movies" else "episode"
                 playable_rows = self.db.execute(
                     "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at "
-                    "FROM library_entities e WHERE e.library_id=? AND e.entity_type=? "
-                    "AND EXISTS (SELECT 1 FROM media_files f WHERE f.entity_id=e.id AND f.role='media')",
+                    "FROM library_entities e JOIN media_files f ON f.entity_id=e.id AND f.role='media' "
+                    "WHERE e.library_id=? AND e.entity_type=? "
+                    "GROUP BY e.id ORDER BY MAX(f.modified_ns) DESC,e.id LIMIT 18",
                     (library_id, entity_type),
                 )
-                ordered_playable_rows = sorted(
-                    playable_rows,
-                    key=lambda row: str(row[4] or "").casefold(),
+                dates = self._date_values(
+                    "", allowed, {row[0] for row in playable_rows}
                 )
-                ordered_playable_rows.sort(
-                    key=lambda row: (dates.get(row[0]) or {}).get("lastAddedAt") or "",
-                    reverse=True,
-                )
-                for playable_row in ordered_playable_rows[:18]:
+                for playable_row in playable_rows:
                     episode_series_id = None
                     if entity_type == "episode":
                         season = self._entity_row(playable_row[2])

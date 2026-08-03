@@ -537,7 +537,7 @@ class CatalogTest(unittest.TestCase):
             ("allowed", "episode"),
         )
         plan_text = " ".join(row[3] for row in plan)
-        self.assertIn("USING INDEX idx_media_files_role_modified_entity", plan_text)
+        self.assertIn("USING COVERING INDEX idx_media_files_role_modified_entity", plan_text)
         self.assertNotIn("USE TEMP B-TREE FOR ORDER BY", plan_text)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])

@@ -2959,17 +2959,36 @@ class LibraryRuntime:
                 self.condition.wait(timeout=min(0.25, remaining))
 
     def _recover_active_jobs(self) -> None:
-        """Make interrupted inventory jobs terminal instead of restarting scans."""
+        """Re-queue interrupted inventory jobs after an Orchestrator restart."""
         rows = self.store.db.execute(
             "SELECT id,library_id,state FROM library_jobs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC"
         )
+        by_library: dict[str, list[tuple[str, str]]] = {}
+        for job_id, library_id, state in rows:
+            by_library.setdefault(library_id, []).append((job_id, state))
         timestamp = now()
         with self.store.db.transaction() as cursor:
-            for job_id, library_id, _state in rows:
-                cursor.execute(
-                    "UPDATE library_jobs SET state='terminated',message='Interrupted by Orchestrator restart; run scan manually',error=NULL,finished_at=? WHERE id=?",
-                    (timestamp, job_id),
+            for library_id, jobs in by_library.items():
+                keep_id = next(
+                    (job_id for job_id, state in jobs if state != "terminating"),
+                    None,
                 )
+                for job_id, state in jobs:
+                    if job_id == keep_id:
+                        cursor.execute(
+                            "UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after Orchestrator restart',error=NULL,error_details=NULL,started_at=NULL,finished_at=NULL WHERE id=?",
+                            (job_id,),
+                        )
+                    else:
+                        message = (
+                            "Terminated during Orchestrator restart"
+                            if state == "terminating"
+                            else "Superseded by the active library job"
+                        )
+                        cursor.execute(
+                            "UPDATE library_jobs SET state='terminated',message=?,error=NULL,finished_at=? WHERE id=?",
+                            (message, timestamp, job_id),
+                        )
                 cursor.execute(
                     "UPDATE libraries SET scan_state='idle',scan_error=NULL,updated_at=? WHERE id=?",
                     (timestamp, library_id),

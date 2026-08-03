@@ -78,26 +78,15 @@ class MetadataServicesTest(unittest.TestCase):
             executor.shutdown()
         self.assertEqual(calls, [1])
 
-    def test_unlimited_asset_executor_runs_tasks_concurrently(self):
-        executor = MetadataAssetExecutor(max_workers=0)
-        started = threading.Barrier(3)
-        release = threading.Event()
-        calls = []
-
-        def work(value):
-            calls.append(value)
-            started.wait(5)
-            release.wait(5)
-
+    def test_asset_executor_clamps_worker_limits(self):
+        zero = MetadataAssetExecutor(max_workers=0)
+        oversized = MetadataAssetExecutor(max_workers=99)
         try:
-            executor.submit(("asset", 1), lambda: work(1))
-            executor.submit(("asset", 2), lambda: work(2))
-            started.wait(5)
-            release.set()
-            executor.drain(5)
+            self.assertEqual(zero.max_workers, 1)
+            self.assertEqual(oversized.max_workers, 64)
         finally:
-            executor.shutdown()
-        self.assertEqual(sorted(calls), [1, 2])
+            zero.shutdown()
+            oversized.shutdown()
 
     def _cache(self, locale, payload):
         payload = {"_imageLanguageSchema": 3, **payload}

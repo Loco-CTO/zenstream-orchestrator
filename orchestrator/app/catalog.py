@@ -56,6 +56,8 @@ class _CatalogReadContext:
         self.graph: tuple[dict, dict, dict] | None = None
         self.direct_states: dict[str, tuple] | None = None
         self.playable_descendants: dict[str, list[str]] = {}
+        self.resolved_states: dict[str, dict] = {}
+        self.series_primary_images: dict[tuple[str, str], dict | None] = {}
         self.metadata_service = MetadataReadService(catalog.db)
         self.configured_languages: list[str] | None = None
         self.timings: dict[str, float] = {}
@@ -532,8 +534,10 @@ class Catalog:
         }
 
     def _state(self, user_id: str, entity_id: str) -> dict:
-        entities, children, _ = self._relationship_graph(user_id)
         context = self._context(user_id)
+        if context and entity_id in context.resolved_states:
+            return dict(context.resolved_states[entity_id])
+        entities, children, _ = self._relationship_graph(user_id)
         row = self._state_rows(user_id).get(entity_id) if context else self._state_row(user_id, entity_id)
         direct = self._direct_state(row)
         leaves = self._playable_descendants(entity_id, entities, children)
@@ -542,6 +546,8 @@ class Catalog:
                 direct["played"] = False
                 direct["playedPercentage"] = None
                 direct["unplayedItemCount"] = 0
+            if context:
+                context.resolved_states[entity_id] = dict(direct)
             return direct
         states = self._state_rows(user_id) if context else None
         leaf_states = [
@@ -551,7 +557,20 @@ class Catalog:
         direct["played"] = bool(leaf_states) and all(state["played"] for state in leaf_states)
         direct["unplayedItemCount"] = sum(not state["played"] for state in leaf_states)
         direct["playedPercentage"] = None
+        if context:
+            context.resolved_states[entity_id] = dict(direct)
         return direct
+
+    def _leaf_state(self, user_id: str, entity_id: str) -> dict:
+        context = self._context(user_id)
+        if context:
+            cached = context.resolved_states.get(entity_id)
+            if cached is not None:
+                return dict(cached)
+            value = self._direct_state(self._state_rows(user_id).get(entity_id))
+            context.resolved_states[entity_id] = dict(value)
+            return value
+        return self._direct_state(self._state_row(user_id, entity_id))
 
     def _serialize(
         self,
@@ -591,22 +610,36 @@ class Catalog:
             "lastAddedAt": (dates or {}).get("lastAddedAt", row[8]),
             "updatedAt": row[9],
             "metadata": metadata,
-            "userState": self._state(user_id, row[0]),
+            "userState": (
+                self._leaf_state(user_id, row[0])
+                if row[3] in {"movie", "episode", "track"}
+                else self._state(user_id, row[0])
+            ),
             "childIds": children or [],
         }
 
     def _series_primary_image(
         self, user_id: str, series_id: str, language: str
     ) -> dict | None:
+        context = self._context(user_id)
+        key = (series_id, language)
+        if context and key in context.series_primary_images:
+            return context.series_primary_images[key]
         try:
             series = self.metadata(user_id, series_id, language)["metadata"]
         except HTTPException as error:
             if error.status_code != 404:
                 raise
-            return None
+            value = None
+            if context:
+                context.series_primary_images[key] = value
+            return value
         images = series.get("images")
         primary = images.get("Primary") if isinstance(images, dict) else None
-        return primary if isinstance(primary, dict) else None
+        value = primary if isinstance(primary, dict) else None
+        if context:
+            context.series_primary_images[key] = value
+        return value
 
     def _date_values(
         self,

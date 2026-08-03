@@ -673,6 +673,14 @@ class JobScheduler:
         return run
 
     def enqueue_catalog_projection(self, library_id: str) -> dict:
+        timestamp = now()
+        self.store.db.execute(
+            "INSERT INTO catalog_projection_status "
+            "(library_id,generation,state,progress_current,progress_total,error,updated_at) "
+            "VALUES(?,COALESCE((SELECT generation FROM catalog_projection_status WHERE library_id=?),0),'pending',0,0,NULL,?) "
+            "ON CONFLICT(library_id) DO UPDATE SET state='pending',progress_current=0,progress_total=0,error=NULL,updated_at=excluded.updated_at",
+            (library_id, library_id, timestamp),
+        )
         definition = self.store.by_key(f"catalog_projection:{library_id}")
         if not definition:
             library = self.library_runtime.store.get(library_id)

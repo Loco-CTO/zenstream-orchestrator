@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import os
 import time
 from contextlib import asynccontextmanager
@@ -14,11 +16,13 @@ from api.zenstream.application_routes import (
 from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
 from app.config import load_config
+from app.foreground import run_foreground, shutdown as shutdown_foreground
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
 from app.metadata_services import asset_executor
 from app.logging_config import get_logger
 from app.playback import PlaybackManager
+from app.models.account import Account
 from version import __version__
 
 
@@ -32,13 +36,24 @@ async def lifespan(_app: FastAPI):
         raise RuntimeError("Environment variable `SECRET_KEY` not set")
     library_runtime.start()
     job_scheduler.start()
+    async def maintain_sessions():
+        while True:
+            await asyncio.sleep(60)
+            await asyncio.to_thread(Account.flush_session_activity)
+
+    maintenance_task = asyncio.create_task(maintain_sessions())
     try:
         yield
     finally:
+        maintenance_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await maintenance_task
+        await asyncio.to_thread(Account.flush_session_activity)
         PlaybackManager.stop_all()
         job_scheduler.stop()
         library_runtime.stop()
         asset_executor.shutdown()
+        shutdown_foreground()
         await hub.broadcast({"type": "system", "event": "shutdown"})
 
 
@@ -73,6 +88,14 @@ app.add_middleware(
 @app.middleware("http")
 async def request_timing(request, call_next):
     started = time.perf_counter()
+    authorization = request.headers.get("authorization")
+    if authorization:
+        from app.client_auth import bearer_token
+        from app.models.account import Account
+
+        token = bearer_token(authorization)
+        if token:
+            request.state.authenticated = await run_foreground(Account().authenticate_token, token)
     response = await call_next(request)
     duration_ms = (time.perf_counter() - started) * 1000
     request_logger.debug(

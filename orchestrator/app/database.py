@@ -19,6 +19,7 @@ class DatabaseHandler:
         self.connection = None
         self.read_connection = None
         self.lock = threading.RLock()
+        self.read_lock = threading.RLock()
         self.connect()
 
     def connect(self):
@@ -80,15 +81,17 @@ class DatabaseHandler:
     def read_execute(self, query, params=None):
         """Execute a read without waiting on the writer connection lock."""
         connection = self.read_connection or self.connection
-        cursor = connection.cursor()
-        try:
-            cursor.execute(query, params or ())
-            return cursor.fetchall()
-        except sqlite3.Error as e:
-            print(f"Database read error: {e}")
-            return e
-        finally:
-            cursor.close()
+        with self.read_lock:
+            cursor = connection.cursor()
+            try:
+                cursor.execute(query, params or ())
+                return cursor.fetchall()
+            except sqlite3.Error as e:
+                connection.rollback()
+                print(f"Database read error: {e}")
+                raise
+            finally:
+                cursor.close()
 
     def fetchall(self):
         """Fetch all rows from the database."""

@@ -1,4 +1,5 @@
 import threading
+import tempfile
 import unittest
 from app.database import DatabaseHandler
 from app.jobs import JobScheduler, JobStore
@@ -16,6 +17,30 @@ class DatabaseRollbackTest(unittest.TestCase):
             self.assertEqual(db.execute("SELECT id FROM parent"), [("valid",)])
         finally:
             db.close()
+
+    def test_concurrent_reads_share_a_safe_read_connection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = DatabaseHandler("sqlite", {}, f"{directory}/orchestrator.db")
+            try:
+                db.execute("CREATE TABLE values_table (value INTEGER NOT NULL)")
+                db.execute("INSERT INTO values_table VALUES (1)")
+                errors = []
+
+                def read_values():
+                    try:
+                        for _ in range(25):
+                            self.assertEqual(db.read_execute("SELECT value FROM values_table"), [(1,)])
+                    except Exception as error:
+                        errors.append(error)
+
+                threads = [threading.Thread(target=read_values) for _ in range(8)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+                self.assertEqual(errors, [])
+            finally:
+                db.close()
 
 
 class JobMappingTest(unittest.TestCase):

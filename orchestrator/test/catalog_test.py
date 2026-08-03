@@ -480,6 +480,66 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("edges(parent_id", recursive_queries[0][0])
         self.assertIn("child.parent_id = entity_tree.entity_id", recursive_queries[0][0])
 
+    def test_date_recursive_plan_probes_children_by_parent_index(self):
+        self.seed_series_hierarchy()
+        self.db.execute(
+            "CREATE INDEX idx_library_entities_parent_id "
+            "ON library_entities(parent_id) WHERE parent_id IS NOT NULL"
+        )
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        plan = self.db.execute(
+            """
+            EXPLAIN QUERY PLAN
+            WITH RECURSIVE entity_tree(root_id, entity_id) AS (
+                SELECT id, id FROM library_entities
+                WHERE library_id IN (?) AND id IN (?)
+                UNION
+                SELECT entity_tree.root_id, child.id
+                FROM entity_tree
+                CROSS JOIN library_entities child
+                WHERE child.parent_id = entity_tree.entity_id
+                  AND child.library_id IN (?)
+            )
+            SELECT entity_tree.root_id, MIN(media_files.modified_ns)
+            FROM entity_tree
+            LEFT JOIN media_files
+              ON media_files.entity_id = entity_tree.entity_id
+             AND media_files.role = 'media'
+            GROUP BY entity_tree.root_id
+            """,
+            ("allowed", "series-1", "allowed"),
+        )
+        plan_text = " ".join(row[3] for row in plan)
+        self.assertIn("SEARCH child", plan_text)
+        self.assertNotIn("SCAN child", plan_text)
+
+    def test_newest_media_plan_uses_timestamp_index(self):
+        self.seed_series_hierarchy()
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        self.db.execute(
+            "CREATE INDEX idx_media_files_role_modified_entity "
+            "ON media_files(role, modified_ns DESC, entity_id, id)"
+        )
+        plan = self.db.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT f.entity_id, f.modified_ns, f.id
+            FROM media_files f
+            JOIN library_entities e ON e.id=f.entity_id
+            WHERE f.role='media' AND e.library_id=? AND e.entity_type=?
+            ORDER BY f.modified_ns DESC, f.entity_id, f.id
+            LIMIT 256
+            """,
+            ("allowed", "episode"),
+        )
+        plan_text = " ".join(row[3] for row in plan)
+        self.assertIn("USING INDEX idx_media_files_role_modified_entity", plan_text)
+        self.assertNotIn("USE TEMP B-TREE FOR ORDER BY", plan_text)
+
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_large_list_preloads_graph_and_state_once(self, _languages):
         user_id = self.account().create("large", "password-123")["id"]

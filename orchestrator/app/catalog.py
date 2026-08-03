@@ -57,6 +57,7 @@ class _CatalogReadContext:
         self.direct_states: dict[str, tuple] | None = None
         self.playable_descendants: dict[str, list[str]] = {}
         self.metadata_service = MetadataReadService(catalog.db)
+        self.configured_languages: list[str] | None = None
         self.timings: dict[str, float] = {}
 
     def measure(self, stage: str, action):
@@ -107,6 +108,14 @@ class Catalog:
     def _context(self, user_id: str) -> _CatalogReadContext | None:
         context = self._read_context.get()
         return context if context and context.user_id == user_id else None
+
+    def _configured_languages(self, user_id: str) -> list[str]:
+        context = self._context(user_id)
+        if context is None:
+            return MetadataLanguageSettings().get()
+        if context.configured_languages is None:
+            context.configured_languages = MetadataLanguageSettings().get()
+        return context.configured_languages
 
     def allowed_libraries(self, user_id: str) -> set[str]:
         return {
@@ -220,7 +229,7 @@ class Catalog:
         self, user_id: str, entity_id: str, language: str, include_credits: bool = False
     ) -> dict:
         row = self.require_entity(user_id, entity_id)
-        configured = MetadataLanguageSettings().get()
+        configured = self._configured_languages(user_id)
         language = normalize_metadata_locale(language)
         if language not in configured:
             raise HTTPException(400, "Metadata language is not configured.")
@@ -641,7 +650,7 @@ class Catalog:
             ), entity_tree(root_id, entity_id) AS (
                 SELECT id, id FROM library_entities
                 WHERE library_id IN ({placeholders})
-                UNION ALL
+                UNION
                 SELECT entity_tree.root_id, edges.child_id
                 FROM entity_tree
                 JOIN edges ON edges.parent_id = entity_tree.entity_id

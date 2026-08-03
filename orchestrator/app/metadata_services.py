@@ -37,7 +37,7 @@ logger = get_logger("metadata")
 class MetadataAssetExecutor:
     def __init__(self, max_workers: int | None = None):
         self.max_workers = (
-            configured_worker_limit("METADATA_ASSET_WORKERS", 64, default=2)
+            configured_worker_limit("METADATA_ASSET_WORKERS", 64, default=12)
             if max_workers is None
             else max(1, min(64, max_workers))
         )
@@ -55,6 +55,7 @@ class MetadataAssetExecutor:
             if current is not None and not current.done():
                 return self._states.get(key, "pending")
             self._states[key] = "pending"
+
             def throttled_work():
                 while active_requests():
                     threading.Event().wait(0.05)
@@ -69,7 +70,9 @@ class MetadataAssetExecutor:
                     done.result()
                 except Exception as error:
                     state = "failed"
-                    logger.warning("metadata asset work failed key=%s error=%s", key, error)
+                    logger.warning(
+                        "metadata asset work failed key=%s error=%s", key, error
+                    )
                 with self._lock:
                     self._states[key] = state
                     self._pending.pop(key, None)
@@ -166,26 +169,46 @@ class MetadataSearchProjection:
     def __init__(self, db):
         self.db = db
 
-    def project(self, provider: str, entity_type: str, provider_id: str, locale: str, payload: dict) -> None:
+    def project(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locale: str,
+        payload: dict,
+    ) -> None:
         with self.db.transaction() as cursor:
-            if not cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_search'").fetchone():
+            if not cursor.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_search'"
+            ).fetchone():
                 return
             entities = cursor.execute(
                 "SELECT e.id,e.library_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? AND p.provider_id=? AND e.entity_type=?",
                 (provider, provider_id, entity_type),
             ).fetchall()
             for entity_id, library_id in entities:
-                cursor.execute("DELETE FROM catalog_search WHERE entity_id=? AND locale=?", (entity_id, locale))
+                cursor.execute(
+                    "DELETE FROM catalog_search WHERE entity_id=? AND locale=?",
+                    (entity_id, locale),
+                )
                 if payload.get("title"):
                     cursor.execute(
                         "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
                         (entity_id, library_id, locale, str(payload["title"])),
                     )
                 if payload.get("originalTitle"):
-                    cursor.execute("DELETE FROM catalog_search WHERE entity_id=? AND locale='original'", (entity_id,))
+                    cursor.execute(
+                        "DELETE FROM catalog_search WHERE entity_id=? AND locale='original'",
+                        (entity_id,),
+                    )
                     cursor.execute(
                         "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
-                        (entity_id, library_id, "original", str(payload["originalTitle"])),
+                        (
+                            entity_id,
+                            library_id,
+                            "original",
+                            str(payload["originalTitle"]),
+                        ),
                     )
 
 
@@ -201,8 +224,12 @@ class MetadataReadService:
         self.cache = cache or MetadataCache()
         self._metadata_image_columns: set[str] | None = None
         self._blur_hashes: dict[tuple[str, str, str, str, str], str | None] = {}
-        self._payloads: dict[tuple[str, tuple[tuple[str, str], ...]], dict[tuple[str, str], dict]] = {}
-        self._public_resolutions: dict[tuple[str, str, tuple[tuple[str, str], ...], str], dict] = {}
+        self._payloads: dict[
+            tuple[str, tuple[tuple[str, str], ...]], dict[tuple[str, str], dict]
+        ] = {}
+        self._public_resolutions: dict[
+            tuple[str, str, tuple[tuple[str, str], ...], str], dict
+        ] = {}
 
     @staticmethod
     def providers(entity_type: str) -> list[str]:
@@ -258,7 +285,9 @@ class MetadataReadService:
             None,
         )
         configured = MetadataLanguageSettings().get()
-        tiers = fallback_tiers(requested, original, media=False, include_english="en" in configured)
+        tiers = fallback_tiers(
+            requested, original, media=False, include_english="en" in configured
+        )
         providers = self.providers(entity_type)
         result: dict = {}
 
@@ -359,7 +388,14 @@ class MetadataReadService:
                 blur_hash = self._image_blur_hash(
                     choice.get("provider"),
                     entity_type,
-                    next((identity.get("id") for identity in provider_ids if identity.get("provider") == choice.get("provider")), None),
+                    next(
+                        (
+                            identity.get("id")
+                            for identity in provider_ids
+                            if identity.get("provider") == choice.get("provider")
+                        ),
+                        None,
+                    ),
                     image_type,
                     choice.get("url"),
                 )
@@ -389,7 +425,10 @@ class MetadataReadService:
                 row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")
             }
         columns = self._metadata_image_columns
-        if "blur_hash" not in columns or not all(isinstance(value, str) and value for value in (provider, provider_id, image_url)):
+        if "blur_hash" not in columns or not all(
+            isinstance(value, str) and value
+            for value in (provider, provider_id, image_url)
+        ):
             return None
         key = (provider, entity_type, provider_id, image_type, image_url)
         if key in self._blur_hashes:
@@ -410,7 +449,9 @@ class MetadataReadService:
         original: str | None,
     ) -> list[dict]:
         configured = MetadataLanguageSettings().get()
-        tiers = fallback_tiers(requested, original, media=False, include_english="en" in configured)
+        tiers = fallback_tiers(
+            requested, original, media=False, include_english="en" in configured
+        )
         provider_rank = {value: index for index, value in enumerate(providers)}
         candidates = []
         available = {locale for _, locale in payloads}
@@ -544,6 +585,7 @@ class MetadataIngestService:
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
         if self.image_ingest is not None or self.credit_ingest is not None:
+
             def materialize_assets() -> None:
                 # Cache hits also run this path so rows created before eager
                 # asset ingestion are repaired without blocking metadata.
@@ -575,7 +617,12 @@ class MetadataImageIngestService:
     MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
     def __init__(
-        self, cache, image_root: str | Path | None = None, downloader=None, encoder=None, hasher=None
+        self,
+        cache,
+        image_root: str | Path | None = None,
+        downloader=None,
+        encoder=None,
+        hasher=None,
     ):
         self.cache = cache
         self.db = cache.db
@@ -611,7 +658,9 @@ class MetadataImageIngestService:
         else:
             import httpx
 
-            configured_timeout = float(os.getenv("METADATA_IMAGE_TIMEOUT_SECONDS", "20"))
+            configured_timeout = float(
+                os.getenv("METADATA_IMAGE_TIMEOUT_SECONDS", "20")
+            )
             response = httpx.get(
                 url,
                 timeout=max(3.0, min(60.0, configured_timeout)),
@@ -675,7 +724,12 @@ class MetadataImageIngestService:
                 try:
                     blur_hash = self.hasher(target)
                 except Exception as error:
-                    logger.warning("metadata image BlurHash encoding failed type=%s url=%s error=%s", image_type, url, error)
+                    logger.warning(
+                        "metadata image BlurHash encoding failed type=%s url=%s error=%s",
+                        image_type,
+                        url,
+                        error,
+                    )
                 self.cache.put_image(
                     provider,
                     entity_type,
@@ -720,7 +774,9 @@ class PersonCreditIngestService:
     def _tables_ready(self) -> bool:
         names = {
             row[0]
-            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
         }
         return {"people", "person_localizations", "entity_person_credits"} <= names
 
@@ -743,7 +799,11 @@ class PersonCreditIngestService:
         if not isinstance(image_url, str) or not image_url:
             return
         parsed = urlparse(image_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or self.image_root is None:
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or self.image_root is None
+        ):
             return
         target = self.images._target(image_url)
         if target is None:
@@ -755,15 +815,26 @@ class PersonCreditIngestService:
             try:
                 blur_hash = self.images.hasher(target)
             except Exception as error:
-                logger.warning("person portrait BlurHash encoding failed url=%s error=%s", image_url, error)
+                logger.warning(
+                    "person portrait BlurHash encoding failed url=%s error=%s",
+                    image_url,
+                    error,
+                )
             self.db.execute(
                 "UPDATE people SET image_url=?,local_path=?,image_blur_hash=?,updated_at=? WHERE id=?",
                 (image_url, str(target), blur_hash, iso_now(), person_id),
             )
         except Exception as error:
-            logger.warning("person portrait ingest failed person_id=%s url=%s error=%s", person_id, image_url, error)
+            logger.warning(
+                "person portrait ingest failed person_id=%s url=%s error=%s",
+                person_id,
+                image_url,
+                error,
+            )
 
-    def _person_id(self, cursor, provider: str, identity: str, name: str, locale: str) -> str:
+    def _person_id(
+        self, cursor, provider: str, identity: str, name: str, locale: str
+    ) -> str:
         rows = cursor.execute(
             "SELECT id FROM people WHERE provider=? AND provider_person_id=?",
             (provider, identity),
@@ -771,7 +842,9 @@ class PersonCreditIngestService:
         person_id = rows[0][0] if rows else str(uuid.uuid4())
         now = iso_now()
         if rows:
-            cursor.execute("UPDATE people SET updated_at=? WHERE id=?", (now, person_id))
+            cursor.execute(
+                "UPDATE people SET updated_at=? WHERE id=?", (now, person_id)
+            )
         else:
             cursor.execute(
                 "INSERT INTO people(id,provider,provider_person_id,created_at,updated_at) VALUES(?,?,?,?,?)",
@@ -784,8 +857,20 @@ class PersonCreditIngestService:
         )
         return person_id
 
-    def ingest(self, provider: str, entity_type: str, provider_id: str, locale: str, document: dict) -> None:
-        if provider not in {"tmdb", "tvdb"} or entity_type not in {"movie", "series", "season", "episode"}:
+    def ingest(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locale: str,
+        document: dict,
+    ) -> None:
+        if provider not in {"tmdb", "tvdb"} or entity_type not in {
+            "movie",
+            "series",
+            "season",
+            "episode",
+        }:
             return
         if not self._tables_ready():
             return
@@ -812,12 +897,32 @@ class PersonCreditIngestService:
                         order = int(order)
                     except (TypeError, ValueError):
                         order = fallback_order
-                    identity = source_id or "credit:" + hashlib.sha256(
-                        f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode("utf-8")
-                    ).hexdigest()
-                    person_id = self._person_id(cursor, provider, identity, name, locale)
+                    identity = (
+                        source_id
+                        or "credit:"
+                        + hashlib.sha256(
+                            f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode(
+                                "utf-8"
+                            )
+                        ).hexdigest()
+                    )
+                    person_id = self._person_id(
+                        cursor, provider, identity, name, locale
+                    )
                     portraits.append((person_id, record.get("imageUrl")))
-                    credits.append((str(uuid.uuid4()), entity_id, person_id, provider, locale, credit_type, role, department, order))
+                    credits.append(
+                        (
+                            str(uuid.uuid4()),
+                            entity_id,
+                            person_id,
+                            provider,
+                            locale,
+                            credit_type,
+                            role,
+                            department,
+                            order,
+                        )
+                    )
                 cursor.execute(
                     "DELETE FROM entity_person_credits WHERE entity_id=? AND provider=? AND locale=?",
                     (entity_id, provider, locale),

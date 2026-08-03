@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -28,18 +30,28 @@ def _token_hash(token: str) -> str:
 
 class Account:
     SESSION_DAYS = 7
+    _pending_session_touches: dict[str, str] = {}
+    _session_touch_deadlines: dict[str, float] = {}
+    _session_touch_lock = threading.Lock()
 
     def __init__(self):
         self.db = Config().database
 
-    def _row(self, *, user_id: str | None = None, username: str | None = None):
+    def _row(
+        self,
+        *,
+        user_id: str | None = None,
+        username: str | None = None,
+        read_only: bool = False,
+    ):
+        execute = self.db.read_execute if read_only else self.db.execute
         if user_id:
-            rows = self.db.execute(
+            rows = execute(
                 "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users WHERE id=?",
                 (user_id,),
             )
         else:
-            rows = self.db.execute(
+            rows = execute(
                 "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users WHERE username=?",
                 ((username or "").strip(),),
             )
@@ -64,10 +76,10 @@ class Account:
                 )
         except Exception as error:
             raise ValueError("Username is already in use.") from error
-        return self._public(self._row(user_id=user_id))
+        return self._public(self._row(user_id=user_id, read_only=True))
 
     def authenticate_password(self, username: str, password: str) -> dict | None:
-        row = self._row(username=username)
+        row = self._row(username=username, read_only=True)
         if not row or row[4]:
             return None
         scheme = row[3] or "sha256"
@@ -88,7 +100,7 @@ class Account:
                 "UPDATE users SET password=?,password_scheme='argon2id' WHERE id=?",
                 (_hasher.hash(password), row[0]),
             )
-            row = self._row(user_id=row[0])
+            row = self._row(user_id=row[0], read_only=True)
         return self._public(row)
 
     def create_session(self, user_id: str) -> dict:
@@ -113,8 +125,7 @@ class Account:
         if not token:
             return None
         now = _iso()
-        self.db.execute("DELETE FROM user_sessions WHERE expires_at<=?", (now,))
-        rows = self.db.execute(
+        rows = self.db.read_execute(
             "SELECT u.id,u.username,u.password,u.password_scheme,COALESCE(u.disabled,0),s.id "
             "FROM user_sessions s JOIN users u ON u.id=s.user_id "
             "WHERE s.token_hash=? AND s.expires_at>? AND COALESCE(u.disabled,0)=0",
@@ -122,10 +133,41 @@ class Account:
         )
         if not rows:
             return None
-        self.db.execute(
-            "UPDATE user_sessions SET last_seen_at=? WHERE id=?", (now, rows[0][5])
-        )
+        self._queue_session_touch(rows[0][5], now)
         return self._public(rows[0])
+
+    @classmethod
+    def _queue_session_touch(cls, session_id: str, seen_at: str) -> None:
+        now = time.monotonic()
+        with cls._session_touch_lock:
+            if now < cls._session_touch_deadlines.get(session_id, 0):
+                return
+            cls._session_touch_deadlines[session_id] = now + 600
+            cls._pending_session_touches[session_id] = seen_at
+
+    @classmethod
+    def flush_session_activity(cls, limit: int = 100) -> int:
+        with cls._session_touch_lock:
+            pending = list(cls._pending_session_touches.items())[:limit]
+            for session_id, _ in pending:
+                cls._pending_session_touches.pop(session_id, None)
+        if not pending:
+            return 0
+        db = Config().database
+        with db.transaction() as cursor:
+            cursor.executemany(
+                "UPDATE user_sessions SET last_seen_at=? WHERE id=?",
+                [(seen_at, session_id) for session_id, seen_at in pending],
+            )
+        return len(pending)
+
+    @classmethod
+    def cleanup_expired_sessions(cls) -> int:
+        return len(
+            Config().database.execute(
+                "DELETE FROM user_sessions WHERE expires_at<=?", (_iso(),)
+            )
+        )
 
     def revoke(self, token: str) -> None:
         self.db.execute(
@@ -137,7 +179,7 @@ class Account:
 
     def list(self) -> list[dict]:
         values = []
-        for row in self.db.execute(
+        for row in self.db.read_execute(
             "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users ORDER BY username"
         ):
             value = self._public(row)
@@ -148,24 +190,24 @@ class Account:
     def set_password(self, user_id: str, password: str) -> dict:
         if len(password) < 8:
             raise ValueError("Password must be at least 8 characters.")
-        if not self._row(user_id=user_id):
+        if not self._row(user_id=user_id, read_only=True):
             raise KeyError("User not found.")
         self.db.execute(
             "UPDATE users SET password=?,password_scheme='argon2id',disabled=0 WHERE id=?",
             (_hasher.hash(password), user_id),
         )
         self.revoke_user(user_id)
-        return self._public(self._row(user_id=user_id))
+        return self._public(self._row(user_id=user_id, read_only=True))
 
     def set_disabled(self, user_id: str, disabled: bool) -> dict:
-        if not self._row(user_id=user_id):
+        if not self._row(user_id=user_id, read_only=True):
             raise KeyError("User not found.")
         self.db.execute(
             "UPDATE users SET disabled=? WHERE id=?", (int(disabled), user_id)
         )
         if disabled:
             self.revoke_user(user_id)
-        return self._public(self._row(user_id=user_id))
+        return self._public(self._row(user_id=user_id, read_only=True))
 
     def delete(self, user_id: str) -> bool:
         with self.db.transaction() as cursor:
@@ -175,7 +217,7 @@ class Account:
     def library_ids(self, user_id: str) -> list[str]:
         return [
             row[0]
-            for row in self.db.execute(
+            for row in self.db.read_execute(
                 "SELECT library_id FROM user_library_access WHERE user_id=? ORDER BY library_id",
                 (user_id,),
             )

@@ -21,7 +21,7 @@ class AccountPreference:
         )
 
     def locale(self) -> str:
-        rows = self.db.execute(
+        rows = self.db.read_execute(
             "SELECT locale FROM account_preferences WHERE user_id=?", (self.user_id,)
         )
         return rows[0][0] if rows and rows[0][0] in SUPPORTED_LOCALES else "en"
@@ -51,7 +51,7 @@ class AccountPreference:
 
     def metadata_language(self) -> dict:
         configured = MetadataLanguageSettings().get()
-        rows = self.db.execute(
+        rows = self.db.read_execute(
             "SELECT metadata_language,locale FROM account_preferences WHERE user_id=?",
             (self.user_id,),
         )
@@ -79,7 +79,7 @@ class AccountPreference:
         return self.metadata_language()
 
     def subtitle_style(self) -> dict:
-        rows = self.db.execute(
+        rows = self.db.read_execute(
             "SELECT subtitle_renderer,subtitle_font_family,subtitle_bold,subtitle_text_scale,subtitle_font_color,subtitle_border_size,subtitle_border_color,subtitle_background_color,subtitle_background_opacity FROM account_preferences WHERE user_id=?",
             (self.user_id,),
         )

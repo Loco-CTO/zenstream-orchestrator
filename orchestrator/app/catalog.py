@@ -71,9 +71,14 @@ class _CatalogReadContext:
         self.series_primary_images: dict[tuple[str, str], dict | None] = {}
         self.metadata_service = MetadataReadService(catalog.db)
         self.configured_languages: list[str] | None = None
+        self.allowed_library_ids: set[str] | None = None
+        self.table_presence: dict[str, bool] = {}
         self.timings: dict[str, float] = {}
         self.date_values: dict[
             tuple[frozenset[str], frozenset[str] | None], dict[str, dict[str, str]]
+        ] = {}
+        self.date_root_values: dict[
+            tuple[frozenset[str], str], dict[str, str]
         ] = {}
         self.date_requested_roots = 0
         self.date_rollup_hits = 0

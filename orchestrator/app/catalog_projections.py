@@ -66,7 +66,10 @@ class CatalogProjectionStore:
             row[0]: (row[1], row[2])
             for row in self.db.read_execute(
                 "SELECT entity_id,MIN(modified_ns),MAX(modified_ns) FROM media_files "
-                "WHERE role='media' GROUP BY entity_id"
+                "JOIN library_entities ON library_entities.id=media_files.entity_id "
+                "WHERE media_files.role='media' AND library_entities.library_id=? "
+                "GROUP BY entity_id",
+                (library_id,),
             )
         }
         memo = {}

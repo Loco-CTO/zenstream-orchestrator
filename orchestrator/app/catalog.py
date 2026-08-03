@@ -1328,7 +1328,7 @@ class Catalog:
             if self._has_table("media_files") and library["type"] in {"movies", "tv_series"}:
                 entity_type = "movie" if library["type"] == "movies" else "episode"
                 playable_rows = self.db.execute(
-                    "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at "
+                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                     "FROM library_entities e JOIN media_files f ON f.entity_id=e.id AND f.role='media' "
                     "WHERE e.library_id=? AND e.entity_type=? "
                     "GROUP BY e.id ORDER BY MAX(f.modified_ns) DESC,e.id LIMIT 18",

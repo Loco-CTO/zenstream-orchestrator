@@ -224,9 +224,11 @@ class Catalog:
         language = normalize_metadata_locale(language)
         if language not in configured:
             raise HTTPException(400, "Metadata language is not configured.")
-        resolved = self._read_service().resolve_public(
+        context = self._context(user_id)
+        resolve = lambda: self._read_service().resolve_public(
             entity_id, row[3], self._provider_ids(entity_id, row[3]), language
         )
+        resolved = context.measure("metadata", resolve) if context else resolve()
         images = resolved["metadata"].get("images")
         if isinstance(images, dict):
             for image_type, image in images.items():
@@ -698,7 +700,9 @@ class Catalog:
             ordered_rows = sorted(rows, key=row_hierarchy_key)
             start = (page - 1) * page_size
             display_rows = ordered_rows[start : start + page_size]
-        dates = self._date_values(library_id, {library_id})
+        context = self._context(user_id)
+        date_values = lambda: self._date_values(library_id, {library_id})
+        dates = context.measure("date_sort", date_values) if context else date_values()
         if sort_by in {"added", "lastAdded"} and display_rows is rows:
             date_field = "addedAt" if sort_by == "added" else "lastAddedAt"
             grouped_rows: dict[str, list] = {}
@@ -715,14 +719,17 @@ class Catalog:
                 if len(candidate_rows) >= end:
                     break
             display_rows = candidate_rows
-        values = []
-        for row in display_rows:
-            metadata = self.metadata(user_id, row[0], language)["metadata"]
-            values.append(
-                self._serialize(
-                    user_id, row, metadata, dates=dates.get(row[0]), language=language
+        def serialize_values():
+            values = []
+            for row in display_rows:
+                metadata = self.metadata(user_id, row[0], language)["metadata"]
+                values.append(
+                    self._serialize(
+                        user_id, row, metadata, dates=dates.get(row[0]), language=language
+                    )
                 )
-            )
+            return values
+        values = context.measure("serialization", serialize_values) if context else serialize_values()
         if sort_by is None and hierarchy_parent in {"series", "season"}:
             def hierarchy_key(value):
                 season = value.get("seasonNumber")

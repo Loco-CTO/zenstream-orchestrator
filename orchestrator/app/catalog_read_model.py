@@ -82,13 +82,22 @@ class CatalogReadModel:
             )
         )
 
-    def _summary_values(self, entities, children):
+    def _summary_values(self, entities, children, entity_ids=None):
+        media_query = (
+            "SELECT entity_id,MIN(modified_ns),MAX(modified_ns),COUNT(*) "
+            "FROM media_files WHERE role='media'"
+        )
+        media_params = []
+        if entity_ids is not None:
+            ids = list(entity_ids)
+            if not ids:
+                return [], {}
+            media_query += f" AND entity_id IN ({','.join('?' for _ in ids)})"
+            media_params.extend(ids)
+        media_query += " GROUP BY entity_id"
         media = {
             row[0]: (row[1], row[2], row[3])
-            for row in self.db.read_execute(
-                "SELECT entity_id,MIN(modified_ns),MAX(modified_ns),COUNT(*) "
-                "FROM media_files WHERE role='media' GROUP BY entity_id"
-            )
+            for row in self.db.read_execute(media_query, media_params)
         }
         memo: dict[str, tuple] = {}
         visiting: set[str] = set()
@@ -250,10 +259,10 @@ class CatalogReadModel:
             return 0
         locales = list(locales or MetadataLanguageSettings().get()) or ["en"]
         entities, children = self._load_entities()
-        summaries, _ = self._summary_values(entities, children)
+        summaries, _ = self._summary_values(entities, children, entities)
         projections, genres, grams = self._projection_values(entities, locales)
         users = self._user_values(entities, children)
-        collections = self._collection_values(entities, summaries)
+        collections = self._collection_values_from_db(entities, summaries)
         now = _now()
         with self.db.transaction() as cursor:
             cursor.execute("DELETE FROM catalog_entity_summary")
@@ -298,12 +307,139 @@ class CatalogReadModel:
         )
         return len(entities)
 
-    @staticmethod
-    def _collection_values(entities, summaries):
-        # The collection-specific contribution is rebuilt from source summaries.
-        # Authorization is applied at read time by source_library_id.
-        # This method is intentionally pure so bootstrap remains deterministic.
-        return []
+    def _collection_values_from_db(self, entities, summaries):
+        if not self._has_table("collection_members"):
+            return []
+        summary_by_id = {row[0]: row for row in summaries}
+        grouped: dict[tuple[str, str], dict[str, object]] = {}
+        rows = self.db.read_execute(
+            "SELECT m.collection_entity_id,m.source_entity_id,s.library_id "
+            "FROM collection_members m "
+            "JOIN library_entities c ON c.id=m.collection_entity_id "
+            "JOIN library_entities s ON s.id=m.source_entity_id"
+        )
+        now = _now()
+        for collection_id, source_id, source_library_id in rows:
+            collection = entities.get(collection_id)
+            summary = summary_by_id.get(source_id)
+            if collection is None or summary is None:
+                continue
+            key = (collection_id, source_library_id)
+            value = grouped.setdefault(
+                key,
+                {
+                    "collection_library_id": collection[1],
+                    "playable_leaf_count": 0,
+                    "media_file_count": 0,
+                    "added": [],
+                    "last": [],
+                },
+            )
+            value["playable_leaf_count"] += int(summary[4] or 0)
+            value["media_file_count"] += int(summary[5] or 0)
+            if summary[8] is not None:
+                value["added"].append(int(summary[8]))
+            if summary[9] is not None:
+                value["last"].append(int(summary[9]))
+        return [
+            (
+                collection_id,
+                value["collection_library_id"],
+                source_library_id,
+                value["playable_leaf_count"],
+                value["media_file_count"],
+                min(value["added"], default=0),
+                max(value["last"], default=0),
+                now,
+            )
+            for (collection_id, source_library_id), value in grouped.items()
+        ]
+
+    def bootstrap(self, locales: Iterable[str] | None = None) -> int:
+        """Build the read model before interactive services become healthy."""
+        if not self.available() or not self._has_table("catalog_read_model_status"):
+            return 0
+        configured = list(locales or MetadataLanguageSettings().get()) or ["en"]
+        status = self.status()
+        entity_count = int(self.db.read_execute("SELECT COUNT(*) FROM library_entities")[0][0])
+        summary_count = int(self.db.read_execute("SELECT COUNT(*) FROM catalog_entity_summary")[0][0])
+        projection_count = int(self.db.read_execute("SELECT COUNT(*) FROM catalog_item_projection")[0][0])
+        expected_projections = entity_count * len(configured)
+        if status and status[0] == "ready" and summary_count == entity_count and projection_count == expected_projections:
+            return entity_count
+        logger.info(
+            "catalog read model bootstrap state=%s entities=%s summaries=%s projections=%s expected_projections=%s",
+            status[0] if status else "missing",
+            entity_count,
+            summary_count,
+            projection_count,
+            expected_projections,
+        )
+        try:
+            return self.rebuild(configured)
+        except Exception as error:
+            now = _now()
+            with self.db.transaction() as cursor:
+                cursor.execute(
+                    "UPDATE catalog_read_model_status SET state='failed',updated_at=?,error=? WHERE id=1",
+                    (now, str(error)[:1000]),
+                )
+            raise
+
+    def refresh_roots(self, root_ids: Iterable[str]) -> int:
+        """Refresh committed scanner subtrees without touching unrelated roots."""
+        if not self.available():
+            return 0
+        roots = list(dict.fromkeys(root_ids))
+        if not roots:
+            return 0
+        placeholders = ",".join("?" for _ in roots)
+        rows = self.db.read_execute(
+            "WITH RECURSIVE subtree(id) AS ("
+            f"SELECT id FROM library_entities WHERE id IN ({placeholders}) "
+            "UNION ALL SELECT e.id FROM library_entities e JOIN subtree s ON e.parent_id=s.id) "
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.created_at "
+            "FROM library_entities e JOIN subtree s ON s.id=e.id",
+            roots,
+        )
+        entities = {row[0]: row for row in rows}
+        children: dict[str, list[str]] = defaultdict(list)
+        for row in rows:
+            if row[2] in entities:
+                children[row[2]].append(row[0])
+        summaries, _ = self._summary_values(entities, children, entities)
+        locales = list(MetadataLanguageSettings().get()) or ["en"]
+        now = _now()
+        projection_rows = []
+        for entity_id, row in entities.items():
+            payload = json.dumps(self._fallback_payload(row), ensure_ascii=False)
+            title = normalize_search_text(json.loads(payload).get("title"))
+            for locale in locales:
+                projection_rows.append(
+                    (entity_id, locale, row[1], row[2], row[3], payload, title, 0.0, "", 0.0, now, 1)
+                )
+        with self.db.transaction() as cursor:
+            cursor.executemany(
+                "INSERT INTO catalog_entity_summary(entity_id,library_id,parent_id,entity_type,playable_leaf_count,media_file_count,media_added_ns,media_last_added_ns,added_sort_ns,last_added_sort_ns,generation,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(entity_id) DO UPDATE SET library_id=excluded.library_id,parent_id=excluded.parent_id,entity_type=excluded.entity_type,playable_leaf_count=excluded.playable_leaf_count,media_file_count=excluded.media_file_count,media_added_ns=excluded.media_added_ns,media_last_added_ns=excluded.media_last_added_ns,added_sort_ns=excluded.added_sort_ns,last_added_sort_ns=excluded.last_added_sort_ns,generation=excluded.generation,updated_at=excluded.updated_at",
+                summaries,
+            )
+            cursor.executemany(
+                "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id,locale) DO NOTHING",
+                projection_rows,
+            )
+            if self._has_table("collection_members"):
+                cursor.execute("DELETE FROM catalog_collection_summary")
+                cursor.execute(
+                    "INSERT INTO catalog_collection_summary(collection_entity_id,collection_library_id,source_library_id,playable_leaf_count,media_file_count,added_sort_ns,last_added_sort_ns,updated_at) "
+                    "SELECT m.collection_entity_id,c.library_id,s.library_id,SUM(x.playable_leaf_count),SUM(x.media_file_count),MIN(x.added_sort_ns),MAX(x.last_added_sort_ns),? "
+                    "FROM collection_members m JOIN library_entities c ON c.id=m.collection_entity_id "
+                    "JOIN library_entities s ON s.id=m.source_entity_id "
+                    "JOIN catalog_entity_summary x ON x.entity_id=m.source_entity_id "
+                    "GROUP BY m.collection_entity_id,s.library_id",
+                    (now,),
+                )
+        return len(summaries)
 
     def status(self):
         if not self._has_table("catalog_read_model_status"):
@@ -312,4 +448,3 @@ class CatalogReadModel:
             "SELECT state,generation,updated_at,error FROM catalog_read_model_status WHERE id=1"
         )
         return rows[0] if rows else None
-

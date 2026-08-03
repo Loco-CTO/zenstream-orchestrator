@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import unicodedata
 import math
+import contextvars
+import time
+from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +16,7 @@ from app.metadata_domain import choose_artwork, fallback_tiers, locale_variants
 from app.metadata_services import MetadataReadService
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
 from app.images import LocalArtworkCache
+from app.logging_config import get_logger
 
 
 LOCAL_ARTWORK_NAMES = {
@@ -21,6 +25,8 @@ LOCAL_ARTWORK_NAMES = {
     "Logo": {"logo", "clearlogo", "clear-logo"},
     "Banner": {"banner"},
 }
+
+logger = get_logger("catalog")
 
 
 def _now() -> str:
@@ -37,10 +43,70 @@ class _CatalogDatabase:
     def transaction(self):
         return self._database.transaction()
 
+    def __getattr__(self, name):
+        return getattr(self._database, name)
+
+
+class _CatalogReadContext:
+    def __init__(self, catalog, user_id: str):
+        self.catalog = catalog
+        self.user_id = user_id
+        self.entity_rows: dict[str, tuple | None] = {}
+        self.provider_ids: dict[str, list[dict]] = {}
+        self.graph: tuple[dict, dict, dict] | None = None
+        self.direct_states: dict[str, tuple] | None = None
+        self.playable_descendants: dict[str, list[str]] = {}
+        self.metadata_service = MetadataReadService(catalog.db)
+        self.timings: dict[str, float] = {}
+
+    def measure(self, stage: str, action):
+        started = time.perf_counter()
+        try:
+            return action()
+        finally:
+            self.timings[stage] = self.timings.get(stage, 0.0) + (time.perf_counter() - started)
+
+
+def _catalog_read(method):
+    @wraps(method)
+    def wrapped(self, user_id: str, *args, **kwargs):
+        active = self._read_context.get()
+        if active is not None and active.user_id == user_id:
+            return method(self, user_id, *args, **kwargs)
+        context = _CatalogReadContext(self, user_id)
+        token = self._read_context.set(context)
+        started = time.perf_counter()
+        try:
+            return method(self, user_id, *args, **kwargs)
+        finally:
+            elapsed = time.perf_counter() - started
+            details = " ".join(
+                f"{stage}_seconds={duration:.3f}"
+                for stage, duration in sorted(context.timings.items())
+            )
+            log = logger.warning if elapsed > 2 else logger.debug
+            log(
+                "catalog request complete operation=%s user_id=%s duration_seconds=%.3f %s",
+                method.__name__,
+                user_id,
+                elapsed,
+                details,
+            )
+            self._read_context.reset(token)
+    return wrapped
+
 
 class Catalog:
+    _read_context: contextvars.ContextVar[_CatalogReadContext | None] = contextvars.ContextVar(
+        "catalog_read_context", default=None
+    )
+
     def __init__(self):
         self.db = _CatalogDatabase(Config().database)
+
+    def _context(self, user_id: str) -> _CatalogReadContext | None:
+        context = self._read_context.get()
+        return context if context and context.user_id == user_id else None
 
     def allowed_libraries(self, user_id: str) -> set[str]:
         return {
@@ -113,11 +179,17 @@ class Catalog:
         ]
 
     def _entity_row(self, entity_id: str):
+        context = self._read_context.get()
+        if context is not None and entity_id in context.entity_rows:
+            return context.entity_rows[entity_id]
         rows = self.db.execute(
             "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE id=?",
             (entity_id,),
         )
-        return rows[0] if rows else None
+        row = rows[0] if rows else None
+        if context is not None:
+            context.entity_rows[entity_id] = row
+        return row
 
     def require_entity(self, user_id: str, entity_id: str):
         row = self._entity_row(entity_id)
@@ -126,16 +198,24 @@ class Catalog:
         return row
 
     def _provider_ids(self, entity_id: str, entity_type: str) -> list[dict]:
+        context = self._read_context.get()
+        if context is not None and entity_id in context.provider_ids:
+            return context.provider_ids[entity_id]
         primary = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
         rows = self.db.execute(
             "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY CASE WHEN provider=? THEN 0 ELSE 1 END,provider",
             (entity_id, primary),
         )
-        return [{"provider": row[0], "type": row[1], "id": row[2]} for row in rows]
+        values = [{"provider": row[0], "type": row[1], "id": row[2]} for row in rows]
+        if context is not None:
+            context.provider_ids[entity_id] = values
+        return values
 
     def _read_service(self) -> MetadataReadService:
-        return MetadataReadService(self.db)
+        context = self._read_context.get()
+        return context.metadata_service if context is not None else MetadataReadService(self.db)
 
+    @_catalog_read
     def metadata(
         self, user_id: str, entity_id: str, language: str, include_credits: bool = False
     ) -> dict:
@@ -280,6 +360,7 @@ class Catalog:
             service.providers(row[3]),
         )
 
+    @_catalog_read
     def item(self, user_id: str, entity_id: str, language: str) -> dict:
         row = self.require_entity(user_id, entity_id)
         metadata = self.metadata(user_id, entity_id, language, include_credits=True)["metadata"]
@@ -304,6 +385,17 @@ class Catalog:
         )
 
     def _relationship_graph(self, user_id: str) -> tuple[dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]]:
+        context = self._context(user_id)
+        if context and context.graph is not None:
+            return context.graph
+        def load_graph():
+            return self._relationship_graph_uncached(user_id)
+        graph = context.measure("graph", load_graph) if context else load_graph()
+        if context:
+            context.graph = graph
+        return graph
+
+    def _relationship_graph_uncached(self, user_id: str) -> tuple[dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]]:
         allowed = self.allowed_libraries(user_id)
         if not allowed:
             return {}, {}, {}
@@ -364,6 +456,9 @@ class Catalog:
         entities: dict[str, tuple[str | None, str]],
         children: dict[str, list[str]],
     ) -> list[str]:
+        context = self._read_context.get()
+        if context and entity_id in context.playable_descendants:
+            return context.playable_descendants[entity_id]
         leaf_types = {"movie", "episode", "track", "release"}
         result: list[str] = []
         for descendant_id in [entity_id, *self._walk_children(entity_id, children)]:
@@ -371,7 +466,30 @@ class Catalog:
                 continue
             if entities.get(descendant_id, (None, ""))[1] in leaf_types:
                 result.append(descendant_id)
+        if context:
+            context.playable_descendants[entity_id] = result
         return result
+
+    def _state_rows(self, user_id: str) -> dict[str, tuple]:
+        context = self._context(user_id)
+        if context and context.direct_states is not None:
+            return context.direct_states
+        allowed = self.allowed_libraries(user_id)
+        if not allowed:
+            return {}
+        placeholders = ",".join("?" for _ in allowed)
+        def load_states():
+            rows = self.db.execute(
+                f"SELECT s.entity_id,s.favorite,s.played,s.play_count,s.position_seconds,s.duration_seconds,s.last_played_at "
+                f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
+                f"WHERE s.user_id=? AND e.library_id IN ({placeholders})",
+                [user_id, *allowed],
+            )
+            return {row[0]: row[1:] for row in rows}
+        values = context.measure("state_preload", load_states) if context else load_states()
+        if context:
+            context.direct_states = values
+        return values
 
     def _state_row(self, user_id: str, entity_id: str, cursor=None):
         query = "SELECT favorite,played,play_count,position_seconds,duration_seconds,last_played_at FROM user_item_state WHERE user_id=? AND entity_id=?"
@@ -404,7 +522,8 @@ class Catalog:
 
     def _state(self, user_id: str, entity_id: str) -> dict:
         entities, children, _ = self._relationship_graph(user_id)
-        row = self._state_row(user_id, entity_id)
+        context = self._context(user_id)
+        row = self._state_rows(user_id).get(entity_id) if context else self._state_row(user_id, entity_id)
         direct = self._direct_state(row)
         leaves = self._playable_descendants(entity_id, entities, children)
         if not leaves or (len(leaves) == 1 and leaves[0] == entity_id):
@@ -413,7 +532,11 @@ class Catalog:
                 direct["playedPercentage"] = None
                 direct["unplayedItemCount"] = 0
             return direct
-        leaf_states = [self._direct_state(self._state_row(user_id, leaf_id)) for leaf_id in leaves]
+        states = self._state_rows(user_id) if context else None
+        leaf_states = [
+            self._direct_state(states.get(leaf_id) if states is not None else self._state_row(user_id, leaf_id))
+            for leaf_id in leaves
+        ]
         direct["played"] = bool(leaf_states) and all(state["played"] for state in leaf_states)
         direct["unplayedItemCount"] = sum(not state["played"] for state in leaf_states)
         direct["playedPercentage"] = None
@@ -527,6 +650,7 @@ class Catalog:
             values[entity_id] = {"addedAt": added, "lastAddedAt": last_added}
         return values
 
+    @_catalog_read
     def list_items(
         self,
         user_id: str,
@@ -653,6 +777,7 @@ class Catalog:
             ).split()
         )
 
+    @_catalog_read
     def search(
         self, user_id: str, query: str, language: str, page: int, page_size: int
     ) -> dict:
@@ -795,6 +920,7 @@ class Catalog:
                 )
         return self._state(user_id, entity_id)
 
+    @_catalog_read
     def favorites(
         self,
         user_id: str,
@@ -838,6 +964,7 @@ class Catalog:
             "total": len(values),
         }
 
+    @_catalog_read
     def similar(
         self, user_id: str, entity_id: str, language: str, limit: int = 8
     ) -> dict:
@@ -912,12 +1039,14 @@ class Catalog:
             for row in rows
         ]
 
+    @_catalog_read
     def home_featured(self, user_id: str, language: str) -> list[dict]:
         allowed = self.allowed_libraries(user_id)
         if not allowed:
             return []
         return self._home_discovery_items(user_id, language, allowed)[:25]
 
+    @_catalog_read
     def home_continue_watching(self, user_id: str, language: str) -> list[dict]:
         allowed = self.allowed_libraries(user_id)
         if not allowed:
@@ -943,6 +1072,7 @@ class Catalog:
             for row in rows
         ]
 
+    @_catalog_read
     def home_next_up(self, user_id: str, language: str) -> list[dict]:
         allowed = self.allowed_libraries(user_id)
         if not allowed:
@@ -980,6 +1110,7 @@ class Catalog:
         next_up.sort(key=lambda value: value["userState"].get("lastPlayedAt") or "", reverse=True)
         return next_up[:18]
 
+    @_catalog_read
     def home_derived(
         self, user_id: str, language: str, discovery_items: list[dict] | None = None
     ) -> dict:
@@ -1066,6 +1197,7 @@ class Catalog:
             "genreRows": genre_rows,
         }
 
+    @_catalog_read
     def home(self, user_id: str, language: str) -> dict:
         allowed = self.allowed_libraries(user_id)
         if not allowed:

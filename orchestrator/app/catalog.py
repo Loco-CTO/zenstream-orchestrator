@@ -1341,7 +1341,15 @@ class Catalog:
                     "AND EXISTS (SELECT 1 FROM media_files f WHERE f.entity_id=e.id AND f.role='media')",
                     (library_id, entity_type),
                 )
-                for playable_row in playable_rows:
+                ordered_playable_rows = sorted(
+                    playable_rows,
+                    key=lambda row: str(row[4] or "").casefold(),
+                )
+                ordered_playable_rows.sort(
+                    key=lambda row: (dates.get(row[0]) or {}).get("lastAddedAt") or "",
+                    reverse=True,
+                )
+                for playable_row in ordered_playable_rows[:18]:
                     episode_series_id = None
                     if entity_type == "episode":
                         season = self._entity_row(playable_row[2])

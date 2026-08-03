@@ -65,6 +65,7 @@ class _CatalogReadContext:
         self.graph: tuple[dict, dict, dict] | None = None
         self.direct_states: dict[str, tuple] | None = None
         self.projected_states: dict[str, tuple] = {}
+        self.empty_state_counts: dict[str, int] = {}
         self.projected_metadata: dict[tuple[str, str], dict] = {}
         self.playable_descendants: dict[str, list[str]] = {}
         self.resolved_states: dict[str, dict] = {}
@@ -156,20 +157,63 @@ class Catalog:
         return context.configured_languages
 
     def allowed_libraries(self, user_id: str) -> set[str]:
-        return {
+        context = self._context(user_id)
+        if context and context.allowed_library_ids is not None:
+            return set(context.allowed_library_ids)
+        values = {
             row[0]
             for row in self.db.execute(
                 "SELECT library_id FROM user_library_access WHERE user_id=?",
                 (user_id,),
             )
         }
+        if context:
+            context.allowed_library_ids = set(values)
+        return values
 
-    def _has_table(self, name: str) -> bool:
-        return bool(
+    def _table_exists(self, name: str) -> bool:
+        context = self._read_context.get()
+        if context and name in context.table_presence:
+            return context.table_presence[name]
+        value = bool(
             self.db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
             )
         )
+        if context:
+            context.table_presence[name] = value
+        return value
+
+    def _has_table(self, name: str) -> bool:
+        return self._table_exists(name)
+
+    def _library_supports_last_added(self, library_ids: set[str]) -> set[str]:
+        if not library_ids:
+            return set()
+        placeholders = ",".join("?" for _ in library_ids)
+        supported = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT DISTINCT parent.library_id "
+                "FROM library_entities parent "
+                "JOIN library_entities child INDEXED BY idx_library_entities_parent_id "
+                "ON child.parent_id=parent.id "
+                f"WHERE parent.library_id IN ({placeholders})",
+                sorted(library_ids),
+            )
+        }
+        if self._has_table("collection_members"):
+            supported.update(
+                row[0]
+                for row in self.db.execute(
+                    "SELECT DISTINCT parent.library_id "
+                    "FROM collection_members member "
+                    "JOIN library_entities parent ON parent.id=member.collection_entity_id "
+                    f"WHERE parent.library_id IN ({placeholders})",
+                    sorted(library_ids),
+                )
+            )
+        return supported
 
     def require_library(self, user_id: str, library_id: str) -> dict:
         if library_id not in self.allowed_libraries(user_id):
@@ -181,13 +225,19 @@ class Catalog:
         if not rows:
             raise HTTPException(404, "Library not found.")
         row = rows[0]
+        context = self._context(user_id)
+        supported = (
+            context.measure("library_capabilities", lambda: self._library_supports_last_added({library_id}))
+            if context
+            else self._library_supports_last_added({library_id})
+        )
         return {
             "id": row[0],
             "name": row[1],
             "type": row[2],
             "scanState": row[3],
             "lastScanFinishedAt": row[4],
-            "supportsLastAdded": self._supports_last_added(library_id),
+            "supportsLastAdded": library_id in supported,
         }
 
     def _supports_last_added(self, library_id: str) -> bool:
@@ -213,6 +263,15 @@ class Catalog:
             f"SELECT id,name,type,scan_state,last_scan_finished_at FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) AND type IN ('movies','tv_series','collection') ORDER BY name COLLATE NOCASE",
             list(allowed),
         )
+        context = self._context(user_id)
+        supported = (
+            context.measure(
+                "library_capabilities",
+                lambda: self._library_supports_last_added({row[0] for row in rows}),
+            )
+            if context
+            else self._library_supports_last_added({row[0] for row in rows})
+        )
         return [
             {
                 "id": row[0],
@@ -220,7 +279,7 @@ class Catalog:
                 "type": row[2],
                 "scanState": row[3],
                 "lastScanFinishedAt": row[4],
-                "supportsLastAdded": self._supports_last_added(row[0]),
+                "supportsLastAdded": row[0] in supported,
             }
             for row in rows
         ]
@@ -600,6 +659,13 @@ class Catalog:
             direct["unplayedItemCount"] = int(row[4])
             context.resolved_states[entity_id] = dict(direct)
             return direct
+        if context and entity_id in context.empty_state_counts:
+            direct = self._direct_state(None)
+            direct["played"] = False
+            direct["playedPercentage"] = None
+            direct["unplayedItemCount"] = context.empty_state_counts[entity_id]
+            context.resolved_states[entity_id] = dict(direct)
+            return direct
         entities, children, _ = self._relationship_graph(user_id)
         row = self._state_rows(user_id).get(entity_id) if context else self._state_row(user_id, entity_id)
         direct = self._direct_state(row)
@@ -655,6 +721,55 @@ class Catalog:
             [user_id, *missing],
         )
         context.projected_states.update({row[0]: row[1:] for row in rows})
+        if context.direct_states is None:
+            direct_states = self._state_rows(user_id)
+            if not direct_states:
+                missing = [
+                    entity_id
+                    for entity_id in entity_ids
+                    if entity_id not in context.projected_states
+                ]
+                if missing:
+                    placeholders = ",".join("?" for _ in missing)
+                    allowed = self.allowed_libraries(user_id)
+                    library_placeholders = ",".join("?" for _ in allowed)
+                    collection_union = ""
+                    collection_params: list[str] = []
+                    if self._has_table("collection_members"):
+                        collection_union = (
+                            " UNION SELECT tree.root_id, member.source_entity_id "
+                            "FROM entity_tree tree CROSS JOIN collection_members member "
+                            "JOIN library_entities source ON source.id=member.source_entity_id "
+                            "WHERE member.collection_entity_id=tree.entity_id "
+                            f"AND source.library_id IN ({library_placeholders})"
+                        )
+                        collection_params = sorted(allowed)
+                    rows = self.db.execute(
+                        "WITH RECURSIVE entity_tree(root_id,entity_id) AS ("
+                        f"SELECT id,id FROM library_entities WHERE id IN ({placeholders}) "
+                        f"AND library_id IN ({library_placeholders}) "
+                        "UNION SELECT tree.root_id,child.id FROM entity_tree tree "
+                        "CROSS JOIN library_entities child "
+                        "WHERE child.parent_id=tree.entity_id "
+                        f"AND child.library_id IN ({library_placeholders})"
+                        f"{collection_union}) "
+                        "SELECT tree.root_id,COUNT(*) FROM entity_tree tree "
+                        "JOIN library_entities entity ON entity.id=tree.entity_id "
+                        "WHERE entity.entity_type IN ('movie','episode','track','release') "
+                        "GROUP BY tree.root_id",
+                        [
+                            *missing,
+                            *sorted(allowed),
+                            *sorted(allowed),
+                            *collection_params,
+                        ],
+                    )
+                    context.empty_state_counts.update(
+                        {row[0]: int(row[1] or 0) for row in rows}
+                    )
+                    context.empty_state_counts.update(
+                        {entity_id: 0 for entity_id in missing if entity_id not in context.empty_state_counts}
+                    )
 
     def _preload_projected_metadata(
         self, user_id: str, entity_ids: list[str], language: str
@@ -793,21 +908,35 @@ class Catalog:
         """Return filesystem-derived Added and Last added values per entity."""
         scope = allowed_library_ids or {library_id}
         context = self._read_context.get()
+        scope_key = frozenset(scope)
+        requested_root_ids = None if root_ids is None else set(root_ids)
         cache_key = (
-            frozenset(scope),
-            None if root_ids is None else frozenset(root_ids),
+            scope_key,
+            None if requested_root_ids is None else frozenset(requested_root_ids),
         )
         if context and cache_key in context.date_values:
             return context.date_values[cache_key]
 
+        cached_roots: dict[str, dict[str, str]] = {}
+        if context and requested_root_ids is not None:
+            cached_roots = {
+                root_id: context.date_root_values[(scope_key, root_id)]
+                for root_id in requested_root_ids
+                if (scope_key, root_id) in context.date_root_values
+            }
+            requested_root_ids -= set(cached_roots)
+            if not requested_root_ids:
+                context.date_values[cache_key] = cached_roots
+                return cached_roots
+
         def resolve() -> dict[str, dict[str, str]]:
             placeholders = ",".join("?" for _ in scope)
-            if root_ids is not None and not root_ids:
+            if requested_root_ids is not None and not requested_root_ids:
                 return {}
-            requested_params = sorted(root_ids or ())
+            requested_params = sorted(requested_root_ids or ())
             root_filter = (
                 f" AND id IN ({','.join('?' for _ in requested_params)})"
-                if root_ids is not None
+                if requested_root_ids is not None
                 else ""
             )
             rows = self.db.execute(
@@ -851,7 +980,7 @@ class Catalog:
                     f"FROM catalog_entity_rollups WHERE library_id IN ({placeholders})"
                 )
                 rollup_params: list[str] = list(scope)
-                if root_ids is not None:
+                if requested_root_ids is not None:
                     rollup_query += (
                         f" AND entity_id IN ({','.join('?' for _ in requested_params)})"
                     )
@@ -868,7 +997,7 @@ class Catalog:
                     if entity_id in requested_ids:
                         rollup_values[entity_id] = (added_ns, last_added_ns)
 
-            if root_ids is None:
+            if requested_root_ids is None:
                 if len(rollup_values) == len(requested_ids):
                     compute_ids: set[str] = set()
                 else:
@@ -900,6 +1029,37 @@ class Catalog:
                     values[entity_id] = {"addedAt": fallback, "lastAddedAt": fallback}
                 return values
 
+            direct_ids = {
+                entity_id
+                for entity_id in compute_ids
+                if entities[entity_id][3] in {"movie", "episode", "track", "release"}
+            }
+            if direct_ids:
+                direct_placeholders = ",".join("?" for _ in direct_ids)
+                direct_rows = self.db.execute(
+                    "SELECT entity_id,MIN(modified_ns),MAX(modified_ns) "
+                    "FROM media_files WHERE role='media' "
+                    f"AND entity_id IN ({direct_placeholders}) GROUP BY entity_id",
+                    sorted(direct_ids),
+                )
+                for entity_id, added_ns, last_added_ns in direct_rows:
+                    fallback = entities[entity_id][4] or ""
+                    values[entity_id] = {
+                        "addedAt": _date_from_ns(added_ns) or fallback,
+                        "lastAddedAt": _date_from_ns(last_added_ns) or fallback,
+                    }
+                for entity_id in direct_ids:
+                    values.setdefault(
+                        entity_id,
+                        {
+                            "addedAt": entities[entity_id][4] or "",
+                            "lastAddedAt": entities[entity_id][4] or "",
+                        },
+                    )
+                compute_ids -= direct_ids
+            if not compute_ids:
+                return values
+
             collection_recursive = ""
             collection_params: list[str] = []
             if self._has_table("collection_members"):
@@ -908,16 +1068,16 @@ class Catalog:
                     UNION
                     SELECT entity_tree.root_id, member.source_entity_id
                     FROM entity_tree
-                    JOIN collection_members member
-                      ON member.collection_entity_id = entity_tree.entity_id
+                    CROSS JOIN collection_members member
                     JOIN library_entities source
                       ON source.id = member.source_entity_id
-                    WHERE source.library_id IN ({collection_placeholders})
+                    WHERE member.collection_entity_id = entity_tree.entity_id
+                      AND source.library_id IN ({collection_placeholders})
                 """
                 collection_params = list(scope)
             compute_filter = ""
             compute_params: list[str] = []
-            if root_ids is not None:
+            if requested_root_ids is not None:
                 compute_params = sorted(compute_ids)
                 compute_filter = (
                     f" AND id IN ({','.join('?' for _ in compute_params)})"
@@ -931,9 +1091,9 @@ class Catalog:
                     UNION
                     SELECT entity_tree.root_id, child.id
                     FROM entity_tree
-                    JOIN library_entities child
-                      ON child.parent_id = entity_tree.entity_id
-                    WHERE child.library_id IN ({placeholders})
+                    CROSS JOIN library_entities child
+                    WHERE child.parent_id = entity_tree.entity_id
+                      AND child.library_id IN ({placeholders})
                     {collection_recursive}
                 )
                 SELECT entity_tree.root_id,
@@ -965,8 +1125,16 @@ class Catalog:
             return values
 
         values = context.measure("date_values", resolve) if context else resolve()
+        values = {**cached_roots, **values}
         if context:
             context.date_values[cache_key] = values
+            if requested_root_ids is not None:
+                context.date_root_values.update(
+                    {
+                        (scope_key, root_id): value
+                        for root_id, value in values.items()
+                    }
+                )
         return values
 
     @_catalog_read
@@ -1034,7 +1202,7 @@ class Catalog:
                 projected_page = True
         context = self._context(user_id)
         date_scope = self.allowed_libraries(user_id) if library["type"] == "collection" else {library_id}
-        roots_for_dates = None if sort_by in {"added", "lastAdded"} else {row[0] for row in display_rows}
+        roots_for_dates = {row[0] for row in (rows if sort_by in {"added", "lastAdded"} else display_rows)}
         date_values = lambda: self._date_values(library_id, date_scope, roots_for_dates)
         dates = context.measure("date_sort", date_values) if context else date_values()
         if sort_by in {"added", "lastAdded"} and display_rows is rows:
@@ -1428,18 +1596,39 @@ class Catalog:
         if not allowed:
             return []
         placeholders = ",".join("?" for _ in allowed)
-        rows = self.db.execute(
-            f"WITH episode_state AS ("
-            f" SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id AS series_id,"
-            f" COALESCE(s.played,0) AS played,COALESCE(s.position_seconds,0) AS position_seconds,COALESCE(s.last_played_at,'') AS last_played_at"
-            f" FROM library_entities e JOIN library_entities season ON season.id=e.parent_id JOIN library_entities series ON series.id=season.parent_id"
-            f" LEFT JOIN user_item_state s ON s.entity_id=e.id AND s.user_id=?"
-            f" WHERE e.entity_type='episode' AND e.library_id IN ({placeholders})"
-            f" ), started AS (SELECT series_id,MAX(CASE WHEN played=1 OR position_seconds>0 THEN 1 ELSE 0 END) AS started FROM episode_state GROUP BY series_id), ranked AS ("
-            f" SELECT episode_state.*,ROW_NUMBER() OVER (PARTITION BY series_id ORDER BY season_number,episode_number,relative_path COLLATE NOCASE) AS item_rank"
-            f" FROM episode_state JOIN started USING(series_id) WHERE started=1 AND played=0"
-            f" ) SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at,series_id,last_played_at FROM ranked WHERE item_rank=1 ORDER BY last_played_at DESC,id LIMIT 18",
-            [user_id, *allowed],
+        def select_rows():
+            started_series = self.db.execute(
+                f"SELECT DISTINCT series.id "
+                f"FROM user_item_state s "
+                f"JOIN library_entities e ON e.id=s.entity_id AND e.entity_type='episode' "
+                f"JOIN library_entities season ON season.id=e.parent_id "
+                f"JOIN library_entities series ON series.id=season.parent_id "
+                f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) "
+                "AND (s.played=1 OR s.position_seconds>0)",
+                [user_id, *allowed],
+            )
+            if not started_series:
+                return []
+            series_placeholders = ",".join("?" for _ in started_series)
+            return self.db.execute(
+                f"WITH ranked AS ("
+                f" SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id AS series_id,COALESCE(s.played,0) AS played,COALESCE(s.last_played_at,'') AS last_played_at,"
+                f" ROW_NUMBER() OVER (PARTITION BY series.id ORDER BY e.season_number,e.episode_number,e.relative_path COLLATE NOCASE) AS item_rank"
+                f" FROM library_entities e "
+                f"JOIN library_entities season ON season.id=e.parent_id "
+                f"JOIN library_entities series ON series.id=season.parent_id "
+                f"LEFT JOIN user_item_state s ON s.entity_id=e.id AND s.user_id=? "
+                f"WHERE e.entity_type='episode' AND e.library_id IN ({placeholders}) "
+                f"AND series.id IN ({series_placeholders}) AND COALESCE(s.played,0)=0"
+                f" ) SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at,series_id,last_played_at "
+                f"FROM ranked WHERE item_rank=1 ORDER BY last_played_at DESC,id LIMIT 18",
+                [user_id, *allowed, *(row[0] for row in started_series)],
+            )
+        context = self._context(user_id)
+        rows = (
+            context.measure("home_next_up_sql", select_rows)
+            if context
+            else select_rows()
         )
         ids = [row[0] for row in rows] + [row[10] for row in rows if row[10]]
         self._preload_projected_states(user_id, ids)
@@ -1548,6 +1737,59 @@ class Catalog:
             "genreRows": genre_rows,
         }
 
+    def _newly_added_rows(self, library_id: str, entity_type: str) -> list[tuple]:
+        columns = (
+            "e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+            "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at"
+        )
+        rows_by_entity: dict[str, tuple] = {}
+        last_modified: int | None = None
+        last_entity: str | None = None
+        last_file: str | None = None
+        boundary: int | None = None
+        while True:
+            params: list[object] = [library_id, entity_type]
+            cursor_filter = ""
+            if last_modified is not None:
+                cursor_filter = (
+                    " AND (f.modified_ns < ? OR (f.modified_ns = ? AND "
+                    "(f.entity_id > ? OR (f.entity_id = ? AND f.id > ?))))"
+                )
+                params.extend(
+                    [last_modified, last_modified, last_entity, last_entity, last_file]
+                )
+            batch = self.db.execute(
+                f"SELECT {columns},f.modified_ns,f.id "
+                "FROM media_files f INDEXED BY idx_media_files_role_modified_entity "
+                "JOIN library_entities e ON e.id=f.entity_id "
+                "WHERE f.role='media' AND e.library_id=? AND e.entity_type=?"
+                f"{cursor_filter} ORDER BY f.modified_ns DESC,f.entity_id,f.id LIMIT 256",
+                params,
+            )
+            if not batch:
+                break
+            for row in batch:
+                entity_id = row[0]
+                rows_by_entity.setdefault(entity_id, row[:10] + (row[10],))
+            last_modified = batch[-1][10]
+            last_entity = batch[-1][0]
+            last_file = batch[-1][11]
+            if len(rows_by_entity) >= 18:
+                ordered = sorted(
+                    rows_by_entity.values(),
+                    key=lambda row: (-int(row[10] or 0), row[0]),
+                )
+                boundary = int(ordered[17][10] or 0)
+                if last_modified < boundary:
+                    break
+        return [
+            row[:10]
+            for row in sorted(
+                rows_by_entity.values(),
+                key=lambda row: (-int(row[10] or 0), row[0]),
+            )[:18]
+        ]
+
     @_catalog_read
     def home(self, user_id: str, language: str) -> dict:
         allowed = self.allowed_libraries(user_id)
@@ -1561,26 +1803,32 @@ class Catalog:
                 "recentlyPlayed": [],
                 "genreRows": [],
             }
-        placeholders = ",".join("?" for _ in allowed)
         items = self._home_discovery_items(user_id, language, allowed)
         resume = self.home_continue_watching(user_id, language)
         next_up = self.home_next_up(user_id, language)
         series_names: dict[str, str] = {}
         library_rows = []
-        by_library = {library["id"]: library for library in self.libraries(user_id)}
+        context = self._context(user_id)
+        by_library = {
+            library["id"]: library
+            for library in (
+                context.measure("home_libraries", lambda: self.libraries(user_id))
+                if context
+                else self.libraries(user_id)
+            )
+        }
         for library_id, library in by_library.items():
             newly_added = []
             if self._has_table("media_files") and library["type"] in {"movies", "tv_series"}:
                 entity_type = "movie" if library["type"] == "movies" else "episode"
-                playable_rows = self.db.execute(
-                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-                    "FROM library_entities e JOIN media_files f ON f.entity_id=e.id AND f.role='media' "
-                    "WHERE e.library_id=? AND e.entity_type=? "
-                    "GROUP BY e.id ORDER BY MAX(f.modified_ns) DESC,e.id LIMIT 18",
-                    (library_id, entity_type),
+                select_rows = lambda: self._newly_added_rows(library_id, entity_type)
+                playable_rows = (
+                    context.measure("home_newly_added_sql", select_rows)
+                    if context
+                    else select_rows()
                 )
                 dates = self._date_values(
-                    "", allowed, {row[0] for row in playable_rows}
+                    "", {library_id}, {row[0] for row in playable_rows}
                 )
                 for playable_row in playable_rows:
                     episode_series_id = None

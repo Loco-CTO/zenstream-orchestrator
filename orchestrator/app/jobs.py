@@ -16,6 +16,7 @@ from app.logging_config import get_logger
 from app.trickplay import TrickplayExtractor
 from app.intro_outro import IntroOutroDetector
 from app.foreground import active_requests
+from app.catalog_projections import CatalogProjectionStore
 
 
 logger = get_logger("jobs")
@@ -212,6 +213,17 @@ class JobStore:
             ),
         )
         return self.definition(definition["id"])  # type: ignore[return-value]
+
+    def ensure_projection(self, library: dict) -> dict:
+        return self.ensure(
+            f"catalog_projection:{library['id']}",
+            f"Build catalog projection for {library['name']}",
+            "Build indexed catalog hierarchy, date, and user-state projections.",
+            "catalog_projection",
+            43200,
+            {"libraryId": library["id"]},
+            True,
+        )
 
     def update_definition(self, definition_id: str, values: dict) -> dict:
         definition = self.definition(definition_id)
@@ -523,6 +535,49 @@ class MetadataCleanupJob:
         )
 
 
+class CatalogProjectionJob:
+    def __init__(self, store: JobStore):
+        self.store = store
+        self.db = store.db
+
+    def run(self, run_id: str, definition: dict, should_terminate=None) -> None:
+        should_terminate = should_terminate or (lambda: False)
+        library_id = (definition.get("config") or {}).get("libraryId")
+        if not library_id:
+            raise ValueError("Catalog projection library is not configured")
+        self.store.update_run(
+            run_id,
+            state="running",
+            started_at=now(),
+            thread_name=threading.current_thread().name,
+            message="Building catalog projection",
+        )
+        projection = CatalogProjectionStore(self.db)
+        total = projection.rebuild_library(library_id, should_terminate)
+        projection.rebuild_metadata(library_id, should_terminate)
+        users = self.db.read_execute(
+            "SELECT user_id FROM user_library_access WHERE library_id=?", (library_id,)
+        )
+        for index, (user_id,) in enumerate(users, start=1):
+            if should_terminate():
+                raise JobTerminated()
+            projection.rebuild_user(user_id, library_id, should_terminate)
+            self.store.update_run(
+                run_id,
+                progress_current=index,
+                progress_total=len(users),
+                message=f"Built catalog projection for {index} of {len(users)} users",
+            )
+        self.store.update_run(
+            run_id,
+            state="completed",
+            progress_current=len(users),
+            progress_total=len(users),
+            finished_at=now(),
+            message=f"Projected {total} catalog entities",
+        )
+
+
 class JobScheduler:
     """Dispatches every scheduled run on its own worker thread."""
 
@@ -551,6 +606,7 @@ class JobScheduler:
             )
         for library in self.library_runtime.store.list():
             self.store.ensure_library(library)
+            self.store.ensure_projection(library)
         self._recover_active_runs()
         self.stop_event.clear()
         self.thread = threading.Thread(
@@ -567,6 +623,7 @@ class JobScheduler:
 
     def refresh_library_definition(self, library: dict) -> dict:
         definition = self.store.ensure_library(library)
+        self.store.ensure_projection(library)
         values = {
             "intervalMinutes": library.get("scanIntervalMinutes"),
             "enabled": library.get("watchEnabled", True),
@@ -575,11 +632,12 @@ class JobScheduler:
         return self.store.update_definition(definition["id"], values)
 
     def remove_library_definition(self, library_id: str):
-        definition = self.store.by_key(f"library_scan:{library_id}")
-        if definition:
-            self.store.db.execute(
-                "DELETE FROM job_definitions WHERE id=?", (definition["id"],)
-            )
+        for key in (f"library_scan:{library_id}", f"catalog_projection:{library_id}"):
+            definition = self.store.by_key(key)
+            if definition:
+                self.store.db.execute(
+                    "DELETE FROM job_definitions WHERE id=?", (definition["id"],)
+                )
 
     def run_now(self, definition_id: str) -> dict:
         definition = self.store.definition(definition_id)
@@ -609,6 +667,18 @@ class JobScheduler:
         if not definition:
             self.store.ensure_defaults()
             definition = self.store.by_key("metadata_missing")
+        run, _ = self.store.create_or_get_active_run(definition)
+        with self.condition:
+            self.condition.notify_all()
+        return run
+
+    def enqueue_catalog_projection(self, library_id: str) -> dict:
+        definition = self.store.by_key(f"catalog_projection:{library_id}")
+        if not definition:
+            library = self.library_runtime.store.get(library_id)
+            if not library:
+                raise KeyError("Library not found")
+            definition = self.store.ensure_projection(library)
         run, _ = self.store.create_or_get_active_run(definition)
         with self.condition:
             self.condition.notify_all()
@@ -791,6 +861,10 @@ class JobScheduler:
                 )
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(
+                    run_id, definition, self.cancel_events[run_id].is_set
+                )
+            elif kind == "catalog_projection":
+                CatalogProjectionJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
             elif kind == "trickplay_extract":

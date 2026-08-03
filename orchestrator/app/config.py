@@ -1,5 +1,8 @@
 from .database import DatabaseHandler
 import os
+import shutil
+import sqlite3
+import time
 from pathlib import Path
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -50,6 +53,8 @@ class Config:
         """Create the database handler."""
         database_directory = PROJECT_ROOT / "sqlite"
         database_directory.mkdir(exist_ok=True)
+        database_file = database_directory / "orchestrator.db"
+        self._prepare_fresh_database(database_file)
         self._database = DatabaseHandler(
             db_type="sqlite",
             create_query={
@@ -122,10 +127,39 @@ class Config:
                     },
                 },
             },
-            db_file=str(database_directory / "orchestrator.db"),
+            db_file=str(database_file),
         )
 
         self._run_migrations()
+
+    @staticmethod
+    def _prepare_fresh_database(database_file: Path) -> None:
+        if not database_file.is_file() or database_file.stat().st_size == 0:
+            return
+        compatible = False
+        connection = None
+        try:
+            connection = sqlite3.connect(str(database_file), timeout=1.0)
+            row = connection.execute(
+                "SELECT value FROM schema_metadata WHERE key='generation'"
+            ).fetchone()
+            compatible = bool(row and row[0] == "catalog-projection-v1")
+        except sqlite3.Error:
+            compatible = False
+        finally:
+            if connection is not None:
+                connection.close()
+        if compatible:
+            return
+        stamp = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+        backup = database_file.with_name(
+            f"{database_file.name}.pre-catalog-v1.{stamp}.bak"
+        )
+        shutil.move(str(database_file), str(backup))
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{database_file}{suffix}")
+            if sidecar.exists():
+                shutil.move(str(sidecar), str(backup.with_name(backup.name + suffix)))
 
     @property
     def database(self):

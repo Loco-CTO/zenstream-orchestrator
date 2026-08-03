@@ -38,18 +38,35 @@ class DatabaseHandler:
             self.connection.execute("PRAGMA busy_timeout = 5000")
             if db_file != ":memory:":
                 self.connection.execute("PRAGMA journal_mode = WAL")
+                self.connection.execute("PRAGMA synchronous = NORMAL")
+                self.connection.execute("PRAGMA wal_autocheckpoint = 1000")
+                self.connection.execute("PRAGMA cache_size = -64000")
+                self.connection.execute("PRAGMA temp_store = MEMORY")
                 self.read_connection = sqlite3.connect(
-                    db_file, check_same_thread=False, timeout=2.0
+                    db_file, check_same_thread=False, timeout=0.5
                 )
                 self.read_connection.execute("PRAGMA query_only = ON")
-                self.read_connection.execute("PRAGMA busy_timeout = 2000")
+                self.read_connection.execute("PRAGMA busy_timeout = 500")
+                self.read_connection.execute("PRAGMA cache_size = -64000")
+                self.read_connection.execute("PRAGMA temp_store = MEMORY")
             else:
                 self.read_connection = self.connection
         except sqlite3.Error as e:
             print(f"Error connecting to SQLite: {e}")
 
     def execute(self, query, params=None):
-        """Execute a query on the database."""
+        """Execute a statement through the appropriate read or write path."""
+        if self._is_read_query(query):
+            return self.read_execute(query, params)
+        return self.write(query, params)
+
+    @staticmethod
+    def _is_read_query(query) -> bool:
+        statement = str(query or "").lstrip().upper()
+        return statement.startswith(("SELECT", "PRAGMA", "EXPLAIN"))
+
+    def write(self, query, params=None):
+        """Execute one serialized mutation and commit it."""
         with self.lock:
             cursor = self.connection.cursor()
             try:
@@ -65,6 +82,13 @@ class DatabaseHandler:
                 return e
             finally:
                 cursor.close()
+
+    def write_many(self, statements):
+        """Commit a bounded batch of mutations in one short transaction."""
+        with self.transaction() as cursor:
+            for query, params in statements:
+                cursor.execute(query, params or ())
+        return True
 
     @contextmanager
     def transaction(self):
@@ -89,9 +113,11 @@ class DatabaseHandler:
         else:
             connection = getattr(self.read_local, "connection", None)
             if connection is None:
-                connection = sqlite3.connect(self.db_file, check_same_thread=False, timeout=2.0)
+                connection = sqlite3.connect(self.db_file, check_same_thread=False, timeout=0.5)
                 connection.execute("PRAGMA query_only = ON")
-                connection.execute("PRAGMA busy_timeout = 2000")
+                connection.execute("PRAGMA busy_timeout = 500")
+                connection.execute("PRAGMA cache_size = -64000")
+                connection.execute("PRAGMA temp_store = MEMORY")
                 self.read_local.connection = connection
                 with self.read_connections_lock:
                     self.read_connections.append(connection)

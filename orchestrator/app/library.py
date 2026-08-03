@@ -666,6 +666,9 @@ class LibraryScanner:
                 finished_at=finished,
                 message=f"Indexed {count} entries",
             )
+            from app.jobs import scheduler
+
+            scheduler.enqueue_catalog_projection(library_id)
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except JobTerminated:
             self._scan_complete = False
@@ -1256,86 +1259,83 @@ class LibraryScanner:
     ) -> None:
         workers = configured_worker_limit("METADATA_ROOT_WORKERS", 64)
 
-        def resolve(row: tuple, index: int) -> None:
-            from app.providers import MetadataService, ProviderError
-
-            entity_id, entity_type, relative_path, _season, _episode = row
-            self._check_termination(should_terminate)
-            query, year = _inventory_query(relative_path or "")
-            logger.info(
-                "metadata movie start library_id=%s entity_id=%s query=%s index=%s/%s",
-                library_id, entity_id, query, index, len(rows),
-            )
-            service = MetadataService()
-            explicit = [
-                {"provider": value[0], "id": value[2]}
-                for value in self.db.execute(
-                    "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
-                    (entity_id,),
-                )
-            ]
-            try:
-                result = service.resolve_inventory_entity(
-                    entity_type, query, year, explicit
-                )
-                self._ids(
-                    entity_id,
-                    [
-                        (value["provider"], "movie", value["id"])
-                        for value in result["providerIds"]
-                    ],
-                )
-                for value in result["providerIds"]:
-                    self._fetch_configured_locales(
-                        service,
-                        value["provider"],
-                        entity_type,
-                        str(value["id"]),
-                        required=True,
-                    )
-                self.db.execute(
-                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
-                    (now(), entity_id),
-                )
-                message = f"Resolved {query}"
-                logger.info(
-                    "metadata movie complete library_id=%s entity_id=%s query=%s index=%s/%s",
-                    library_id, entity_id, query, index, len(rows),
-                )
-            except (ProviderError, ValueError, OSError) as error:
-                self.db.execute(
-                    "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
-                    (now(), entity_id),
-                )
-                logger.exception(
-                    "metadata movie failed; continuing library_id=%s entity_id=%s query=%s error=%s",
-                    library_id, entity_id, query, error,
-                )
-                message = f"Metadata failed for {query}; continuing"
-            except Exception as error:
-                self.db.execute(
-                    "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
-                    (now(), entity_id),
-                )
-                logger.exception(
-                    "unexpected metadata movie failure; continuing library_id=%s entity_id=%s query=%s error=%s",
-                    library_id, entity_id, query, error,
-                )
-                message = f"Metadata failed for {query}; continuing"
-            self.store.update_job(
-                job_id, progress_current=index, message=message
-            )
-
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="zenstream-metadata-roots"
         ) as executor:
             futures = [
-                executor.submit(resolve, row, index)
+                executor.submit(self._resolve_movie_row, library_id, row, job_id, should_terminate, index, len(rows))
                 for index, row in enumerate(rows, start=1)
             ]
             for future in as_completed(futures):
                 self._check_termination(should_terminate)
                 future.result()
+
+    def _resolve_movie_row(
+        self,
+        library_id: str,
+        row: tuple,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        index: int,
+        total: int,
+    ) -> None:
+        from app.providers import MetadataService, ProviderError
+
+        entity_id, entity_type, relative_path, _season, _episode = row
+        self._check_termination(should_terminate)
+        query, year = _inventory_query(relative_path or "")
+        logger.info(
+            "metadata movie start library_id=%s entity_id=%s query=%s index=%s/%s",
+            library_id, entity_id, query, index, total,
+        )
+        service = MetadataService()
+        explicit = [
+            {"provider": value[0], "id": value[2]}
+            for value in self.db.execute(
+                "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                (entity_id,),
+            )
+        ]
+        try:
+            result = service.resolve_inventory_entity(entity_type, query, year, explicit)
+            self._ids(
+                entity_id,
+                [(value["provider"], "movie", value["id"]) for value in result["providerIds"]],
+            )
+            for value in result["providerIds"]:
+                self._fetch_configured_locales(
+                    service, value["provider"], entity_type, str(value["id"]), required=True
+                )
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
+                (now(), entity_id),
+            )
+            message = f"Resolved {query}"
+            logger.info(
+                "metadata movie complete library_id=%s entity_id=%s query=%s index=%s/%s",
+                library_id, entity_id, query, index, total,
+            )
+        except (ProviderError, ValueError, OSError) as error:
+            self.db.execute(
+                "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
+                (now(), entity_id),
+            )
+            logger.exception(
+                "metadata movie failed; continuing library_id=%s entity_id=%s query=%s error=%s",
+                library_id, entity_id, query, error,
+            )
+            message = f"Metadata failed for {query}; continuing"
+        except Exception as error:
+            self.db.execute(
+                "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
+                (now(), entity_id),
+            )
+            logger.exception(
+                "unexpected metadata movie failure; continuing library_id=%s entity_id=%s query=%s error=%s",
+                library_id, entity_id, query, error,
+            )
+            message = f"Metadata failed for {query}; continuing"
+        self.store.update_job(job_id, progress_current=index, message=message)
 
     def _resolve_series_immediately(
         self,
@@ -2190,6 +2190,11 @@ class LibraryScanner:
         )
         self.store.update_job(job_id, progress_total=len(entries))
         count = 0
+        metadata_executor = ThreadPoolExecutor(
+            max_workers=configured_worker_limit("METADATA_ROOT_WORKERS", 64),
+            thread_name_prefix="zenstream-metadata-roots",
+        )
+        metadata_futures = []
         for entry in entries:
             self._check_termination(should_terminate)
             entity = self._entity(
@@ -2201,16 +2206,36 @@ class LibraryScanner:
                 discovered_ids.extend(parse_nfo_ids(nfo))
             if discovered_ids:
                 self._replace_ids(entity, discovered_ids)
-            self._files(
+            file_delta = self._files(
                 entity,
                 root,
                 [path for path in files if path.is_file()],
                 job_id=job_id,
             )
+            if (
+                entity in self._scan_created_ids
+                or file_delta["content_changed"]
+                or entity in self._scan_provider_identity_changed
+            ) and self._needs_metadata(entity):
+                metadata_futures.append(
+                    metadata_executor.submit(
+                        self._resolve_movie_row,
+                        library_id,
+                        (entity, "movie", relative(str(root), str(entry)), None, None),
+                        job_id,
+                        should_terminate,
+                        count + 1,
+                        len(entries),
+                    )
+                )
             count += 1
             self.store.update_job(
                 job_id, progress_current=count, message=f"Indexed {entry.name}"
             )
+        for future in metadata_futures:
+            self._check_termination(should_terminate)
+            future.result()
+        metadata_executor.shutdown(wait=True)
         self._scan_complete = True
         return count
 
@@ -2246,6 +2271,7 @@ class LibraryScanner:
         self.store.update_job(job_id, progress_total=len(series_dirs))
         episode_count = 0
         service = MetadataService() if resolve_immediately else None
+        early_series_metadata: set[str] = set()
         for series_index, series_dir in enumerate(series_dirs, start=1):
             self._check_termination(should_terminate)
             series_started = time.monotonic()
@@ -2270,6 +2296,32 @@ class LibraryScanner:
             series_ids = provider_ids(series_dir.name)
             if series_ids:
                 self._replace_ids(series, series_ids)
+            if service and series in self._metadata_candidates() and self._needs_metadata(series):
+                self._set_stage(
+                    job_id,
+                    f"Starting metadata for {series_dir.name}",
+                    seriesId=series,
+                    path=str(series_dir),
+                )
+                try:
+                    self._resolve_series_immediately(
+                        library_id,
+                        series,
+                        relative(str(root), str(series_dir)),
+                        service,
+                        job_id,
+                        should_terminate,
+                    )
+                    early_series_metadata.add(series)
+                except JobTerminated:
+                    raise
+                except Exception as error:
+                    logger.exception(
+                        "early series metadata failed library_id=%s series_id=%s error=%s",
+                        library_id,
+                        series,
+                        error,
+                    )
             season_dirs = [
                 path
                 for path in series_dir.iterdir()
@@ -2405,12 +2457,15 @@ class LibraryScanner:
                 (library_id, series, series),
             )
             metadata_candidates = self._metadata_candidates()
-            needs_resolution = (
-                series in metadata_candidates and self._needs_metadata(series)
-            ) or any(
-                row[0] in metadata_candidates and self._needs_metadata(row[0])
-                for row in children
-                if row[0] in self._scan_seen_ids
+            needs_resolution = False if series in early_series_metadata else (
+                (
+                    series in metadata_candidates
+                    and self._needs_metadata(series)
+                ) or any(
+                    row[0] in metadata_candidates and self._needs_metadata(row[0])
+                    for row in children
+                    if row[0] in self._scan_seen_ids
+                )
             )
             if service and needs_resolution:
                 self._set_stage(

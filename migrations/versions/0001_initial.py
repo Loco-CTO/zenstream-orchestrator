@@ -10,10 +10,10 @@ depends_on = None
 
 TABLES = [
     """CREATE TABLE users (
+        id TEXT PRIMARY KEY NOT NULL,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
         disabled INTEGER NOT NULL DEFAULT 0,
-        id TEXT,
         password_scheme TEXT NOT NULL DEFAULT 'sha256'
     )""",
     "CREATE TABLE invites (url TEXT UNIQUE NOT NULL)",
@@ -36,6 +36,7 @@ TABLES = [
         watching_together INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(group_id, participant_id)
     )""",
     "CREATE TABLE syncplay_operations (operation_id TEXT PRIMARY KEY, group_id TEXT NOT NULL, user_id TEXT NOT NULL, state TEXT NOT NULL)",
+    "CREATE TABLE schema_metadata (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)",
     """CREATE TABLE metadata_credentials (
         provider TEXT PRIMARY KEY NOT NULL, ciphertext TEXT NOT NULL,
         credential_type TEXT NOT NULL DEFAULT 'api_key', validated_at TEXT, updated_at TEXT NOT NULL
@@ -77,7 +78,8 @@ TABLES = [
     """CREATE TABLE media_files (
         id TEXT PRIMARY KEY NOT NULL, entity_id TEXT NOT NULL, relative_path TEXT NOT NULL,
         role TEXT NOT NULL, language TEXT, flags TEXT, size INTEGER NOT NULL DEFAULT 0,
-        modified_ns INTEGER NOT NULL DEFAULT 0, file_hash TEXT, image_blur_hash TEXT,
+        modified_ns INTEGER NOT NULL DEFAULT 0, file_hash TEXT, quick_fingerprint TEXT,
+        image_blur_hash TEXT,
         UNIQUE(entity_id, relative_path, role),
         FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE
     )""",
@@ -228,6 +230,55 @@ TABLES = [
         FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE,
         FOREIGN KEY(person_id) REFERENCES people(id) ON DELETE CASCADE
     )""",
+    """CREATE TABLE enrichment_queue (
+        id TEXT PRIMARY KEY NOT NULL, entity_id TEXT NOT NULL, library_id TEXT NOT NULL,
+        kind TEXT NOT NULL, locale TEXT, priority INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(entity_id, kind, locale),
+        FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE,
+        FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE catalog_entity_rollups (
+        entity_id TEXT PRIMARY KEY NOT NULL, library_id TEXT NOT NULL,
+        descendant_count INTEGER NOT NULL DEFAULT 0, playable_count INTEGER NOT NULL DEFAULT 0,
+        played_leaf_count INTEGER NOT NULL DEFAULT 0, unplayed_leaf_count INTEGER NOT NULL DEFAULT 0,
+        added_ns INTEGER, last_added_ns INTEGER, generation INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE,
+        FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE catalog_user_rollups (
+        user_id TEXT NOT NULL, entity_id TEXT NOT NULL,
+        favorite INTEGER NOT NULL DEFAULT 0, played INTEGER NOT NULL DEFAULT 0,
+        play_count INTEGER NOT NULL DEFAULT 0,
+        played_leaf_count INTEGER NOT NULL DEFAULT 0, unplayed_leaf_count INTEGER NOT NULL DEFAULT 0,
+        position_seconds REAL NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
+        last_played_at TEXT, generation INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+        PRIMARY KEY(user_id, entity_id),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE catalog_metadata_projection (
+        entity_id TEXT NOT NULL, locale TEXT NOT NULL, payload TEXT NOT NULL,
+        updated_at TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(entity_id, locale),
+        FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE catalog_home_projection (
+        user_id TEXT, library_id TEXT, section TEXT NOT NULL, entity_id TEXT NOT NULL,
+        rank INTEGER NOT NULL, generation INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL,
+        PRIMARY KEY(user_id, library_id, section, entity_id),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE,
+        FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE catalog_projection_status (
+        library_id TEXT PRIMARY KEY NOT NULL, generation INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'pending', progress_current INTEGER NOT NULL DEFAULT 0,
+        progress_total INTEGER NOT NULL DEFAULT 0, error TEXT, updated_at TEXT NOT NULL,
+        FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
+    )""",
 ]
 
 INDEXES = [
@@ -248,6 +299,15 @@ INDEXES = [
     "CREATE INDEX idx_intro_outro_assets_season ON intro_outro_assets(season_id)",
     "CREATE INDEX idx_entity_person_credits_item ON entity_person_credits(entity_id, locale, credit_type, credit_order)",
     "CREATE INDEX idx_entity_person_credits_person ON entity_person_credits(person_id)",
+    "CREATE INDEX idx_user_sessions_expiry ON user_sessions(expires_at)",
+    "CREATE INDEX idx_library_entities_hierarchy_order ON library_entities(library_id, entity_type, parent_id, season_number, episode_number, relative_path)",
+    "CREATE INDEX idx_media_files_entity_role_modified ON media_files(entity_id, role, modified_ns)",
+    "CREATE INDEX idx_enrichment_queue_state_priority ON enrichment_queue(state, priority DESC, created_at)",
+    "CREATE INDEX idx_enrichment_queue_library ON enrichment_queue(library_id, state, updated_at)",
+    "CREATE INDEX idx_catalog_entity_rollups_library ON catalog_entity_rollups(library_id, last_added_ns)",
+    "CREATE INDEX idx_catalog_user_rollups_user ON catalog_user_rollups(user_id, last_played_at)",
+    "CREATE INDEX idx_catalog_metadata_locale ON catalog_metadata_projection(locale, entity_id)",
+    "CREATE INDEX idx_catalog_home_lookup ON catalog_home_projection(user_id, section, rank)",
 ]
 
 
@@ -257,6 +317,7 @@ def upgrade():
     op.execute(sa.text("CREATE VIRTUAL TABLE catalog_search USING fts5(entity_id UNINDEXED, library_id UNINDEXED, locale UNINDEXED, title, tokenize='trigram')"))
     for statement in INDEXES:
         op.execute(sa.text(statement))
+    op.execute(sa.text("INSERT INTO schema_metadata(key,value) VALUES('generation','catalog-projection-v1')"))
     op.execute(sa.text("INSERT INTO intro_outro_settings(id,scan_on_added,updated_at) VALUES(1,1,CURRENT_TIMESTAMP)"))
 
 

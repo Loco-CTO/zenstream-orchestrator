@@ -505,10 +505,11 @@ class LibraryScanner:
         self._stage = "idle"
         self._stage_context: dict = {}
         self._stage_started = time.monotonic()
+        self._last_stage_persisted_at = 0.0
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
 
-    def _set_stage(self, job_id: str, stage: str, **context) -> None:
+    def _set_stage(self, job_id: str, stage: str, *, persist: bool = True, **context) -> None:
         with self._stage_lock:
             self._stage = stage
             self._stage_context = context
@@ -519,7 +520,10 @@ class LibraryScanner:
             stage,
             context,
         )
-        self.store.update_job(job_id, message=stage)
+        now_monotonic = time.monotonic()
+        if persist or now_monotonic - self._last_stage_persisted_at >= 2.0:
+            self.store.update_job(job_id, message=stage)
+            self._last_stage_persisted_at = now_monotonic
 
     def _start_heartbeat(self, library_id: str, job_id: str) -> None:
         self._heartbeat_stop = threading.Event()
@@ -596,6 +600,7 @@ class LibraryScanner:
             "removed": set(),
         }
         self._scan_provider_identity_changed = set()
+        self._last_stage_persisted_at = 0.0
         self._scan_complete = False
         try:
             self._check_termination(should_terminate)
@@ -1982,6 +1987,7 @@ class LibraryScanner:
                     self._set_stage(
                         job_id,
                         f"Inspecting {path.name}",
+                        persist=False,
                         entityId=entity_id,
                         path=str(path),
                     )
@@ -2016,6 +2022,7 @@ class LibraryScanner:
                 self._set_stage(
                     job_id,
                     f"Fingerprinting {path.name} ({stat.st_size} bytes)",
+                    persist=False,
                     entityId=entity_id,
                     path=str(path),
                     size=stat.st_size,
@@ -2080,6 +2087,7 @@ class LibraryScanner:
                 self._set_stage(
                     job_id,
                     "Probing changed media",
+                    persist=False,
                     entityId=entity_id,
                 )
             logger.info(

@@ -16,7 +16,7 @@ from api.zenstream.application_routes import (
 from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
 from app.config import load_config
-from app.foreground import run_foreground, shutdown as shutdown_foreground
+from app.foreground import active_requests, run_foreground, shutdown as shutdown_foreground
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
 from app.metadata_services import asset_executor
@@ -89,6 +89,8 @@ app.add_middleware(
 async def request_timing(request, call_next):
     started = time.perf_counter()
     authorization = request.headers.get("authorization")
+    auth_started = time.perf_counter()
+    auth_ms = 0.0
     if authorization:
         from app.client_auth import bearer_token
         from app.models.account import Account
@@ -96,14 +98,18 @@ async def request_timing(request, call_next):
         token = bearer_token(authorization)
         if token:
             request.state.authenticated = await run_foreground(Account().authenticate_token, token)
+            auth_ms = (time.perf_counter() - auth_started) * 1000
     response = await call_next(request)
     duration_ms = (time.perf_counter() - started) * 1000
-    request_logger.debug(
-        "request complete method=%s path=%s status=%s duration_ms=%.1f",
+    log = request_logger.warning if duration_ms >= 500 else request_logger.debug
+    log(
+        "request complete method=%s path=%s status=%s duration_ms=%.1f auth_ms=%.1f foreground_active=%s",
         request.method,
         request.url.path,
         response.status_code,
         duration_ms,
+        auth_ms,
+        active_requests(),
     )
     return response
 

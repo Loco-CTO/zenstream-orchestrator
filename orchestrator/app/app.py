@@ -17,6 +17,7 @@ from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
 from app.config import load_config
 from app.foreground import active_requests, run_foreground, shutdown as shutdown_foreground
+from app.catalog_read_model import CatalogReadModel
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
 from app.metadata_services import asset_executor
@@ -34,6 +35,7 @@ async def lifespan(_app: FastAPI):
     load_config()
     if not os.getenv("SECRET_KEY"):
         raise RuntimeError("Environment variable `SECRET_KEY` not set")
+    await asyncio.to_thread(CatalogReadModel().bootstrap)
     library_runtime.start()
     job_scheduler.start()
     async def maintain_sessions():

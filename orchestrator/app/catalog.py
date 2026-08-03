@@ -1778,6 +1778,23 @@ class Catalog:
     ) -> list[dict]:
         placeholders = ",".join("?" for _ in allowed)
         context = self._context(user_id)
+        if self._read_model_ready():
+            select_rows = lambda: self.db.execute(
+                f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,s.added_sort_ns,s.last_added_sort_ns "
+                f"FROM library_entities e JOIN catalog_entity_summary s ON s.entity_id=e.id "
+                f"WHERE e.library_id IN ({placeholders}) AND e.entity_type IN ('movie','series','collection') "
+                "ORDER BY s.last_added_sort_ns DESC,e.id LIMIT 36",
+                list(allowed),
+            )
+            rows = context.measure("home_discovery_sql", select_rows) if context else select_rows()
+            dates = {
+                row[0]: {
+                    "addedAt": _date_from_ns(row[10]) or row[8],
+                    "lastAddedAt": _date_from_ns(row[11]) or row[8],
+                }
+                for row in rows
+            }
+            return self._hydrate_rows(user_id, [row[:10] for row in rows], language, dates)
         select_rows = lambda: self.db.execute(
             f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection') ORDER BY created_at DESC LIMIT 36",
             list(allowed),

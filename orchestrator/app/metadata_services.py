@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import os
@@ -189,6 +190,8 @@ class MetadataReadService:
         self.cache = cache or MetadataCache()
         self._metadata_image_columns: set[str] | None = None
         self._blur_hashes: dict[tuple[str, str, str, str, str], str | None] = {}
+        self._payloads: dict[tuple[str, tuple[tuple[str, str], ...]], dict[tuple[str, str], dict]] = {}
+        self._public_resolutions: dict[tuple[str, str, tuple[tuple[str, str], ...], str], dict] = {}
 
     @staticmethod
     def providers(entity_type: str) -> list[str]:
@@ -197,6 +200,18 @@ class MetadataReadService:
     def payloads(
         self, entity_type: str, provider_ids: Iterable[dict]
     ) -> dict[tuple[str, str], dict]:
+        provider_ids = list(provider_ids)
+        identities = tuple(
+            sorted(
+                (str(identity.get("provider")), str(identity.get("id")))
+                for identity in provider_ids
+                if identity.get("provider") and identity.get("id")
+            )
+        )
+        cache_key = (entity_type, identities)
+        cached = self._payloads.get(cache_key)
+        if cached is not None:
+            return cached
         payloads: dict[tuple[str, str], dict] = {}
         for identity in provider_ids:
             provider = identity.get("provider")
@@ -214,6 +229,7 @@ class MetadataReadService:
                     continue
                 if value.get("_imageLanguageSchema") == IMAGE_LANGUAGE_SCHEMA:
                     payloads.setdefault((provider, locale), value)
+        self._payloads[cache_key] = payloads
         return payloads
 
     def resolve_raw(
@@ -303,6 +319,17 @@ class MetadataReadService:
         requested: str,
     ) -> dict:
         provider_ids = list(provider_ids)
+        identities = tuple(
+            sorted(
+                (str(identity.get("provider")), str(identity.get("id")))
+                for identity in provider_ids
+                if identity.get("provider") and identity.get("id")
+            )
+        )
+        cache_key = (entity_id, entity_type, identities, requested)
+        cached = self._public_resolutions.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
         raw = self.resolve_raw(entity_type, provider_ids, requested)
         original = raw.get("originalLanguage")
         providers = self.providers(entity_type)
@@ -329,12 +356,14 @@ class MetadataReadService:
                     image["blurHash"] = blur_hash
                 selected[image_type] = image
         raw["images"] = selected
-        return {
+        resolved = {
             "itemId": entity_id,
             "requestedLanguage": requested,
             "originalLanguage": original,
             "metadata": raw,
         }
+        self._public_resolutions[cache_key] = copy.deepcopy(resolved)
+        return resolved
 
     def _image_blur_hash(
         self,

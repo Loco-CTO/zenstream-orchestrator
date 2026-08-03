@@ -406,6 +406,42 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("hidden", rows)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_newly_added_serializes_only_selected_items(self, _languages):
+        user_id = self.account().create("home-limit", "password-123")["id"]
+        self.db.execute("UPDATE libraries SET type='movies' WHERE id='allowed'")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
+        )
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        for index in range(40):
+            entity_id = f"movie-{index}"
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (entity_id, "allowed", None, "movie", entity_id, None, None, None, None, "2026", "2026"),
+            )
+            self.db.execute(
+                "INSERT INTO media_files VALUES(?,?,?,?,?)",
+                (f"file-{index}", entity_id, f"{entity_id}.mkv", "media", 1_700_000_000_000_000_000 + index),
+            )
+        catalog = self.catalog()
+        metadata_calls = 0
+
+        def metadata(_user_id, entity_id, _language):
+            nonlocal metadata_calls
+            metadata_calls += 1
+            return {"metadata": {"title": entity_id}}
+
+        catalog.metadata = metadata
+        catalog._home_discovery_items = lambda *_args: []
+
+        result = catalog.home(user_id, "en")
+
+        self.assertEqual(len(result["libraryRows"][0]["items"]), 18)
+        self.assertEqual(metadata_calls, 18)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_derived_rows_use_existing_catalog_and_user_state(self, _languages):
         user_id = self.account().create("derived", "password-123")["id"]
         self.db.execute(

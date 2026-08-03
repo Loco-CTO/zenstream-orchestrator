@@ -732,6 +732,8 @@ class Catalog:
                 if missing:
                     placeholders = ",".join("?" for _ in missing)
                     allowed = self.allowed_libraries(user_id)
+                    if not allowed:
+                        return
                     library_placeholders = ",".join("?" for _ in allowed)
                     collection_union = ""
                     collection_params: list[str] = []
@@ -1579,13 +1581,19 @@ class Catalog:
         if not allowed:
             return []
         placeholders = ",".join("?" for _ in allowed)
-        rows = self.db.execute(
+        select_rows = lambda: self.db.execute(
             f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id "
             f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
             f"LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
             f"LEFT JOIN library_entities series ON series.id=season.parent_id "
             f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND s.duration_seconds>0 AND s.position_seconds/s.duration_seconds>=0.02 AND s.position_seconds/s.duration_seconds<0.9 ORDER BY s.last_played_at DESC LIMIT 18",
             [user_id, *allowed],
+        )
+        context = self._context(user_id)
+        rows = (
+            context.measure("home_continue_watching_sql", select_rows)
+            if context
+            else select_rows()
         )
         ids = [row[0] for row in rows] + [row[10] for row in rows if row[10]]
         self._preload_projected_states(user_id, ids)

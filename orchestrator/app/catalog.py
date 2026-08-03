@@ -485,52 +485,42 @@ class Catalog:
             list(scope),
         )
         entities = {row[0]: row for row in rows}
-        children: dict[str, list[str]] = {}
-        for entity_id, parent_id, _, _ in rows:
-            if parent_id:
-                children.setdefault(parent_id, []).append(entity_id)
-        if self._has_table("collection_members"):
-            for collection_id, member_id in self.db.execute(
-                f"SELECT m.collection_entity_id,m.source_entity_id FROM collection_members m JOIN library_entities c ON c.id=m.collection_entity_id WHERE c.library_id IN ({placeholders})",
-                list(scope),
-            ):
-                children.setdefault(collection_id, []).append(member_id)
-
-        media: dict[str, list[str]] = {}
-        if self._has_table("media_files"):
-            for entity_id, modified_ns in self.db.execute(
-                f"SELECT entity_id,modified_ns FROM media_files WHERE role='media' AND entity_id IN (SELECT id FROM library_entities WHERE library_id IN ({placeholders})) AND modified_ns IS NOT NULL",
-                list(scope),
-            ):
-                media.setdefault(entity_id, []).append(
-                    datetime.fromtimestamp(modified_ns / 1_000_000_000, tz=timezone.utc).isoformat()
-                )
-
-        memo: dict[str, tuple[str, str]] = {}
-
-        def aggregate(entity_id: str, visiting: set[str] | None = None) -> tuple[str, str]:
-            if entity_id in memo:
-                return memo[entity_id]
-            visiting = visiting or set()
-            if entity_id in visiting:
-                fallback = entities[entity_id][3] or ""
-                return fallback, fallback
-            visiting.add(entity_id)
-            timestamps = list(media.get(entity_id, []))
-            for child_id in children.get(entity_id, []):
-                if child_id in entities:
-                    child_added, child_last = aggregate(child_id, visiting)
-                    timestamps.extend(value for value in (child_added, child_last) if value)
+        if not entities:
+            return {}
+        date_rows = self.db.execute(
+            f"""
+            WITH RECURSIVE entity_tree(root_id, entity_id) AS (
+                SELECT id, id FROM library_entities
+                WHERE library_id IN ({placeholders})
+                UNION ALL
+                SELECT entity_tree.root_id, child.id
+                FROM entity_tree
+                JOIN library_entities child ON child.parent_id = entity_tree.entity_id
+                WHERE child.library_id IN ({placeholders})
+            )
+            SELECT entity_tree.root_id, MIN(media_files.modified_ns), MAX(media_files.modified_ns)
+            FROM entity_tree
+            LEFT JOIN media_files
+              ON media_files.entity_id = entity_tree.entity_id
+             AND media_files.role = 'media'
+             AND media_files.modified_ns IS NOT NULL
+            GROUP BY entity_tree.root_id
+            """,
+            list(scope) + list(scope),
+        )
+        values = {}
+        for entity_id, added_ns, last_added_ns in date_rows:
             fallback = entities[entity_id][3] or ""
-            result = (min(timestamps) if timestamps else fallback, max(timestamps) if timestamps else fallback)
-            memo[entity_id] = result
-            return result
-
-        return {
-            entity_id: {"addedAt": added, "lastAddedAt": last_added}
-            for entity_id in entities
-            for added, last_added in [aggregate(entity_id)]
-        }
+            added = (
+                datetime.fromtimestamp(added_ns / 1_000_000_000, tz=timezone.utc).isoformat()
+                if added_ns is not None else fallback
+            )
+            last_added = (
+                datetime.fromtimestamp(last_added_ns / 1_000_000_000, tz=timezone.utc).isoformat()
+                if last_added_ns is not None else fallback
+            )
+            values[entity_id] = {"addedAt": added, "lastAddedAt": last_added}
+        return values
 
     def list_items(
         self,
@@ -579,7 +569,7 @@ class Catalog:
             ordered_rows = sorted(rows, key=row_hierarchy_key)
             start = (page - 1) * page_size
             display_rows = ordered_rows[start : start + page_size]
-        dates = self._date_values(library_id, self.allowed_libraries(user_id))
+        dates = self._date_values(library_id, {library_id})
         if sort_by in {"added", "lastAdded"} and display_rows is rows:
             date_field = "addedAt" if sort_by == "added" else "lastAddedAt"
             grouped_rows: dict[str, list] = {}

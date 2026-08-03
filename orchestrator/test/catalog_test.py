@@ -128,6 +128,16 @@ class CatalogTest(unittest.TestCase):
             "metadata": {"title": entity_id.replace("-", " ")}
         }
 
+    def create_date_projection_tables(self):
+        self.db.execute(
+            "CREATE TABLE catalog_entity_rollups(" 
+            "entity_id TEXT PRIMARY KEY,library_id TEXT,added_ns INTEGER,last_added_ns INTEGER)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_projection_status(" 
+            "library_id TEXT PRIMARY KEY,state TEXT)"
+        )
+
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_hierarchy_defaults_to_numeric_episode_order_and_paginates(self, _languages):
         user_id = self.seed_series_hierarchy()
@@ -300,11 +310,114 @@ class CatalogTest(unittest.TestCase):
 
         self.assertEqual(values["collection-1"]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
 
+    def test_partial_rollups_compute_only_missing_requested_roots(self):
+        self.seed_series_hierarchy()
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("series-2", "allowed", None, "series", "Other", None, None, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("episode-20", "allowed", "series-2", "episode", "Other/Episode", 1, 1, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES(?,?,?,?,?)",
+            ("file-20", "episode-20", "episode-20.mkv", "media", 1_900_000_000_000_000_000),
+        )
+        self.create_date_projection_tables()
+        self.db.execute("INSERT INTO catalog_projection_status VALUES(?,?)", ("allowed", "ready"))
+        self.db.execute(
+            "INSERT INTO catalog_entity_rollups VALUES(?,?,?,?)",
+            ("series-1", "allowed", 1_700_000_000_000_000_000, 1_800_000_000_000_000_000),
+        )
+
+        values = self.catalog()._date_values(
+            "allowed", {"allowed"}, {"series-1", "series-2"}
+        )
+
+        self.assertEqual(values["series-1"]["addedAt"], "2023-11-14T22:13:20+00:00")
+        self.assertEqual(values["series-1"]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
+        self.assertEqual(values["series-2"]["addedAt"], "2030-03-17T17:46:40+00:00")
+        self.assertEqual(values["series-2"]["lastAddedAt"], "2030-03-17T17:46:40+00:00")
+
+    def test_scanning_library_ignores_stale_rollups(self):
+        self.seed_series_hierarchy()
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        for file_id, entity_id, modified_ns in (
+            ("file-1", "episode-1", 2_000_000_000_000_000_000),
+            ("file-2", "episode-2", 2_100_000_000_000_000_000),
+        ):
+            self.db.execute(
+                "INSERT INTO media_files VALUES(?,?,?,?,?)",
+                (file_id, entity_id, f"{entity_id}.mkv", "media", modified_ns),
+            )
+        self.create_date_projection_tables()
+        self.db.execute("UPDATE libraries SET scan_state='scanning' WHERE id='allowed'")
+        self.db.execute("INSERT INTO catalog_projection_status VALUES(?,?)", ("allowed", "ready"))
+        self.db.execute(
+            "INSERT INTO catalog_entity_rollups VALUES(?,?,?,?)",
+            ("series-1", "allowed", 1_000_000_000_000_000_000, 1_100_000_000_000_000_000),
+        )
+
+        values = self.catalog()._date_values("allowed", {"allowed"}, {"series-1"})
+
+        self.assertEqual(values["series-1"]["addedAt"], "2033-05-18T03:33:20+00:00")
+        self.assertEqual(values["series-1"]["lastAddedAt"], "2036-07-18T13:20:00+00:00")
+
+    def test_date_fallback_is_root_scoped_and_indexed(self):
+        self.seed_series_hierarchy()
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("series-2", "allowed", None, "series", "Other", None, None, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("episode-20", "allowed", "series-2", "episode", "Other/Episode", 1, 1, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES(?,?,?,?,?)",
+            ("file-1", "episode-1", "episode-1.mkv", "media", 1_800_000_000_000_000_000),
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES(?,?,?,?,?)",
+            ("file-20", "episode-20", "episode-20.mkv", "media", 1_900_000_000_000_000_000),
+        )
+        catalog = self.catalog()
+        execute = self.db.execute
+        recursive_queries = []
+
+        def counted_execute(query, params=None):
+            if "WITH RECURSIVE entity_tree" in query:
+                recursive_queries.append((query, params))
+            return execute(query, params)
+
+        self.db.execute = counted_execute
+        try:
+            values = catalog._date_values("allowed", {"allowed"}, {"series-1"})
+        finally:
+            self.db.execute = execute
+
+        self.assertEqual(set(values), {"series-1"})
+        self.assertEqual(len(recursive_queries), 1)
+        self.assertNotIn("edges(parent_id", recursive_queries[0][0])
+        self.assertIn("child.parent_id = entity_tree.entity_id", recursive_queries[0][0])
+
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_large_list_preloads_graph_and_state_once(self, _languages):
         user_id = self.account().create("large", "password-123")["id"]
         self.db.execute(
             "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
+        )
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
         )
         for series_index in range(157):
             series_id = f"series-{series_index}"
@@ -319,6 +432,16 @@ class CatalogTest(unittest.TestCase):
                     (episode_id, "allowed", series_id, "episode", episode_id, 1, episode_index + 1, None, None, "2026", "2026"),
                 )
                 if episode_index == 0:
+                    self.db.execute(
+                        "INSERT INTO media_files VALUES(?,?,?,?,?)",
+                        (
+                            f"{episode_id}-file",
+                            episode_id,
+                            f"{episode_id}.mkv",
+                            "media",
+                            1_700_000_000_000_000_000 + series_index,
+                        ),
+                    )
                     self.db.execute(
                         "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
                         (user_id, episode_id, 0, 1, 1, 0, 0, None, "2026"),

@@ -72,6 +72,13 @@ class _CatalogReadContext:
         self.metadata_service = MetadataReadService(catalog.db)
         self.configured_languages: list[str] | None = None
         self.timings: dict[str, float] = {}
+        self.date_values: dict[
+            tuple[frozenset[str], frozenset[str] | None], dict[str, dict[str, str]]
+        ] = {}
+        self.date_requested_roots = 0
+        self.date_rollup_hits = 0
+        self.date_fallback_roots = 0
+        self.date_scan_states: set[str] = set()
 
     def measure(self, stage: str, action):
         started = time.perf_counter()
@@ -98,6 +105,19 @@ def _catalog_read(method):
                 f"{stage}_seconds={duration:.3f}"
                 for stage, duration in sorted(context.timings.items())
             )
+            if context.date_requested_roots:
+                details = " ".join(
+                    part
+                    for part in (
+                        details,
+                        f"date_requested_roots={context.date_requested_roots}",
+                        f"date_rollup_hits={context.date_rollup_hits}",
+                        f"date_fallback_roots={context.date_fallback_roots}",
+                        "date_scan_states="
+                        + ",".join(sorted(context.date_scan_states)),
+                    )
+                    if part
+                )
             log = logger.warning if elapsed > 2 else logger.debug
             log(
                 "catalog request complete operation=%s user_id=%s duration_seconds=%.3f %s",
@@ -767,92 +787,181 @@ class Catalog:
     ) -> dict[str, dict[str, str]]:
         """Return filesystem-derived Added and Last added values per entity."""
         scope = allowed_library_ids or {library_id}
-        placeholders = ",".join("?" for _ in scope)
-        root_filter = ""
-        root_params: list[str] = []
-        if root_ids is not None:
-            if not root_ids:
+        context = self._read_context.get()
+        cache_key = (
+            frozenset(scope),
+            None if root_ids is None else frozenset(root_ids),
+        )
+        if context and cache_key in context.date_values:
+            return context.date_values[cache_key]
+
+        def resolve() -> dict[str, dict[str, str]]:
+            placeholders = ",".join("?" for _ in scope)
+            if root_ids is not None and not root_ids:
                 return {}
-            root_filter = f" AND id IN ({','.join('?' for _ in root_ids)})"
-            root_params = list(root_ids)
-        rows = self.db.execute(
-            f"SELECT id,parent_id,entity_type,created_at FROM library_entities WHERE library_id IN ({placeholders}){root_filter}",
-            [*scope, *root_params],
-        )
-        entities = {row[0]: row for row in rows}
-        if not entities:
-            return {}
-        rollup_rows = []
-        if self._has_table("catalog_entity_rollups"):
-            rollup_rows = self.db.execute(
-                f"SELECT entity_id,added_ns,last_added_ns FROM catalog_entity_rollups WHERE library_id IN ({placeholders})"
-                + (f" AND entity_id IN ({','.join('?' for _ in root_ids)})" if root_ids is not None and root_ids else ""),
-                [*scope, *(list(root_ids) if root_ids is not None else [])],
+            requested_params = sorted(root_ids or ())
+            root_filter = (
+                f" AND id IN ({','.join('?' for _ in requested_params)})"
+                if root_ids is not None
+                else ""
             )
-        if len(rollup_rows) == len(entities):
-            return {
-                row[0]: {
-                    "addedAt": _date_from_ns(row[1]) or entities[row[0]][3] or "",
-                    "lastAddedAt": _date_from_ns(row[2]) or entities[row[0]][3] or "",
+            rows = self.db.execute(
+                f"SELECT id,library_id,parent_id,entity_type,created_at "
+                f"FROM library_entities WHERE library_id IN ({placeholders})"
+                f"{root_filter}",
+                [*scope, *requested_params],
+            )
+            entities = {row[0]: row for row in rows}
+            if not entities:
+                return {}
+
+            scan_states = {
+                row[0]: row[1]
+                for row in self.db.execute(
+                    f"SELECT id,scan_state FROM libraries WHERE id IN ({placeholders})",
+                    list(scope),
+                )
+            }
+            projection_states: dict[str, str | None] = {}
+            if self._has_table("catalog_projection_status"):
+                projection_states = {
+                    row[0]: row[1]
+                    for row in self.db.execute(
+                        f"SELECT library_id,state FROM catalog_projection_status "
+                        f"WHERE library_id IN ({placeholders})",
+                        list(scope),
+                    )
                 }
-                for row in rollup_rows
+            if context:
+                context.date_requested_roots += len(entities)
+                context.date_scan_states.update(
+                    scan_states.get(row[1], "unknown") for row in entities.values()
+                )
+
+            requested_ids = set(entities)
+            rollup_values: dict[str, tuple[int | None, int | None]] = {}
+            if self._has_table("catalog_entity_rollups"):
+                rollup_query = (
+                    f"SELECT entity_id,added_ns,last_added_ns,library_id "
+                    f"FROM catalog_entity_rollups WHERE library_id IN ({placeholders})"
+                )
+                rollup_params: list[str] = list(scope)
+                if root_ids is not None:
+                    rollup_query += (
+                        f" AND entity_id IN ({','.join('?' for _ in requested_params)})"
+                    )
+                    rollup_params.extend(requested_params)
+                for entity_id, added_ns, last_added_ns, rollup_library_id in self.db.execute(
+                    rollup_query, rollup_params
+                ):
+                    projection_ready = projection_states.get(rollup_library_id)
+                    if (
+                        scan_states.get(rollup_library_id) == "scanning"
+                        or projection_ready not in (None, "ready")
+                    ):
+                        continue
+                    if entity_id in requested_ids:
+                        rollup_values[entity_id] = (added_ns, last_added_ns)
+
+            if root_ids is None:
+                if len(rollup_values) == len(requested_ids):
+                    compute_ids: set[str] = set()
+                else:
+                    rollup_values = {}
+                    compute_ids = requested_ids
+            else:
+                compute_ids = requested_ids - set(rollup_values)
+
+            values = {
+                entity_id: {
+                    "addedAt": _date_from_ns(date_values[0])
+                    or entities[entity_id][4]
+                    or "",
+                    "lastAddedAt": _date_from_ns(date_values[1])
+                    or entities[entity_id][4]
+                    or "",
+                }
+                for entity_id, date_values in rollup_values.items()
             }
-        if not self._has_table("media_files"):
-            return {
-                entity_id: {"addedAt": row[3] or "", "lastAddedAt": row[3] or ""}
-                for entity_id, row in entities.items()
-            }
-        collection_step = ""
-        collection_params: list[str] = []
-        if self._has_table("collection_members"):
-            collection_step = f"""
-                UNION
-                SELECT member.collection_entity_id, member.source_entity_id
-                FROM collection_members member
-                JOIN library_entities collection
-                  ON collection.id = member.collection_entity_id
-                JOIN library_entities source ON source.id = member.source_entity_id
-                WHERE collection.library_id IN ({placeholders})
-                  AND source.library_id IN ({placeholders})
-            """
-            collection_params = [*scope, *scope]
-        date_rows = self.db.execute(
-            f"""
-            WITH RECURSIVE edges(parent_id, child_id) AS (
-                SELECT parent_id, id
-                FROM library_entities
-                WHERE parent_id IS NOT NULL AND library_id IN ({placeholders})
-                {collection_step}
-            ), entity_tree(root_id, entity_id) AS (
-                SELECT id, id FROM library_entities
-                WHERE library_id IN ({placeholders}){root_filter}
-                UNION
-                SELECT entity_tree.root_id, edges.child_id
+            if context:
+                context.date_rollup_hits += len(rollup_values)
+                context.date_fallback_roots += len(compute_ids)
+
+            if not compute_ids:
+                return values
+            if not self._has_table("media_files"):
+                for entity_id in compute_ids:
+                    fallback = entities[entity_id][4] or ""
+                    values[entity_id] = {"addedAt": fallback, "lastAddedAt": fallback}
+                return values
+
+            collection_recursive = ""
+            collection_params: list[str] = []
+            if self._has_table("collection_members"):
+                collection_placeholders = ",".join("?" for _ in scope)
+                collection_recursive = f"""
+                    UNION
+                    SELECT entity_tree.root_id, member.source_entity_id
+                    FROM entity_tree
+                    JOIN collection_members member
+                      ON member.collection_entity_id = entity_tree.entity_id
+                    JOIN library_entities source
+                      ON source.id = member.source_entity_id
+                    WHERE source.library_id IN ({collection_placeholders})
+                """
+                collection_params = list(scope)
+            compute_filter = ""
+            compute_params: list[str] = []
+            if root_ids is not None:
+                compute_params = sorted(compute_ids)
+                compute_filter = (
+                    f" AND id IN ({','.join('?' for _ in compute_params)})"
+                )
+            date_rows = self.db.execute(
+                f"""
+                WITH RECURSIVE entity_tree(root_id, entity_id) AS (
+                    SELECT id, id
+                    FROM library_entities
+                    WHERE library_id IN ({placeholders}){compute_filter}
+                    UNION
+                    SELECT entity_tree.root_id, child.id
+                    FROM entity_tree
+                    JOIN library_entities child
+                      ON child.parent_id = entity_tree.entity_id
+                    WHERE child.library_id IN ({placeholders})
+                    {collection_recursive}
+                )
+                SELECT entity_tree.root_id,
+                       MIN(media_files.modified_ns),
+                       MAX(media_files.modified_ns)
                 FROM entity_tree
-                JOIN edges ON edges.parent_id = entity_tree.entity_id
+                LEFT JOIN media_files
+                  ON media_files.entity_id = entity_tree.entity_id
+                 AND media_files.role = 'media'
+                 AND media_files.modified_ns IS NOT NULL
+                GROUP BY entity_tree.root_id
+                """,
+                [*scope, *compute_params, *scope, *collection_params],
             )
-            SELECT entity_tree.root_id, MIN(media_files.modified_ns), MAX(media_files.modified_ns)
-            FROM entity_tree
-            LEFT JOIN media_files
-              ON media_files.entity_id = entity_tree.entity_id
-             AND media_files.role = 'media'
-             AND media_files.modified_ns IS NOT NULL
-            GROUP BY entity_tree.root_id
-            """,
-            [*scope, *collection_params, *scope, *root_params],
-        )
-        values = {}
-        for entity_id, added_ns, last_added_ns in date_rows:
-            fallback = entities[entity_id][3] or ""
-            added = (
-                datetime.fromtimestamp(added_ns / 1_000_000_000, tz=timezone.utc).isoformat()
-                if added_ns is not None else fallback
-            )
-            last_added = (
-                datetime.fromtimestamp(last_added_ns / 1_000_000_000, tz=timezone.utc).isoformat()
-                if last_added_ns is not None else fallback
-            )
-            values[entity_id] = {"addedAt": added, "lastAddedAt": last_added}
+            for entity_id, added_ns, last_added_ns in date_rows:
+                fallback = entities[entity_id][4] or ""
+                values[entity_id] = {
+                    "addedAt": _date_from_ns(added_ns) or fallback,
+                    "lastAddedAt": _date_from_ns(last_added_ns) or fallback,
+                }
+            for entity_id in compute_ids:
+                values.setdefault(
+                    entity_id,
+                    {
+                        "addedAt": entities[entity_id][4] or "",
+                        "lastAddedAt": entities[entity_id][4] or "",
+                    },
+                )
+            return values
+
+        values = context.measure("date_values", resolve) if context else resolve()
+        if context:
+            context.date_values[cache_key] = values
         return values
 
     @_catalog_read

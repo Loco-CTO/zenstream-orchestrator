@@ -276,33 +276,43 @@ async def item_image(
     entity_id: str, image_type: str, request: Request, language: str = Query(...)
 ):
     account = account_from_access(request)
-    row = catalog.require_entity(account["id"], entity_id)
-    library_rows = catalog.db.execute(
-        "SELECT directory FROM libraries WHERE id=?", (row[1],)
-    )
-    directory = (
-        Path(library_rows[0][0]) if library_rows and library_rows[0][0] else None
-    )
-    if directory:
-        for relative_path, content_hash in catalog.db.execute(
-            "SELECT relative_path,quick_fingerprint FROM media_files WHERE entity_id=? AND role='image'",
-            (entity_id,),
-        ):
-            candidate = directory / relative_path
-            if candidate.stem.lower() in LOCAL_ARTWORK_NAMES.get(image_type, set()) and candidate.is_file():
-                cached = LocalArtworkCache(catalog.db).path(content_hash)
-                if cached and cached.is_file():
-                    return FileResponse(cached, media_type="image/webp")
-                raise HTTPException(404, "Image not found.")
-    image = catalog.selected_image(account["id"], entity_id, language, image_type)
-    if not image:
-        raise HTTPException(404, "Image not found.")
-    rows = catalog.db.execute(
-        "SELECT local_path FROM metadata_images WHERE image_type=? AND image_url=? ORDER BY fetched_at DESC",
-        (image_type, image.get("url")),
-    )
-    if rows and rows[0][0] and Path(rows[0][0]).is_file():
-        return FileResponse(rows[0][0], media_type="image/webp")
+    def resolve_cached_image() -> Path | None:
+        row = catalog.require_entity(account["id"], entity_id)
+        library_rows = catalog.db.execute(
+            "SELECT directory FROM libraries WHERE id=?", (row[1],)
+        )
+        directory = (
+            Path(library_rows[0][0]) if library_rows and library_rows[0][0] else None
+        )
+        if directory:
+            for relative_path, content_hash in catalog.db.execute(
+                "SELECT relative_path,quick_fingerprint FROM media_files WHERE entity_id=? AND role='image'",
+                (entity_id,),
+            ):
+                candidate = directory / relative_path
+                if candidate.stem.lower() in LOCAL_ARTWORK_NAMES.get(image_type, set()) and candidate.is_file():
+                    cached = LocalArtworkCache(catalog.db).path(content_hash)
+                    if cached and cached.is_file():
+                        return cached
+                    raise HTTPException(404, "Image not found.")
+        image = catalog.selected_image(account["id"], entity_id, language, image_type)
+        if not image:
+            raise HTTPException(404, "Image not found.")
+        rows = catalog.db.execute(
+            "SELECT local_path FROM metadata_images WHERE image_type=? AND image_url=? ORDER BY fetched_at DESC",
+            (image_type, image.get("url")),
+        )
+        if rows and rows[0][0] and Path(rows[0][0]).is_file():
+            return Path(rows[0][0])
+        return None
+
+    cached_image = await asyncio.to_thread(resolve_cached_image)
+    if cached_image:
+        return FileResponse(
+            cached_image,
+            media_type="image/webp",
+            headers={"Cache-Control": "private, max-age=86400"},
+        )
     return Response(
         status_code=202,
         headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"},

@@ -187,6 +187,8 @@ class MetadataReadService:
             db = Config().database
         self.db = db
         self.cache = cache or MetadataCache()
+        self._metadata_image_columns: set[str] | None = None
+        self._blur_hashes: dict[tuple[str, str, str, str, str], str | None] = {}
 
     @staticmethod
     def providers(entity_type: str) -> list[str]:
@@ -342,14 +344,23 @@ class MetadataReadService:
         image_type: str,
         image_url: object,
     ) -> str | None:
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")}
+        if self._metadata_image_columns is None:
+            self._metadata_image_columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")
+            }
+        columns = self._metadata_image_columns
         if "blur_hash" not in columns or not all(isinstance(value, str) and value for value in (provider, provider_id, image_url)):
             return None
+        key = (provider, entity_type, provider_id, image_type, image_url)
+        if key in self._blur_hashes:
+            return self._blur_hashes[key]
         rows = self.db.execute(
             "SELECT blur_hash FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=? AND blur_hash IS NOT NULL ORDER BY fetched_at DESC LIMIT 1",
             (provider, entity_type, provider_id, image_type, image_url),
         )
-        return rows[0][0] if rows and rows[0][0] else None
+        value = rows[0][0] if rows and rows[0][0] else None
+        self._blur_hashes[key] = value
+        return value
 
     @staticmethod
     def _localized_trailers(

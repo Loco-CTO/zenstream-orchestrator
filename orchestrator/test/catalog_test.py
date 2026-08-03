@@ -265,6 +265,41 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(added["items"][0]["addedAt"], "2023-11-14T22:13:20+00:00")
         self.assertEqual(added["items"][0]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
 
+    def test_collection_date_values_follow_authorized_members(self):
+        user_id = self.account().create("collection-dates", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO libraries VALUES('collections','Collections','collection','ready',NULL,NULL)"
+        )
+        for library_id in ("allowed", "collections"):
+            self.db.execute(
+                "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, library_id, "now")
+            )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("source-movie", "allowed", None, "movie", "Source", None, None, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("collection-1", "collections", None, "collection", "Collection", None, None, None, None, "2026", "2026"),
+        )
+        self.db.execute(
+            "CREATE TABLE collection_members(collection_entity_id TEXT,source_entity_id TEXT,position INTEGER)"
+        )
+        self.db.execute(
+            "INSERT INTO collection_members VALUES(?,?,?)", ("collection-1", "source-movie", 0)
+        )
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES(?,?,?,?,?)",
+            ("source-file", "source-movie", "source.mkv", "media", 1_800_000_000_000_000_000),
+        )
+
+        values = self.catalog()._date_values("collections", {"allowed", "collections"})
+
+        self.assertEqual(values["collection-1"]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
+
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_large_list_preloads_graph_and_state_once(self, _languages):
         user_id = self.account().create("large", "password-123")["id"]

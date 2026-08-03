@@ -609,14 +609,24 @@ class Catalog:
         return primary if isinstance(primary, dict) else None
 
     def _date_values(
-        self, library_id: str, allowed_library_ids: set[str] | None = None
+        self,
+        library_id: str,
+        allowed_library_ids: set[str] | None = None,
+        root_ids: set[str] | None = None,
     ) -> dict[str, dict[str, str]]:
         """Return filesystem-derived Added and Last added values per entity."""
         scope = allowed_library_ids or {library_id}
         placeholders = ",".join("?" for _ in scope)
+        root_filter = ""
+        root_params: list[str] = []
+        if root_ids is not None:
+            if not root_ids:
+                return {}
+            root_filter = f" AND id IN ({','.join('?' for _ in root_ids)})"
+            root_params = list(root_ids)
         rows = self.db.execute(
-            f"SELECT id,parent_id,entity_type,created_at FROM library_entities WHERE library_id IN ({placeholders})",
-            list(scope),
+            f"SELECT id,parent_id,entity_type,created_at FROM library_entities WHERE library_id IN ({placeholders}){root_filter}",
+            [*scope, *root_params],
         )
         entities = {row[0]: row for row in rows}
         if not entities:
@@ -649,7 +659,7 @@ class Catalog:
                 {collection_step}
             ), entity_tree(root_id, entity_id) AS (
                 SELECT id, id FROM library_entities
-                WHERE library_id IN ({placeholders})
+                WHERE library_id IN ({placeholders}){root_filter}
                 UNION
                 SELECT entity_tree.root_id, edges.child_id
                 FROM entity_tree
@@ -663,7 +673,7 @@ class Catalog:
              AND media_files.modified_ns IS NOT NULL
             GROUP BY entity_tree.root_id
             """,
-            list(scope) + collection_params + list(scope),
+            [*scope, *collection_params, *scope, *root_params],
         )
         values = {}
         for entity_id, added_ns, last_added_ns in date_rows:
@@ -729,7 +739,8 @@ class Catalog:
             display_rows = ordered_rows[start : start + page_size]
         context = self._context(user_id)
         date_scope = self.allowed_libraries(user_id) if library["type"] == "collection" else {library_id}
-        date_values = lambda: self._date_values(library_id, date_scope)
+        roots_for_dates = None if sort_by in {"added", "lastAdded"} else {row[0] for row in display_rows}
+        date_values = lambda: self._date_values(library_id, date_scope, roots_for_dates)
         dates = context.measure("date_sort", date_values) if context else date_values()
         if sort_by in {"added", "lastAdded"} and display_rows is rows:
             date_field = "addedAt" if sort_by == "added" else "lastAddedAt"

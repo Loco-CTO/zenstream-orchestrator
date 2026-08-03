@@ -20,6 +20,9 @@ class DatabaseHandler:
         self.read_connection = None
         self.lock = threading.RLock()
         self.read_lock = threading.RLock()
+        self.read_local = threading.local()
+        self.read_connections = []
+        self.read_connections_lock = threading.RLock()
         self.connect()
 
     def connect(self):
@@ -79,9 +82,22 @@ class DatabaseHandler:
                 cursor.close()
 
     def read_execute(self, query, params=None):
-        """Execute a read without waiting on the writer connection lock."""
-        connection = self.read_connection or self.connection
-        with self.read_lock:
+        """Execute a read without waiting on writer or unrelated reader locks."""
+        if self.db_file == ":memory:":
+            connection = self.connection
+            lock = self.read_lock
+        else:
+            connection = getattr(self.read_local, "connection", None)
+            if connection is None:
+                connection = sqlite3.connect(self.db_file, check_same_thread=False, timeout=2.0)
+                connection.execute("PRAGMA query_only = ON")
+                connection.execute("PRAGMA busy_timeout = 2000")
+                self.read_local.connection = connection
+                with self.read_connections_lock:
+                    self.read_connections.append(connection)
+            lock = None
+
+        def execute_read():
             cursor = connection.cursor()
             try:
                 cursor.execute(query, params or ())
@@ -92,6 +108,10 @@ class DatabaseHandler:
                 raise
             finally:
                 cursor.close()
+        if lock is not None:
+            with lock:
+                return execute_read()
+        return execute_read()
 
     def fetchall(self):
         """Fetch all rows from the database."""
@@ -121,3 +141,7 @@ class DatabaseHandler:
             self.connection.close()
         if self.read_connection and self.read_connection is not self.connection:
             self.read_connection.close()
+        with self.read_connections_lock:
+            for connection in self.read_connections:
+                connection.close()
+            self.read_connections.clear()

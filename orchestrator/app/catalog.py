@@ -487,6 +487,11 @@ class Catalog:
         entities = {row[0]: row for row in rows}
         if not entities:
             return {}
+        if not self._has_table("media_files"):
+            return {
+                entity_id: {"addedAt": row[3] or "", "lastAddedAt": row[3] or ""}
+                for entity_id, row in entities.items()
+            }
         date_rows = self.db.execute(
             f"""
             WITH RECURSIVE entity_tree(root_id, entity_id) AS (

@@ -14,7 +14,7 @@ def upgrade():
     )
     op.execute(
         "CREATE INDEX idx_media_files_role_modified_entity "
-        "ON media_files(role, modified_ns DESC, entity_id)"
+        "ON media_files(role, modified_ns DESC, entity_id, id)"
     )
     op.execute(
         "CREATE INDEX idx_library_entities_admin_browse "

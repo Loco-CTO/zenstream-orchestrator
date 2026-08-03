@@ -27,9 +27,12 @@ async def run_foreground(function: Callable[..., T], /, *args, **kwargs) -> T:
     global _active
     queued_at = time.perf_counter()
     loop = asyncio.get_running_loop()
+    started_at = 0.0
 
     def run() -> T:
+        nonlocal started_at
         global _active
+        started_at = time.perf_counter()
         with _lock:
             _active += 1
         try:
@@ -39,11 +42,17 @@ async def run_foreground(function: Callable[..., T], /, *args, **kwargs) -> T:
                 _active -= 1
 
     result = await loop.run_in_executor(_executor, partial(run))
-    queue_ms = (time.perf_counter() - queued_at) * 1000
-    if queue_ms >= 100:
+    finished_at = time.perf_counter()
+    queue_ms = (started_at - queued_at) * 1000
+    execution_ms = (finished_at - started_at) * 1000
+    if queue_ms >= 100 or execution_ms >= 2000:
         from app.logging_config import get_logger
 
-        get_logger("foreground").warning("foreground work queued duration_ms=%.1f", queue_ms)
+        get_logger("foreground").warning(
+            "foreground work complete queue_duration_ms=%.1f execution_duration_ms=%.1f",
+            queue_ms,
+            execution_ms,
+        )
     return result
 
 

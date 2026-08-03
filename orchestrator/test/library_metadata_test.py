@@ -1996,10 +1996,12 @@ class LibraryJobControlTest(unittest.TestCase):
         self.assertIsNone(self.runtime.enqueue("library-1", "reconcile"))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM library_jobs")[0][0], 0)
 
-    def test_restart_terminates_active_jobs_without_requeueing(self):
+    def test_restart_requeues_newest_active_job_and_resets_transient_state(self):
         running = self.runtime.enqueue("library-1", "scan")
+        queued = self.runtime.enqueue("library-1", "reconcile")
+        self.assertEqual(running["id"], queued["id"])
         self.db.execute(
-            "UPDATE library_jobs SET state='running',started_at='before' WHERE id=?",
+            "UPDATE library_jobs SET state='running',progress_current=4,progress_total=10,started_at='before',finished_at='old',message='Working' WHERE id=?",
             (running["id"],),
         )
 
@@ -2007,15 +2009,47 @@ class LibraryJobControlTest(unittest.TestCase):
 
         self.assertEqual(
             self.db.execute("SELECT state FROM library_jobs WHERE id=?", (running["id"],))[0][0],
+            "queued",
+        )
+        self.assertEqual(
+            self.db.execute("SELECT progress_current,progress_total,started_at,finished_at,message FROM library_jobs WHERE id=?", (running["id"],))[0],
+            (0, 0, None, None, "Queued again after Orchestrator restart"),
+        )
+        self.assertEqual(
+            self.db.execute("SELECT scan_state FROM libraries WHERE id='library-1'")[0][0],
+            "idle",
+        )
+
+    def test_restart_terminates_explicitly_terminating_jobs(self):
+        job = self.runtime.enqueue("library-1", "scan")
+        self.db.execute(
+            "UPDATE library_jobs SET state='terminating',message='Termination requested' WHERE id=?",
+            (job["id"],),
+        )
+
+        self.runtime._recover_active_jobs()
+
+        state, message = self.db.execute(
+            "SELECT state,message FROM library_jobs WHERE id=?", (job["id"],)
+        )[0]
+        self.assertEqual(state, "terminated")
+        self.assertEqual(message, "Terminated during Orchestrator restart")
+
+    def test_restart_keeps_only_newest_non_terminating_duplicate(self):
+        oldest = self.runtime.enqueue("library-1", "scan")
+        self.db.execute("UPDATE library_jobs SET created_at='2020-01-01' WHERE id=?", (oldest["id"],))
+        newest = self.runtime.store.create_job("library-1", "scan")
+        self.db.execute("UPDATE library_jobs SET state='running' WHERE id=?", (newest["id"],))
+
+        self.runtime._recover_active_jobs()
+
+        self.assertEqual(
+            self.db.execute("SELECT state FROM library_jobs WHERE id=?", (newest["id"],))[0][0],
+            "queued",
+        )
+        self.assertEqual(
+            self.db.execute("SELECT state FROM library_jobs WHERE id=?", (oldest["id"],))[0][0],
             "terminated",
-        )
-        self.assertEqual(
-            self.db.execute("SELECT message FROM library_jobs WHERE id=?", (running["id"],))[0][0],
-            "Interrupted by Orchestrator restart; run scan manually",
-        )
-        self.assertEqual(
-            self.db.execute("SELECT COUNT(*) FROM library_jobs WHERE state='queued'")[0][0],
-            0,
         )
 
     def test_watcher_reconcile_scopes_move_to_top_level_roots(self):

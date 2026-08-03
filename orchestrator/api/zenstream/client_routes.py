@@ -18,6 +18,7 @@ from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
 from app.client_auth import account_from_access, issue_ticket, require_account
 from app.logging_config import get_logger
+from app.foreground import run_foreground
 from app.playback import PlaybackManager, ffmpeg_path
 from app.trickplay import TrickplayExtractor
 from app.intro_outro import IntroOutroStore
@@ -132,7 +133,7 @@ async def set_subtitles(request: Request):
 @router.get("/api/catalog/libraries")
 async def libraries(request: Request):
     account, _ = require_account(request)
-    return {"libraries": await asyncio.to_thread(catalog.libraries, account["id"])}
+    return {"libraries": await run_foreground(catalog.libraries, account["id"])}
 
 
 @router.get("/api/catalog/home")
@@ -142,31 +143,31 @@ async def home(
     section: str | None = Query(None),
 ):
     account, _ = require_account(request)
-    preferred = await asyncio.to_thread(_preferred, account, language)
+    preferred = await run_foreground(_preferred, account, language)
     if section is None:
-        return await asyncio.to_thread(
+        return await run_foreground(
             catalog.home, account["id"], preferred
         )
     if section == "featured":
         return {
-            "latestItems": await asyncio.to_thread(
+            "latestItems": await run_foreground(
                 catalog.home_featured, account["id"], preferred
             )
         }
     if section == "continueWatching":
         return {
-            "continueWatching": await asyncio.to_thread(
+            "continueWatching": await run_foreground(
                 catalog.home_continue_watching, account["id"], preferred
             )
         }
     if section == "nextUp":
         return {
-            "nextUp": await asyncio.to_thread(
+            "nextUp": await run_foreground(
                 catalog.home_next_up, account["id"], preferred
             )
         }
     if section == "derived":
-        return await asyncio.to_thread(
+        return await run_foreground(
             catalog.home_derived, account["id"], preferred
         )
     else:
@@ -189,8 +190,8 @@ async def items(
     sortOrder: str = Query("ascending"),
 ):
     account, _ = require_account(request)
-    preferred = await asyncio.to_thread(_preferred, account, language)
-    return await asyncio.to_thread(
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(
         catalog.list_items,
         account["id"],
         libraryId,
@@ -212,8 +213,8 @@ async def search(
     pageSize: int = Query(40, ge=1, le=100),
 ):
     account, _ = require_account(request)
-    preferred = await asyncio.to_thread(_preferred, account, language)
-    return await asyncio.to_thread(
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(
         catalog.search,
         account["id"],
         query,
@@ -233,8 +234,8 @@ async def favorites(
     sortOrder: str = Query("ascending"),
 ):
     account, _ = require_account(request)
-    preferred = await asyncio.to_thread(_preferred, account, language)
-    return await asyncio.to_thread(
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(
         catalog.favorites,
         account["id"],
         preferred,
@@ -248,8 +249,8 @@ async def favorites(
 @router.get("/api/catalog/items/{entity_id}")
 async def item(entity_id: str, request: Request, language: str | None = Query(None)):
     account, _ = require_account(request)
-    preferred = await asyncio.to_thread(_preferred, account, language)
-    return await asyncio.to_thread(
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(
         catalog.item, account["id"], entity_id, preferred
     )
 
@@ -257,8 +258,8 @@ async def item(entity_id: str, request: Request, language: str | None = Query(No
 @router.get("/api/catalog/items/{entity_id}/similar")
 async def similar(entity_id: str, request: Request, language: str | None = Query(None)):
     account, _ = require_account(request)
-    preferred = await asyncio.to_thread(_preferred, account, language)
-    return await asyncio.to_thread(
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(
         catalog.similar, account["id"], entity_id, preferred
     )
 
@@ -266,7 +267,7 @@ async def similar(entity_id: str, request: Request, language: str | None = Query
 @router.get("/api/catalog/items/{entity_id}/metadata")
 async def item_metadata(entity_id: str, request: Request, language: str = Query(...)):
     account, _ = require_account(request)
-    return await asyncio.to_thread(
+    return await run_foreground(
         catalog.metadata, account["id"], entity_id, language, include_credits=True
     )
 
@@ -306,7 +307,7 @@ async def item_image(
             return Path(rows[0][0])
         return None
 
-    cached_image = await asyncio.to_thread(resolve_cached_image)
+    cached_image = await run_foreground(resolve_cached_image)
     if cached_image:
         return FileResponse(
             cached_image,
@@ -322,7 +323,7 @@ async def item_image(
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
     account = account_from_access(request)
-    image = await asyncio.to_thread(
+    image = await run_foreground(
         catalog.person_image, account["id"], entity_id, person_id
     )
     if image is None:

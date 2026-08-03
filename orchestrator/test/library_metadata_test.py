@@ -2,6 +2,7 @@ import asyncio
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -109,6 +110,33 @@ class LibraryMetadataTest(unittest.TestCase):
     def _prepare_incremental_scan(scanner):
         scanner._scan_seen_ids = set()
         scanner._scan_created_ids = []
+
+    def test_scan_stage_persistence_is_throttled_for_file_updates(self):
+        db, scanner = self._scanner_db()
+        try:
+            scanner.store.update_job = MagicMock()
+            scanner._last_stage_persisted_at = time.monotonic()
+            for index in range(20):
+                scanner._set_stage(
+                    "job-1",
+                    f"Inspecting file-{index}",
+                    persist=False,
+                    entityId="entity-1",
+                    path=f"file-{index}",
+                )
+            self.assertEqual(scanner.store.update_job.call_count, 0)
+
+            scanner._last_stage_persisted_at = time.monotonic() - 3
+            scanner._set_stage(
+                "job-1",
+                "Inspecting another file",
+                persist=False,
+                entityId="entity-1",
+                path="another-file",
+            )
+            self.assertEqual(scanner.store.update_job.call_count, 1)
+        finally:
+            db.close()
 
     def test_incremental_movie_scan_preserves_ids_and_reconciles_files(self):
         db, scanner = self._scanner_db()

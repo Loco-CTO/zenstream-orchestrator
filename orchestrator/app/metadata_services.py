@@ -27,17 +27,68 @@ from app.models.metadata import (
 )
 from app.logging_config import get_logger
 from app.images import blurhash_for_image, encode_webp_bytes
+from app.worker_config import configured_worker_limit
 
 
 logger = get_logger("metadata")
 
 
+class _UnboundedExecutor:
+    def __init__(self, thread_name_prefix: str):
+        self._thread_name_prefix = thread_name_prefix
+        self._lock = threading.Lock()
+        self._threads: set[threading.Thread] = set()
+        self._closed = False
+
+    def submit(self, work) -> Future:
+        future: Future = Future()
+
+        def run() -> None:
+            try:
+                if not future.set_running_or_notify_cancel():
+                    return
+                future.set_result(work())
+            except BaseException as error:
+                future.set_exception(error)
+            finally:
+                with self._lock:
+                    self._threads.discard(threading.current_thread())
+
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("cannot schedule work after shutdown")
+            thread = threading.Thread(
+                target=run,
+                name=f"{self._thread_name_prefix}-{len(self._threads) + 1}",
+                daemon=True,
+            )
+            self._threads.add(thread)
+            thread.start()
+        return future
+
+    def shutdown(self, wait: bool = False, cancel_futures: bool = False) -> None:
+        with self._lock:
+            self._closed = True
+            threads = list(self._threads)
+        if wait:
+            for thread in threads:
+                thread.join()
+
+
 class MetadataAssetExecutor:
     def __init__(self, max_workers: int | None = None):
-        configured = max_workers or int(os.getenv("METADATA_ASSET_WORKERS", "4"))
-        self.max_workers = max(1, min(16, configured))
-        self._executor = ThreadPoolExecutor(
-            max_workers=self.max_workers, thread_name_prefix="zenstream-metadata-assets"
+        self.max_workers = (
+            configured_worker_limit("METADATA_ASSET_WORKERS", 16)
+            if max_workers is None
+            else (None if max_workers == 0 else max(1, min(16, max_workers)))
+        )
+        self._executor = (
+            _UnboundedExecutor("zenstream-metadata-assets")
+            if self.max_workers is None
+            else ThreadPoolExecutor(
+                max_workers=self.max_workers,
+                thread_name_prefix="zenstream-metadata-assets",
+            )
         )
         self._lock = threading.RLock()
         self._pending: dict[tuple, Future] = {}

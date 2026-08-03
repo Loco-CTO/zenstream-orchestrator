@@ -9,6 +9,7 @@ from app.logging_config import get_logger
 from app.metadata_services import MetadataReadService
 from app.models.metadata import MetadataLanguageSettings
 from app.providers import PRIMARY_PROVIDER_BY_ENTITY
+from app.catalog_read_model import CatalogReadModel
 
 
 logger = get_logger("catalog_projections")
@@ -58,6 +59,11 @@ class CatalogProjectionStore:
         return entities, children, target_ids
 
     def rebuild_library(self, library_id: str, should_terminate=None) -> int:
+        read_model = CatalogReadModel(self.db)
+        if read_model.available():
+            if should_terminate and should_terminate():
+                raise RuntimeError("Projection rebuild cancelled")
+            return read_model.rebuild()
         should_terminate = should_terminate or (lambda: False)
         entities, children, target_ids = self._library_entities(library_id)
         if not entities:
@@ -133,6 +139,11 @@ class CatalogProjectionStore:
         return len(values)
 
     def rebuild_user(self, user_id: str, library_id: str, should_terminate=None) -> int:
+        read_model = CatalogReadModel(self.db)
+        if read_model.available():
+            if should_terminate and should_terminate():
+                raise RuntimeError("User projection rebuild cancelled")
+            return read_model.rebuild()
         should_terminate = should_terminate or (lambda: False)
         entities, children, target_ids = self._library_entities(library_id)
         if not entities:
@@ -189,6 +200,11 @@ class CatalogProjectionStore:
         return len(values)
 
     def rebuild_metadata(self, library_id: str, should_terminate=None) -> int:
+        read_model = CatalogReadModel(self.db)
+        if read_model.available():
+            if should_terminate and should_terminate():
+                raise RuntimeError("Metadata projection cancelled")
+            return read_model.rebuild()
         should_terminate = should_terminate or (lambda: False)
         rows = self.db.read_execute(
             "SELECT id,entity_type FROM library_entities WHERE library_id=?",

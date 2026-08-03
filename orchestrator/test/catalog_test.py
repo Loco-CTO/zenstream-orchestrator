@@ -265,6 +265,58 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(added["items"][0]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_large_list_preloads_graph_and_state_once(self, _languages):
+        user_id = self.account().create("large", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
+        )
+        for series_index in range(157):
+            series_id = f"series-{series_index}"
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (series_id, "allowed", None, "series", series_id, None, None, None, None, "2026", "2026"),
+            )
+            for episode_index in range(26 if series_index < 76 else 25):
+                episode_id = f"{series_id}-episode-{episode_index}"
+                self.db.execute(
+                    "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (episode_id, "allowed", series_id, "episode", episode_id, 1, episode_index + 1, None, None, "2026", "2026"),
+                )
+                if episode_index == 0:
+                    self.db.execute(
+                        "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+                        (user_id, episode_id, 0, 1, 1, 0, 0, None, "2026"),
+                    )
+        catalog = self.catalog()
+        catalog.metadata = lambda _user_id, entity_id, _language: {"metadata": {"title": entity_id}}
+        graph_calls = 0
+        state_queries = 0
+        graph = catalog._relationship_graph_uncached
+        execute = self.db.execute
+
+        def counted_graph(value):
+            nonlocal graph_calls
+            graph_calls += 1
+            return graph(value)
+
+        def counted_execute(query, params=None):
+            nonlocal state_queries
+            if query.startswith("SELECT s.entity_id,s.favorite"):
+                state_queries += 1
+            return execute(query, params)
+
+        catalog._relationship_graph_uncached = counted_graph
+        self.db.execute = counted_execute
+        try:
+            result = catalog.list_items(user_id, "allowed", "en", page_size=40)
+        finally:
+            self.db.execute = execute
+
+        self.assertEqual(len(result["items"]), 40)
+        self.assertEqual(graph_calls, 1)
+        self.assertEqual(state_queries, 1)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_newly_added_uses_playable_file_times_and_leaf_items(self, _languages):
         user_id = self.seed_series_hierarchy()
         self.db.execute("UPDATE libraries SET type='tv_series' WHERE id='allowed'")

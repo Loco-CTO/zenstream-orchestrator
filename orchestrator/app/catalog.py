@@ -1021,13 +1021,19 @@ class Catalog:
             params = [library_id, parent_id, page_size, offset]
         rows = self.db.execute(query, params)
         dates: dict[str, dict] = {}
-        if sort_by in {"added", "lastAdded"}:
+        ids = [row[0] for row in rows]
+        if ids:
+            date_placeholders = ",".join("?" for _ in ids)
+            date_rows = self.db.execute(
+                f"SELECT e.id,e.created_at,s.added_sort_ns,s.last_added_sort_ns FROM library_entities e JOIN catalog_entity_summary s ON s.entity_id=e.id WHERE e.id IN ({date_placeholders})",
+                ids,
+            )
             dates = {
                 row[0]: {
-                    "addedAt": _date_from_ns(row[10]) or row[8],
-                    "lastAddedAt": _date_from_ns(row[11]) or row[8],
+                    "addedAt": _date_from_ns(row[2]) or row[1],
+                    "lastAddedAt": _date_from_ns(row[3]) or row[1],
                 }
-                for row in rows
+                for row in date_rows
             }
         values = self._hydrate_rows(user_id, [row[:10] for row in rows], language, dates)
         if self._context(user_id):

@@ -12,7 +12,7 @@ class CatalogReadModelTest(unittest.TestCase):
         for statement in (
             "CREATE TABLE libraries(id TEXT PRIMARY KEY,name TEXT,type TEXT,scan_state TEXT,last_scan_finished_at TEXT,created_at TEXT)",
             "CREATE TABLE users(id TEXT PRIMARY KEY)",
-            "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT,relative_path TEXT,created_at TEXT)",
+            "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT,relative_path TEXT,season_number INTEGER,episode_number INTEGER,episode_end_number INTEGER,disc_number INTEGER,track_number INTEGER,created_at TEXT,updated_at TEXT)",
             "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)",
             "CREATE TABLE user_item_state(user_id TEXT,entity_id TEXT,played INTEGER,favorite INTEGER,play_count INTEGER,position_seconds REAL,duration_seconds REAL,last_played_at TEXT,PRIMARY KEY(user_id,entity_id))",
             "CREATE TABLE collection_members(collection_entity_id TEXT,source_entity_id TEXT,position INTEGER)",
@@ -30,11 +30,11 @@ class CatalogReadModelTest(unittest.TestCase):
         self.db.execute("INSERT INTO users VALUES('user')")
         self.db.execute("CREATE TABLE user_library_access(user_id TEXT,library_id TEXT,created_at TEXT,PRIMARY KEY(user_id,library_id))")
         self.db.execute("INSERT INTO user_library_access VALUES('user','library','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('series','library',NULL,'series','Series','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('season','library','series','season','Series/Season 1','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('episode-1','library','season','episode','Series/Season 1/Episode 1.mkv','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('episode-2','library','season','episode','Series/Season 1/Episode 2.mkv','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('collection-item','collection',NULL,'collection','Collection','2026')")
+        self.db.execute("INSERT INTO library_entities VALUES('series','library',NULL,'series','Series',NULL,NULL,NULL,NULL,NULL,'2026','2026')")
+        self.db.execute("INSERT INTO library_entities VALUES('season','library','series','season','Series/Season 1',1,NULL,NULL,NULL,NULL,'2026','2026')")
+        self.db.execute("INSERT INTO library_entities VALUES('episode-1','library','season','episode','Series/Season 1/Episode 1.mkv',1,1,NULL,NULL,NULL,'2026','2026')")
+        self.db.execute("INSERT INTO library_entities VALUES('episode-2','library','season','episode','Series/Season 1/Episode 2.mkv',1,2,NULL,NULL,NULL,'2026','2026')")
+        self.db.execute("INSERT INTO library_entities VALUES('collection-item','collection',NULL,'collection','Collection',NULL,NULL,NULL,NULL,NULL,'2026','2026')")
         self.db.execute("INSERT INTO collection_members VALUES('collection-item','series',1)")
         self.db.execute("INSERT INTO media_files VALUES('file-1','episode-1','Episode 1.mkv','media',10)")
         self.db.execute("INSERT INTO media_files VALUES('file-2','episode-2','Episode 2.mkv','media',20)")
@@ -86,7 +86,17 @@ class CatalogReadModelTest(unittest.TestCase):
         response = catalog.list_items("user", "library", "en", parent_id="season", page_size=1, sort_by="lastAdded", sort_order="descending")
         self.assertEqual(response["total"], 2)
         self.assertEqual(response["items"][0]["id"], "episode-2")
-        self.assertEqual(response["items"][0]["lastAddedAt"], "1970-01-01T00:00:00.000000020+00:00")
+        self.assertEqual(response["items"][0]["lastAddedAt"], "1970-01-01T00:00:00+00:00")
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_short_search_uses_read_model_grams_before_hydration(self, _languages):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        response = catalog.search("user", "Se", "en", 1, 10)
+        self.assertEqual(response["total"], 1)
+        self.assertEqual(response["items"][0]["id"], "series")
 
 
 if __name__ == "__main__":

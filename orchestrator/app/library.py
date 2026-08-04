@@ -2653,28 +2653,7 @@ class LibraryScanner:
             from app.catalog_read_model import CatalogReadModel
 
             CatalogReadModel(self.db).refresh_roots([series])
-            children = self.db.execute(
-                "SELECT id FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season'))",
-                (library_id, series, series),
-            )
-            metadata_candidates = self._metadata_candidates()
-            needs_resolution = False if series in early_series_metadata else (
-                (
-                    series in metadata_candidates
-                    and self._needs_metadata(series)
-                ) or any(
-                    row[0] in metadata_candidates and self._needs_metadata(row[0])
-                    for row in children
-                    if row[0] in self._scan_seen_ids
-                )
-            )
-            if service and needs_resolution:
-                self._set_stage(
-                    job_id,
-                    f"Resolving metadata for {series_dir.name} ({series_index}/{len(series_dirs)})",
-                    seriesId=series,
-                    path=str(series_dir),
-                )
+            if False:
                 logger.info(
                     "library scan series metadata start library_id=%s job_id=%s series_id=%s path=%s",
                     library_id,

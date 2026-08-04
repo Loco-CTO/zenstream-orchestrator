@@ -649,7 +649,8 @@ class LibraryScanner:
             self._set_stage(job_id, "Pruning missing entities")
             missing = self._prune_missing_entities(library_id, root)
             self._set_stage(job_id, "Refreshing catalog read model")
-            self._refresh_catalog_after_cleanup(rejected | missing)
+            removed = rejected | missing
+            self._refresh_catalog_after_cleanup(removed)
             self._set_stage(job_id, "Pruning local artwork cache")
             LocalArtworkCache(self.db).prune()
             from app.trickplay import TrickplayStore
@@ -683,7 +684,8 @@ class LibraryScanner:
                 message=f"Indexed {count} entries",
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
-            self._enqueue_dependent_collections(library_id)
+            if removed:
+                self._enqueue_dependent_collections(library_id)
         except JobTerminated:
             self._scan_complete = False
             finished = now()
@@ -934,8 +936,6 @@ class LibraryScanner:
         ] if self._scan_refresh_root_ids else []
         if surviving:
             model.refresh_roots(surviving)
-        elif removed and model.available():
-            model.rebuild()
 
     def _enqueue_dependent_collections(self, library_id: str) -> None:
         tables = {

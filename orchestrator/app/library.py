@@ -921,21 +921,13 @@ class LibraryScanner:
         self._scan_refresh_root_ids.difference_update(removed)
         return removed
 
-    def _refresh_catalog_after_cleanup(self, removed: set[str]) -> None:
+    def _refresh_catalog_after_cleanup(self, _removed: set[str]) -> None:
         from app.catalog_read_model import CatalogReadModel
 
         model = CatalogReadModel(self.db)
-        surviving = [
-            row[0]
-            for row in self.db.execute(
-                "SELECT id FROM library_entities WHERE id IN ({})".format(
-                    ",".join("?" for _ in self._scan_refresh_root_ids)
-                ),
-                list(self._scan_refresh_root_ids),
-            )
-        ] if self._scan_refresh_root_ids else []
-        if surviving:
-            model.refresh_roots(surviving)
+        roots = sorted(self._scan_refresh_root_ids)
+        for offset in range(0, len(roots), 300):
+            model.refresh_roots(roots[offset : offset + 300])
 
     def _enqueue_dependent_collections(self, library_id: str) -> None:
         tables = {

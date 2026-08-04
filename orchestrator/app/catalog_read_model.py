@@ -166,13 +166,23 @@ class CatalogReadModel:
 
     def _projection_values(self, entities, locales: list[str]):
         old: dict[tuple[str, str], str] = {}
-        if self._has_table("catalog_metadata_projection"):
+        if self._has_table("catalog_item_projection"):
             old = {
                 (row[0], row[1]): row[2]
                 for row in self.db.read_execute(
-                    "SELECT entity_id,locale,payload FROM catalog_metadata_projection"
+                    "SELECT entity_id,locale,payload FROM catalog_item_projection"
                 )
             }
+        if self._has_table("catalog_metadata_projection"):
+            old.update(
+                {
+                    (row[0], row[1]): row[2]
+                    for row in self.db.read_execute(
+                        "SELECT entity_id,locale,payload FROM catalog_metadata_projection"
+                    )
+                    if (row[0], row[1]) not in old
+                }
+            )
         values = []
         genres = []
         grams = []
@@ -376,7 +386,9 @@ class CatalogReadModel:
             expected_projections,
         )
         try:
-            return self.rebuild(configured)
+            count = self.rebuild(configured)
+            self._retire_legacy_tables()
+            return count
         except Exception as error:
             now = _now()
             with self.db.transaction() as cursor:
@@ -385,6 +397,17 @@ class CatalogReadModel:
                     (now, str(error)[:1000]),
                 )
             raise
+
+    def _retire_legacy_tables(self) -> None:
+        with self.db.transaction() as cursor:
+            for table in (
+                "catalog_entity_rollups",
+                "catalog_user_rollups",
+                "catalog_metadata_projection",
+                "catalog_home_projection",
+                "catalog_projection_status",
+            ):
+                cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
     def refresh_roots(self, root_ids: Iterable[str]) -> int:
         """Refresh committed scanner subtrees without touching unrelated roots."""

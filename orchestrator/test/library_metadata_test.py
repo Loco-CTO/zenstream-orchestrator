@@ -750,7 +750,7 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
-    def test_immediate_series_scan_derives_exact_tvdb_episode_ids_before_seeding(self):
+    def test_series_root_resolution_does_not_seed_children_before_inventory(self):
         db, scanner = self._scanner_db()
         try:
             db.execute(
@@ -763,8 +763,13 @@ class LibraryMetadataTest(unittest.TestCase):
                 patch.object(scanner, "_aggregate_series_children") as aggregate,
                 patch.object(scanner, "_derive_tvdb_episode_ids") as derive,
                 patch.object(scanner, "_seed_all_children") as seed,
+                patch.object(scanner, "_fetch_configured_locales"),
             ):
-                scanner._resolve_series_immediately(
+                service.resolve_inventory_entity.return_value = {
+                    "providerIds": [{"provider": "tvdb", "id": "12345"}],
+                    "metadata": {"children": []},
+                }
+                scanner._resolve_series_root(
                     "library-1",
                     "series-1",
                     "Example [tvdbid-12345]",
@@ -773,11 +778,9 @@ class LibraryMetadataTest(unittest.TestCase):
                     lambda: False,
                 )
 
-            aggregate.assert_called_once_with("series-1", service)
-            derive.assert_called_once_with("series-1", service)
-            seed.assert_called_once_with(
-                "library-1", service, "job-1", unittest.mock.ANY, parent_id="series-1"
-            )
+            aggregate.assert_not_called()
+            derive.assert_not_called()
+            seed.assert_not_called()
         finally:
             db.close()
 
@@ -918,6 +921,55 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(rows, [(1, 289, 1), (0, 12345, 0)])
         self.assertEqual(resolve.call_count, 1)
         db.close()
+
+    def test_tv_scan_resolves_series_and_each_season_in_numeric_order(self):
+        db, scanner = self._scanner_db()
+        events = []
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first = root / "Example" / "Season 1"
+                second = root / "Example" / "Season 2"
+                first.mkdir(parents=True)
+                second.mkdir(parents=True)
+                (second / "Example - S02E02.mkv").touch()
+                (second / "Example - S02E01.mkv").touch()
+                (first / "Example - S01E02.mkv").touch()
+                (first / "Example - S01E01.mkv").touch()
+
+                def resolve_root(*args, **kwargs):
+                    events.append("series")
+                    return {"children": []}
+
+                def resolve_season(*args, **kwargs):
+                    season_id = args[2]
+                    season_number = db.execute(
+                        "SELECT season_number FROM library_entities WHERE id=?",
+                        (season_id,),
+                    )[0][0]
+                    children = db.execute(
+                        "SELECT episode_number FROM library_entities WHERE parent_id=? ORDER BY episode_number",
+                        (season_id,),
+                    )
+                    self.assertTrue(children)
+                    events.append((season_number, [row[0] for row in children]))
+
+                with (
+                    patch("app.providers.MetadataService", return_value=MagicMock()),
+                    patch.object(scanner, "_resolve_series_root", side_effect=resolve_root),
+                    patch.object(scanner, "_resolve_season_metadata", side_effect=resolve_season),
+                ):
+                    scanner._scan_series(
+                        "library-1",
+                        root,
+                        "job-1",
+                        lambda: False,
+                        resolve_immediately=True,
+                    )
+
+            self.assertEqual(events, ["series", (1, [1, 2]), (2, [1, 2])])
+        finally:
+            db.close()
 
     def test_image_fallback_order_is_requested_no_language_english_any(self):
         images = [

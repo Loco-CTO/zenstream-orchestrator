@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import time
 from typing import Iterable
 
 from app.config import Config
@@ -47,6 +48,9 @@ def _numeric(value: object, default: float = 0.0) -> float:
 class CatalogReadModel:
     """Maintains the bounded, indexed catalog projections used by reads."""
 
+    PROGRESS_INTERVAL_SECONDS = 2.0
+    PROGRESS_BATCH_SIZE = 1000
+
     def __init__(self, db=None):
         self.db = db or Config().database
 
@@ -82,7 +86,7 @@ class CatalogReadModel:
             )
         )
 
-    def _summary_values(self, entities, children, entity_ids=None):
+    def _summary_values(self, entities, children, entity_ids=None, progress=None):
         media_query = (
             "SELECT entity_id,MIN(modified_ns),MAX(modified_ns),COUNT(*) "
             "FROM media_files WHERE role='media'"
@@ -137,6 +141,8 @@ class CatalogReadModel:
             )
             visiting.remove(entity_id)
             memo[entity_id] = value
+            if progress is not None:
+                progress("summaries", len(memo), len(entities))
             return value
 
         values = []
@@ -164,7 +170,7 @@ class CatalogReadModel:
         title = Path(row[4] or "").stem or row[3].replace("_", " ").title()
         return {"title": title, "_imageLanguageSchema": IMAGE_LANGUAGE_SCHEMA}
 
-    def _projection_values(self, entities, locales: list[str]):
+    def _projection_values(self, entities, locales: list[str], progress=None):
         old: dict[tuple[str, str], str] = {}
         if self._has_table("catalog_item_projection"):
             old = {
@@ -216,6 +222,8 @@ class CatalogReadModel:
                     now,
                     1,
                 ))
+                if progress is not None:
+                    progress("projections", len(values), len(entities) * len(locales))
                 seen_grams = set()
                 searchable = normalize_search_text(f"{payload.get('title') or ''} {path_text}")
                 for size in (1, 2):
@@ -230,7 +238,7 @@ class CatalogReadModel:
                         genres.append((entity_id, locale, key, genre.strip()))
         return values, genres, grams
 
-    def _user_values(self, entities, children):
+    def _user_values(self, entities, children, progress=None):
         if not self._has_table("user_item_state"):
             return []
         states = self.db.read_execute(
@@ -247,7 +255,7 @@ class CatalogReadModel:
                 if source_id in entities and collection_id in entities:
                     parents[source_id].append(collection_id)
         counts: dict[tuple[str, str], int] = defaultdict(int)
-        for user_id, entity_id, played in states:
+        for index, (user_id, entity_id, played) in enumerate(states, 1):
             if not played or entity_id not in entities:
                 continue
             stack = [entity_id]
@@ -261,54 +269,171 @@ class CatalogReadModel:
                 if row[3] in LEAF_TYPES and not children.get(current):
                     counts[(user_id, current)] += 1
                 stack.extend(parents.get(current, ()))
+            if progress is not None:
+                progress("user_summary", index, len(states))
         now = _now()
         return [(user_id, entity_id, count, now) for (user_id, entity_id), count in counts.items()]
+
+    def _has_progress_columns(self) -> bool:
+        if not self._has_table("catalog_read_model_status"):
+            return False
+        columns = {
+            row[1]
+            for row in self.db.read_execute("PRAGMA table_info(catalog_read_model_status)")
+        }
+        return {
+            "stage",
+            "processed",
+            "total",
+            "started_at",
+            "heartbeat_at",
+        }.issubset(columns)
+
+    def _persist_progress(
+        self,
+        stage: str,
+        processed: int,
+        total: int,
+        started_at: str,
+        state: str = "building",
+        generation: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        if not self._has_progress_columns():
+            return
+        now = _now()
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE catalog_read_model_status SET state=?,generation=COALESCE(?,generation),"
+                "updated_at=?,error=?,stage=?,processed=?,total=?,started_at=?,heartbeat_at=? WHERE id=1",
+                (
+                    state,
+                    generation,
+                    now,
+                    error,
+                    stage,
+                    int(processed),
+                    int(total),
+                    started_at,
+                    now,
+                ),
+            )
+
+    def _progress_tracker(self, started_at: str):
+        last_report = 0.0
+
+        def report(
+            stage: str,
+            processed: int,
+            total: int,
+            force: bool = False,
+            persist: bool = True,
+        ) -> None:
+            nonlocal last_report
+            now = time.monotonic()
+            if not force and now - last_report < self.PROGRESS_INTERVAL_SECONDS:
+                return
+            last_report = now
+            percent = (processed / total * 100.0) if total else 100.0
+            elapsed = now - report.started_monotonic
+            logger.info(
+                "catalog read model rebuild progress stage=%s processed=%s total=%s percent=%.1f elapsed_seconds=%.1f",
+                stage,
+                processed,
+                total,
+                percent,
+                elapsed,
+            )
+            if persist:
+                self._persist_progress(stage, processed, total, started_at)
+
+        report.started_monotonic = time.monotonic()
+        return report
 
     def rebuild(self, locales: Iterable[str] | None = None) -> int:
         if not self.available():
             return 0
         locales = list(locales or MetadataLanguageSettings().get()) or ["en"]
+        started_at = _now()
+        progress = self._progress_tracker(started_at)
+        progress("loading_entities", 0, 0, force=True)
+        self._persist_progress("loading_entities", 0, 0, started_at)
         entities, children = self._load_entities()
-        summaries, _ = self._summary_values(entities, children, entities)
-        projections, genres, grams = self._projection_values(entities, locales)
-        users = self._user_values(entities, children)
-        collections = self._collection_values_from_db(entities, summaries)
+        progress("loading_entities", len(entities), len(entities), force=True)
+        progress("summaries", 0, len(entities), force=True)
+        summaries, _ = self._summary_values(entities, children, entities, progress)
+        progress("summaries", len(entities), len(entities), force=True)
+        projection_total = len(entities) * len(locales)
+        progress("projections", 0, projection_total, force=True)
+        projections, genres, grams = self._projection_values(entities, locales, progress)
+        progress("projections", len(projections), projection_total, force=True)
+        progress("user_summary", 0, 0, force=True)
+        users = self._user_values(entities, children, progress)
+        progress("user_summary", len(users), len(users), force=True)
+        progress("collection_summary", 0, 0, force=True)
+        collections = self._collection_values_from_db(entities, summaries, progress)
+        progress("collection_summary", len(collections), len(collections), force=True)
         now = _now()
+        write_total = len(summaries) + len(projections) + len(genres) + len(grams) + len(users) + len(collections)
+        progress("writing", 0, write_total, force=True, persist=False)
+        written = 0
+
+        def write_rows(cursor, query, rows, stage):
+            nonlocal written
+            for offset in range(0, len(rows), self.PROGRESS_BATCH_SIZE):
+                batch = rows[offset : offset + self.PROGRESS_BATCH_SIZE]
+                cursor.executemany(query, batch)
+                written += len(batch)
+                progress(stage, written, write_total, persist=False)
+
         with self.db.transaction() as cursor:
             cursor.execute("DELETE FROM catalog_entity_summary")
-            cursor.executemany(
+            write_rows(cursor,
                 "INSERT INTO catalog_entity_summary(entity_id,library_id,parent_id,entity_type,playable_leaf_count,media_file_count,media_added_ns,media_last_added_ns,added_sort_ns,last_added_sort_ns,generation,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 summaries,
+                "writing_summaries",
             )
             cursor.execute("DELETE FROM catalog_item_projection")
-            cursor.executemany(
+            write_rows(cursor,
                 "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 projections,
+                "writing_projections",
             )
             cursor.execute("DELETE FROM catalog_item_genres")
-            cursor.executemany(
+            write_rows(cursor,
                 "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
                 genres,
+                "writing_genres",
             )
             cursor.execute("DELETE FROM catalog_search_grams")
-            cursor.executemany(
+            write_rows(cursor,
                 "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,?)",
                 grams,
+                "writing_search_grams",
             )
             cursor.execute("DELETE FROM catalog_user_summary")
-            cursor.executemany(
+            write_rows(cursor,
                 "INSERT INTO catalog_user_summary(user_id,entity_id,played_leaf_count,updated_at) VALUES(?,?,?,?)",
                 users,
+                "writing_user_summary",
             )
             cursor.execute("DELETE FROM catalog_collection_summary")
-            cursor.executemany(
+            write_rows(cursor,
                 "INSERT INTO catalog_collection_summary(collection_entity_id,collection_library_id,source_library_id,playable_leaf_count,media_file_count,added_sort_ns,last_added_sort_ns,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                 collections,
+                "writing_collection_summary",
             )
-            cursor.execute(
-                "INSERT INTO catalog_read_model_status(id,state,generation,updated_at,error) VALUES(1,'ready',1,?,NULL) ON CONFLICT(id) DO UPDATE SET state='ready',generation=1,updated_at=excluded.updated_at,error=NULL",
-                (now,),
-            )
+            if self._has_progress_columns():
+                cursor.execute(
+                    "INSERT INTO catalog_read_model_status(id,state,generation,updated_at,error,stage,processed,total,started_at,heartbeat_at) VALUES(1,'ready',1,?,NULL,'complete',?,?,?,?) ON CONFLICT(id) DO UPDATE SET state='ready',generation=1,updated_at=excluded.updated_at,error=NULL,stage='complete',processed=excluded.processed,total=excluded.total,started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at",
+                    (now, write_total, write_total, started_at, now),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO catalog_read_model_status(id,state,generation,updated_at,error) VALUES(1,'ready',1,?,NULL) ON CONFLICT(id) DO UPDATE SET state='ready',generation=1,updated_at=excluded.updated_at,error=NULL",
+                    (now,),
+                )
+        progress("complete", write_total, write_total, force=True, persist=False)
         logger.info(
             "catalog read model rebuild complete entities=%s projections=%s users=%s",
             len(entities),
@@ -317,7 +442,7 @@ class CatalogReadModel:
         )
         return len(entities)
 
-    def _collection_values_from_db(self, entities, summaries):
+    def _collection_values_from_db(self, entities, summaries, progress=None):
         if not self._has_table("collection_members"):
             return []
         summary_by_id = {row[0]: row for row in summaries}
@@ -329,7 +454,7 @@ class CatalogReadModel:
             "JOIN library_entities s ON s.id=m.source_entity_id"
         )
         now = _now()
-        for collection_id, source_id, source_library_id in rows:
+        for index, (collection_id, source_id, source_library_id) in enumerate(rows, 1):
             collection = entities.get(collection_id)
             summary = summary_by_id.get(source_id)
             if collection is None or summary is None:
@@ -351,6 +476,8 @@ class CatalogReadModel:
                 value["added"].append(int(summary[8]))
             if summary[9] is not None:
                 value["last"].append(int(summary[9]))
+            if progress is not None:
+                progress("collection_summary", index, len(rows))
         return [
             (
                 collection_id,
@@ -391,11 +518,21 @@ class CatalogReadModel:
             return count
         except Exception as error:
             now = _now()
-            with self.db.transaction() as cursor:
-                cursor.execute(
-                    "UPDATE catalog_read_model_status SET state='failed',updated_at=?,error=? WHERE id=1",
-                    (now, str(error)[:1000]),
+            if self._has_progress_columns():
+                self._persist_progress(
+                    "failed",
+                    0,
+                    0,
+                    now,
+                    state="failed",
+                    error=str(error)[:1000],
                 )
+            else:
+                with self.db.transaction() as cursor:
+                    cursor.execute(
+                        "UPDATE catalog_read_model_status SET state='failed',updated_at=?,error=? WHERE id=1",
+                        (now, str(error)[:1000]),
+                    )
             raise
 
     def _retire_legacy_tables(self) -> None:
@@ -494,7 +631,9 @@ class CatalogReadModel:
     def status(self):
         if not self._has_table("catalog_read_model_status"):
             return None
-        rows = self.db.read_execute(
-            "SELECT state,generation,updated_at,error FROM catalog_read_model_status WHERE id=1"
-        )
+        if self._has_progress_columns():
+            query = "SELECT state,generation,updated_at,error,stage,processed,total,started_at,heartbeat_at FROM catalog_read_model_status WHERE id=1"
+        else:
+            query = "SELECT state,generation,updated_at,error FROM catalog_read_model_status WHERE id=1"
+        rows = self.db.read_execute(query)
         return rows[0] if rows else None

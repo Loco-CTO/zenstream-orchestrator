@@ -1,6 +1,5 @@
 from .database import DatabaseHandler
 import os
-import sqlite3
 from pathlib import Path
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -52,7 +51,6 @@ class Config:
         database_directory = PROJECT_ROOT / "sqlite"
         database_directory.mkdir(exist_ok=True)
         database_file = database_directory / "orchestrator.db"
-        self._prepare_fresh_database(database_file)
         self._database = DatabaseHandler(
             db_type="sqlite",
             create_query={
@@ -129,38 +127,6 @@ class Config:
         )
 
         self._run_migrations()
-
-    @staticmethod
-    def _prepare_fresh_database(database_file: Path) -> None:
-        if not database_file.is_file() or database_file.stat().st_size == 0:
-            return
-        compatible = False
-        connection = None
-        try:
-            connection = sqlite3.connect(str(database_file), timeout=1.0)
-            row = connection.execute(
-                "SELECT value FROM schema_metadata WHERE key='generation'"
-            ).fetchone()
-            compatible = bool(row and row[0] == "catalog-projection-v1")
-        except sqlite3.OperationalError as error:
-            message = str(error).lower()
-            if "locked" in message or "busy" in message:
-                raise RuntimeError(
-                    "SQLite schema could not be verified because the database is busy; refusing to archive it."
-                ) from error
-            compatible = False
-        except sqlite3.Error:
-            compatible = False
-        finally:
-            if connection is not None:
-                connection.close()
-        if not compatible:
-            # Alembic owns schema compatibility and upgrades.  Do not archive or
-            # recreate a live database here: this code runs while Config is being
-            # imported, before Alembic has an opportunity to upgrade a valid
-            # older schema.  In particular, a bind-mounted SQLite database may
-            # reject a Windows/Docker rename even though it is perfectly usable.
-            return
 
     @property
     def database(self):

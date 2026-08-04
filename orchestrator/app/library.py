@@ -2447,7 +2447,13 @@ class LibraryScanner:
         root: Path,
         series_dir: Path,
         should_terminate: Callable[[], bool],
-    ) -> list[tuple[Path, int, list[tuple[int, str, Path, int, int | None]]]]:
+    ) -> list[
+        tuple[
+            Path,
+            int,
+            list[tuple[int, str, Path, int, int | None, list[Path]]],
+        ]
+    ]:
         children = list(series_dir.iterdir())
         season_dirs = [
             path
@@ -2480,6 +2486,10 @@ class LibraryScanner:
             episode_paths = (
                 children if season_dir == series_dir else list(self._walk_paths(season_dir))
             )
+            files_by_parent: dict[Path, list[Path]] = {}
+            for path in episode_paths:
+                if path.is_file():
+                    files_by_parent.setdefault(path.parent, []).append(path)
             episode_records = []
             for media in episode_paths:
                 self._check_termination(should_terminate)
@@ -2518,6 +2528,15 @@ class LibraryScanner:
                         media,
                         filename_season_number,
                         end_number,
+                        [
+                            sidecar
+                            for sidecar in files_by_parent.get(media.parent, [])
+                            if sidecar == media
+                            or (
+                                sidecar.stem.startswith(media.stem)
+                                and sidecar.suffix.lower() not in VIDEO_EXTENSIONS
+                            )
+                        ],
                     )
                 )
             episode_records.sort(key=lambda value: (value[0], value[1]))
@@ -2752,6 +2771,7 @@ class LibraryScanner:
                     media,
                     filename_season_number,
                     end_number,
+                    episode_files,
                 ) in episode_records:
                     self._check_termination(should_terminate)
                     # The directory establishes the season hierarchy. Keep the
@@ -2777,14 +2797,7 @@ class LibraryScanner:
                     self._files(
                         episode,
                         root,
-                        [media]
-                        + [
-                            sidecar
-                            for sidecar in media.parent.iterdir()
-                            if sidecar.is_file()
-                            and sidecar.stem.startswith(media.stem)
-                            and sidecar != media
-                        ],
+                        episode_files,
                         job_id=job_id,
                     )
                     if not self.db.execute(

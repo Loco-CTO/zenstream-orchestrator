@@ -18,6 +18,7 @@ from app.library import (
     guess_media,
     normalized_path,
     provider_ids,
+    sidecar_display_title,
     _quick_fingerprint,
 )
 from app.library_cleanup import cleanup_entities, cleanup_library, cleanup_orphans
@@ -286,6 +287,81 @@ class LibraryMetadataTest(unittest.TestCase):
             path.write_bytes(data)
             last_fingerprint, _ = _quick_fingerprint(path)
             self.assertNotEqual(last_fingerprint, first_fingerprint)
+
+    def test_sidecar_display_titles_preserve_descriptors_and_ignore_flags(self):
+        media_paths = ["5 Centimeters per Second/5 Centimeters per Second.mkv"]
+        self.assertEqual(
+            sidecar_display_title(
+                "5 Centimeters per Second/5 Centimeters per Second.AI 音声認識.ja.srt",
+                "ja",
+                "subtitle",
+                media_paths,
+            ),
+            "AI 音声認識 - Japanese",
+        )
+        self.assertEqual(
+            sidecar_display_title(
+                "5 Centimeters per Second/5 Centimeters per Second.ja.srt",
+                "ja",
+                "subtitle",
+                media_paths,
+            ),
+            "Japanese",
+        )
+        self.assertEqual(
+            sidecar_display_title(
+                "5 Centimeters per Second/5 Centimeters per Second.forced.sdh.cc.hi.ja.srt",
+                "ja",
+                "subtitle",
+                media_paths,
+            ),
+            "Japanese",
+        )
+
+    def test_sidecar_display_title_does_not_use_unmatched_movie_title_as_descriptor(self):
+        self.assertEqual(
+            sidecar_display_title(
+                "Mr.Robot.en.srt",
+                "en",
+                "subtitle",
+                ["Mr.Robot.mkv"],
+            ),
+            "English",
+        )
+
+    def test_sidecar_scan_is_stat_only_and_retains_inaccessible_existing_rows(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                sidecar = root / "Movie.AI 音声認識.ja.srt"
+                sidecar.write_text("subtitle", encoding="utf-8")
+                first_mtime = sidecar.stat().st_mtime_ns
+                db.execute(
+                    "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("sidecar-1", "entity-1", sidecar.name, "subtitle", "ja", None, 1, first_mtime, "legacy-fingerprint"),
+                )
+                with patch("app.library._quick_fingerprint") as fingerprint:
+                    result = scanner._files("entity-1", root, [sidecar])
+                    fingerprint.assert_not_called()
+                    self.assertEqual(result["updated"], 1)
+                    self.assertEqual(
+                        db.execute(
+                            "SELECT id,size,modified_ns,quick_fingerprint FROM media_files WHERE entity_id='entity-1'"
+                        )[0][0],
+                        "sidecar-1",
+                    )
+
+                    with patch("app.library._bounded_sidecar_stat", return_value=None):
+                        scanner._files("entity-1", root, [sidecar])
+                    self.assertEqual(
+                        db.execute(
+                            "SELECT id FROM media_files WHERE entity_id='entity-1'"
+                        )[0][0],
+                        "sidecar-1",
+                    )
+        finally:
+            db.close()
 
     def test_targeted_movie_scan_only_visits_affected_root(self):
         db, scanner = self._scanner_db()

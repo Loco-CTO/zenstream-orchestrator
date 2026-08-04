@@ -253,8 +253,41 @@ class PlaybackTest(unittest.TestCase):
 
         self.assertEqual(sources[0]["mediaFileId"], "file-1")
         media_query = manager.db.execute.call_args_list[0].args[0]
-        self.assertIn("role IN ('subtitle','lyrics')", manager.db.execute.call_args_list[1].args[0])
+        self.assertIn("role IN ('media','subtitle','lyrics')", manager.db.execute.call_args_list[1].args[0])
         self.assertIn("media_sources", media_query)
+
+    def test_sources_add_descriptor_to_sidecar_title(self):
+        manager = object.__new__(PlaybackManager)
+        manager.catalog = MagicMock()
+        manager.db = MagicMock()
+        manager.db.execute.side_effect = [
+            [
+                (
+                    "source-1",
+                    "file-1",
+                    "mp4",
+                    120.0,
+                    1_000_000,
+                    1920,
+                    1080,
+                    "h264",
+                    "aac",
+                    json.dumps({"streams": []}),
+                )
+            ],
+            [
+                ("file-1", "5 Centimeters per Second/5 Centimeters per Second.mkv", None, "media"),
+                ("file-2", "5 Centimeters per Second/5 Centimeters per Second.AI 音声認識.ja.srt", "ja", "subtitle"),
+                ("file-3", "5 Centimeters per Second/5 Centimeters per Second.ja.srt", "ja", "subtitle"),
+            ],
+        ]
+
+        streams = manager.sources("user-1", "entity-1")[0]["streams"]
+
+        self.assertEqual(
+            [stream["tags"]["title"] for stream in streams],
+            ["AI 音声認識 - Japanese", "Japanese"],
+        )
 
     @patch("app.playback.issue_ticket", return_value="ticket")
     def test_negotiate_returns_readiness_error_when_no_source(self, _ticket):

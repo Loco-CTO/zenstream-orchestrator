@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import unicodedata
@@ -38,6 +39,9 @@ router = APIRouter(prefix="/api/admin")
 logger = get_logger("library_api")
 store = LibraryStore()
 credentials = MetadataCredentials()
+_admin_hydration: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "admin_catalog_hydration", default=None
+)
 
 
 def _trickplay_asset(entity_id: str) -> dict | None:
@@ -99,6 +103,9 @@ def _configured_locale(value: str | None) -> str:
 
 
 def _entity_ids(entity_id: str) -> list[dict]:
+    hydration = _admin_hydration.get()
+    if hydration is not None and entity_id in hydration["providers"]:
+        return hydration["providers"][entity_id]
     entity_rows = store.db.execute(
         "SELECT entity_type FROM library_entities WHERE id=?", (entity_id,)
     )
@@ -108,7 +115,7 @@ def _entity_ids(entity_id: str) -> list[dict]:
         "SELECT provider,identifier_type,provider_id,is_primary FROM entity_provider_ids WHERE entity_id=? ORDER BY CASE WHEN provider=? THEN 0 ELSE 1 END, provider",
         (entity_id, primary_provider),
     )
-    return [
+    value = [
         {
             "provider": row[0],
             "type": row[1],
@@ -118,16 +125,21 @@ def _entity_ids(entity_id: str) -> list[dict]:
         }
         for row in rows
     ]
+    if hydration is not None:
+        hydration["providers"][entity_id] = value
+    return value
 
 
 def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) -> dict:
-    rows = store.db.execute(
+    hydration = _admin_hydration.get()
+    row = hydration["entities"].get(entity_id) if hydration is not None else None
+    rows = [] if row is not None else store.db.execute(
         "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,disc_number,track_number,match_status,match_confidence,match_method FROM library_entities WHERE id=?",
         (entity_id,),
     )
-    if not rows:
+    if row is None and not rows:
         raise HTTPException(404, "Library item not found.")
-    row = rows[0]
+    row = row or rows[0]
     value = {
         "id": row[0],
         "libraryId": row[1],
@@ -150,7 +162,7 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     )
     if row[3] in {"movie", "episode"}:
         value["trickplay"] = _trickplay_asset(entity_id)
-    children = store.db.execute(
+    children = hydration["children"].get(entity_id, []) if hydration is not None else store.db.execute(
         "SELECT id,entity_type,relative_path,season_number,episode_number,track_number FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
         (entity_id,),
     )
@@ -194,6 +206,11 @@ def _metadata_for(
     requested = normalize_metadata_locale(locale)
     if requested not in MetadataLanguageSettings().get():
         raise HTTPException(400, "Metadata language is not configured.")
+    hydration = _admin_hydration.get()
+    if hydration is not None:
+        value = hydration["metadata"].get((item["id"], requested))
+        if value is not None:
+            return value
     value = MetadataReadService(store.db).resolve_raw(
         item["type"], item.get("providerIds", []), requested
     )
@@ -668,11 +685,77 @@ def _list_admin_items_sync(
             f"SELECT id FROM library_entities WHERE {where} ORDER BY entity_type, relative_path COLLATE NOCASE LIMIT ? OFFSET ?",
             params + [page_size, (page - 1) * page_size],
         )
-    items = []
-    for row in rows:
-        item = _entity(row[0], locale)
-        item["metadata"] = _metadata_for(item, locale, False, fallback=False)
-        items.append(item)
+    entity_ids = [row[0] for row in rows]
+    hydration = {
+        "entities": {},
+        "providers": {},
+        "children": {},
+        "metadata": {},
+    }
+    if entity_ids:
+        placeholders = ",".join("?" for _ in entity_ids)
+        hydration["entities"] = {
+            row[0]: row
+            for row in store.db.execute(
+                f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,disc_number,track_number,match_status,match_confidence,match_method FROM library_entities WHERE id IN ({placeholders})",
+                entity_ids,
+            )
+        }
+        provider_rows = store.db.execute(
+            f"SELECT entity_id,provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id IN ({placeholders}) ORDER BY entity_id,provider",
+            entity_ids,
+        )
+        for entity_id, provider, identifier_type, provider_id in provider_rows:
+            entity_type = hydration["entities"].get(entity_id, (None, None, None, ""))[3]
+            primary = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
+            hydration["providers"].setdefault(entity_id, []).append(
+                {
+                    "provider": provider,
+                    "type": identifier_type,
+                    "id": provider_id,
+                    "primary": provider == primary,
+                    "role": "primary" if provider == primary else "secondary",
+                }
+            )
+        for entity_id, values in hydration["providers"].items():
+            entity_type = hydration["entities"].get(entity_id, (None, None, None, ""))[3]
+            primary = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
+            values.sort(key=lambda value: (value["provider"] != primary, value["provider"]))
+        child_rows = store.db.execute(
+            f"SELECT id,entity_type,relative_path,season_number,episode_number,track_number,parent_id FROM library_entities WHERE parent_id IN ({placeholders}) ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
+            entity_ids,
+        )
+        for row in child_rows:
+            hydration["children"].setdefault(row[6], []).append(row[:6])
+        projection_tables = {
+            row[0]
+            for row in store.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('catalog_item_projection','catalog_read_model_status')")
+        }
+        ready = False
+        if "catalog_item_projection" in projection_tables and "catalog_read_model_status" in projection_tables:
+            status = store.db.execute("SELECT state FROM catalog_read_model_status WHERE id=1")
+            ready = bool(status and status[0][0] == "ready")
+        if ready:
+            projection_rows = store.db.execute(
+                f"SELECT entity_id,payload FROM catalog_item_projection WHERE locale=? AND entity_id IN ({placeholders})",
+                [locale, *entity_ids],
+            )
+            for entity_id, payload in projection_rows:
+                try:
+                    value = json.loads(payload)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(value, dict):
+                    hydration["metadata"][(entity_id, locale)] = value
+    token = _admin_hydration.set(hydration)
+    try:
+        items = []
+        for row in rows:
+            item = _entity(row[0], locale)
+            item["metadata"] = _metadata_for(item, locale, False, fallback=False)
+            items.append(item)
+    finally:
+        _admin_hydration.reset(token)
     return {
         "items": items,
         "page": page,

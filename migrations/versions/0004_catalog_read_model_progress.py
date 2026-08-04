@@ -1,4 +1,5 @@
 from alembic import op
+from sqlalchemy import Column, Integer, Text
 
 
 revision = "0004_catalog_read_model_progress"
@@ -10,23 +11,23 @@ depends_on = None
 def upgrade():
     op.add_column(
         "catalog_read_model_status",
-        op.Column("stage", op.Text(), nullable=False, server_default="idle"),
+        Column("stage", Text(), nullable=False, server_default="idle"),
     )
     op.add_column(
         "catalog_read_model_status",
-        op.Column("processed", op.Integer(), nullable=False, server_default="0"),
+        Column("processed", Integer(), nullable=False, server_default="0"),
     )
     op.add_column(
         "catalog_read_model_status",
-        op.Column("total", op.Integer(), nullable=False, server_default="0"),
+        Column("total", Integer(), nullable=False, server_default="0"),
     )
     op.add_column(
         "catalog_read_model_status",
-        op.Column("started_at", op.Text(), nullable=True),
+        Column("started_at", Text(), nullable=True),
     )
     op.add_column(
         "catalog_read_model_status",
-        op.Column("heartbeat_at", op.Text(), nullable=True),
+        Column("heartbeat_at", Text(), nullable=True),
     )
 
 

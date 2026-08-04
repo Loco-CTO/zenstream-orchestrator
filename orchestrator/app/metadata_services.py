@@ -210,6 +210,76 @@ class MetadataSearchProjection:
                             str(payload["originalTitle"]),
                         ),
                     )
+                if cursor.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_item_projection'"
+                ).fetchone():
+                    from app.catalog_read_model import normalize_search_text
+
+                    entity = cursor.execute(
+                        "SELECT parent_id,entity_type FROM library_entities WHERE id=?",
+                        (entity_id,),
+                    ).fetchone()
+                    previous = cursor.execute(
+                        "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
+                        (entity_id, locale),
+                    ).fetchone()
+                    try:
+                        merged = json.loads(previous[0]) if previous else {}
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        merged = {}
+                    if not isinstance(merged, dict):
+                        merged = {}
+                    for field in ("title", "originalTitle", "genres", "tags", "date", "releaseDate", "runtimeMinutes", "communityRating"):
+                        if field in payload:
+                            merged[field] = payload[field]
+                    payload_text = json.dumps(merged, ensure_ascii=False)
+                    cursor.execute(
+                        "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,1) "
+                        "ON CONFLICT(entity_id,locale) DO UPDATE SET payload=excluded.payload,title_sort=excluded.title_sort,rating_sort=excluded.rating_sort,release_sort=excluded.release_sort,runtime_sort=excluded.runtime_sort,updated_at=excluded.updated_at",
+                        (
+                            entity_id,
+                            locale,
+                            library_id,
+                            entity[0] if entity else None,
+                            entity[1] if entity else entity_type,
+                            payload_text,
+                            normalize_search_text(merged.get("title") or ""),
+                            float(merged.get("communityRating") or 0),
+                            str(merged.get("date") or merged.get("releaseDate") or ""),
+                            float(merged.get("runtimeMinutes") or 0),
+                        ),
+                    )
+                    cursor.execute(
+                        "DELETE FROM catalog_search_grams WHERE entity_id=? AND locale=?",
+                        (entity_id, locale),
+                    )
+                    searchable = normalize_search_text(f"{merged.get('title') or ''} {payload.get('originalTitle') or ''}")
+                    grams = {
+                        searchable[index:index + size]
+                        for size in (1, 2)
+                        for index in range(max(0, len(searchable) - size + 1))
+                        if searchable[index:index + size]
+                    }
+                    cursor.executemany(
+                        "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,?)",
+                        [(gram, entity_id, locale, library_id, entity[0] if entity else None) for gram in grams],
+                    )
+                    if cursor.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_item_genres'"
+                    ).fetchone():
+                        cursor.execute(
+                            "DELETE FROM catalog_item_genres WHERE entity_id=? AND locale=?",
+                            (entity_id, locale),
+                        )
+                        genres = merged.get("genres") or merged.get("tags") or []
+                        cursor.executemany(
+                            "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                            [
+                                (entity_id, locale, normalize_search_text(genre), str(genre).strip())
+                                for genre in genres
+                                if isinstance(genre, str) and genre.strip()
+                            ],
+                        )
 
 
 class MetadataReadService:

@@ -21,7 +21,7 @@ from fastapi import HTTPException
 from app.catalog import Catalog
 from app.config import Config
 from app.client_auth import issue_ticket
-from app.library import LANGUAGE_ALIASES, language_name
+from app.library import LANGUAGE_ALIASES, language_name, sidecar_display_title
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
 
@@ -368,6 +368,11 @@ class PlaybackManager:
             value["tags"] = tags
             return value
 
+        file_rows = self.db.execute(
+            "SELECT id,relative_path,language,role FROM media_files WHERE entity_id=? AND role IN ('media','subtitle','lyrics') ORDER BY relative_path COLLATE NOCASE",
+            (entity_id,),
+        )
+        media_paths = [row[1] for row in file_rows if row[3] == "media"]
         sidecars = [
             {
                 "index": 1000 + index,
@@ -377,14 +382,13 @@ class PlaybackManager:
                 "kind": role,
                 "tags": {
                     **({"language": language} if language else {}),
-                    "title": language_name(language, role),
+                    "title": sidecar_display_title(
+                        relative_path, language, role, media_paths
+                    ),
                 },
             }
             for index, (file_id, relative_path, language, role) in enumerate(
-                self.db.execute(
-                    "SELECT id,relative_path,language,role FROM media_files WHERE entity_id=? AND role IN ('subtitle','lyrics') ORDER BY relative_path COLLATE NOCASE",
-                    (entity_id,),
-                )
+                row for row in file_rows if row[3] in {"subtitle", "lyrics"}
             )
         ]
         return [

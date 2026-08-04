@@ -68,6 +68,44 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(values, (5, 10))
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_refresh_root_admits_new_collection_entity(self, _languages):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('collection-2','collection',NULL,'collection','Collection 2',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO collection_members VALUES('collection-2','series',1)"
+        )
+
+        model.refresh_roots(["collection-2"])
+
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT entity_id FROM catalog_entity_summary WHERE entity_id='collection-2'"
+            ),
+            [("collection-2",)],
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_bootstrap_repairs_small_summary_gap_without_full_rebuild(self, _languages):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute("DELETE FROM catalog_entity_summary WHERE entity_id='series'")
+        self.db.execute("UPDATE catalog_read_model_status SET state='building' WHERE id=1")
+
+        with patch.object(model, "rebuild", side_effect=AssertionError("unexpected full rebuild")):
+            result = model.bootstrap(["en"])
+
+        self.assertEqual(result, 5)
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM catalog_entity_summary"
+            )[0][0],
+            5,
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_missing_metadata_still_gets_deterministic_projection(self, _languages):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])

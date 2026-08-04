@@ -16,7 +16,6 @@ from app.logging_config import get_logger
 from app.trickplay import TrickplayExtractor
 from app.intro_outro import IntroOutroDetector
 from app.foreground import active_requests
-from app.catalog_projections import CatalogProjectionStore
 
 
 logger = get_logger("jobs")
@@ -213,17 +212,6 @@ class JobStore:
             ),
         )
         return self.definition(definition["id"])  # type: ignore[return-value]
-
-    def ensure_projection(self, library: dict) -> dict:
-        return self.ensure(
-            f"catalog_projection:{library['id']}",
-            f"Build catalog projection for {library['name']}",
-            "Build indexed catalog hierarchy, date, and user-state projections.",
-            "catalog_projection",
-            43200,
-            {"libraryId": library["id"]},
-            True,
-        )
 
     def update_definition(self, definition_id: str, values: dict) -> dict:
         definition = self.definition(definition_id)
@@ -532,67 +520,6 @@ class MetadataCleanupJob:
             progress_total=1,
             finished_at=now(),
             message="Orphaned library data cleaned",
-        )
-
-
-class CatalogProjectionJob:
-    def __init__(self, store: JobStore):
-        self.store = store
-        self.db = store.db
-
-    def run(self, run_id: str, definition: dict, should_terminate=None) -> None:
-        should_terminate = should_terminate or (lambda: False)
-        library_id = (definition.get("config") or {}).get("libraryId")
-        if not library_id:
-            raise ValueError("Catalog projection library is not configured")
-        from app.catalog_read_model import CatalogReadModel
-
-        read_model = CatalogReadModel(self.db)
-        if read_model.available() and (read_model.status() or (None,))[0] == "ready":
-            self.store.update_run(
-                run_id,
-                state="completed",
-                started_at=now(),
-                finished_at=now(),
-                progress_current=1,
-                progress_total=1,
-                message="Skipped legacy projection; catalog read model is maintained incrementally",
-            )
-            logger.info(
-                "legacy catalog projection skipped library_id=%s reason=read_model_ready",
-                library_id,
-            )
-            return
-        self.store.update_run(
-            run_id,
-            state="running",
-            started_at=now(),
-            thread_name=threading.current_thread().name,
-            message="Building catalog projection",
-        )
-        projection = CatalogProjectionStore(self.db)
-        total = projection.rebuild_library(library_id, should_terminate)
-        projection.rebuild_metadata(library_id, should_terminate)
-        users = self.db.read_execute(
-            "SELECT user_id FROM user_library_access WHERE library_id=?", (library_id,)
-        )
-        for index, (user_id,) in enumerate(users, start=1):
-            if should_terminate():
-                raise JobTerminated()
-            projection.rebuild_user(user_id, library_id, should_terminate)
-            self.store.update_run(
-                run_id,
-                progress_current=index,
-                progress_total=len(users),
-                message=f"Built catalog projection for {index} of {len(users)} users",
-            )
-        self.store.update_run(
-            run_id,
-            state="completed",
-            progress_current=len(users),
-            progress_total=len(users),
-            finished_at=now(),
-            message=f"Projected {total} catalog entities",
         )
 
 

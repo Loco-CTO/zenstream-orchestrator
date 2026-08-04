@@ -334,7 +334,7 @@ class CatalogReadModel:
             if not force and now - last_report < self.PROGRESS_INTERVAL_SECONDS:
                 return
             last_report = now
-            percent = (processed / total * 100.0) if total else 100.0
+            percent = (processed / total * 100.0) if total else 0.0
             elapsed = now - report.started_monotonic
             logger.info(
                 "catalog read model rebuild progress stage=%s processed=%s total=%s percent=%.1f elapsed_seconds=%.1f",

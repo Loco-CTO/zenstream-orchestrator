@@ -647,7 +647,7 @@ class LibraryScanner:
             self._set_stage(job_id, "Pruning entities without playable media")
             rejected = self._prune_rejected_entities()
             self._set_stage(job_id, "Pruning missing entities")
-            missing = self._prune_missing_entities(library_id, root)
+            missing = self._prune_missing_entities(library_id, root, targets=targets)
             self._set_stage(job_id, "Refreshing catalog read model")
             removed = rejected | missing
             self._refresh_catalog_after_cleanup()
@@ -685,7 +685,7 @@ class LibraryScanner:
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
             if removed:
-                self._enqueue_dependent_collections(library_id)
+                self._refresh_dependent_collections(library_id)
         except JobTerminated:
             self._scan_complete = False
             finished = now()
@@ -808,7 +808,13 @@ class LibraryScanner:
             | set(self._scan_provider_identity_changed)
         )
 
-    def _prune_missing_entities(self, library_id: str, root: Path | None = None) -> set[str]:
+    def _prune_missing_entities(
+        self,
+        library_id: str,
+        root: Path | None = None,
+        *,
+        targets: set[str] | None = None,
+    ) -> set[str]:
         if not self._scan_complete:
             return set()
         legacy_without_library_root = False
@@ -825,9 +831,21 @@ class LibraryScanner:
             "SELECT id,relative_path FROM library_entities WHERE library_id=?", (library_id,)
         )
         missing = []
+        normalized_targets = {
+            str(target).replace("\\", "/").strip("/").casefold()
+            for target in (targets or set())
+        }
         for entity_id, relative_path in rows:
             if entity_id in self._scan_seen_ids:
                 continue
+            if normalized_targets:
+                normalized_path = str(relative_path or "").replace("\\", "/").strip("/").casefold()
+                if not any(
+                    normalized_path == target
+                    or normalized_path.startswith(target + "/")
+                    for target in normalized_targets
+                ):
+                    continue
             # A complete traversal is required before pruning. Existing paths
             # that were not classifiable are deliberately retained.
             if legacy_without_library_root:
@@ -929,12 +947,13 @@ class LibraryScanner:
         for offset in range(0, len(roots), 300):
             model.refresh_roots(roots[offset : offset + 300])
 
-    def _enqueue_dependent_collections(self, library_id: str) -> None:
+    def _refresh_dependent_collections(self, library_id: str) -> None:
+        """Re-evaluate affected derived collections without provider enumeration."""
         tables = {
             row[0]
             for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-        if "library_sources" not in tables:
+        if not {"library_sources", "collection_members"} <= tables:
             return
         dependent_ids = [
             row[0]
@@ -945,8 +964,39 @@ class LibraryScanner:
         ]
         if not dependent_ids:
             return
-        for dependent_id in dependent_ids:
-            runtime.enqueue(dependent_id, "collection_rebuild")
+        collection_ids = [
+            row[0]
+            for row in self.db.execute(
+                "SELECT id FROM library_entities WHERE library_id IN ({}) AND entity_type='collection'".format(
+                    ",".join("?" for _ in dependent_ids)
+                ),
+                dependent_ids,
+            )
+        ]
+        if not collection_ids:
+            return
+        from app.library_cleanup import cleanup_entities
+
+        empty = [
+            collection_id
+            for collection_id in collection_ids
+            if not self.db.execute(
+                "SELECT 1 FROM collection_members WHERE collection_entity_id=? LIMIT 1",
+                (collection_id,),
+            )
+        ]
+        if empty:
+            closure = self._entity_closure(empty)
+            cleanup_entities(self.db, empty)
+            self._delete_catalog_rows(closure)
+            self._scan_delta["removed"].update(closure)
+        surviving = [value for value in collection_ids if value not in set(empty)]
+        if surviving:
+            from app.catalog_read_model import CatalogReadModel
+
+            model = CatalogReadModel(self.db)
+            for offset in range(0, len(surviving), 300):
+                model.refresh_roots(surviving[offset : offset + 300])
 
     def _entity_fingerprint(self, entity_id: str) -> str | None:
         if "quick_fingerprint" not in {
@@ -2665,7 +2715,10 @@ class LibraryScanner:
         self.store.update_job(job_id, progress_total=len(series_dirs))
         episode_count = 0
         series_count = 0
-        service = MetadataService() if resolve_immediately else None
+        # Defer provider-client construction until a root has passed the
+        # playable-episode preflight; empty/unclassifiable roots do no
+        # metadata work at all.
+        service = None
         for series_index, series_dir in enumerate(series_dirs, start=1):
             self._check_termination(should_terminate)
             series_started = time.monotonic()
@@ -2699,6 +2752,8 @@ class LibraryScanner:
                     message=f"Skipped {series_dir.name}: no playable episodes",
                 )
                 continue
+            if resolve_immediately and service is None:
+                service = MetadataService()
             series = self._entity(
                 library_id, None, "series", series_relative_path
             )

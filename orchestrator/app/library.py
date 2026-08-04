@@ -1721,7 +1721,7 @@ class LibraryScanner:
                 (entity_id,),
             )
             if not provider_rows:
-                if entity_type in {"season", "episode"} and parent_id:
+                if entity_type in {"season", "episode"} and (parent_id or season_id):
                     logger.warning(
                         "No TVDB provider ID was aggregated; leaving file unresolved type=%s path=%s",
                         entity_type,

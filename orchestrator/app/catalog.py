@@ -965,6 +965,16 @@ class Catalog:
         if sort_by in {"added", "lastAdded"}:
             order_column = "s.added_sort_ns" if sort_by == "added" else "s.last_added_sort_ns"
             select_dates = "s.added_sort_ns,s.last_added_sort_ns"
+            date_params: list[object] = []
+            if library["type"] == "collection" and self._has_table("catalog_collection_summary"):
+                scope = sorted(self.allowed_libraries(user_id))
+                scope_placeholders = ",".join("?" for _ in scope)
+                select_dates = (
+                    f"COALESCE((SELECT MIN(c.added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN ({scope_placeholders})),s.added_sort_ns),"
+                    f"COALESCE((SELECT MAX(c.last_added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN ({scope_placeholders})),s.last_added_sort_ns)"
+                )
+                order_column = "sort_added" if sort_by == "added" else "sort_last"
+                date_params = [*scope, *scope, *scope]
             order = f"{order_column} {direction},e.id {direction}"
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
@@ -972,7 +982,14 @@ class Catalog:
                 "FROM library_entities e JOIN catalog_entity_summary s ON s.entity_id=e.id "
                 "WHERE e.library_id=? AND e.parent_id IS ? ORDER BY " + order + " LIMIT ? OFFSET ?"
             )
-            params = [library_id, parent_id, page_size, offset]
+            if date_params:
+                # The computed date aliases are used only for ordering; SQLite
+                # permits the equivalent expressions in the SELECT and ORDER BY.
+                order = ("(SELECT MIN(c.added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN (" + scope_placeholders + "))" if sort_by == "added" else "(SELECT MAX(c.last_added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN (" + scope_placeholders + "))")
+                query = query.replace("ORDER BY sort_added", "ORDER BY " + order).replace("ORDER BY sort_last", "ORDER BY " + order)
+                params = [*date_params, library_id, parent_id, page_size, offset]
+            else:
+                params = [library_id, parent_id, page_size, offset]
         elif sort_by in {"rating", "title", "release", "runtime"} or sort_by is None:
             projection_order = {
                 "rating": "p.rating_sort",
@@ -1119,7 +1136,20 @@ class Catalog:
         if self._read_model_ready():
             def resolve_indexed() -> dict[str, dict[str, str]]:
                 placeholders = ",".join("?" for _ in scope)
-                params: list[object] = list(scope)
+                params: list[object] = []
+                collection_dates = "s.added_sort_ns,s.last_added_sort_ns"
+                if self._has_table("catalog_collection_summary"):
+                    collection_dates = (
+                        "CASE WHEN e.entity_type='collection' THEN COALESCE("
+                        f"(SELECT MIN(c.added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN ({placeholders})),"
+                        "s.added_sort_ns) ELSE s.added_sort_ns END,"
+                        "CASE WHEN e.entity_type='collection' THEN COALESCE("
+                        f"(SELECT MAX(c.last_added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN ({placeholders})),"
+                        "s.last_added_sort_ns) ELSE s.last_added_sort_ns END"
+                    )
+                    params.extend(scope)
+                    params.extend(scope)
+                params.extend(scope)
                 root_filter = ""
                 if requested_root_ids is not None:
                     if not requested_root_ids:
@@ -1128,7 +1158,7 @@ class Catalog:
                     root_filter = f" AND e.id IN ({','.join('?' for _ in root_params)})"
                     params.extend(root_params)
                 rows = self.db.execute(
-                    "SELECT e.id,e.created_at,e.library_id,s.added_sort_ns,s.last_added_sort_ns "
+                    "SELECT e.id,e.created_at,e.library_id," + collection_dates + " "
                     "FROM library_entities e JOIN catalog_entity_summary s ON s.entity_id=e.id "
                     f"WHERE e.library_id IN ({placeholders}){root_filter}",
                     params,
@@ -1711,6 +1741,10 @@ class Catalog:
                     "ON CONFLICT(user_id,entity_id) DO UPDATE SET favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
                     (user_id, affected_id, int(state["favorite"]), int(next_played), play_count, state["positionSeconds"], state["durationSeconds"], now if state["positionSeconds"] or next_played else state.get("lastPlayedAt"), now),
                 )
+        if self._has_table("catalog_user_summary"):
+            from app.catalog_read_model import CatalogReadModel
+
+            CatalogReadModel(self.db).refresh_user_entities(user_id, affected)
         return self._state(user_id, entity_id)
 
     @_catalog_read
@@ -2013,10 +2047,14 @@ class Catalog:
         if not allowed:
             return empty
         placeholders = ",".join("?" for _ in allowed)
-        favorite_rows = self.db.execute(
-            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders})",
-            [user_id, *allowed],
+        favorite_query = (
+            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+            f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders})"
         )
+        favorite_params = [user_id, *allowed]
+        if self._read_model_ready():
+            favorite_query += " ORDER BY e.relative_path COLLATE NOCASE,e.id LIMIT 18"
+        favorite_rows = self.db.execute(favorite_query, favorite_params)
         self._preload_projected_states(user_id, [row[0] for row in favorite_rows])
         self._preload_projected_metadata(user_id, [row[0] for row in favorite_rows], language)
         my_list = [

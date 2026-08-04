@@ -688,6 +688,9 @@ class LibraryScanner:
                 self._refresh_dependent_collections(library_id)
         except JobTerminated:
             self._scan_complete = False
+            # A terminated traversal is not authoritative. Remove only rows
+            # created by this attempt; previously indexed inventory remains.
+            self._remove_created_entities()
             finished = now()
             self.store.update_job(
                 job_id,
@@ -2480,7 +2483,7 @@ class LibraryScanner:
         if path.suffix.lower() not in VIDEO_EXTENSIONS:
             return False
         try:
-            return stat.S_ISREG(path.stat().st_mode)
+            return stat.S_ISREG(path.stat().st_mode) and os.access(path, os.R_OK)
         except OSError:
             return False
 

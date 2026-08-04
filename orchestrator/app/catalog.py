@@ -1597,7 +1597,7 @@ class Catalog:
             if len(wanted) >= 3 and self._has_table("catalog_search"):
                 source = (
                     "SELECT p.entity_id,MIN(" + title_rank + ") AS match_rank,"
-                    "MIN(" + locale_rank + ") AS locale_rank,MIN(bm25(catalog_search)) AS score "
+                    "MIN(" + locale_rank + ") AS locale_rank,0.0 AS score "
                     "FROM catalog_search JOIN catalog_item_projection p ON p.entity_id=catalog_search.entity_id AND p.locale=catalog_search.locale "
                     "JOIN library_entities e ON e.id=p.entity_id AND e.entity_type IN ('movie','series','collection') "
                     f"WHERE catalog_search MATCH ? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) "

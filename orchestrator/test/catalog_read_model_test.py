@@ -98,6 +98,22 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(response["total"], 1)
         self.assertEqual(response["items"][0]["id"], "series")
 
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_fts_search_does_not_use_bm25_inside_grouped_read_model_query(self, _languages):
+        self.db.execute(
+            "CREATE VIRTUAL TABLE catalog_search USING fts5(entity_id UNINDEXED, library_id UNINDEXED, locale UNINDEXED, title, tokenize='trigram')"
+        )
+        self.db.execute(
+            "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES('series','library','en','Series')"
+        )
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        response = catalog.search("user", "Series", "en", 1, 10)
+        self.assertEqual(response["total"], 1)
+        self.assertEqual(response["items"][0]["id"], "series")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1467,6 +1467,43 @@ class MetadataService:
         client = self.client(provider)
         return client.normalize(entity_type, provider_id, client.details(entity_type, provider_id, "en"))
 
+    def series_child_ids(self, provider: str, provider_id: str) -> dict:
+        """Fetch provider child identities without caching localized child metadata."""
+        if provider != "tvdb":
+            return {"seasons": [], "episodes": []}
+        hierarchy = self.client(provider).series_hierarchy(provider_id)
+        seasons = []
+        for value in (hierarchy.get("extended", {}).get("data", {}).get("seasons") or []):
+            season_number = value.get("seasonNumber")
+            if season_number is None:
+                season_number = value.get("number")
+            if value.get("id") is None or season_number is None:
+                continue
+            seasons.append(
+                {
+                    "seasonNumber": int(season_number),
+                    "providerId": str(value["id"]),
+                }
+            )
+        episodes = []
+        for value in hierarchy.get("episodes", []) or []:
+            season_number = value.get("seasonNumber")
+            if season_number is None:
+                season_number = value.get("season")
+            episode_number = value.get("number")
+            if episode_number is None:
+                episode_number = value.get("episodeNumber")
+            if value.get("id") is None or season_number is None or episode_number is None:
+                continue
+            episodes.append(
+                {
+                    "seasonNumber": int(season_number),
+                    "episodeNumber": int(episode_number),
+                    "providerId": str(value["id"]),
+                }
+            )
+        return {"seasons": seasons, "episodes": episodes}
+
     def aggregate_series(
         self, provider: str, provider_id: str, locale: str = "en", force: bool = False
     ) -> dict:

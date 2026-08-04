@@ -848,6 +848,132 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_tv_scan_admits_only_series_and_seasons_with_playable_episodes(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first_season = root / "Example" / "Season 1"
+                empty_season = root / "Example" / "Season 2"
+                empty_series = root / "Empty" / "Season 1"
+                unmapped_series = root / "Unmapped"
+                for path in (first_season, empty_season, empty_series, unmapped_series):
+                    path.mkdir(parents=True)
+                episode = first_season / "Example - S01E01.mkv"
+                episode.touch()
+                (first_season / "Example - S01E01.en.srt").touch()
+                (empty_season / "poster.jpg").touch()
+                (empty_series / "poster.jpg").touch()
+                (unmapped_series / "feature.mkv").touch()
+
+                self._prepare_incremental_scan(scanner)
+                count = scanner._scan_series(
+                    "library-1", root, "job-1", lambda: False
+                )
+                self._finish_incremental_scan(scanner, "library-1", root)
+
+                self.assertEqual(count, 1)
+                self.assertEqual(
+                    db.execute(
+                        "SELECT entity_type,relative_path FROM library_entities ORDER BY length(relative_path),relative_path"
+                    ),
+                    [
+                        ("series", "Example"),
+                        ("season", "Example/Season 1"),
+                        ("episode", "Example/Season 1/Example - S01E01.mkv"),
+                    ],
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT role FROM media_files ORDER BY role"
+                    ),
+                    [("media",), ("subtitle",)],
+                )
+        finally:
+            db.close()
+
+    def test_series_removed_when_last_playable_episode_disappears(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                season = root / "Example" / "Season 1"
+                season.mkdir(parents=True)
+                episode = season / "Example - S01E01.mkv"
+                episode.touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_series("library-1", root, "job-1", lambda: False)
+                self._finish_incremental_scan(scanner, "library-1", root)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 3)
+
+                episode.unlink()
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_series("library-1", root, "job-1", lambda: False)
+                self._finish_incremental_scan(scanner, "library-1", root)
+
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+        finally:
+            db.close()
+
+    def test_movie_scan_failure_does_not_prune_existing_entity(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                movie = root / "Movie"
+                movie.mkdir()
+                (movie / "Movie.mkv").touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                self._finish_incremental_scan(scanner, "library-1", root)
+                entity_id = db.execute("SELECT id FROM library_entities")[0][0]
+
+                self._prepare_incremental_scan(scanner)
+                with patch.object(
+                    scanner, "_walk_paths", side_effect=PermissionError("denied")
+                ):
+                    with self.assertRaises(PermissionError):
+                        scanner._scan_movies(
+                            "library-1", root, "job-1", lambda: False
+                        )
+
+                self.assertFalse(scanner._scan_complete)
+                self.assertEqual(
+                    db.execute("SELECT id FROM library_entities"), [(entity_id,)]
+                )
+        finally:
+            db.close()
+
+    def test_movie_disappearing_after_preflight_leaves_no_provisional_entity(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                movie = root / "Movie"
+                movie.mkdir()
+                video = movie / "Movie.mkv"
+                video.touch()
+                original_files = scanner._files
+
+                def remove_before_reconcile(*args, **kwargs):
+                    video.unlink()
+                    return original_files(*args, **kwargs)
+
+                self._prepare_incremental_scan(scanner)
+                with patch.object(scanner, "_files", side_effect=remove_before_reconcile):
+                    scanner._scan_movies(
+                        "library-1", root, "job-1", lambda: False
+                    )
+                self._finish_incremental_scan(scanner, "library-1", root)
+
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+        finally:
+            db.close()
+
     def test_series_root_resolution_does_not_seed_children_before_inventory(self):
         db, scanner = self._scanner_db()
         try:

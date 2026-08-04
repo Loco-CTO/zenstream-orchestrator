@@ -1339,7 +1339,7 @@ class LibraryScanner:
             message = f"Metadata failed for {query}; continuing"
         self.store.update_job(job_id, progress_current=index, message=message)
 
-    def _resolve_series_immediately(
+    def _resolve_series_root(
         self,
         library_id: str,
         series_id: str,
@@ -1347,12 +1347,13 @@ class LibraryScanner:
         service,
         job_id: str,
         should_terminate: Callable[[], bool],
-    ) -> None:
-        """Resolve one discovered series and all of its children before continuing."""
+    ) -> dict | None:
+        """Resolve one discovered series before processing its seasons."""
         from app.providers import ProviderError
 
         self._check_termination(should_terminate)
         logger.info("metadata series start library_id=%s series_id=%s path=%s", library_id, series_id, relative_path)
+        result = None
         if self._needs_metadata(series_id):
             query, year = _inventory_query(relative_path or "")
             explicit = [
@@ -1400,18 +1401,85 @@ class LibraryScanner:
                     progress=lambda message: self.store.update_job(job_id, message=message),
                 )
             logger.info("metadata series match complete series_id=%s", series_id)
-        self._aggregate_series_children(series_id, service)
-        self.store.update_job(job_id, message=f"Resolved series hierarchy ({series_id})")
-        logger.info("metadata series hierarchy complete series_id=%s", series_id)
-        # The series hierarchy is useful for bulk caching but can omit an
-        # episode from the returned aggregate.  Season details are the
-        # authoritative TVDB source for exact episode IDs, so run the same
-        # derivation used by the incremental resolution path before seeding.
-        self._derive_tvdb_episode_ids(series_id, service)
-        self._seed_all_children(
-            library_id, service, job_id, should_terminate, parent_id=series_id
+            result = result or {"metadata": None}
+        self.store.update_job(job_id, message=f"Resolved series ({series_id})")
+        logger.info("metadata series root complete series_id=%s", series_id)
+        return result["metadata"] if result else None
+
+    def _resolve_season_metadata(
+        self,
+        library_id: str,
+        series_id: str,
+        season_id: str,
+        service,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        series_metadata: dict | None = None,
+        tvdb_identity: dict | None = None,
+    ) -> None:
+        """Attach provider IDs and fetch one season and all its episodes."""
+        self._check_termination(should_terminate)
+        season_row = self.db.execute(
+            "SELECT season_number,relative_path FROM library_entities WHERE id=? AND entity_type='season'",
+            (season_id,),
         )
-        logger.info("metadata series complete library_id=%s series_id=%s", library_id, series_id)
+        if not season_row:
+            return
+        season_number, season_path = season_row[0]
+        provider_rows = self.db.execute(
+            "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
+            (series_id,),
+        )
+        provider_ids = {row[0]: str(row[1]) for row in provider_rows}
+
+        if provider_ids.get("tmdb"):
+            self._derive_tmdb_child_ids(series_id, season_id=season_id)
+
+        if provider_ids.get("tvdb"):
+            season_provider_id = None
+            if tvdb_identity:
+                season_provider_id = next(
+                    (
+                        value["providerId"]
+                        for value in tvdb_identity.get("seasons", [])
+                        if int(value.get("seasonNumber", -1)) == int(season_number)
+                    ),
+                    None,
+                )
+            if not season_provider_id and series_metadata:
+                season_provider_id = next(
+                    (
+                        str(value.get("id"))
+                        for value in series_metadata.get("children", []) or []
+                        if value.get("type") == "season"
+                        and int(value.get("season", -1)) == int(season_number)
+                        and value.get("id") is not None
+                    ),
+                    None,
+                )
+            if season_provider_id:
+                self._ids(
+                    season_id,
+                    [("tvdb", "season", str(season_provider_id))],
+                )
+                self._derive_tvdb_episode_ids(
+                    series_id, service, season_id=season_id
+                )
+
+        self._seed_all_children(
+            library_id,
+            service,
+            job_id,
+            should_terminate,
+            season_id=season_id,
+        )
+        logger.info(
+            "metadata season complete series_id=%s season_id=%s season_number=%s path=%s",
+            series_id,
+            season_id,
+            season_number,
+            season_path,
+        )
 
     def _aggregate_series_children(self, series_id: str, service) -> None:
         """Map all discovered seasons and episodes from resolved parent IDs."""
@@ -1552,11 +1620,17 @@ class LibraryScanner:
         job_id: str,
         should_terminate: Callable[[], bool],
         parent_id: str | None = None,
+        season_id: str | None = None,
     ) -> None:
         """Fetch common metadata and IDs for every season, episode, release, and track."""
         from app.metadata_services import MetadataIngestService
 
-        if parent_id:
+        if season_id:
+            rows = self.db.execute(
+                "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND (id=? OR parent_id=?) ORDER BY CASE WHEN entity_type='season' THEN 0 ELSE 1 END, episode_number IS NULL, episode_number, relative_path COLLATE NOCASE",
+                (library_id, season_id, season_id),
+            )
+        elif parent_id:
             rows = self.db.execute(
                 "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND (parent_id=? OR parent_id IN (SELECT id FROM library_entities WHERE parent_id=? AND entity_type='season')) ORDER BY length(relative_path),relative_path",
                 (library_id, parent_id, parent_id),

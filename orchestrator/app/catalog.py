@@ -1599,6 +1599,7 @@ class Catalog:
                     "SELECT p.entity_id,MIN(" + title_rank + ") AS match_rank,"
                     "MIN(" + locale_rank + ") AS locale_rank,MIN(bm25(catalog_search)) AS score "
                     "FROM catalog_search JOIN catalog_item_projection p ON p.entity_id=catalog_search.entity_id AND p.locale=catalog_search.locale "
+                    "JOIN library_entities e ON e.id=p.entity_id AND e.entity_type IN ('movie','series','collection') "
                     f"WHERE catalog_search MATCH ? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) "
                     "GROUP BY p.entity_id"
                 )
@@ -1608,9 +1609,10 @@ class Catalog:
                     "SELECT p.entity_id,CASE WHEN p.title_sort=? THEN 0 ELSE 2 END AS match_rank,"
                     "MIN(" + locale_rank + ") AS locale_rank,0.0 AS score "
                     "FROM catalog_search_grams g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
+                    "JOIN library_entities e ON e.id=p.entity_id AND e.entity_type IN ('movie','series','collection') "
                     f"WHERE g.gram=? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) GROUP BY p.entity_id"
                 )
-                match_params = [wanted, wanted, *locale_order, *allowed, *locale_order]
+                match_params = [wanted, *locale_order, wanted, *allowed, *locale_order]
             total_rows = self.db.execute(f"SELECT COUNT(*) FROM ({source}) matches", match_params)
             total = int(total_rows[0][0] or 0) if total_rows else 0
             if not total:

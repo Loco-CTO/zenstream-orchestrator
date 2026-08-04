@@ -2624,7 +2624,13 @@ class LibraryScanner:
         metadata_futures = []
         for entry in entries:
             self._check_termination(should_terminate)
-            files = list(self._walk_paths(entry)) if entry.is_dir() else [entry]
+            if entry.is_dir():
+                files = []
+                for candidate in self._walk_paths(entry):
+                    self._check_termination(should_terminate)
+                    files.append(candidate)
+            else:
+                files = [entry]
             relative_path = relative(str(root), str(entry))
             if not any(self._is_supported_video(path) for path in files):
                 self._reject_existing_entity(library_id, "movie", relative_path)
@@ -2737,7 +2743,10 @@ class LibraryScanner:
                 len(series_dirs),
                 series_dir,
             )
-            series_children = list(series_dir.iterdir())
+            series_children = []
+            for child in series_dir.iterdir():
+                self._check_termination(should_terminate)
+                series_children.append(child)
             episode_plan = self._series_episode_plan(
                 root, series_dir, should_terminate, series_children
             )

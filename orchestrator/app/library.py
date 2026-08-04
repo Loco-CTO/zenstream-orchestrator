@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import multiprocessing
 import os
 import re
 import stat
@@ -13,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
+from queue import Empty
 
 from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
@@ -106,6 +108,7 @@ def new_id() -> str:
 
 
 QUICK_FINGERPRINT_SAMPLE_SIZE = 1024 * 1024
+SIDECAR_STAT_TIMEOUT_SECONDS = 10.0
 
 
 def _quick_fingerprint(path: Path, size: int | None = None) -> tuple[str, int]:
@@ -124,6 +127,46 @@ def _quick_fingerprint(path: Path, size: int | None = None) -> tuple[str, int]:
             digest.update(last)
             bytes_read += len(last)
     return digest.hexdigest(), bytes_read
+
+
+def _isolated_stat(path: str, result_queue) -> None:
+    try:
+        value = os.stat(path)
+        result_queue.put((True, int(value.st_size), int(value.st_mtime_ns)))
+    except OSError:
+        result_queue.put((False, 0, 0))
+
+
+def _bounded_sidecar_stat(
+    path: Path, timeout: float = SIDECAR_STAT_TIMEOUT_SECONDS
+) -> tuple[int, int] | None:
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_isolated_stat,
+        args=(str(path), result_queue),
+        daemon=True,
+    )
+    try:
+        process.start()
+        process.join(timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join(1.0)
+            return None
+        try:
+            success, size, modified_ns = result_queue.get(timeout=0.25)
+        except Empty:
+            return None
+        return (size, modified_ns) if success else None
+    except (OSError, RuntimeError):
+        if process.is_alive():
+            process.terminate()
+            process.join(1.0)
+        return None
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
 
 
 def normalized_path(path: str) -> str:
@@ -247,6 +290,60 @@ def sidecar_language(path: Path) -> str | None:
             if len(base) in {2, 3}:
                 return f"{base.lower()}-{region.upper()}" if region else base.lower()
     return None
+
+
+def _sidecar_suffix_tokens(value: str) -> list[str]:
+    return [token.strip() for token in re.split(r"[._-]+", value) if token.strip()]
+
+
+def sidecar_descriptor(
+    sidecar_path: str | Path, media_paths: Iterable[str | Path]
+) -> str | None:
+    sidecar = Path(sidecar_path)
+    sidecar_stem = sidecar.stem
+    normalized_sidecar = sidecar_stem.casefold()
+    matching_stem: str | None = None
+    for media_path_value in media_paths:
+        media_path = Path(media_path_value)
+        if media_path.parent != sidecar.parent:
+            continue
+        media_stem = media_path.stem
+        if not normalized_sidecar.startswith(media_stem.casefold()):
+            continue
+        remainder = sidecar_stem[len(media_stem) :]
+        if remainder and remainder[0] not in ".-_ \t":
+            continue
+        if matching_stem is None or len(media_stem) > len(matching_stem):
+            matching_stem = media_stem
+    if matching_stem is None:
+        return None
+
+    remainder = sidecar_stem[len(matching_stem) :].lstrip(" ._-\t")
+    tokens = _sidecar_suffix_tokens(remainder)
+    while tokens and tokens[-1].casefold() in LANGUAGE_MARKERS:
+        tokens.pop()
+    if tokens:
+        candidate = tokens[-1]
+        lowered = candidate.casefold()
+        if lowered in LANGUAGE_ALIASES or re.fullmatch(
+            r"[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?", candidate
+        ):
+            tokens.pop()
+    while tokens and tokens[-1].casefold() in LANGUAGE_MARKERS:
+        tokens.pop()
+    descriptor = re.sub(r"\s+", " ", " ".join(tokens)).strip(" ._-\t")
+    return descriptor or None
+
+
+def sidecar_display_title(
+    sidecar_path: str | Path,
+    language: str | None,
+    role: str,
+    media_paths: Iterable[str | Path],
+) -> str:
+    descriptor = sidecar_descriptor(sidecar_path, media_paths)
+    resolved_language = language_name(language, role)
+    return f"{descriptor} - {resolved_language}" if descriptor else resolved_language
 
 
 def language_name(language: str | None, role: str) -> str:
@@ -2292,30 +2389,47 @@ class LibraryScanner:
                 path,
                 role,
             )
-            try:
-                if job_id:
-                    self._set_stage(
-                        job_id,
-                        f"Inspecting {path.name}",
-                        persist=False,
-                        entityId=entity_id,
-                        path=str(path),
-                    )
-                stat = path.stat()
-            except OSError:
-                logger.warning(
-                    "library scan file stat failed entity_id=%s path=%s duration_seconds=%.1f",
-                    entity_id,
-                    path,
-                    time.monotonic() - file_started,
+            if job_id:
+                self._set_stage(
+                    job_id,
+                    f"Inspecting {path.name}",
+                    persist=False,
+                    entityId=entity_id,
+                    path=str(path),
                 )
-                continue
+            if role in {"subtitle", "lyrics"}:
+                sidecar_stat = _bounded_sidecar_stat(path)
+                if sidecar_stat is None:
+                    relative_path = relative(str(root), str(path))
+                    key = (relative_path, role)
+                    if key in existing:
+                        seen.add(key)
+                    logger.warning(
+                        "library scan sidecar stat deferred entity_id=%s path=%s duration_seconds=%.1f",
+                        entity_id,
+                        path,
+                        time.monotonic() - file_started,
+                    )
+                    continue
+                file_size, modified_ns = sidecar_stat
+            else:
+                try:
+                    file_stat = path.stat()
+                    file_size, modified_ns = file_stat.st_size, file_stat.st_mtime_ns
+                except OSError:
+                    logger.warning(
+                        "library scan file stat failed entity_id=%s path=%s duration_seconds=%.1f",
+                        entity_id,
+                        path,
+                        time.monotonic() - file_started,
+                    )
+                    continue
             logger.info(
                 "library scan file stat complete entity_id=%s path=%s size=%s modified_ns=%s duration_seconds=%.1f",
                 entity_id,
                 path,
-                stat.st_size,
-                stat.st_mtime_ns,
+                file_size,
+                modified_ns,
                 time.monotonic() - file_started,
             )
             language = sidecar_language(path) if role in {"subtitle", "lyrics"} else None
@@ -2324,26 +2438,46 @@ class LibraryScanner:
             seen.add(key)
             old = existing.get(key)
             old_fingerprint = old[7] if old and has_fingerprint else None
-            if old and old[5] == stat.st_size and old[6] == stat.st_mtime_ns:
+            if old and old[5] == file_size and old[6] == modified_ns:
                 result["unchanged"] += 1
+                continue
+            if role in {"subtitle", "lyrics"}:
+                if old:
+                    self.db.execute(
+                        f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=NULL' if has_fingerprint else ''} WHERE id=?",
+                        (language, None, file_size, modified_ns, old[0]),
+                    )
+                    result["updated"] += 1
+                elif has_fingerprint:
+                    self.db.execute(
+                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,NULL)",
+                        (new_id(), entity_id, relative_path, role, language, None, file_size, modified_ns),
+                    )
+                    result["added"] += 1
+                else:
+                    self.db.execute(
+                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
+                        (new_id(), entity_id, relative_path, role, language, None, file_size, modified_ns),
+                    )
+                    result["added"] += 1
                 continue
             fingerprint_started = time.monotonic()
             if job_id:
                 self._set_stage(
                     job_id,
-                    f"Fingerprinting {path.name} ({stat.st_size} bytes)",
+                    f"Fingerprinting {path.name} ({file_size} bytes)",
                     persist=False,
                     entityId=entity_id,
                     path=str(path),
-                    size=stat.st_size,
+                    size=file_size,
                 )
             logger.info(
                 "library scan file fingerprint start entity_id=%s path=%s size=%s",
                 entity_id,
                 path,
-                stat.st_size,
+                file_size,
             )
-            quick_fingerprint, bytes_read = _quick_fingerprint(path, stat.st_size)
+            quick_fingerprint, bytes_read = _quick_fingerprint(path, file_size)
             logger.info(
                 "library scan file fingerprint complete entity_id=%s path=%s bytes_read=%s duration_seconds=%.1f",
                 entity_id,
@@ -2355,7 +2489,7 @@ class LibraryScanner:
                 content_changed = old_fingerprint != quick_fingerprint if has_fingerprint else True
                 self.db.execute(
                     f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=?' if has_fingerprint else ''} WHERE id=?",
-                    ([language, None, stat.st_size, stat.st_mtime_ns, quick_fingerprint, old[0]] if has_fingerprint else [language, None, stat.st_size, stat.st_mtime_ns, old[0]]),
+                    ([language, None, file_size, modified_ns, quick_fingerprint, old[0]] if has_fingerprint else [language, None, file_size, modified_ns, old[0]]),
                 )
                 result["updated"] += 1
                 if content_changed and role == "media":
@@ -2364,12 +2498,12 @@ class LibraryScanner:
                 if has_fingerprint:
                     self.db.execute(
                         "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
-                        (new_id(), entity_id, relative_path, role, language, None, stat.st_size, stat.st_mtime_ns, quick_fingerprint),
+                        (new_id(), entity_id, relative_path, role, language, None, file_size, modified_ns, quick_fingerprint),
                     )
                 else:
                     self.db.execute(
                         "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
-                        (new_id(), entity_id, relative_path, role, language, None, stat.st_size, stat.st_mtime_ns),
+                        (new_id(), entity_id, relative_path, role, language, None, file_size, modified_ns),
                     )
                 result["added"] += 1
                 if role == "media":

@@ -1095,6 +1095,10 @@ class LibraryScanner:
                 logger.exception("failed to preserve moved entity old_id=%s new_id=%s", old_id, new_id)
                 continue
             self._scan_seen_ids.add(old_id)
+            self._scan_reconciled_ids.add(old_id)
+            if new_id in self._scan_refresh_root_ids:
+                self._scan_refresh_root_ids.discard(new_id)
+                self._scan_refresh_root_ids.add(old_id)
             self._scan_delta["added"].discard(new_id)
             self._scan_delta["changed"].add(old_id)
             self._scan_delta["unchanged"].discard(old_id)
@@ -2429,6 +2433,98 @@ class LibraryScanner:
                 entries.append(candidate)
         return entries
 
+    @staticmethod
+    def _is_supported_video(path: Path) -> bool:
+        if path.suffix.lower() not in VIDEO_EXTENSIONS:
+            return False
+        try:
+            return stat.S_ISREG(path.stat().st_mode)
+        except FileNotFoundError:
+            return False
+
+    def _series_episode_plan(
+        self,
+        root: Path,
+        series_dir: Path,
+        should_terminate: Callable[[], bool],
+    ) -> list[tuple[Path, int, list[tuple[int, str, Path, int, int | None]]]]:
+        children = list(series_dir.iterdir())
+        season_dirs = [
+            path
+            for path in children
+            if path.is_dir()
+            and (SEASON_RE.match(path.name) or path.name.lower() == "specials")
+        ]
+        if any(self._is_supported_video(path) for path in children):
+            season_dirs.append(series_dir)
+        season_dirs.sort(
+            key=lambda path: (
+                0
+                if path.name.lower() == "specials"
+                else int(SEASON_RE.match(path.name).group(1))
+                if SEASON_RE.match(path.name)
+                else 1,
+                1 if path == series_dir else 0,
+                path.name.casefold(),
+            )
+        )
+        plan = []
+        for season_dir in season_dirs:
+            self._check_termination(should_terminate)
+            match = SEASON_RE.match(season_dir.name)
+            season_folder_number = (
+                int(match.group(1))
+                if match
+                else (0 if season_dir.name.lower() == "specials" else 1)
+            )
+            episode_paths = (
+                children if season_dir == series_dir else list(self._walk_paths(season_dir))
+            )
+            episode_records = []
+            for media in episode_paths:
+                self._check_termination(should_terminate)
+                if not self._is_supported_video(media):
+                    continue
+                episode_match = EPISODE_RE.search(media.stem)
+                guessed = guess_media(media) if not episode_match else {}
+                if not episode_match and not (
+                    guessed.get("season") and guessed.get("episode")
+                ):
+                    continue
+                filename_season_number = (
+                    int(episode_match.group("season"))
+                    if episode_match
+                    else int(guessed["season"])
+                )
+                guessed_episode = guessed.get("episode")
+                episode_number = (
+                    int(episode_match.group("episode"))
+                    if episode_match
+                    else int(
+                        guessed_episode
+                        if not isinstance(guessed_episode, list)
+                        else guessed_episode[0]
+                    )
+                )
+                end_number = (
+                    int(episode_match.group("end"))
+                    if episode_match and episode_match.group("end")
+                    else None
+                )
+                episode_records.append(
+                    (
+                        episode_number,
+                        relative(str(root), str(media)).casefold(),
+                        media,
+                        filename_season_number,
+                        end_number,
+                    )
+                )
+            episode_records.sort(key=lambda value: (value[0], value[1]))
+            if episode_records:
+                plan.append((season_dir, season_folder_number, episode_records))
+        return plan
+
     def _scan_movies(
         self,
         library_id: str,
@@ -2466,10 +2562,19 @@ class LibraryScanner:
         metadata_futures = []
         for entry in entries:
             self._check_termination(should_terminate)
-            entity = self._entity(
-                library_id, None, "movie", relative(str(root), str(entry))
-            )
             files = list(self._walk_paths(entry)) if entry.is_dir() else [entry]
+            relative_path = relative(str(root), str(entry))
+            if not any(self._is_supported_video(path) for path in files):
+                self._reject_existing_entity(library_id, "movie", relative_path)
+                self.store.update_job(
+                    job_id,
+                    progress_current=count,
+                    message=f"Skipped {entry.name}: no playable video",
+                )
+                continue
+            entity = self._entity(
+                library_id, None, "movie", relative_path
+            )
             discovered_ids = list(provider_ids(entry.name))
             for nfo in (path for path in files if path.suffix.lower() == ".nfo"):
                 discovered_ids.extend(parse_nfo_ids(nfo))
@@ -2481,9 +2586,13 @@ class LibraryScanner:
                 [path for path in files if path.is_file()],
                 job_id=job_id,
             )
-            from app.catalog_read_model import CatalogReadModel
-
-            CatalogReadModel(self.db).refresh_roots([entity])
+            if not self.db.execute(
+                "SELECT 1 FROM media_files WHERE entity_id=? AND role='media' LIMIT 1",
+                (entity,),
+            ):
+                self._scan_rejected_ids.add(entity)
+                continue
+            self._scan_refresh_root_ids.add(entity)
             if (
                 entity in self._scan_created_ids
                 or file_delta["content_changed"]
@@ -2543,6 +2652,7 @@ class LibraryScanner:
         )
         self.store.update_job(job_id, progress_total=len(series_dirs))
         episode_count = 0
+        series_count = 0
         service = MetadataService() if resolve_immediately else None
         for series_index, series_dir in enumerate(series_dirs, start=1):
             self._check_termination(should_terminate)
@@ -2562,8 +2672,22 @@ class LibraryScanner:
                 len(series_dirs),
                 series_dir,
             )
+            episode_plan = self._series_episode_plan(
+                root, series_dir, should_terminate
+            )
+            series_relative_path = relative(str(root), str(series_dir))
+            if not episode_plan:
+                self._reject_existing_entity(
+                    library_id, "series", series_relative_path
+                )
+                self.store.update_job(
+                    job_id,
+                    progress_current=series_index,
+                    message=f"Skipped {series_dir.name}: no playable episodes",
+                )
+                continue
             series = self._entity(
-                library_id, None, "series", relative(str(root), str(series_dir))
+                library_id, None, "series", series_relative_path
             )
             series_ids = provider_ids(series_dir.name)
             if series_ids:
@@ -2580,7 +2704,7 @@ class LibraryScanner:
                     series_metadata = self._resolve_series_root(
                         library_id,
                         series,
-                        relative(str(root), str(series_dir)),
+                        series_relative_path,
                         service,
                         job_id,
                         should_terminate,
@@ -2594,28 +2718,6 @@ class LibraryScanner:
                         series,
                         error,
                     )
-            season_dirs = [
-                path
-                for path in series_dir.iterdir()
-                if path.is_dir()
-                and (SEASON_RE.match(path.name) or path.name.lower() == "specials")
-            ]
-            if any(
-                path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
-                for path in series_dir.iterdir()
-            ):
-                season_dirs.append(series_dir)
-            season_dirs.sort(
-                key=lambda path: (
-                    0
-                    if path.name.lower() == "specials"
-                    else int(SEASON_RE.match(path.name).group(1))
-                    if SEASON_RE.match(path.name)
-                    else 1,
-                    1 if path == series_dir else 0,
-                    path.name.casefold(),
-                )
-            )
             tvdb_provider_id = next(
                 (
                     row[0]
@@ -2627,19 +2729,14 @@ class LibraryScanner:
                 None,
             )
             tvdb_identity = None
-            for season_dir in season_dirs:
+            accepted_series_episodes = 0
+            for season_dir, season_folder_number, episode_records in episode_plan:
                 logger.info(
                     "library scan season start library_id=%s job_id=%s series_id=%s path=%s",
                     library_id,
                     job_id,
                     series,
                     season_dir,
-                )
-                match = SEASON_RE.match(season_dir.name)
-                season_folder_number = (
-                    int(match.group(1))
-                    if match
-                    else (0 if season_dir.name.lower() == "specials" else 1)
                 )
                 season = self._entity(
                     library_id,
@@ -2648,53 +2745,7 @@ class LibraryScanner:
                     relative(str(root), str(season_dir)),
                     season_number=season_folder_number,
                 )
-                episode_paths = (
-                    season_dir.iterdir()
-                    if season_dir == series_dir
-                    else self._walk_paths(season_dir)
-                )
-                episode_records = []
-                for media in episode_paths:
-                    if (
-                        not media.is_file()
-                        or media.suffix.lower() not in VIDEO_EXTENSIONS
-                    ):
-                        continue
-                    episode_match = EPISODE_RE.search(media.stem)
-                    guessed = guess_media(media) if not episode_match else {}
-                    if not episode_match and not (
-                        guessed.get("season") and guessed.get("episode")
-                    ):
-                        continue
-                    filename_season_number = (
-                        int(episode_match.group("season"))
-                        if episode_match
-                        else int(guessed["season"])
-                    )
-                    episode_number = (
-                        int(episode_match.group("episode"))
-                        if episode_match
-                        else int(
-                            guessed["episode"]
-                            if not isinstance(guessed["episode"], list)
-                            else guessed["episode"][0]
-                        )
-                    )
-                    end_number = (
-                        int(episode_match.group("end"))
-                        if episode_match and episode_match.group("end")
-                        else None
-                    )
-                    episode_records.append(
-                        (
-                            episode_number,
-                            relative(str(root), str(media)).casefold(),
-                            media,
-                            filename_season_number,
-                            end_number,
-                        )
-                    )
-                episode_records.sort(key=lambda value: (value[0], value[1]))
+                accepted_season_episodes = 0
                 for (
                     episode_number,
                     _relative_media_path,
@@ -2736,6 +2787,14 @@ class LibraryScanner:
                         ],
                         job_id=job_id,
                     )
+                    if not self.db.execute(
+                        "SELECT 1 FROM media_files WHERE entity_id=? AND role='media' LIMIT 1",
+                        (episode,),
+                    ):
+                        self._scan_rejected_ids.add(episode)
+                        continue
+                    accepted_season_episodes += 1
+                    accepted_series_episodes += 1
                     episode_count += 1
                     if episode_count == 1 or episode_count % 10 == 0:
                         self.store.update_job(
@@ -2758,6 +2817,9 @@ class LibraryScanner:
                     season_dir,
                     episode_count,
                 )
+                if not accepted_season_episodes:
+                    self._scan_rejected_ids.add(season)
+                    continue
                 if service:
                     season_candidates = self._metadata_candidates()
                     season_rows = self.db.execute(
@@ -2817,12 +2879,28 @@ class LibraryScanner:
             self._files(
                 series,
                 root,
-                [path for path in series_dir.iterdir() if path.is_file()],
+                [
+                    path
+                    for path in series_dir.iterdir()
+                    if path.is_file() and path.suffix.lower() not in VIDEO_EXTENSIONS
+                ],
                 job_id=job_id,
             )
-            from app.catalog_read_model import CatalogReadModel
-
-            CatalogReadModel(self.db).refresh_roots([series])
+            unseen_descendants = self.db.execute(
+                "WITH RECURSIVE descendants(id) AS ("
+                "SELECT id FROM library_entities WHERE parent_id=? "
+                "UNION ALL SELECT e.id FROM library_entities e JOIN descendants d ON e.parent_id=d.id) "
+                "SELECT id FROM descendants",
+                (series,),
+            )
+            self._scan_rejected_ids.update(
+                row[0] for row in unseen_descendants if row[0] not in self._scan_seen_ids
+            )
+            if not accepted_series_episodes:
+                self._scan_rejected_ids.add(series)
+                continue
+            self._scan_refresh_root_ids.add(series)
+            series_count += 1
             self.store.update_job(
                 job_id,
                 progress_current=series_index,
@@ -2838,7 +2916,7 @@ class LibraryScanner:
                 time.monotonic() - series_started,
             )
         self._scan_complete = True
-        return len(series_dirs)
+        return series_count
 
     def _scan_music(
         self,

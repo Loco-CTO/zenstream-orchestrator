@@ -549,9 +549,18 @@ class JobScheduler:
             self.store.db.execute(
                 "DELETE FROM job_definitions WHERE id=?", (legacy_hydration["id"],)
             )
+        legacy_projections = self.store.db.read_execute(
+            "SELECT id FROM job_definitions WHERE kind='catalog_projection'"
+        )
+        for (definition_id,) in legacy_projections:
+            self.store.db.execute(
+                "DELETE FROM job_runs WHERE definition_id=?", (definition_id,)
+            )
+            self.store.db.execute(
+                "DELETE FROM job_definitions WHERE id=?", (definition_id,)
+            )
         for library in self.library_runtime.store.list():
             self.store.ensure_library(library)
-            self.store.ensure_projection(library)
         self._recover_active_runs()
         self.stop_event.clear()
         self.thread = threading.Thread(
@@ -568,7 +577,6 @@ class JobScheduler:
 
     def refresh_library_definition(self, library: dict) -> dict:
         definition = self.store.ensure_library(library)
-        self.store.ensure_projection(library)
         values = {
             "intervalMinutes": library.get("scanIntervalMinutes"),
             "enabled": library.get("watchEnabled", True),
@@ -577,7 +585,7 @@ class JobScheduler:
         return self.store.update_definition(definition["id"], values)
 
     def remove_library_definition(self, library_id: str):
-        for key in (f"library_scan:{library_id}", f"catalog_projection:{library_id}"):
+        for key in (f"library_scan:{library_id}",):
             definition = self.store.by_key(key)
             if definition:
                 self.store.db.execute(
@@ -612,39 +620,6 @@ class JobScheduler:
         if not definition:
             self.store.ensure_defaults()
             definition = self.store.by_key("metadata_missing")
-        run, _ = self.store.create_or_get_active_run(definition)
-        with self.condition:
-            self.condition.notify_all()
-        return run
-
-    def enqueue_catalog_projection(self, library_id: str) -> dict:
-        from app.catalog_read_model import CatalogReadModel
-
-        read_model = CatalogReadModel(self.db)
-        if read_model.available() and (read_model.status() or (None,))[0] == "ready":
-            logger.info(
-                "legacy catalog projection enqueue skipped library_id=%s reason=read_model_ready",
-                library_id,
-            )
-            return {
-                "id": f"catalog-projection-skipped:{library_id}",
-                "state": "completed",
-                "message": "Catalog read model is maintained incrementally",
-            }
-        timestamp = now()
-        self.store.db.execute(
-            "INSERT INTO catalog_projection_status "
-            "(library_id,generation,state,progress_current,progress_total,error,updated_at) "
-            "VALUES(?,COALESCE((SELECT generation FROM catalog_projection_status WHERE library_id=?),0),'pending',0,0,NULL,?) "
-            "ON CONFLICT(library_id) DO UPDATE SET state='pending',progress_current=0,progress_total=0,error=NULL,updated_at=excluded.updated_at",
-            (library_id, library_id, timestamp),
-        )
-        definition = self.store.by_key(f"catalog_projection:{library_id}")
-        if not definition:
-            library = self.library_runtime.store.get(library_id)
-            if not library:
-                raise KeyError("Library not found")
-            definition = self.store.ensure_projection(library)
         run, _ = self.store.create_or_get_active_run(definition)
         with self.condition:
             self.condition.notify_all()
@@ -827,10 +802,6 @@ class JobScheduler:
                 )
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(
-                    run_id, definition, self.cancel_events[run_id].is_set
-                )
-            elif kind == "catalog_projection":
-                CatalogProjectionJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
             elif kind == "trickplay_extract":

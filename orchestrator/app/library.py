@@ -2439,7 +2439,7 @@ class LibraryScanner:
             return False
         try:
             return stat.S_ISREG(path.stat().st_mode)
-        except FileNotFoundError:
+        except OSError:
             return False
 
     def _series_episode_plan(
@@ -2447,6 +2447,7 @@ class LibraryScanner:
         root: Path,
         series_dir: Path,
         should_terminate: Callable[[], bool],
+        children: list[Path] | None = None,
     ) -> list[
         tuple[
             Path,
@@ -2454,7 +2455,7 @@ class LibraryScanner:
             list[tuple[int, str, Path, int, int | None, list[Path]]],
         ]
     ]:
-        children = list(series_dir.iterdir())
+        children = children if children is not None else list(series_dir.iterdir())
         season_dirs = [
             path
             for path in children
@@ -2691,8 +2692,9 @@ class LibraryScanner:
                 len(series_dirs),
                 series_dir,
             )
+            series_children = list(series_dir.iterdir())
             episode_plan = self._series_episode_plan(
-                root, series_dir, should_terminate
+                root, series_dir, should_terminate, series_children
             )
             series_relative_path = relative(str(root), str(series_dir))
             if not episode_plan:
@@ -2712,43 +2714,8 @@ class LibraryScanner:
             if series_ids:
                 self._replace_ids(series, series_ids)
             series_metadata = None
-            if service and series in self._metadata_candidates():
-                self._set_stage(
-                    job_id,
-                    f"Starting metadata for {series_dir.name}",
-                    seriesId=series,
-                    path=str(series_dir),
-                )
-                try:
-                    series_metadata = self._resolve_series_root(
-                        library_id,
-                        series,
-                        series_relative_path,
-                        service,
-                        job_id,
-                        should_terminate,
-                    )
-                except JobTerminated:
-                    raise
-                except Exception as error:
-                    logger.exception(
-                        "series root metadata failed library_id=%s series_id=%s error=%s",
-                        library_id,
-                        series,
-                        error,
-                    )
-            tvdb_provider_id = next(
-                (
-                    row[0]
-                    for row in self.db.execute(
-                        "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='tvdb'",
-                        (series,),
-                    )
-                ),
-                None,
-            )
-            tvdb_identity = None
             accepted_series_episodes = 0
+            accepted_seasons: list[tuple[Path, int, str]] = []
             for season_dir, season_folder_number, episode_records in episode_plan:
                 logger.info(
                     "library scan season start library_id=%s job_id=%s series_id=%s path=%s",
@@ -2833,69 +2800,24 @@ class LibraryScanner:
                 if not accepted_season_episodes:
                     self._scan_rejected_ids.add(season)
                     continue
-                if service:
-                    season_candidates = self._metadata_candidates()
-                    season_rows = self.db.execute(
-                        "SELECT id FROM library_entities WHERE id=? OR parent_id=?",
-                        (season, season),
-                    )
-                    needs_season_metadata = any(
-                        row[0] in season_candidates and self._needs_metadata(row[0])
-                        for row in season_rows
-                    )
-                    if needs_season_metadata:
-                        if tvdb_identity is None and tvdb_provider_id:
-                            try:
-                                tvdb_identity = service.series_child_ids(
-                                    "tvdb", str(tvdb_provider_id)
-                                )
-                            except Exception as error:
-                                logger.warning(
-                                    "TVDB child identity discovery failed series_id=%s provider_id=%s: %s",
-                                    series,
-                                    tvdb_provider_id,
-                                    error,
-                                )
-                        self._set_stage(
-                            job_id,
-                            f"Resolving season {season_folder_number} for {series_dir.name}",
-                            seriesId=series,
-                            seasonId=season,
-                            path=str(season_dir),
-                        )
-                        try:
-                            self._resolve_season_metadata(
-                                library_id,
-                                series,
-                                season,
-                                service,
-                                job_id,
-                                should_terminate,
-                                series_metadata=series_metadata,
-                                tvdb_identity=tvdb_identity,
-                            )
-                        except JobTerminated:
-                            raise
-                        except Exception as error:
-                            logger.exception(
-                                "season metadata failed; continuing library_id=%s series_id=%s season_id=%s path=%s error=%s",
-                                library_id,
-                                series,
-                                season,
-                                season_dir,
-                                error,
-                            )
-                            self.store.update_job(
-                                job_id,
-                                message=f"Metadata failed for season {season_folder_number}; continuing",
-                            )
+                accepted_seasons.append((season_dir, season_folder_number, season))
+            root_video_stems = {
+                path.stem
+                for path in series_children
+                if path.suffix.lower() in VIDEO_EXTENSIONS
+            }
             self._files(
                 series,
                 root,
                 [
                     path
-                    for path in series_dir.iterdir()
-                    if path.is_file() and path.suffix.lower() not in VIDEO_EXTENSIONS
+                    for path in series_children
+                    if path.is_file()
+                    and path.suffix.lower() not in VIDEO_EXTENSIONS
+                    and not any(
+                        path.stem.startswith(video_stem)
+                        for video_stem in root_video_stems
+                    )
                 ],
                 job_id=job_id,
             )
@@ -2912,6 +2834,99 @@ class LibraryScanner:
             if not accepted_series_episodes:
                 self._scan_rejected_ids.add(series)
                 continue
+            if service and series in self._metadata_candidates():
+                self._set_stage(
+                    job_id,
+                    f"Starting metadata for {series_dir.name}",
+                    seriesId=series,
+                    path=str(series_dir),
+                )
+                try:
+                    series_metadata = self._resolve_series_root(
+                        library_id,
+                        series,
+                        series_relative_path,
+                        service,
+                        job_id,
+                        should_terminate,
+                    )
+                except JobTerminated:
+                    raise
+                except Exception as error:
+                    logger.exception(
+                        "series root metadata failed library_id=%s series_id=%s error=%s",
+                        library_id,
+                        series,
+                        error,
+                    )
+            tvdb_provider_id = next(
+                (
+                    row[0]
+                    for row in self.db.execute(
+                        "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='tvdb'",
+                        (series,),
+                    )
+                ),
+                None,
+            )
+            tvdb_identity = None
+            if service:
+                season_candidates = self._metadata_candidates()
+                for season_dir, season_folder_number, season in accepted_seasons:
+                    season_rows = self.db.execute(
+                        "SELECT id FROM library_entities WHERE id=? OR parent_id=?",
+                        (season, season),
+                    )
+                    if not any(
+                        row[0] in season_candidates and self._needs_metadata(row[0])
+                        for row in season_rows
+                    ):
+                        continue
+                    if tvdb_identity is None and tvdb_provider_id:
+                        try:
+                            tvdb_identity = service.series_child_ids(
+                                "tvdb", str(tvdb_provider_id)
+                            )
+                        except Exception as error:
+                            logger.warning(
+                                "TVDB child identity discovery failed series_id=%s provider_id=%s: %s",
+                                series,
+                                tvdb_provider_id,
+                                error,
+                            )
+                    self._set_stage(
+                        job_id,
+                        f"Resolving season {season_folder_number} for {series_dir.name}",
+                        seriesId=series,
+                        seasonId=season,
+                        path=str(season_dir),
+                    )
+                    try:
+                        self._resolve_season_metadata(
+                            library_id,
+                            series,
+                            season,
+                            service,
+                            job_id,
+                            should_terminate,
+                            series_metadata=series_metadata,
+                            tvdb_identity=tvdb_identity,
+                        )
+                    except JobTerminated:
+                        raise
+                    except Exception as error:
+                        logger.exception(
+                            "season metadata failed; continuing library_id=%s series_id=%s season_id=%s path=%s error=%s",
+                            library_id,
+                            series,
+                            season,
+                            season_dir,
+                            error,
+                        )
+                        self.store.update_job(
+                            job_id,
+                            message=f"Metadata failed for season {season_folder_number}; continuing",
+                        )
             self._scan_refresh_root_ids.add(series)
             series_count += 1
             self.store.update_job(

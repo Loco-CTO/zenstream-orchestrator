@@ -545,6 +545,24 @@ class CatalogProjectionJob:
         library_id = (definition.get("config") or {}).get("libraryId")
         if not library_id:
             raise ValueError("Catalog projection library is not configured")
+        from app.catalog_read_model import CatalogReadModel
+
+        read_model = CatalogReadModel(self.db)
+        if read_model.available() and (read_model.status() or (None,))[0] == "ready":
+            self.store.update_run(
+                run_id,
+                state="completed",
+                started_at=now(),
+                finished_at=now(),
+                progress_current=1,
+                progress_total=1,
+                message="Skipped legacy projection; catalog read model is maintained incrementally",
+            )
+            logger.info(
+                "legacy catalog projection skipped library_id=%s reason=read_model_ready",
+                library_id,
+            )
+            return
         self.store.update_run(
             run_id,
             state="running",
@@ -673,6 +691,19 @@ class JobScheduler:
         return run
 
     def enqueue_catalog_projection(self, library_id: str) -> dict:
+        from app.catalog_read_model import CatalogReadModel
+
+        read_model = CatalogReadModel(self.db)
+        if read_model.available() and (read_model.status() or (None,))[0] == "ready":
+            logger.info(
+                "legacy catalog projection enqueue skipped library_id=%s reason=read_model_ready",
+                library_id,
+            )
+            return {
+                "id": f"catalog-projection-skipped:{library_id}",
+                "state": "completed",
+                "message": "Catalog read model is maintained incrementally",
+            }
         timestamp = now()
         self.store.db.execute(
             "INSERT INTO catalog_projection_status "

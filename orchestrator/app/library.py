@@ -1402,6 +1402,20 @@ class LibraryScanner:
                 )
             logger.info("metadata series match complete series_id=%s", series_id)
             result = result or {"metadata": None}
+        if not result:
+            provider_rows = self.db.execute(
+                "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
+                (series_id,),
+            )
+            for provider, provider_id in provider_rows:
+                self._fetch_configured_locales(
+                    service,
+                    provider,
+                    "series",
+                    str(provider_id),
+                    required=False,
+                    progress=lambda message: self.store.update_job(job_id, message=message),
+                )
         self.store.update_job(job_id, message=f"Resolved series ({series_id})")
         logger.info("metadata series root complete series_id=%s", series_id)
         return result["metadata"] if result else None
@@ -1625,6 +1639,7 @@ class LibraryScanner:
         """Fetch common metadata and IDs for every season, episode, release, and track."""
         from app.metadata_services import MetadataIngestService
 
+        ingest = MetadataIngestService(service)
         if season_id:
             rows = self.db.execute(
                 "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND (id=? OR parent_id=?) ORDER BY CASE WHEN entity_type='season' THEN 0 ELSE 1 END, episode_number IS NULL, episode_number, relative_path COLLATE NOCASE",
@@ -1641,12 +1656,46 @@ class LibraryScanner:
                 (library_id,),
             )
         metadata_candidates = self._metadata_candidates()
+
+        def needs_localized_metadata(row: tuple) -> bool:
+            entity_id, entity_type = row[0], row[1]
+            if entity_id not in metadata_candidates:
+                return False
+            if entity_id in self._scan_delta["content_changed"]:
+                return True
+            if self._needs_metadata(entity_id):
+                return True
+            provider_rows = self.db.execute(
+                "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                (entity_id,),
+            )
+            priorities = {
+                "season": ["tvdb", "tmdb"],
+                "episode": ["tvdb", "tmdb"],
+                "release": ["musicbrainz"],
+                "track": ["musicbrainz"],
+            }.get(entity_type, [row[0] for row in provider_rows])
+            for provider in priorities:
+                provider_id = next(
+                    (value[1] for value in provider_rows if value[0] == provider),
+                    None,
+                )
+                if not provider_id:
+                    continue
+                if any(
+                    not self.db.execute(
+                        "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
+                        (provider, entity_type, str(provider_id), locale),
+                    )
+                    for locale in ingest.locales()
+                ):
+                    return True
+            return False
+
         rows = [
             row
             for row in rows
-            if row[0] in self._scan_seen_ids
-            and row[0] in metadata_candidates
-            and self._needs_metadata(row[0])
+            if row[0] in self._scan_seen_ids and needs_localized_metadata(row)
         ]
         self.store.update_job(
             job_id,
@@ -1725,7 +1774,6 @@ class LibraryScanner:
             fetched = False
             required_succeeded = False
             errors = []
-            ingest = MetadataIngestService(service)
             for provider in priorities:
                 provider_id = next(
                     (row[1] for row in provider_rows if row[0] == provider), None
@@ -2360,9 +2408,10 @@ class LibraryScanner:
             targets=sorted(targets) if targets else None,
         )
         enumeration_started = time.monotonic()
-        series_dirs = [
-            path for path in self._target_entries(root, targets) if path.is_dir()
-        ]
+        series_dirs = sorted(
+            (path for path in self._target_entries(root, targets) if path.is_dir()),
+            key=lambda path: path.name.casefold(),
+        )
         logger.info(
             "library scan root enumeration complete library_id=%s job_id=%s type=tv_series root=%s entries=%s duration_seconds=%.1f",
             library_id,
@@ -2399,7 +2448,7 @@ class LibraryScanner:
             if series_ids:
                 self._replace_ids(series, series_ids)
             series_metadata = None
-            if service and series in self._metadata_candidates() and self._needs_metadata(series):
+            if service and series in self._metadata_candidates():
                 self._set_stage(
                     job_id,
                     f"Starting metadata for {series_dir.name}",
@@ -2446,7 +2495,6 @@ class LibraryScanner:
                     path.name.casefold(),
                 )
             )
-            tvdb_identity = None
             tvdb_provider_id = next(
                 (
                     row[0]
@@ -2457,18 +2505,7 @@ class LibraryScanner:
                 ),
                 None,
             )
-            if service and tvdb_provider_id:
-                try:
-                    tvdb_identity = service.series_child_ids(
-                        "tvdb", str(tvdb_provider_id)
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "TVDB child identity discovery failed series_id=%s provider_id=%s: %s",
-                        series,
-                        tvdb_provider_id,
-                        error,
-                    )
+            tvdb_identity = None
             for season_dir in season_dirs:
                 logger.info(
                     "library scan season start library_id=%s job_id=%s series_id=%s path=%s",
@@ -2611,6 +2648,18 @@ class LibraryScanner:
                         for row in season_rows
                     )
                     if needs_season_metadata:
+                        if tvdb_identity is None and tvdb_provider_id:
+                            try:
+                                tvdb_identity = service.series_child_ids(
+                                    "tvdb", str(tvdb_provider_id)
+                                )
+                            except Exception as error:
+                                logger.warning(
+                                    "TVDB child identity discovery failed series_id=%s provider_id=%s: %s",
+                                    series,
+                                    tvdb_provider_id,
+                                    error,
+                                )
                         self._set_stage(
                             job_id,
                             f"Resolving season {season_folder_number} for {series_dir.name}",
@@ -2653,50 +2702,6 @@ class LibraryScanner:
             from app.catalog_read_model import CatalogReadModel
 
             CatalogReadModel(self.db).refresh_roots([series])
-            if False:
-                logger.info(
-                    "library scan series metadata start library_id=%s job_id=%s series_id=%s path=%s",
-                    library_id,
-                    job_id,
-                    series,
-                    series_dir,
-                )
-                try:
-                    self._resolve_series_immediately(
-                        library_id,
-                        series,
-                        relative(str(root), str(series_dir)),
-                        service,
-                        job_id,
-                        should_terminate,
-                    )
-                except JobTerminated:
-                    raise
-                except Exception as error:
-                    self.db.execute(
-                        "UPDATE library_entities SET match_status='failed',match_method='scan_resolution',updated_at=? WHERE id=?",
-                        (now(), series),
-                    )
-                    logger.exception(
-                        "metadata series failed; continuing library_id=%s series_id=%s path=%s error=%s",
-                        library_id,
-                        series,
-                        relative(str(root), str(series_dir)),
-                        error,
-                    )
-                    self.store.update_job(
-                        job_id,
-                        progress_current=series_index,
-                        message=f"Metadata failed for {series_dir.name}; continuing",
-                    )
-                else:
-                    logger.info(
-                        "library scan series metadata complete library_id=%s job_id=%s series_id=%s path=%s",
-                        library_id,
-                        job_id,
-                        series,
-                        series_dir,
-                    )
             self.store.update_job(
                 job_id,
                 progress_current=series_index,

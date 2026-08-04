@@ -1,8 +1,6 @@
 from .database import DatabaseHandler
 import os
-import shutil
 import sqlite3
-import time
 from pathlib import Path
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -156,17 +154,11 @@ class Config:
         finally:
             if connection is not None:
                 connection.close()
-        if compatible:
-            return
-        stamp = time.strftime("%Y%m%d%H%M%S", time.gmtime())
-        backup = database_file.with_name(
-            f"{database_file.name}.pre-catalog-v1.{stamp}.bak"
-        )
-        shutil.move(str(database_file), str(backup))
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(f"{database_file}{suffix}")
-            if sidecar.exists():
-                shutil.move(str(sidecar), str(backup.with_name(backup.name + suffix)))
+        if not compatible:
+            raise RuntimeError(
+                "SQLite schema generation is not recognized; refusing to move the live database. "
+                "Run the configured Alembic migrations or restore a compatible database backup."
+            )
 
     @property
     def database(self):

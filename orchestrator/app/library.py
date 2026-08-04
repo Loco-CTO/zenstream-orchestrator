@@ -63,26 +63,93 @@ AUDIO_EXTENSIONS = {
 # either client. The playback API normalizes text and bitmap subtitle formats
 # to WebVTT at request time.
 SUBTITLE_EXTENSIONS = {
-    ".srt", ".ass", ".ssa", ".vtt", ".webvtt", ".sub", ".smi", ".sami",
-    ".ttml", ".dfxp", ".xml", ".sup", ".idx", ".mks", ".mpl2", ".rt",
-    ".scc", ".stl", ".usf", ".cap", ".pjs", ".aqt", ".jacosub", ".gsub",
-    ".dks", ".mpsub", ".xss",
+    ".srt",
+    ".ass",
+    ".ssa",
+    ".vtt",
+    ".webvtt",
+    ".sub",
+    ".smi",
+    ".sami",
+    ".ttml",
+    ".dfxp",
+    ".xml",
+    ".sup",
+    ".idx",
+    ".mks",
+    ".mpl2",
+    ".rt",
+    ".scc",
+    ".stl",
+    ".usf",
+    ".cap",
+    ".pjs",
+    ".aqt",
+    ".jacosub",
+    ".gsub",
+    ".dks",
+    ".mpsub",
+    ".xss",
 }
-LYRIC_EXTENSIONS = {".lrc", ".elrc", ".txt", ".lyrics", ".qrc", ".krc", ".ksc", ".irc", ".yrc"}
+LYRIC_EXTENSIONS = {
+    ".lrc",
+    ".elrc",
+    ".txt",
+    ".lyrics",
+    ".qrc",
+    ".krc",
+    ".ksc",
+    ".irc",
+    ".yrc",
+}
 LANGUAGE_ALIASES = {
-    "eng": "en", "jpn": "ja", "jap": "ja", "deu": "de", "ger": "de",
-    "fra": "fr", "fre": "fr", "spa": "es", "ita": "it", "kor": "ko",
-    "por": "pt", "rus": "ru", "zho": "zh", "chi": "zh", "tha": "th",
-    "vie": "vi", "ara": "ar", "und": None,
+    "eng": "en",
+    "jpn": "ja",
+    "jap": "ja",
+    "deu": "de",
+    "ger": "de",
+    "fra": "fr",
+    "fre": "fr",
+    "spa": "es",
+    "ita": "it",
+    "kor": "ko",
+    "por": "pt",
+    "rus": "ru",
+    "zho": "zh",
+    "chi": "zh",
+    "tha": "th",
+    "vie": "vi",
+    "ara": "ar",
+    "und": None,
 }
 LANGUAGE_NAMES = {
-    "en": "English", "ja": "Japanese", "de": "German", "fr": "French",
-    "es": "Spanish", "it": "Italian", "ko": "Korean", "pt": "Portuguese",
-    "ru": "Russian", "zh": "Chinese", "zh-CN": "Chinese (Simplified)",
-    "zh-TW": "Chinese (Traditional)", "th": "Thai", "vi": "Vietnamese",
+    "en": "English",
+    "ja": "Japanese",
+    "de": "German",
+    "fr": "French",
+    "es": "Spanish",
+    "it": "Italian",
+    "ko": "Korean",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "zh": "Chinese",
+    "zh-CN": "Chinese (Simplified)",
+    "zh-TW": "Chinese (Traditional)",
+    "th": "Thai",
+    "vi": "Vietnamese",
     "ar": "Arabic",
 }
-LANGUAGE_MARKERS = {"default", "forced", "sdh", "cc", "hi", "sub", "subtitle", "subs", "lyrics"}
+LANGUAGE_MARKERS = {
+    "default",
+    "forced",
+    "sdh",
+    "cc",
+    "hi",
+    "sub",
+    "subtitle",
+    "subs",
+    "lyrics",
+}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".avif"}
 ID_RE = re.compile(
     r"\[(?P<provider>tmdbid|tvdbid|imdbid)-(?P<id>[^\]]+)\]", re.IGNORECASE
@@ -121,7 +188,12 @@ def _quick_fingerprint(path: Path, size: int | None = None) -> tuple[str, int]:
         digest.update(first)
         bytes_read = len(first)
         if file_size > QUICK_FINGERPRINT_SAMPLE_SIZE:
-            handle.seek(max(QUICK_FINGERPRINT_SAMPLE_SIZE, file_size - QUICK_FINGERPRINT_SAMPLE_SIZE))
+            handle.seek(
+                max(
+                    QUICK_FINGERPRINT_SAMPLE_SIZE,
+                    file_size - QUICK_FINGERPRINT_SAMPLE_SIZE,
+                )
+            )
             last = handle.read(QUICK_FINGERPRINT_SAMPLE_SIZE)
             digest.update(b"last:")
             digest.update(last)
@@ -129,44 +201,100 @@ def _quick_fingerprint(path: Path, size: int | None = None) -> tuple[str, int]:
     return digest.hexdigest(), bytes_read
 
 
-def _isolated_stat(path: str, result_queue) -> None:
-    try:
-        value = os.stat(path)
-        result_queue.put((True, int(value.st_size), int(value.st_mtime_ns)))
-    except OSError:
-        result_queue.put((False, 0, 0))
+def _isolated_stat_worker(request_queue, response_queue) -> None:
+    while True:
+        request = request_queue.get()
+        if request is None:
+            return
+        request_id, path = request
+        try:
+            value = os.stat(path)
+            response_queue.put(
+                (request_id, True, int(value.st_size), int(value.st_mtime_ns))
+            )
+        except OSError:
+            response_queue.put((request_id, False, 0, 0))
+
+
+class _SidecarStatWorker:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._request_queue = None
+        self._response_queue = None
+        self._process = None
+        self._request_id = 0
+
+    def _stop(self) -> None:
+        process = self._process
+        request_queue = self._request_queue
+        response_queue = self._response_queue
+        self._process = None
+        self._request_queue = None
+        self._response_queue = None
+        if process is not None and process.is_alive():
+            process.terminate()
+            process.join(1.0)
+        if request_queue is not None:
+            request_queue.close()
+            request_queue.join_thread()
+        if response_queue is not None:
+            response_queue.close()
+            response_queue.join_thread()
+
+    def _start(self) -> bool:
+        context = multiprocessing.get_context("spawn")
+        request_queue = context.Queue(maxsize=1)
+        response_queue = context.Queue(maxsize=1)
+        process = context.Process(
+            target=_isolated_stat_worker,
+            args=(request_queue, response_queue),
+            daemon=True,
+        )
+        try:
+            process.start()
+        except (OSError, RuntimeError):
+            request_queue.close()
+            response_queue.close()
+            return False
+        self._request_queue = request_queue
+        self._response_queue = response_queue
+        self._process = process
+        return True
+
+    def stat(
+        self, path: Path, timeout: float = SIDECAR_STAT_TIMEOUT_SECONDS
+    ) -> tuple[int, int] | None:
+        with self._lock:
+            if self._process is None or not self._process.is_alive():
+                self._stop()
+                if not self._start():
+                    return None
+            self._request_id += 1
+            request_id = self._request_id
+            try:
+                self._request_queue.put((request_id, str(path)), timeout=0.25)
+                deadline = time.monotonic() + timeout
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._stop()
+                        return None
+                    response = self._response_queue.get(timeout=remaining)
+                    if response[0] != request_id:
+                        continue
+                    return (response[2], response[3]) if response[1] else None
+            except (Empty, OSError, EOFError, ValueError):
+                self._stop()
+                return None
+
+
+_SIDECAR_STAT_WORKER = _SidecarStatWorker()
 
 
 def _bounded_sidecar_stat(
     path: Path, timeout: float = SIDECAR_STAT_TIMEOUT_SECONDS
 ) -> tuple[int, int] | None:
-    context = multiprocessing.get_context("spawn")
-    result_queue = context.Queue(maxsize=1)
-    process = context.Process(
-        target=_isolated_stat,
-        args=(str(path), result_queue),
-        daemon=True,
-    )
-    try:
-        process.start()
-        process.join(timeout)
-        if process.is_alive():
-            process.terminate()
-            process.join(1.0)
-            return None
-        try:
-            success, size, modified_ns = result_queue.get(timeout=0.25)
-        except Empty:
-            return None
-        return (size, modified_ns) if success else None
-    except (OSError, RuntimeError):
-        if process.is_alive():
-            process.terminate()
-            process.join(1.0)
-        return None
-    finally:
-        result_queue.close()
-        result_queue.join_thread()
+    return _SIDECAR_STAT_WORKER.stat(path, timeout)
 
 
 def normalized_path(path: str) -> str:
@@ -610,7 +738,9 @@ class LibraryScanner:
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
 
-    def _set_stage(self, job_id: str, stage: str, *, persist: bool = True, **context) -> None:
+    def _set_stage(
+        self, job_id: str, stage: str, *, persist: bool = True, **context
+    ) -> None:
         with self._stage_lock:
             self._stage = stage
             self._stage_context = context
@@ -928,7 +1058,8 @@ class LibraryScanner:
                 root = None
                 legacy_without_library_root = True
         rows = self.db.execute(
-            "SELECT id,relative_path FROM library_entities WHERE library_id=?", (library_id,)
+            "SELECT id,relative_path FROM library_entities WHERE library_id=?",
+            (library_id,),
         )
         missing = []
         normalized_targets = {
@@ -939,7 +1070,9 @@ class LibraryScanner:
             if entity_id in self._scan_seen_ids:
                 continue
             if normalized_targets:
-                normalized_path = str(relative_path or "").replace("\\", "/").strip("/").casefold()
+                normalized_path = (
+                    str(relative_path or "").replace("\\", "/").strip("/").casefold()
+                )
                 if not any(
                     normalized_path == target
                     or normalized_path.startswith(target + "/")
@@ -1002,7 +1135,9 @@ class LibraryScanner:
             return
         tables = {
             row[0]
-            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
         }
         keyed_tables = {
             "catalog_entity_summary": "entity_id",
@@ -1033,7 +1168,9 @@ class LibraryScanner:
         removed = set(closure)
         self._scan_delta["removed"].update(removed)
         self._scan_created_ids = [
-            entity_id for entity_id in self._scan_created_ids if entity_id not in removed
+            entity_id
+            for entity_id in self._scan_created_ids
+            if entity_id not in removed
         ]
         self._scan_seen_ids.difference_update(removed)
         self._scan_refresh_root_ids.difference_update(removed)
@@ -1051,7 +1188,9 @@ class LibraryScanner:
         """Re-evaluate affected derived collections without provider enumeration."""
         tables = {
             row[0]
-            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
         }
         if not {"library_sources", "collection_members"} <= tables:
             return
@@ -1186,18 +1325,26 @@ class LibraryScanner:
                             "SELECT name FROM sqlite_master WHERE type='table'"
                         )
                     }
-                    old_files = list(
-                        cursor.execute(
-                            "SELECT id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
-                            (old_id,),
+                    old_files = (
+                        list(
+                            cursor.execute(
+                                "SELECT id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
+                                (old_id,),
+                            )
                         )
-                    ) if "media_files" in tables else []
-                    new_files = list(
-                        cursor.execute(
-                            "SELECT id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
-                            (new_id,),
+                        if "media_files" in tables
+                        else []
+                    )
+                    new_files = (
+                        list(
+                            cursor.execute(
+                                "SELECT id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint FROM media_files WHERE entity_id=? ORDER BY role,relative_path",
+                                (new_id,),
+                            )
                         )
-                    ) if "media_files" in tables else []
+                        if "media_files" in tables
+                        else []
+                    )
                     # Keep media-file IDs where the moved entity has the same
                     # role inventory. This also keeps existing probe sources
                     # attached to the stable file identity.
@@ -1211,30 +1358,61 @@ class LibraryScanner:
                             (*new_file[1:8], old_file[0]),
                         )
                         if "media_sources" in tables:
-                            cursor.execute("DELETE FROM media_sources WHERE media_file_id=?", (new_file[0],))
-                        cursor.execute("DELETE FROM media_files WHERE id=?", (new_file[0],))
+                            cursor.execute(
+                                "DELETE FROM media_sources WHERE media_file_id=?",
+                                (new_file[0],),
+                            )
+                        cursor.execute(
+                            "DELETE FROM media_files WHERE id=?", (new_file[0],)
+                        )
                     for old_file in old_files[paired:]:
-                        cursor.execute("DELETE FROM media_files WHERE id=?", (old_file[0],))
+                        cursor.execute(
+                            "DELETE FROM media_files WHERE id=?", (old_file[0],)
+                        )
                     for new_file in new_files[paired:]:
-                        cursor.execute("UPDATE media_files SET entity_id=? WHERE id=?", (old_id, new_file[0]))
+                        cursor.execute(
+                            "UPDATE media_files SET entity_id=? WHERE id=?",
+                            (old_id, new_file[0]),
+                        )
                     if "media_sources" in tables:
-                        cursor.execute("UPDATE media_sources SET entity_id=? WHERE entity_id=?", (old_id, new_id))
+                        cursor.execute(
+                            "UPDATE media_sources SET entity_id=? WHERE entity_id=?",
+                            (old_id, new_id),
+                        )
                     if "collection_members" in tables:
-                        cursor.execute("UPDATE collection_members SET source_entity_id=? WHERE source_entity_id=?", (old_id, new_id))
+                        cursor.execute(
+                            "UPDATE collection_members SET source_entity_id=? WHERE source_entity_id=?",
+                            (old_id, new_id),
+                        )
                     if "user_item_state" in tables:
                         cursor.execute(
                             "DELETE FROM user_item_state WHERE entity_id=? AND user_id IN (SELECT user_id FROM user_item_state WHERE entity_id=?)",
                             (new_id, old_id),
                         )
-                        cursor.execute("UPDATE user_item_state SET entity_id=? WHERE entity_id=?", (old_id, new_id))
+                        cursor.execute(
+                            "UPDATE user_item_state SET entity_id=? WHERE entity_id=?",
+                            (old_id, new_id),
+                        )
                     if "catalog_search" in tables:
-                        cursor.execute("UPDATE catalog_search SET entity_id=? WHERE entity_id=?", (old_id, new_id))
-                    cursor.execute("DELETE FROM entity_provider_ids WHERE entity_id=?", (new_id,))
+                        cursor.execute(
+                            "UPDATE catalog_search SET entity_id=? WHERE entity_id=?",
+                            (old_id, new_id),
+                        )
+                    cursor.execute(
+                        "DELETE FROM entity_provider_ids WHERE entity_id=?", (new_id,)
+                    )
                     if "collection_members" in tables:
-                        cursor.execute("DELETE FROM collection_members WHERE collection_entity_id=? OR source_entity_id=?", (new_id, new_id))
+                        cursor.execute(
+                            "DELETE FROM collection_members WHERE collection_entity_id=? OR source_entity_id=?",
+                            (new_id, new_id),
+                        )
                     cursor.execute("DELETE FROM library_entities WHERE id=?", (new_id,))
             except Exception:
-                logger.exception("failed to preserve moved entity old_id=%s new_id=%s", old_id, new_id)
+                logger.exception(
+                    "failed to preserve moved entity old_id=%s new_id=%s",
+                    old_id,
+                    new_id,
+                )
                 continue
             self._scan_seen_ids.add(old_id)
             self._scan_reconciled_ids.add(old_id)
@@ -1244,7 +1422,9 @@ class LibraryScanner:
             self._scan_delta["added"].discard(new_id)
             self._scan_delta["changed"].add(old_id)
             self._scan_delta["unchanged"].discard(old_id)
-            self._scan_created_ids = [value for value in self._scan_created_ids if value != new_id]
+            self._scan_created_ids = [
+                value for value in self._scan_created_ids if value != new_id
+            ]
 
     def _remove_created_entities(self) -> None:
         if not self._scan_created_ids:
@@ -1371,11 +1551,19 @@ class LibraryScanner:
             )
         ]
         if set(normalized) != set(current):
-            self.db.execute("DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,))
+            self.db.execute(
+                "DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,)
+            )
             for provider, identifier_type, value in normalized:
                 self.db.execute(
                     "INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)",
-                    (entity_id, provider, identifier_type, value, int(provider == primary_provider)),
+                    (
+                        entity_id,
+                        provider,
+                        identifier_type,
+                        value,
+                        int(provider == primary_provider),
+                    ),
                 )
             if current:
                 self._scan_provider_identity_changed.add(entity_id)
@@ -1428,9 +1616,7 @@ class LibraryScanner:
         )
         service = MetadataService()
         if library_type == "movies" and rows:
-            self._resolve_movies_parallel(
-                library_id, rows, job_id, should_terminate
-            )
+            self._resolve_movies_parallel(library_id, rows, job_id, should_terminate)
             return
         for index, (
             entity_id,
@@ -1443,7 +1629,13 @@ class LibraryScanner:
             query, year = _inventory_query(relative_path or "")
             logger.info(
                 "metadata root start library_id=%s entity_id=%s type=%s query=%s path=%s index=%s/%s",
-                library_id, entity_id, entity_type, query, relative_path, index, len(rows),
+                library_id,
+                entity_id,
+                entity_type,
+                query,
+                relative_path,
+                index,
+                len(rows),
             )
             explicit = [
                 {"provider": row[0], "id": row[2]}
@@ -1488,7 +1680,10 @@ class LibraryScanner:
             for value in result["providerIds"]:
                 logger.info(
                     "metadata root locales start entity_id=%s type=%s provider=%s provider_id=%s",
-                    entity_id, entity_type, value["provider"], value["id"],
+                    entity_id,
+                    entity_type,
+                    value["provider"],
+                    value["id"],
                 )
                 self._fetch_configured_locales(
                     service,
@@ -1496,7 +1691,9 @@ class LibraryScanner:
                     entity_type,
                     str(value["id"]),
                     required=True,
-                    progress=lambda message: self.store.update_job(job_id, message=message),
+                    progress=lambda message: self.store.update_job(
+                        job_id, message=message
+                    ),
                 )
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
@@ -1515,7 +1712,12 @@ class LibraryScanner:
             )
             logger.info(
                 "metadata root complete library_id=%s entity_id=%s type=%s query=%s index=%s/%s",
-                library_id, entity_id, entity_type, query, index, len(rows),
+                library_id,
+                entity_id,
+                entity_type,
+                query,
+                index,
+                len(rows),
             )
         self._seed_all_children(library_id, service, job_id, should_terminate)
 
@@ -1532,7 +1734,15 @@ class LibraryScanner:
             max_workers=workers, thread_name_prefix="zenstream-metadata-roots"
         ) as executor:
             futures = [
-                executor.submit(self._resolve_movie_row, library_id, row, job_id, should_terminate, index, len(rows))
+                executor.submit(
+                    self._resolve_movie_row,
+                    library_id,
+                    row,
+                    job_id,
+                    should_terminate,
+                    index,
+                    len(rows),
+                )
                 for index, row in enumerate(rows, start=1)
             ]
             for future in as_completed(futures):
@@ -1555,7 +1765,11 @@ class LibraryScanner:
         query, year = _inventory_query(relative_path or "")
         logger.info(
             "metadata movie start library_id=%s entity_id=%s query=%s index=%s/%s",
-            library_id, entity_id, query, index, total,
+            library_id,
+            entity_id,
+            query,
+            index,
+            total,
         )
         service = MetadataService()
         explicit = [
@@ -1566,14 +1780,23 @@ class LibraryScanner:
             )
         ]
         try:
-            result = service.resolve_inventory_entity(entity_type, query, year, explicit)
+            result = service.resolve_inventory_entity(
+                entity_type, query, year, explicit
+            )
             self._ids(
                 entity_id,
-                [(value["provider"], "movie", value["id"]) for value in result["providerIds"]],
+                [
+                    (value["provider"], "movie", value["id"])
+                    for value in result["providerIds"]
+                ],
             )
             for value in result["providerIds"]:
                 self._fetch_configured_locales(
-                    service, value["provider"], entity_type, str(value["id"]), required=True
+                    service,
+                    value["provider"],
+                    entity_type,
+                    str(value["id"]),
+                    required=True,
                 )
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
@@ -1582,7 +1805,11 @@ class LibraryScanner:
             message = f"Resolved {query}"
             logger.info(
                 "metadata movie complete library_id=%s entity_id=%s query=%s index=%s/%s",
-                library_id, entity_id, query, index, total,
+                library_id,
+                entity_id,
+                query,
+                index,
+                total,
             )
         except (ProviderError, ValueError, OSError) as error:
             self.db.execute(
@@ -1591,7 +1818,10 @@ class LibraryScanner:
             )
             logger.exception(
                 "metadata movie failed; continuing library_id=%s entity_id=%s query=%s error=%s",
-                library_id, entity_id, query, error,
+                library_id,
+                entity_id,
+                query,
+                error,
             )
             message = f"Metadata failed for {query}; continuing"
         except Exception as error:
@@ -1601,7 +1831,10 @@ class LibraryScanner:
             )
             logger.exception(
                 "unexpected metadata movie failure; continuing library_id=%s entity_id=%s query=%s error=%s",
-                library_id, entity_id, query, error,
+                library_id,
+                entity_id,
+                query,
+                error,
             )
             message = f"Metadata failed for {query}; continuing"
         self.store.update_job(job_id, progress_current=index, message=message)
@@ -1619,7 +1852,12 @@ class LibraryScanner:
         from app.providers import ProviderError
 
         self._check_termination(should_terminate)
-        logger.info("metadata series start library_id=%s series_id=%s path=%s", library_id, series_id, relative_path)
+        logger.info(
+            "metadata series start library_id=%s series_id=%s path=%s",
+            library_id,
+            series_id,
+            relative_path,
+        )
         result = None
         if self._needs_metadata(series_id):
             query, year = _inventory_query(relative_path or "")
@@ -1631,7 +1869,11 @@ class LibraryScanner:
                 )
             ]
             try:
-                logger.info("metadata series match start series_id=%s query=%s", series_id, query)
+                logger.info(
+                    "metadata series match start series_id=%s query=%s",
+                    series_id,
+                    query,
+                )
                 result = service.resolve_inventory_entity(
                     "series", query, year, explicit
                 )
@@ -1657,7 +1899,9 @@ class LibraryScanner:
             for value in result["providerIds"]:
                 logger.info(
                     "metadata series locales start series_id=%s provider=%s provider_id=%s",
-                    series_id, value["provider"], value["id"],
+                    series_id,
+                    value["provider"],
+                    value["id"],
                 )
                 self._fetch_configured_locales(
                     service,
@@ -1665,7 +1909,9 @@ class LibraryScanner:
                     "series",
                     str(value["id"]),
                     required=True,
-                    progress=lambda message: self.store.update_job(job_id, message=message),
+                    progress=lambda message: self.store.update_job(
+                        job_id, message=message
+                    ),
                 )
             logger.info("metadata series match complete series_id=%s", series_id)
             result = result or {"metadata": None}
@@ -1681,7 +1927,9 @@ class LibraryScanner:
                     "series",
                     str(provider_id),
                     required=False,
-                    progress=lambda message: self.store.update_job(job_id, message=message),
+                    progress=lambda message: self.store.update_job(
+                        job_id, message=message
+                    ),
                 )
         self.store.update_job(job_id, message=f"Resolved series ({series_id})")
         logger.info("metadata series root complete series_id=%s", series_id)
@@ -1743,9 +1991,7 @@ class LibraryScanner:
                     season_id,
                     [("tvdb", "season", str(season_provider_id))],
                 )
-                self._derive_tvdb_episode_ids(
-                    series_id, service, season_id=season_id
-                )
+                self._derive_tvdb_episode_ids(series_id, service, season_id=season_id)
 
         self._seed_all_children(
             library_id,
@@ -1981,7 +2227,12 @@ class LibraryScanner:
             self._check_termination(should_terminate)
             logger.info(
                 "metadata child start library_id=%s entity_id=%s type=%s provider_path=%s index=%s/%s",
-                library_id, entity_id, entity_type, relative_path, index, len(rows),
+                library_id,
+                entity_id,
+                entity_type,
+                relative_path,
+                index,
+                len(rows),
             )
             provider_rows = self.db.execute(
                 "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
@@ -2057,7 +2308,11 @@ class LibraryScanner:
                     )
                     logger.info(
                         "metadata child locale start entity_id=%s type=%s provider=%s provider_id=%s locale=%s",
-                        entity_id, entity_type, provider, provider_id, locale,
+                        entity_id,
+                        entity_type,
+                        provider,
+                        provider_id,
+                        locale,
                     )
                     try:
                         normalized = ingest.ingest_locale(
@@ -2070,7 +2325,11 @@ class LibraryScanner:
                         self._persist_child_ids(entity_id, normalized)
                         logger.info(
                             "metadata child locale complete entity_id=%s type=%s provider=%s provider_id=%s locale=%s",
-                            entity_id, entity_type, provider, provider_id, locale,
+                            entity_id,
+                            entity_type,
+                            provider,
+                            provider_id,
+                            locale,
                         )
                     except Exception as error:
                         errors.append(
@@ -2100,7 +2359,10 @@ class LibraryScanner:
             )
             logger.info(
                 "metadata child complete entity_id=%s type=%s index=%s/%s",
-                entity_id, entity_type, index, len(rows),
+                entity_id,
+                entity_type,
+                index,
+                len(rows),
             )
 
     @staticmethod
@@ -2133,7 +2395,9 @@ class LibraryScanner:
                 locale,
             )
             try:
-                ingest.ingest_locale(provider, entity_type, provider_id, locale, force=False)
+                ingest.ingest_locale(
+                    provider, entity_type, provider_id, locale, force=False
+                )
                 if progress:
                     progress(
                         f"Cached {provider} {entity_type} {provider_id} metadata ({locale})"
@@ -2317,7 +2581,9 @@ class LibraryScanner:
                 normalized = (
                     fetch_identity("tvdb", "season", season_provider_id)
                     if fetch_identity
-                    else service.fetch("tvdb", "season", season_provider_id, "en", force=True)
+                    else service.fetch(
+                        "tvdb", "season", season_provider_id, "en", force=True
+                    )
                 )
             except Exception as error:
                 raise ValueError(
@@ -2365,10 +2631,7 @@ class LibraryScanner:
         job_id: str | None = None,
     ) -> dict:
         """Reconcile media rows in place and return a scan delta."""
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(media_files)")
-        }
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(media_files)")}
         has_fingerprint = "quick_fingerprint" in columns
         select_fingerprint = ",quick_fingerprint" if has_fingerprint else ""
         existing_rows = self.db.execute(
@@ -2377,7 +2640,13 @@ class LibraryScanner:
         )
         existing = {(row[1], row[2]): row for row in existing_rows}
         seen = set()
-        result = {"added": 0, "updated": 0, "removed": 0, "unchanged": 0, "content_changed": False}
+        result = {
+            "added": 0,
+            "updated": 0,
+            "removed": 0,
+            "unchanged": 0,
+            "content_changed": False,
+        }
         for path in files:
             role = media_role(path)
             if not role:
@@ -2432,7 +2701,9 @@ class LibraryScanner:
                 modified_ns,
                 time.monotonic() - file_started,
             )
-            language = sidecar_language(path) if role in {"subtitle", "lyrics"} else None
+            language = (
+                sidecar_language(path) if role in {"subtitle", "lyrics"} else None
+            )
             relative_path = relative(str(root), str(path))
             key = (relative_path, role)
             seen.add(key)
@@ -2451,13 +2722,31 @@ class LibraryScanner:
                 elif has_fingerprint:
                     self.db.execute(
                         "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,NULL)",
-                        (new_id(), entity_id, relative_path, role, language, None, file_size, modified_ns),
+                        (
+                            new_id(),
+                            entity_id,
+                            relative_path,
+                            role,
+                            language,
+                            None,
+                            file_size,
+                            modified_ns,
+                        ),
                     )
                     result["added"] += 1
                 else:
                     self.db.execute(
                         "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
-                        (new_id(), entity_id, relative_path, role, language, None, file_size, modified_ns),
+                        (
+                            new_id(),
+                            entity_id,
+                            relative_path,
+                            role,
+                            language,
+                            None,
+                            file_size,
+                            modified_ns,
+                        ),
                     )
                     result["added"] += 1
                 continue
@@ -2486,10 +2775,23 @@ class LibraryScanner:
                 time.monotonic() - fingerprint_started,
             )
             if old:
-                content_changed = old_fingerprint != quick_fingerprint if has_fingerprint else True
+                content_changed = (
+                    old_fingerprint != quick_fingerprint if has_fingerprint else True
+                )
                 self.db.execute(
                     f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=?' if has_fingerprint else ''} WHERE id=?",
-                    ([language, None, file_size, modified_ns, quick_fingerprint, old[0]] if has_fingerprint else [language, None, file_size, modified_ns, old[0]]),
+                    (
+                        [
+                            language,
+                            None,
+                            file_size,
+                            modified_ns,
+                            quick_fingerprint,
+                            old[0],
+                        ]
+                        if has_fingerprint
+                        else [language, None, file_size, modified_ns, old[0]]
+                    ),
                 )
                 result["updated"] += 1
                 if content_changed and role == "media":
@@ -2498,12 +2800,31 @@ class LibraryScanner:
                 if has_fingerprint:
                     self.db.execute(
                         "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
-                        (new_id(), entity_id, relative_path, role, language, None, file_size, modified_ns, quick_fingerprint),
+                        (
+                            new_id(),
+                            entity_id,
+                            relative_path,
+                            role,
+                            language,
+                            None,
+                            file_size,
+                            modified_ns,
+                            quick_fingerprint,
+                        ),
                     )
                 else:
                     self.db.execute(
                         "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
-                        (new_id(), entity_id, relative_path, role, language, None, file_size, modified_ns),
+                        (
+                            new_id(),
+                            entity_id,
+                            relative_path,
+                            role,
+                            language,
+                            None,
+                            file_size,
+                            modified_ns,
+                        ),
                     )
                 result["added"] += 1
                 if role == "media":
@@ -2518,9 +2839,7 @@ class LibraryScanner:
         if has_fingerprint:
             self._materialize_local_artwork(entity_id, root)
         if result["added"] or result["removed"] or result["content_changed"]:
-            self._mark_changed(
-                entity_id, content_changed=result["content_changed"]
-            )
+            self._mark_changed(entity_id, content_changed=result["content_changed"])
         # Probe after the file rows are reconciled so playback never depends
         # on a stale source row. A same-fingerprint timestamp touch does not probe.
         if result["content_changed"]:
@@ -2596,7 +2915,9 @@ class LibraryScanner:
         def traversal_error(error):
             raise error
 
-        for current, directories, filenames in os.walk(directory, onerror=traversal_error):
+        for current, directories, filenames in os.walk(
+            directory, onerror=traversal_error
+        ):
             current_path = Path(current)
             yield from (current_path / name for name in directories)
             yield from (current_path / name for name in filenames)
@@ -2781,9 +3102,7 @@ class LibraryScanner:
                     message=f"Skipped {entry.name}: no playable video",
                 )
                 continue
-            entity = self._entity(
-                library_id, None, "movie", relative_path
-            )
+            entity = self._entity(library_id, None, "movie", relative_path)
             discovered_ids = list(provider_ids(entry.name))
             for nfo in (path for path in files if path.suffix.lower() == ".nfo"):
                 discovered_ids.extend(parse_nfo_ids(nfo))
@@ -2893,9 +3212,7 @@ class LibraryScanner:
             )
             series_relative_path = relative(str(root), str(series_dir))
             if not episode_plan:
-                self._reject_existing_entity(
-                    library_id, "series", series_relative_path
-                )
+                self._reject_existing_entity(library_id, "series", series_relative_path)
                 self.store.update_job(
                     job_id,
                     progress_current=series_index,
@@ -2904,9 +3221,7 @@ class LibraryScanner:
                 continue
             if resolve_immediately and service is None:
                 service = MetadataService()
-            series = self._entity(
-                library_id, None, "series", series_relative_path
-            )
+            series = self._entity(library_id, None, "series", series_relative_path)
             series_ids = provider_ids(series_dir.name)
             if series_ids:
                 self._replace_ids(series, series_ids)
@@ -3026,7 +3341,9 @@ class LibraryScanner:
                 (series,),
             )
             self._scan_rejected_ids.update(
-                row[0] for row in unseen_descendants if row[0] not in self._scan_seen_ids
+                row[0]
+                for row in unseen_descendants
+                if row[0] not in self._scan_seen_ids
             )
             if not accepted_series_episodes:
                 self._scan_rejected_ids.add(series)
@@ -3152,6 +3469,7 @@ class LibraryScanner:
         targets: set[str] | None = None,
     ) -> int:
         album_dirs = []
+
         def traversal_error(error):
             raise error
 
@@ -3159,9 +3477,7 @@ class LibraryScanner:
         for scan_root in scan_roots:
             if not scan_root.is_dir():
                 continue
-            for directory, _, filenames in os.walk(
-                scan_root, onerror=traversal_error
-            ):
+            for directory, _, filenames in os.walk(scan_root, onerror=traversal_error):
                 if any(
                     Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames
                 ):
@@ -3249,7 +3565,12 @@ class LibraryScanner:
         )
         self._scan_seen_ids = set()
         self._scan_created_ids = []
-        self._scan_delta = {"added": set(), "changed": set(), "unchanged": set(), "removed": set()}
+        self._scan_delta = {
+            "added": set(),
+            "changed": set(),
+            "unchanged": set(),
+            "removed": set(),
+        }
         self._scan_complete = False
         try:
             from app.providers import MetadataService, ProviderError, TVDBClient
@@ -3354,7 +3675,9 @@ class LibraryScanner:
                             "providerId": list_id,
                             "images": [],
                         }
-                        service.cache.put("tvdb", "collection", list_id, locale, normalized)
+                        service.cache.put(
+                            "tvdb", "collection", list_id, locale, normalized
+                        )
                 count += 1
                 self.store.update_job(
                     job_id, progress_current=count, message=f"Derived {value['title']}"
@@ -3367,7 +3690,9 @@ class LibraryScanner:
                         if self._scan_seen_ids
                         else "SELECT NULL"
                     ),
-                    [library_id, *self._scan_seen_ids] if self._scan_seen_ids else [library_id],
+                    [library_id, *self._scan_seen_ids]
+                    if self._scan_seen_ids
+                    else [library_id],
                 )
             ]
             if stale:

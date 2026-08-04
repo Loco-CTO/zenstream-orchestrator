@@ -1133,7 +1133,8 @@ class LibraryMetadataTest(unittest.TestCase):
             (specials / "Example - S00E12345.mkv").touch()
             with (
                 patch("app.providers.MetadataService", return_value=MagicMock()),
-                patch.object(scanner, "_resolve_series_immediately") as resolve,
+                patch.object(scanner, "_resolve_series_root", return_value=None) as resolve,
+                patch.object(scanner, "_resolve_season_metadata"),
             ):
                 scanner._scan_series(
                     "library-1", root, "job-1", lambda: False, resolve_immediately=True

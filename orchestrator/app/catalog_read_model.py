@@ -504,6 +504,41 @@ class CatalogReadModel:
         expected_projections = entity_count * len(configured)
         if status and status[0] == "ready" and summary_count == entity_count and projection_count == expected_projections:
             return entity_count
+        if status and projection_count == expected_projections and summary_count < entity_count:
+            missing_summary_ids = [
+                row[0]
+                for row in self.db.read_execute(
+                    "SELECT e.id FROM library_entities e "
+                    "LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id "
+                    "WHERE s.entity_id IS NULL LIMIT 301"
+                )
+            ]
+            if 0 < len(missing_summary_ids) <= 300:
+                try:
+                    self.refresh_roots(missing_summary_ids)
+                    repaired_count = int(
+                        self.db.read_execute("SELECT COUNT(*) FROM catalog_entity_summary")[0][0]
+                    )
+                    if repaired_count == entity_count:
+                        now = _now()
+                        with self.db.transaction() as cursor:
+                            if self._has_progress_columns():
+                                cursor.execute(
+                                    "UPDATE catalog_read_model_status SET state='ready',generation=1,updated_at=?,error=NULL,stage='complete',processed=?,total=?,started_at=COALESCE(started_at,?),heartbeat_at=? WHERE id=1",
+                                    (now, entity_count, entity_count, now, now),
+                                )
+                            else:
+                                cursor.execute(
+                                    "UPDATE catalog_read_model_status SET state='ready',generation=1,updated_at=?,error=NULL WHERE id=1",
+                                    (now,),
+                                )
+                        logger.info(
+                            "catalog read model bootstrap repaired missing summaries=%s",
+                            len(missing_summary_ids),
+                        )
+                        return entity_count
+                except Exception:
+                    logger.exception("catalog read model targeted summary repair failed")
         logger.info(
             "catalog read model bootstrap state=%s entities=%s summaries=%s projections=%s expected_projections=%s",
             status[0] if status else "missing",

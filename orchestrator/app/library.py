@@ -3571,6 +3571,7 @@ class LibraryScanner:
             "unchanged": set(),
             "removed": set(),
         }
+        self._scan_refresh_root_ids = set()
         self._scan_complete = False
         try:
             from app.providers import MetadataService, ProviderError, TVDBClient
@@ -3639,6 +3640,7 @@ class LibraryScanner:
                 collection = self._entity(
                     library_id, None, "collection", f"tvdb-list-{list_id}"
                 )
+                self._scan_refresh_root_ids.add(collection)
                 self._replace_ids(collection, [("tvdb", "collection", list_id)])
                 current_members = [
                     (row[0], row[1])
@@ -3698,6 +3700,7 @@ class LibraryScanner:
             if stale:
                 cleanup_entities(self.db, stale)
                 self._scan_delta["removed"].update(stale)
+            self._refresh_catalog_after_cleanup()
             self._scan_complete = True
             self.store.update_job(
                 job_id,

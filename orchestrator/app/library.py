@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import re
+import stat
 import threading
 import time
 import uuid
@@ -500,6 +501,9 @@ class LibraryScanner:
             "removed": set(),
         }
         self._scan_provider_identity_changed: set[str] = set()
+        self._scan_rejected_ids: set[str] = set()
+        self._scan_reconciled_ids: set[str] = set()
+        self._scan_refresh_root_ids: set[str] = set()
         self._scan_complete = False
         self._stage_lock = threading.RLock()
         self._stage = "idle"
@@ -600,6 +604,9 @@ class LibraryScanner:
             "removed": set(),
         }
         self._scan_provider_identity_changed = set()
+        self._scan_rejected_ids = set()
+        self._scan_reconciled_ids = set()
+        self._scan_refresh_root_ids = set()
         self._last_stage_persisted_at = 0.0
         self._scan_complete = False
         try:
@@ -637,8 +644,12 @@ class LibraryScanner:
             self._fetch_seen_locales(should_terminate)
             self._set_stage(job_id, "Reconciling moved entities")
             self._reconcile_moved_entities(library_id, root)
+            self._set_stage(job_id, "Pruning entities without playable media")
+            rejected = self._prune_rejected_entities()
             self._set_stage(job_id, "Pruning missing entities")
-            self._prune_missing_entities(library_id, root)
+            missing = self._prune_missing_entities(library_id, root)
+            self._set_stage(job_id, "Refreshing catalog read model")
+            self._refresh_catalog_after_cleanup(rejected | missing)
             self._set_stage(job_id, "Pruning local artwork cache")
             LocalArtworkCache(self.db).prune()
             from app.trickplay import TrickplayStore
@@ -672,6 +683,7 @@ class LibraryScanner:
                 message=f"Indexed {count} entries",
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
+            self._enqueue_dependent_collections(library_id)
         except JobTerminated:
             self._scan_complete = False
             finished = now()
@@ -794,9 +806,9 @@ class LibraryScanner:
             | set(self._scan_provider_identity_changed)
         )
 
-    def _prune_missing_entities(self, library_id: str, root: Path | None = None) -> None:
+    def _prune_missing_entities(self, library_id: str, root: Path | None = None) -> set[str]:
         if not self._scan_complete:
-            return
+            return set()
         legacy_without_library_root = False
         if root is None:
             try:
@@ -829,11 +841,120 @@ class LibraryScanner:
                 continue
             missing.append(entity_id)
         if not missing:
-            return
+            return set()
         from app.library_cleanup import cleanup_entities
 
+        closure = self._entity_closure(missing)
         cleanup_entities(self.db, missing)
-        self._scan_delta["removed"].update(missing)
+        self._delete_catalog_rows(closure)
+        self._scan_delta["removed"].update(closure)
+        return set(closure)
+
+    def _reject_existing_entity(
+        self, library_id: str, entity_type: str, relative_path: str
+    ) -> None:
+        rows = self.db.execute(
+            "SELECT id FROM library_entities WHERE library_id=? AND entity_type=? AND relative_path=?",
+            (library_id, entity_type, relative_path),
+        )
+        if rows:
+            self._scan_rejected_ids.add(rows[0][0])
+
+    def _entity_closure(self, entity_ids: Iterable[str]) -> list[str]:
+        roots = list(dict.fromkeys(entity_ids))
+        if not roots:
+            return []
+        placeholders = ",".join("?" for _ in roots)
+        return [
+            row[0]
+            for row in self.db.execute(
+                "WITH RECURSIVE removed(id) AS ("
+                f"SELECT id FROM library_entities WHERE id IN ({placeholders}) "
+                "UNION ALL SELECT e.id FROM library_entities e JOIN removed r ON e.parent_id=r.id) "
+                "SELECT DISTINCT id FROM removed",
+                roots,
+            )
+        ]
+
+    def _delete_catalog_rows(self, entity_ids: Iterable[str]) -> None:
+        ids = list(dict.fromkeys(entity_ids))
+        if not ids:
+            return
+        tables = {
+            row[0]
+            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        keyed_tables = {
+            "catalog_entity_summary": "entity_id",
+            "catalog_item_projection": "entity_id",
+            "catalog_user_summary": "entity_id",
+            "catalog_item_genres": "entity_id",
+            "catalog_search_grams": "entity_id",
+            "catalog_collection_summary": "collection_entity_id",
+        }
+        for offset in range(0, len(ids), 300):
+            batch = ids[offset : offset + 300]
+            placeholders = ",".join("?" for _ in batch)
+            for table, column in keyed_tables.items():
+                if table in tables:
+                    self.db.execute(
+                        f"DELETE FROM {table} WHERE {column} IN ({placeholders})", batch
+                    )
+
+    def _prune_rejected_entities(self) -> set[str]:
+        rejected = self._scan_rejected_ids - self._scan_reconciled_ids
+        closure = self._entity_closure(rejected)
+        if not closure:
+            return set()
+        from app.library_cleanup import cleanup_entities
+
+        cleanup_entities(self.db, list(rejected))
+        self._delete_catalog_rows(closure)
+        removed = set(closure)
+        self._scan_delta["removed"].update(removed)
+        self._scan_created_ids = [
+            entity_id for entity_id in self._scan_created_ids if entity_id not in removed
+        ]
+        self._scan_seen_ids.difference_update(removed)
+        self._scan_refresh_root_ids.difference_update(removed)
+        return removed
+
+    def _refresh_catalog_after_cleanup(self, removed: set[str]) -> None:
+        from app.catalog_read_model import CatalogReadModel
+
+        model = CatalogReadModel(self.db)
+        surviving = [
+            row[0]
+            for row in self.db.execute(
+                "SELECT id FROM library_entities WHERE id IN ({})".format(
+                    ",".join("?" for _ in self._scan_refresh_root_ids)
+                ),
+                list(self._scan_refresh_root_ids),
+            )
+        ] if self._scan_refresh_root_ids else []
+        if surviving:
+            model.refresh_roots(surviving)
+        elif removed and model.available():
+            model.rebuild()
+
+    def _enqueue_dependent_collections(self, library_id: str) -> None:
+        tables = {
+            row[0]
+            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "library_sources" not in tables:
+            return
+        dependent_ids = [
+            row[0]
+            for row in self.db.execute(
+                "SELECT library_id FROM library_sources WHERE source_library_id=?",
+                (library_id,),
+            )
+        ]
+        if not dependent_ids:
+            return
+        for dependent_id in dependent_ids:
+            runtime.enqueue(dependent_id, "collection_rebuild")
 
     def _entity_fingerprint(self, entity_id: str) -> str | None:
         if "quick_fingerprint" not in {

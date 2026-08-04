@@ -1887,16 +1887,25 @@ class LibraryScanner:
                     entity_id, [("musicbrainz", "recording", str(candidate["id"]))]
                 )
 
-    def _derive_tmdb_child_ids(self, series_id: str) -> None:
+    def _derive_tmdb_child_ids(
+        self, series_id: str, season_id: str | None = None
+    ) -> None:
         provider_rows = self.db.execute(
             "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='tmdb'",
             (series_id,),
         )
         if not provider_rows:
             return
-        seasons = self.db.execute(
-            "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=? AND entity_type='season'",
-            (series_id,),
+        seasons = (
+            self.db.execute(
+                "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE id=? AND parent_id=? AND entity_type='season'",
+                (season_id, series_id),
+            )
+            if season_id
+            else self.db.execute(
+                "SELECT id,entity_type,season_number,episode_number FROM library_entities WHERE parent_id=? AND entity_type='season'",
+                (series_id,),
+            )
         )
         season_ids = [row[0] for row in seasons]
         children = list(seasons)
@@ -1960,11 +1969,23 @@ class LibraryScanner:
                 )
                 break
 
-    def _derive_tvdb_episode_ids(self, series_id: str, service) -> None:
+    def _derive_tvdb_episode_ids(
+        self,
+        series_id: str,
+        service,
+        season_id: str | None = None,
+    ) -> None:
         """Fetch TVDB season details and attach exact TVDB episode IDs."""
-        seasons = self.db.execute(
-            "SELECT id,season_number,relative_path FROM library_entities WHERE parent_id=? AND entity_type='season' ORDER BY season_number",
-            (series_id,),
+        seasons = (
+            self.db.execute(
+                "SELECT id,season_number,relative_path FROM library_entities WHERE id=? AND parent_id=? AND entity_type='season'",
+                (season_id, series_id),
+            )
+            if season_id
+            else self.db.execute(
+                "SELECT id,season_number,relative_path FROM library_entities WHERE parent_id=? AND entity_type='season' ORDER BY season_number",
+                (series_id,),
+            )
         )
         for season_id, season_number, season_path in seasons:
             provider_rows = self.db.execute(

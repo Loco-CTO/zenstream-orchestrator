@@ -2526,9 +2526,13 @@ class LibraryScanner:
                 if match
                 else (0 if season_dir.name.lower() == "specials" else 1)
             )
-            episode_paths = (
-                children if season_dir == series_dir else list(self._walk_paths(season_dir))
-            )
+            if season_dir == series_dir:
+                episode_paths = children
+            else:
+                episode_paths = []
+                for candidate in self._walk_paths(season_dir):
+                    self._check_termination(should_terminate)
+                    episode_paths.append(candidate)
             files_by_parent: dict[Path, list[Path]] = {}
             for path in episode_paths:
                 if path.is_file():

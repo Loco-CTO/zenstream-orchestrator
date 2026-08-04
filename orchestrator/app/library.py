@@ -2374,7 +2374,6 @@ class LibraryScanner:
         self.store.update_job(job_id, progress_total=len(series_dirs))
         episode_count = 0
         service = MetadataService() if resolve_immediately else None
-        early_series_metadata: set[str] = set()
         for series_index, series_dir in enumerate(series_dirs, start=1):
             self._check_termination(should_terminate)
             series_started = time.monotonic()
@@ -2399,6 +2398,7 @@ class LibraryScanner:
             series_ids = provider_ids(series_dir.name)
             if series_ids:
                 self._replace_ids(series, series_ids)
+            series_metadata = None
             if service and series in self._metadata_candidates() and self._needs_metadata(series):
                 self._set_stage(
                     job_id,
@@ -2407,7 +2407,7 @@ class LibraryScanner:
                     path=str(series_dir),
                 )
                 try:
-                    self._resolve_series_immediately(
+                    series_metadata = self._resolve_series_root(
                         library_id,
                         series,
                         relative(str(root), str(series_dir)),
@@ -2415,12 +2415,11 @@ class LibraryScanner:
                         job_id,
                         should_terminate,
                     )
-                    early_series_metadata.add(series)
                 except JobTerminated:
                     raise
                 except Exception as error:
                     logger.exception(
-                        "early series metadata failed library_id=%s series_id=%s error=%s",
+                        "series root metadata failed library_id=%s series_id=%s error=%s",
                         library_id,
                         series,
                         error,
@@ -2436,6 +2435,40 @@ class LibraryScanner:
                 for path in series_dir.iterdir()
             ):
                 season_dirs.append(series_dir)
+            season_dirs.sort(
+                key=lambda path: (
+                    0
+                    if path.name.lower() == "specials"
+                    else int(SEASON_RE.match(path.name).group(1))
+                    if SEASON_RE.match(path.name)
+                    else 1,
+                    1 if path == series_dir else 0,
+                    path.name.casefold(),
+                )
+            )
+            tvdb_identity = None
+            tvdb_provider_id = next(
+                (
+                    row[0]
+                    for row in self.db.execute(
+                        "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='tvdb'",
+                        (series,),
+                    )
+                ),
+                None,
+            )
+            if service and tvdb_provider_id:
+                try:
+                    tvdb_identity = service.series_child_ids(
+                        "tvdb", str(tvdb_provider_id)
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "TVDB child identity discovery failed series_id=%s provider_id=%s: %s",
+                        series,
+                        tvdb_provider_id,
+                        error,
+                    )
             for season_dir in season_dirs:
                 logger.info(
                     "library scan season start library_id=%s job_id=%s series_id=%s path=%s",
@@ -2462,8 +2495,8 @@ class LibraryScanner:
                     if season_dir == series_dir
                     else self._walk_paths(season_dir)
                 )
+                episode_records = []
                 for media in episode_paths:
-                    self._check_termination(should_terminate)
                     if (
                         not media.is_file()
                         or media.suffix.lower() not in VIDEO_EXTENSIONS
@@ -2494,6 +2527,24 @@ class LibraryScanner:
                         if episode_match and episode_match.group("end")
                         else None
                     )
+                    episode_records.append(
+                        (
+                            episode_number,
+                            relative(str(root), str(media)).casefold(),
+                            media,
+                            filename_season_number,
+                            end_number,
+                        )
+                    )
+                episode_records.sort(key=lambda value: (value[0], value[1]))
+                for (
+                    episode_number,
+                    _relative_media_path,
+                    media,
+                    filename_season_number,
+                    end_number,
+                ) in episode_records:
+                    self._check_termination(should_terminate)
                     # The directory establishes the season hierarchy. Keep the
                     # filename season only for loose episodes stored directly
                     # under the series directory.
@@ -2549,6 +2600,50 @@ class LibraryScanner:
                     season_dir,
                     episode_count,
                 )
+                if service:
+                    season_candidates = self._metadata_candidates()
+                    season_rows = self.db.execute(
+                        "SELECT id FROM library_entities WHERE id=? OR parent_id=?",
+                        (season, season),
+                    )
+                    needs_season_metadata = any(
+                        row[0] in season_candidates and self._needs_metadata(row[0])
+                        for row in season_rows
+                    )
+                    if needs_season_metadata:
+                        self._set_stage(
+                            job_id,
+                            f"Resolving season {season_folder_number} for {series_dir.name}",
+                            seriesId=series,
+                            seasonId=season,
+                            path=str(season_dir),
+                        )
+                        try:
+                            self._resolve_season_metadata(
+                                library_id,
+                                series,
+                                season,
+                                service,
+                                job_id,
+                                should_terminate,
+                                series_metadata=series_metadata,
+                                tvdb_identity=tvdb_identity,
+                            )
+                        except JobTerminated:
+                            raise
+                        except Exception as error:
+                            logger.exception(
+                                "season metadata failed; continuing library_id=%s series_id=%s season_id=%s path=%s error=%s",
+                                library_id,
+                                series,
+                                season,
+                                season_dir,
+                                error,
+                            )
+                            self.store.update_job(
+                                job_id,
+                                message=f"Metadata failed for season {season_folder_number}; continuing",
+                            )
             self._files(
                 series,
                 root,

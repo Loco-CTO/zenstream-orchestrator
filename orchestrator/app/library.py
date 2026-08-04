@@ -650,7 +650,7 @@ class LibraryScanner:
             missing = self._prune_missing_entities(library_id, root)
             self._set_stage(job_id, "Refreshing catalog read model")
             removed = rejected | missing
-            self._refresh_catalog_after_cleanup(removed)
+            self._refresh_catalog_after_cleanup()
             self._set_stage(job_id, "Pruning local artwork cache")
             LocalArtworkCache(self.db).prune()
             from app.trickplay import TrickplayStore
@@ -921,7 +921,7 @@ class LibraryScanner:
         self._scan_refresh_root_ids.difference_update(removed)
         return removed
 
-    def _refresh_catalog_after_cleanup(self, _removed: set[str]) -> None:
+    def _refresh_catalog_after_cleanup(self) -> None:
         from app.catalog_read_model import CatalogReadModel
 
         model = CatalogReadModel(self.db)

@@ -179,6 +179,12 @@ def upgrade():
     )
     op.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_catalog_collection_summary_entity_source
+        ON catalog_collection_summary(collection_entity_id, source_library_id, added_sort_ns, last_added_sort_ns)
+        """
+    )
+    op.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_catalog_item_genres_lookup
         ON catalog_item_genres(locale, genre_key, entity_id)
         """
@@ -198,6 +204,7 @@ def upgrade():
         "VALUES(1,'building',0,CURRENT_TIMESTAMP,NULL) "
         "ON CONFLICT(id) DO UPDATE SET state='building',error=NULL,updated_at=excluded.updated_at"
     )
+    op.execute("PRAGMA optimize")
 
 
 def downgrade():

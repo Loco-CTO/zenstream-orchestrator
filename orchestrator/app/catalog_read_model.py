@@ -441,6 +441,33 @@ class CatalogReadModel:
                 )
         return len(summaries)
 
+    def refresh_user_entities(self, user_id: str, entity_ids: Iterable[str]) -> int:
+        if not self.available() or not self._has_table("catalog_user_summary"):
+            return 0
+        ids = list(dict.fromkeys(entity_ids))
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        rows = self.db.read_execute(
+            "WITH RECURSIVE roots(id) AS ("
+            f"SELECT id FROM library_entities WHERE id IN ({placeholders})), "
+            "tree(root_id,id) AS (SELECT id,id FROM roots UNION ALL "
+            "SELECT tree.root_id,e.id FROM tree JOIN library_entities e ON e.parent_id=tree.id) "
+            "SELECT tree.root_id,COUNT(state.entity_id) FROM tree "
+            "JOIN library_entities leaf ON leaf.id=tree.id "
+            "LEFT JOIN user_item_state state ON state.user_id=? AND state.entity_id=leaf.id "
+            "AND state.played=1 AND leaf.entity_type IN ('movie','episode','track','release') "
+            "GROUP BY tree.root_id",
+            [*ids, user_id],
+        )
+        now = _now()
+        with self.db.transaction() as cursor:
+            cursor.executemany(
+                "INSERT INTO catalog_user_summary(user_id,entity_id,played_leaf_count,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id,entity_id) DO UPDATE SET played_leaf_count=excluded.played_leaf_count,updated_at=excluded.updated_at",
+                [(user_id, row[0], int(row[1] or 0), now) for row in rows],
+            )
+        return len(rows)
+
     def status(self):
         if not self._has_table("catalog_read_model_status"):
             return None

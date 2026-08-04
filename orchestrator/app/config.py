@@ -144,6 +144,13 @@ class Config:
                 "SELECT value FROM schema_metadata WHERE key='generation'"
             ).fetchone()
             compatible = bool(row and row[0] == "catalog-projection-v1")
+        except sqlite3.OperationalError as error:
+            message = str(error).lower()
+            if "locked" in message or "busy" in message:
+                raise RuntimeError(
+                    "SQLite schema could not be verified because the database is busy; refusing to archive it."
+                ) from error
+            compatible = False
         except sqlite3.Error:
             compatible = False
         finally:

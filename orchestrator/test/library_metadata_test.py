@@ -110,6 +110,24 @@ class LibraryMetadataTest(unittest.TestCase):
     def _prepare_incremental_scan(scanner):
         scanner._scan_seen_ids = set()
         scanner._scan_created_ids = []
+        scanner._scan_delta = {
+            "added": set(),
+            "changed": set(),
+            "content_changed": set(),
+            "unchanged": set(),
+            "removed": set(),
+        }
+        scanner._scan_provider_identity_changed = set()
+        scanner._scan_rejected_ids = set()
+        scanner._scan_reconciled_ids = set()
+        scanner._scan_refresh_root_ids = set()
+        scanner._scan_complete = False
+
+    @staticmethod
+    def _finish_incremental_scan(scanner, library_id, root):
+        scanner._reconcile_moved_entities(library_id, root)
+        scanner._prune_rejected_entities()
+        scanner._prune_missing_entities(library_id, root)
 
     def test_scan_stage_persistence_is_throttled_for_file_updates(self):
         db, scanner = self._scanner_db()
@@ -319,6 +337,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 self._prepare_incremental_scan(scanner)
                 scanner._scan_movies("library-1", root, "job-1", lambda: False)
                 scanner._reconcile_moved_entities("library-1", root)
+                scanner._prune_rejected_entities()
                 scanner._prune_missing_entities("library-1", root)
 
                 self.assertEqual(
@@ -328,6 +347,85 @@ class LibraryMetadataTest(unittest.TestCase):
                 self.assertEqual(
                     db.execute("SELECT id,relative_path FROM media_files")[0],
                     (old_file, "Renamed/Movie.mkv"),
+                )
+        finally:
+            db.close()
+
+    def test_movie_root_requires_a_playable_video(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                movie = root / "Empty Movie"
+                movie.mkdir()
+                (movie / "poster.jpg").touch()
+                (movie / "Movie.en.srt").touch()
+
+                self._prepare_incremental_scan(scanner)
+                with patch.object(scanner, "_resolve_movie_row") as resolve:
+                    count = scanner._scan_movies(
+                        "library-1", root, "job-1", lambda: False
+                    )
+
+                self.assertEqual(count, 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+                resolve.assert_not_called()
+        finally:
+            db.close()
+
+    def test_movie_removed_when_its_directory_no_longer_has_playable_video(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                movie = root / "Movie"
+                movie.mkdir()
+                video = movie / "Movie.mkv"
+                video.touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                self._finish_incremental_scan(scanner, "library-1", root)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 1)
+
+                video.unlink()
+                (movie / "Movie.en.srt").touch()
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                self._finish_incremental_scan(scanner, "library-1", root)
+
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+        finally:
+            db.close()
+
+    def test_targeted_empty_movie_cleanup_keeps_unrelated_movie(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name in ("One", "Two"):
+                    movie = root / name
+                    movie.mkdir()
+                    (movie / f"{name}.mkv").touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                self._finish_incremental_scan(scanner, "library-1", root)
+
+                (root / "One" / "One.mkv").unlink()
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies(
+                    "library-1", root, "job-1", lambda: False, {"One"}
+                )
+                self._finish_incremental_scan(scanner, "library-1", root)
+
+                self.assertEqual(
+                    db.execute(
+                        "SELECT relative_path FROM library_entities ORDER BY relative_path"
+                    ),
+                    [("Two",)],
                 )
         finally:
             db.close()

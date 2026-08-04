@@ -155,10 +155,12 @@ class Config:
             if connection is not None:
                 connection.close()
         if not compatible:
-            raise RuntimeError(
-                "SQLite schema generation is not recognized; refusing to move the live database. "
-                "Run the configured Alembic migrations or restore a compatible database backup."
-            )
+            # Alembic owns schema compatibility and upgrades.  Do not archive or
+            # recreate a live database here: this code runs while Config is being
+            # imported, before Alembic has an opportunity to upgrade a valid
+            # older schema.  In particular, a bind-mounted SQLite database may
+            # reject a Windows/Docker rename even though it is perfectly usable.
+            return
 
     @property
     def database(self):

@@ -671,9 +671,6 @@ class LibraryScanner:
                 finished_at=finished,
                 message=f"Indexed {count} entries",
             )
-            from app.jobs import scheduler
-
-            scheduler.enqueue_catalog_projection(library_id)
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except JobTerminated:
             self._scan_complete = False

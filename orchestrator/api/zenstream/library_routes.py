@@ -637,6 +637,51 @@ async def terminate_scheduled_job(
     return run
 
 
+def _list_admin_items_sync(
+    library_id: str,
+    parent_id: str | None,
+    locale: str,
+    query: str,
+    page: int,
+    page_size: int,
+):
+    if not store.get(library_id):
+        raise HTTPException(404, "Library not found.")
+    parent_id = parent_id or None
+    query = query.strip()
+    if query:
+        ranked_ids = _rank_library_item_ids(
+            store.db, library_id, parent_id, locale, query
+        )
+        total = len(ranked_ids)
+        rows = [
+            (entity_id,)
+            for entity_id in ranked_ids[(page - 1) * page_size : page * page_size]
+        ]
+    else:
+        params = [library_id, parent_id]
+        where = "library_id=? AND parent_id IS ?"
+        total = store.db.execute(
+            f"SELECT COUNT(*) FROM library_entities WHERE {where}", params
+        )[0][0]
+        rows = store.db.execute(
+            f"SELECT id FROM library_entities WHERE {where} ORDER BY entity_type, relative_path COLLATE NOCASE LIMIT ? OFFSET ?",
+            params + [page_size, (page - 1) * page_size],
+        )
+    items = []
+    for row in rows:
+        item = _entity(row[0], locale)
+        item["metadata"] = _metadata_for(item, locale, False, fallback=False)
+        items.append(item)
+    return {
+        "items": items,
+        "page": page,
+        "pageSize": page_size,
+        "total": total,
+        "query": query,
+    }
+
+
 @router.get("/libraries/{library_id}/items")
 async def list_items(
     library_id: str,
@@ -650,41 +695,15 @@ async def list_items(
 ):
     require_admin(Username, TOKEN)
     locale = _configured_locale(locale)
-    if not store.get(library_id):
-        raise HTTPException(404, "Library not found.")
-    parentId = parentId or None
-    query = query.strip()
-    if query:
-        ranked_ids = _rank_library_item_ids(
-            store.db, library_id, parentId, locale, query
-        )
-        total = len(ranked_ids)
-        rows = [
-            (entity_id,)
-            for entity_id in ranked_ids[(page - 1) * pageSize : page * pageSize]
-        ]
-    else:
-        params = [library_id, parentId]
-        where = "library_id=? AND parent_id IS ?"
-        total = store.db.execute(
-            f"SELECT COUNT(*) FROM library_entities WHERE {where}", params
-        )[0][0]
-        rows = store.db.execute(
-            f"SELECT id FROM library_entities WHERE {where} ORDER BY entity_type, relative_path COLLATE NOCASE LIMIT ? OFFSET ?",
-            params + [pageSize, (page - 1) * pageSize],
-        )
-    items = []
-    for row in rows:
-        item = _entity(row[0], locale)
-        item["metadata"] = _metadata_for(item, locale, False, fallback=False)
-        items.append(item)
-    return {
-        "items": items,
-        "page": page,
-        "pageSize": pageSize,
-        "total": total,
-        "query": query,
-    }
+    return await asyncio.to_thread(
+        _list_admin_items_sync,
+        library_id,
+        parentId,
+        locale,
+        query,
+        page,
+        pageSize,
+    )
 
 
 @router.get("/library-items/{entity_id}")

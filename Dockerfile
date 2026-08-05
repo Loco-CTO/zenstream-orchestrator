@@ -2,9 +2,9 @@
 
 FROM node:26-slim AS dashboard-build
 WORKDIR /frontend
-COPY frontend/package.json frontend/package-lock.json ./
+COPY frontend/package.json ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --ignore-scripts --no-audit --no-fund
+    npm install --ignore-scripts --no-audit --no-fund --no-package-lock
 COPY frontend/ ./
 RUN npm run build && test -f /frontend/out/web/login/index.html
 

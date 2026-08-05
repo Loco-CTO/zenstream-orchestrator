@@ -11,7 +11,7 @@ from app.config import Config
 from app.library import JobTerminated, runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.providers import ProviderError
-from app.metadata_services import MetadataIngestService
+from app.metadata_services import MetadataIngestService, metadata_task_results
 from app.logging_config import get_logger
 from app.trickplay import TrickplayExtractor
 from app.intro_outro import IntroOutroDetector
@@ -410,70 +410,86 @@ class MetadataMissingJob:
             "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
             "WHERE p.provider IN ('tmdb','tvdb','musicbrainz') ORDER BY p.provider,e.entity_type,p.provider_id"
         )
-        items = {}
-        for provider, entity_type, provider_id in rows:
-            for locale in locales:
-                items.setdefault((entity_type, provider_id, locale), []).append(
-                    provider
-                )
+        items = list(rows)
+        total = len(items) * len(locales)
         self.store.update_run(
             run_id,
             state="running",
             started_at=now(),
             thread_name=threading.current_thread().name,
-            progress_total=len(items),
+            progress_total=total,
             message="Finding missing provider metadata",
         )
-        completed = 0
-        failures = []
-        for (entity_type, provider_id, locale), providers in items.items():
-            if should_terminate():
-                raise JobTerminated()
-            for provider in providers:
-                try:
-                    cached = ingest.metadata_service.cache.get(
-                        provider, entity_type, provider_id, locale
+        def process_item(item):
+            provider, entity_type, provider_id = item
+            item_failures = []
+            missing = []
+            for locale in locales:
+                cached = ingest.metadata_service.cache.get(
+                    provider, entity_type, provider_id, locale
+                )
+                if cached and not force:
+                    ingest.ingest_document(
+                        provider, entity_type, provider_id, locale, cached
                     )
-                    if cached and not force:
-                        ingest.ingest_document(
-                            provider, entity_type, provider_id, locale, cached
-                        )
-                    else:
-                        ingest.ingest_locale(provider, entity_type, provider_id, locale, force=force)
-                    if not ingest.metadata_service.cache.get(
-                        provider, entity_type, provider_id, locale
-                    ):
-                        raise ProviderError("Provider returned no cacheable metadata")
-                except (ProviderError, ValueError, OSError) as error:
-                    failure = {
-                        "provider": provider,
-                        "entityType": entity_type,
-                        "providerId": provider_id,
-                        "locale": locale,
-                        "error": f"{type(error).__name__}: {error}",
-                    }
-                    failures.append(failure)
-                    logger.exception(
-                        "scheduled missing metadata failed provider=%s entity_type=%s provider_id=%s locale=%s",
+                else:
+                    missing.append(locale)
+            if missing:
+                try:
+                    ingest.ingest_locales(
                         provider,
                         entity_type,
                         provider_id,
-                        locale,
+                        missing,
+                        force=force,
                     )
-            completed += 1
-            if completed % 10 == 0 or completed == len(items):
+                except (ProviderError, ValueError, OSError) as error:
+                    item_failures.extend(
+                        {
+                            "provider": provider,
+                            "entityType": entity_type,
+                            "providerId": provider_id,
+                            "locale": locale,
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                        for locale in missing
+                    )
+                    logger.exception(
+                        "scheduled missing metadata failed provider=%s entity_type=%s provider_id=%s locales=%s",
+                        provider,
+                        entity_type,
+                        provider_id,
+                        missing,
+                    )
+            return len(locales), item_failures
+
+        completed = 0
+        failures = []
+        next_update = 10
+        for item, result, error in metadata_task_results(
+            items, process_item, should_terminate
+        ):
+            if error is not None:
+                raise error
+            processed, item_failures = result
+            failures.extend(item_failures)
+            completed += processed
+            if completed >= next_update or completed == total:
                 self.store.update_run(
                     run_id,
                     progress_current=completed,
-                    message=f"Checked {completed} of {len(items)} entities",
+                    message=f"Checked {completed} of {total} metadata documents",
                 )
+                next_update = completed + 10
+        if should_terminate():
+            raise JobTerminated()
         if failures:
-            summary = f"Checked {completed} entities; {len(failures)} missing-metadata repairs failed"
+            summary = f"Checked {completed} metadata documents; {len(failures)} repairs failed"
             self.store.update_run(
                 run_id,
                 state="failed",
                 progress_current=completed,
-                progress_total=len(items),
+                progress_total=total,
                 finished_at=now(),
                 message=summary,
                 error=summary,
@@ -489,9 +505,9 @@ class MetadataMissingJob:
                 run_id,
                 state="completed",
                 progress_current=completed,
-                progress_total=len(items),
+                progress_total=total,
                 finished_at=now(),
-                message=f"Checked {completed} entities for missing metadata",
+                message=f"Checked {completed} metadata documents for missing metadata",
             )
 
 

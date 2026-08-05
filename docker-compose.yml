@@ -7,7 +7,7 @@ services:
       - "${ORCHESTRATOR_PORT:-9088}:9088"
     environment:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY}
-      # The image contains static ffmpeg/ffprobe binaries. These overrides are
+      # The image contains bundled ffmpeg/ffprobe binaries. These overrides are
       # optional and are only needed for development or custom tool builds.
       FFMPEG_PATH: "${FFMPEG_PATH:-}"
       FFPROBE_PATH: "${FFPROBE_PATH:-}"

@@ -1449,7 +1449,7 @@ class LibraryScanner:
 
     def _fetch_seen_locales(self, should_terminate: Callable[[], bool]) -> None:
         """Populate configured locales only for inventory changes from this scan."""
-        from app.metadata_services import MetadataIngestService
+        from app.metadata_services import MetadataIngestService, metadata_task_results
         from app.providers import MetadataService
 
         ingest = MetadataIngestService(MetadataService())
@@ -1465,8 +1465,8 @@ class LibraryScanner:
             else []
         )
         locales = ingest.locales()
+        tasks = {}
         for entity_id, entity_type, provider, identifier_type, provider_id in rows:
-            self._check_termination(should_terminate)
             if provider not in {"tmdb", "tvdb", "musicbrainz"}:
                 continue
             for locale in locales:
@@ -1479,23 +1479,30 @@ class LibraryScanner:
                     # rematerialize or refetch an already cached locale; the
                     # explicit metadata refresh job owns that work.
                     continue
-                try:
-                    ingest.ingest_locale(
-                        provider,
-                        entity_type,
-                        str(provider_id),
-                        locale,
-                        force=False,
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "rescan localized metadata failed entity_type=%s provider=%s provider_id=%s locale=%s: %s",
-                        entity_type,
-                        provider,
-                        provider_id,
-                        locale,
-                        error,
-                    )
+                tasks.setdefault(
+                    (provider, entity_type, str(provider_id)), []
+                ).append(locale)
+
+        def fetch_locales(task):
+            (provider, entity_type, provider_id), missing = task
+            return ingest.ingest_locales(
+                provider, entity_type, provider_id, missing, force=False
+            )
+
+        for task, _result, error in metadata_task_results(
+            sorted(tasks.items()), fetch_locales, should_terminate
+        ):
+            self._check_termination(should_terminate)
+            if error is not None:
+                (provider, entity_type, provider_id), missing = task
+                logger.warning(
+                    "rescan localized metadata failed entity_type=%s provider=%s provider_id=%s locales=%s: %s",
+                    entity_type,
+                    provider,
+                    provider_id,
+                    missing,
+                    error,
+                )
 
     def _ids(self, entity_id: str, values: Iterable[tuple[str, str, str]]) -> None:
         from app.providers import PRIMARY_PROVIDER_BY_ENTITY
@@ -2041,6 +2048,12 @@ class LibraryScanner:
         for provider, provider_id in by_provider.items():
             if provider not in {"tvdb", "tmdb"}:
                 continue
+            if provider == "tvdb" and (
+                hasattr(service, "fetch_locales") or hasattr(service, "fetch")
+            ):
+                ingest.ingest_locales(
+                    provider, "series", provider_id, locales, force=False
+                )
             aggregate = None
             for locale in locales:
                 try:
@@ -2298,26 +2311,27 @@ class LibraryScanner:
                 )
                 if not provider_id:
                     continue
-                for locale in ingest.locales():
-                    self.store.update_job(
-                        job_id,
-                        message=(
-                            f"Fetching {provider} {entity_type} metadata "
-                            f"{relative_path} ({index}/{len(rows)}, {locale})"
-                        ),
+                locales = ingest.locales()
+                self.store.update_job(
+                    job_id,
+                    message=(
+                        f"Fetching {provider} {entity_type} metadata "
+                        f"{relative_path} ({index}/{len(rows)}, {len(locales)} locales)"
+                    ),
+                )
+                logger.info(
+                    "metadata child locale batch start entity_id=%s type=%s provider=%s provider_id=%s locales=%s",
+                    entity_id,
+                    entity_type,
+                    provider,
+                    provider_id,
+                    locales,
+                )
+                try:
+                    normalized_by_locale = ingest.ingest_locales(
+                        provider, entity_type, provider_id, locales, force=False
                     )
-                    logger.info(
-                        "metadata child locale start entity_id=%s type=%s provider=%s provider_id=%s locale=%s",
-                        entity_id,
-                        entity_type,
-                        provider,
-                        provider_id,
-                        locale,
-                    )
-                    try:
-                        normalized = ingest.ingest_locale(
-                            provider, entity_type, provider_id, locale, force=False
-                        )
+                    for locale, normalized in normalized_by_locale.items():
                         fetched = True
                         if provider == required:
                             required_succeeded = True
@@ -2331,19 +2345,19 @@ class LibraryScanner:
                             provider_id,
                             locale,
                         )
-                    except Exception as error:
-                        errors.append(
-                            f"{provider}/{locale}: {type(error).__name__}: {error}"
-                        )
-                        logger.warning(
-                            "child metadata seed failed entity_id=%s type=%s provider=%s provider_id=%s locale=%s: %s",
-                            entity_id,
-                            entity_type,
-                            provider,
-                            provider_id,
-                            locale,
-                            error,
-                        )
+                except Exception as error:
+                    errors.append(
+                        f"{provider}/{','.join(locales)}: {type(error).__name__}: {error}"
+                    )
+                    logger.warning(
+                        "child metadata seed failed entity_id=%s type=%s provider=%s provider_id=%s locales=%s: %s",
+                        entity_id,
+                        entity_type,
+                        provider,
+                        provider_id,
+                        locales,
+                        error,
+                    )
             if not fetched or (required and not required_succeeded):
                 raise ValueError(
                     f"Metadata resolution failed for {entity_type} '{relative_path}': required provider {required or 'provider'} could not be seeded; {'; '.join(errors) or 'no usable provider metadata'}"
@@ -2379,50 +2393,47 @@ class LibraryScanner:
         if provider not in {"tmdb", "tvdb", "musicbrainz"}:
             return
 
-        errors = []
         ingest = MetadataIngestService(service)
         locales = ingest.locales()
-        for locale in locales:
+        if progress:
+            progress(
+                f"Fetching {provider} {entity_type} {provider_id} metadata ({len(locales)} locales)"
+            )
+        logger.info(
+            "metadata locale batch start provider=%s entity_type=%s provider_id=%s locales=%s",
+            provider,
+            entity_type,
+            provider_id,
+            locales,
+        )
+        try:
+            ingest.ingest_locales(
+                provider, entity_type, provider_id, locales, force=False
+            )
             if progress:
                 progress(
-                    f"Fetching {provider} {entity_type} {provider_id} metadata ({locale})"
+                    f"Cached {provider} {entity_type} {provider_id} metadata ({len(locales)} locales)"
                 )
             logger.info(
-                "metadata locale start provider=%s entity_type=%s provider_id=%s locale=%s",
+                "metadata locale batch complete provider=%s entity_type=%s provider_id=%s locales=%s",
                 provider,
                 entity_type,
                 provider_id,
-                locale,
+                locales,
             )
-            try:
-                ingest.ingest_locale(
-                    provider, entity_type, provider_id, locale, force=False
-                )
-                if progress:
-                    progress(
-                        f"Cached {provider} {entity_type} {provider_id} metadata ({locale})"
-                    )
-                logger.info(
-                    "metadata locale complete provider=%s entity_type=%s provider_id=%s locale=%s",
-                    provider,
-                    entity_type,
-                    provider_id,
-                    locale,
-                )
-            except Exception as error:
-                errors.append(f"{locale}: {type(error).__name__}: {error}")
-                logger.warning(
-                    "localized metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s: %s",
-                    provider,
-                    entity_type,
-                    provider_id,
-                    locale,
-                    error,
-                )
-        if required and errors and len(errors) == len(locales):
-            raise ValueError(
-                f"No metadata locale could be fetched for {provider} {entity_type} {provider_id}: {'; '.join(errors)}"
+        except Exception as error:
+            logger.warning(
+                "localized metadata batch fetch failed provider=%s entity_type=%s provider_id=%s locales=%s: %s",
+                provider,
+                entity_type,
+                provider_id,
+                locales,
+                error,
             )
+            if required:
+                raise ValueError(
+                    f"No metadata locale could be fetched for {provider} {entity_type} {provider_id}: {type(error).__name__}: {error}"
+                ) from error
 
     def _persist_normalized_ids(
         self, entity_id: str, entity_type: str, normalized: dict
@@ -3664,12 +3675,17 @@ class LibraryScanner:
                             (collection, source_entity, position),
                         )
                     self._mark_changed(collection)
-                for locale in ingest.locales():
-                    try:
-                        normalized = ingest.ingest_locale(
-                            "tvdb", "collection", list_id, locale, force=False
-                        )
-                    except Exception:
+                collection_locales = ingest.locales()
+                try:
+                    ingest.ingest_locales(
+                        "tvdb",
+                        "collection",
+                        list_id,
+                        collection_locales,
+                        force=False,
+                    )
+                except Exception:
+                    for locale in collection_locales:
                         normalized = {
                             "title": value["title"],
                             "overview": value["data"].get("overview"),

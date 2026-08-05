@@ -265,3 +265,20 @@ class MetadataCache:
                 (now + timedelta(days=7)).isoformat(),
             ),
         )
+
+    def put_images(self, records) -> None:
+        records = list(records)
+        if not records:
+            return
+        now = utc_now()
+        fetched_at = now.isoformat()
+        expires_at = (now + timedelta(days=7)).isoformat()
+        for record in records:
+            if record[4] not in ARTWORK_CATEGORY_SET:
+                raise ValueError(f"Unsupported image type '{record[4]}'.")
+        with self.db.transaction() as cursor:
+            cursor.executemany(
+                "INSERT INTO metadata_images(provider, entity_type, provider_id, locale, image_type, image_url, blur_hash, local_path, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(provider, entity_type, provider_id, locale, image_type, image_url) DO UPDATE SET blur_hash=excluded.blur_hash, local_path=excluded.local_path, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
+                [(*record, fetched_at, expires_at) for record in records],
+            )

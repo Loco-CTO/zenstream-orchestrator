@@ -1,10 +1,13 @@
 .venv
 **/node_modules
-**/.next
+**/.next*
 **/out
 __pycache__
 *.py[cod]
 *.log
+logs
+.pytest_cache
+.vscode
 .env
 .env.*
 !.env.example

@@ -21,15 +21,19 @@ class TVDBTLSCompatibilityTest(unittest.TestCase):
         self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
         self.assertEqual(context.maximum_version, ssl.TLSVersion.TLSv1_2)
 
-    @patch("app.providers.httpx.get")
-    def test_api_requests_use_the_tls_12_context(self, get):
+    def test_api_requests_use_the_tls_12_context(self):
         response = MagicMock()
         response.json.return_value = {}
-        get.return_value = response
+        response.status_code = 200
+        response.headers = {}
+        client = TVDBClient({"apiKey": "key"})
+        transport = MagicMock()
+        transport.get.return_value = response
 
-        TVDBClient({"apiKey": "key"})._get("https://api4.thetvdb.com/v4/languages")
+        with patch.object(client, "_http_client", return_value=transport) as factory:
+            client._get("https://api4.thetvdb.com/v4/languages")
 
-        context = get.call_args.kwargs["verify"]
+        context = factory.call_args.args[0]
         self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
         self.assertEqual(context.maximum_version, ssl.TLSVersion.TLSv1_2)
 

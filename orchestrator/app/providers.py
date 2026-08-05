@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 import threading
 import time
 import re
@@ -235,6 +238,23 @@ class ProviderClient:
     def __init__(self, timeout: float = 20):
         configured = float(os.getenv("METADATA_PROVIDER_TIMEOUT_SECONDS", str(timeout)))
         self.timeout = max(3.0, min(60.0, configured))
+        self._http_clients = {}
+        self._http_clients_lock = threading.Lock()
+
+    def _http_client(self, verify=True):
+        key = (id(verify), self.timeout)
+        with self._http_clients_lock:
+            client = self._http_clients.get(key)
+            if client is None:
+                client = httpx.Client(
+                    timeout=self.timeout,
+                    verify=verify,
+                    limits=httpx.Limits(
+                        max_connections=32, max_keepalive_connections=16
+                    ),
+                )
+                self._http_clients[key] = client
+            return client
 
     def _get(self, url: str, **kwargs) -> dict:
         started = time.monotonic()
@@ -250,7 +270,29 @@ class ProviderClient:
         )
         try:
             logger.debug("provider request url=%s params=%s", url, request_params)
-            response = httpx.get(url, timeout=self.timeout, **kwargs)
+            verify = kwargs.pop("verify", True)
+            client = self._http_client(verify)
+            response = None
+            for attempt in range(3):
+                response = client.get(url, timeout=self.timeout, **kwargs)
+                if response.status_code not in {429, 502, 503, 504} or attempt == 2:
+                    break
+                retry_after = response.headers.get("retry-after")
+                try:
+                    delay = float(retry_after) if retry_after is not None else 0.25 * (2**attempt)
+                except ValueError:
+                    delay = 0.25 * (2**attempt)
+                delay = max(0.05, min(5.0, delay))
+                logger.warning(
+                    "metadata provider request retry client=%s url=%s status=%s delay_seconds=%.2f attempt=%s",
+                    client_name,
+                    url,
+                    response.status_code,
+                    delay,
+                    attempt + 1,
+                )
+                time.sleep(delay)
+            assert response is not None
             response.raise_for_status()
             payload = response.json()
             logger.info(
@@ -388,37 +430,73 @@ class TMDBClient(ProviderClient):
         ]
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
-        language = self._language_code(locale)
-        image_language = self._include_image_language(language)
+        return self.details_all_locales(entity_type, provider_id, [locale])[locale]
+
+    @staticmethod
+    def _translation_for(payload: dict, locale: str) -> dict:
+        normalized = _normalize_language_tag(locale)
+        language, _, region = normalized.partition("-")
+        candidates = []
+        for translation in (payload.get("translations") or {}).get("translations", []) or []:
+            if not isinstance(translation, dict):
+                continue
+            if str(translation.get("iso_639_1") or "").lower() != language:
+                continue
+            country = str(translation.get("iso_3166_1") or "").upper()
+            rank = 0 if region and country == region else 1 if not region else 2
+            candidates.append((rank, translation.get("data") or {}))
+        return min(candidates, default=(99, {}), key=lambda value: value[0])[1]
+
+    def details_all_locales(
+        self, entity_type: str, provider_id: str, locales: list[str]
+    ) -> dict[str, dict]:
+        if not locales:
+            return {}
+        languages = [self._language_code(locale) for locale in locales]
+        language = languages[0]
+        image_language = ",".join(
+            dict.fromkeys(
+                value
+                for current in languages
+                for value in self._include_image_language(current).split(",")
+            )
+        )
         if entity_type == "season":
             series_id, season = provider_id.split(":", 1)
-            return self._request(
+            payload = self._request(
                 f"/tv/{quote(series_id)}/season/{quote(season)}",
                 params={
                     "language": language,
                     "include_image_language": image_language,
-                    "append_to_response": "images,external_ids,videos",
+                    "append_to_response": "images,external_ids,videos,translations",
                 },
             )
-        if entity_type == "episode":
+        elif entity_type == "episode":
             series_id, season, episode = provider_id.split(":", 2)
-            return self._request(
+            payload = self._request(
                 f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}",
                 params={
                     "language": language,
                     "include_image_language": image_language,
-                    "append_to_response": "images,external_ids,videos",
+                    "append_to_response": "images,external_ids,videos,translations",
                 },
             )
-        kind = "tv" if entity_type == "series" else "movie"
-        return self._request(
-            f"/{kind}/{quote(provider_id)}",
-            params={
-                "language": language,
-                "include_image_language": image_language,
-                "append_to_response": "images,external_ids,credits,videos",
-            },
-        )
+        else:
+            kind = "tv" if entity_type == "series" else "movie"
+            payload = self._request(
+                f"/{kind}/{quote(provider_id)}",
+                params={
+                    "language": language,
+                    "include_image_language": image_language,
+                    "append_to_response": "images,external_ids,credits,videos,translations",
+                },
+            )
+        values = {}
+        for locale in locales:
+            localized = copy.deepcopy(payload)
+            localized.update(self._translation_for(payload, locale))
+            values[locale] = localized
+        return values
 
     def series_hierarchy(self, provider_id: str, locale: str) -> dict:
         """Fetch season details, whose responses include their episode lists."""
@@ -819,6 +897,11 @@ class TVDBClient(ProviderClient):
         return self._request(f"/lists/{quote(list_id)}/extended")
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
+        return self.details_all_locales(entity_type, provider_id, [locale])[locale]
+
+    def details_all_locales(
+        self, entity_type: str, provider_id: str, locales: list[str]
+    ) -> dict[str, dict]:
         endpoint = {
             "series": "series",
             "episode": "episodes",
@@ -831,24 +914,35 @@ class TVDBClient(ProviderClient):
         # for the requested translation explicitly, including English, so a
         # response cached under `en` cannot contain the provider's default
         # language.
-        if locale:
-            try:
-                translated = self._request(
-                    f"/{endpoint}/{quote(provider_id)}/translations/{quote(self._language_code(locale))}"
-                )
-                payload["translation"] = translated.get("data")
-            except ProviderError as error:
-                # TVDB does not expose translations for every entity (notably
-                # some seasons). Extended metadata is still usable, so an
-                # optional translation miss must not abort the whole scan.
-                logger.debug(
-                    "TVDB translation unavailable provider_id=%s entity_type=%s locale=%s error=%s",
-                    provider_id,
-                    entity_type,
-                    locale,
-                    error,
-                )
-        return payload
+        values = {locale: copy.deepcopy(payload) for locale in locales}
+
+        def fetch_translation(locale: str):
+            translated = self._request(
+                f"/{endpoint}/{quote(provider_id)}/translations/{quote(self._language_code(locale))}"
+            )
+            return locale, translated.get("data")
+
+        workers = min(8, len(locales))
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+            futures = {
+                executor.submit(fetch_translation, locale): locale
+                for locale in locales
+                if locale
+            }
+            for future in as_completed(futures):
+                locale = futures[future]
+                try:
+                    _, translation = future.result()
+                    values[locale]["translation"] = translation
+                except ProviderError as error:
+                    logger.debug(
+                        "TVDB translation unavailable provider_id=%s entity_type=%s locale=%s error=%s",
+                        provider_id,
+                        entity_type,
+                        locale,
+                        error,
+                    )
+        return values
 
     def series_hierarchy(self, provider_id: str, season_type: str = "default") -> dict:
         """Fetch a series and all episode identities from TVDB's hierarchy API."""
@@ -1306,6 +1400,9 @@ class MetadataService:
     def __init__(self):
         self.credentials = MetadataCredentials()
         self.cache = MetadataCache()
+        self._tvdb_hierarchies: dict[str, dict] = {}
+        self._clients = {}
+        self._clients_lock = threading.Lock()
 
     def language_options(self) -> list[dict[str, str]]:
         """Return canonical metadata locales known by configured providers."""
@@ -1353,21 +1450,34 @@ class MetadataService:
             return lock
 
     def client(self, provider: str):
-        if provider == "musicbrainz":
-            return MusicBrainzClient()
-        credential = self.credentials.get(provider)
-        if not credential:
-            raise ProviderError(f"{provider.upper()} is not configured")
-        if provider == "tmdb":
-            return TMDBClient(
-                credential,
-                self.credentials.configured()[provider].get(
-                    "credentialType", "api_key"
-                ),
-            )
-        if provider == "tvdb":
-            return TVDBClient(credential)
-        raise ProviderError(f"Unsupported metadata provider '{provider}'")
+        clients = getattr(self, "_clients", None)
+        if clients is None:
+            clients = self._clients = {}
+            self._clients_lock = threading.Lock()
+        with self._clients_lock:
+            if provider in clients:
+                return clients[provider]
+            if provider == "musicbrainz":
+                client = MusicBrainzClient()
+            else:
+                credential = self.credentials.get(provider)
+                if not credential:
+                    raise ProviderError(f"{provider.upper()} is not configured")
+                if provider == "tmdb":
+                    client = TMDBClient(
+                        credential,
+                        self.credentials.configured()[provider].get(
+                            "credentialType", "api_key"
+                        ),
+                    )
+                elif provider == "tvdb":
+                    client = TVDBClient(credential)
+                else:
+                    raise ProviderError(
+                        f"Unsupported metadata provider '{provider}'"
+                    )
+            clients[provider] = client
+            return client
 
     def test(
         self,
@@ -1394,50 +1504,95 @@ class MetadataService:
         locale: str,
         force: bool = False,
     ) -> dict:
-        lock = self._lock_for(provider, entity_type, provider_id, locale)
-        with lock:
-            # Another request may have populated the cache while this request
-            # was waiting. Re-check before making a provider call.
-            cached = self.cache.get(provider, entity_type, provider_id, locale)
-            if cached and not force and not cached.pop("_stale", False):
-                return cached
+        return self.fetch_locales(
+            provider, entity_type, provider_id, [locale], force=force
+        )[locale]
+
+    def fetch_locales(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locales: list[str],
+        force: bool = False,
+    ) -> dict[str, dict]:
+        locales = list(dict.fromkeys(locales))
+        if not locales:
+            return {}
+        locks = [
+            self._lock_for(provider, entity_type, provider_id, locale)
+            for locale in sorted(locales)
+        ]
+        with ExitStack() as stack:
+            for lock in locks:
+                stack.enter_context(lock)
+            values = {}
+            missing = []
+            for locale in locales:
+                cached = self.cache.get(provider, entity_type, provider_id, locale)
+                if cached and not force and not cached.pop("_stale", False):
+                    values[locale] = cached
+                else:
+                    missing.append(locale)
+            if not missing:
+                return values
             logger.debug(
-                "metadata fetch provider=%s entity_type=%s provider_id=%s locale=%s force=%s",
+                "metadata fetch provider=%s entity_type=%s provider_id=%s locales=%s force=%s",
                 provider,
                 entity_type,
                 provider_id,
-                locale,
+                missing,
                 force,
             )
             client = self.client(provider)
             try:
-                payload = client.details(entity_type, provider_id, locale)
-                normalized = client.normalize(entity_type, provider_id, payload)
+                if hasattr(client, "details_all_locales"):
+                    payloads = client.details_all_locales(
+                        entity_type, provider_id, missing
+                    )
+                else:
+                    payloads = {
+                        locale: client.details(entity_type, provider_id, locale)
+                        for locale in missing
+                    }
             except Exception as error:
                 logger.exception(
-                    "metadata fetch failed provider=%s entity_type=%s provider_id=%s locale=%s",
+                    "metadata fetch failed provider=%s entity_type=%s provider_id=%s locales=%s",
                     provider,
                     entity_type,
                     provider_id,
-                    locale,
+                    missing,
                 )
                 if isinstance(error, ProviderError):
                     raise
                 raise ProviderError(
                     f"{provider} {entity_type} {provider_id} details normalization failed: {type(error).__name__}: {error}"
                 ) from error
-            self.cache.put(provider, entity_type, provider_id, locale, normalized)
-            from app.metadata_services import MetadataSearchProjection
-            MetadataSearchProjection(self.cache.db).project(provider, entity_type, provider_id, locale, normalized)
-            logger.info(
-                "metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d",
-                provider,
-                entity_type,
-                provider_id,
-                locale,
-                len(normalized.get("images", [])),
-            )
-            return normalized
+            for locale in missing:
+                try:
+                    normalized = client.normalize(
+                        entity_type, provider_id, payloads.get(locale, {})
+                    )
+                except Exception as error:
+                    raise ProviderError(
+                        f"{provider} {entity_type} {provider_id} {locale} normalization failed: {type(error).__name__}: {error}"
+                    ) from error
+                self.cache.put(provider, entity_type, provider_id, locale, normalized)
+                from app.metadata_services import MetadataSearchProjection
+
+                MetadataSearchProjection(self.cache.db).project(
+                    provider, entity_type, provider_id, locale, normalized
+                )
+                logger.info(
+                    "metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d",
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    len(normalized.get("images", [])),
+                )
+                values[locale] = normalized
+            return values
 
     def _cache_normalized(
         self,
@@ -1511,7 +1666,13 @@ class MetadataService:
         client = self.client(provider)
         records = {"series": None, "seasons": [], "episodes": []}
         if provider == "tvdb":
-            hierarchy = client.series_hierarchy(provider_id)
+            hierarchies = getattr(self, "_tvdb_hierarchies", None)
+            if hierarchies is None:
+                hierarchies = self._tvdb_hierarchies = {}
+            hierarchy = hierarchies.get(provider_id)
+            if hierarchy is None:
+                hierarchy = client.series_hierarchy(provider_id)
+                hierarchies[provider_id] = hierarchy
             # TVDB's hierarchy endpoint has no locale parameter and its
             # extended series record is commonly returned in the catalogue's
             # default language.  Caching that record under every configured

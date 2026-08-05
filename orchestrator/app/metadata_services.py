@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import copy
+from contextlib import contextmanager
 import json
 import hashlib
 import os
 import threading
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
@@ -34,6 +35,64 @@ from app.foreground import active_requests
 logger = get_logger("metadata")
 
 
+_fetch_activity_lock = threading.Lock()
+_active_fetches = 0
+
+
+def active_metadata_fetches() -> int:
+    with _fetch_activity_lock:
+        return _active_fetches
+
+
+@contextmanager
+def metadata_fetch_activity():
+    global _active_fetches
+    with _fetch_activity_lock:
+        _active_fetches += 1
+    try:
+        yield
+    finally:
+        with _fetch_activity_lock:
+            _active_fetches -= 1
+
+
+def metadata_task_results(tasks, work, should_terminate=None, max_workers=None):
+    """Run metadata I/O concurrently without creating an unbounded future queue."""
+    should_terminate = should_terminate or (lambda: False)
+    workers = (
+        configured_worker_limit("METADATA_FETCH_WORKERS", 64, default=12)
+        if max_workers is None
+        else max(1, min(64, max_workers))
+    )
+    iterator = iter(tasks)
+    with ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="zenstream-metadata-fetch"
+    ) as executor:
+        while True:
+            if should_terminate():
+                return
+            batch = []
+            for _ in range(workers * 4):
+                try:
+                    task = next(iterator)
+                except StopIteration:
+                    break
+                batch.append((task, executor.submit(work, task)))
+            if not batch:
+                return
+            by_future = {future: task for task, future in batch}
+            for future in as_completed(by_future):
+                if should_terminate():
+                    for pending in by_future:
+                        pending.cancel()
+                    return
+                task = by_future[future]
+                try:
+                    yield task, future.result(), None
+                except Exception as error:
+                    yield task, None, error
+
+
 class MetadataAssetExecutor:
     def __init__(self, max_workers: int | None = None):
         self.max_workers = (
@@ -57,7 +116,7 @@ class MetadataAssetExecutor:
             self._states[key] = "pending"
 
             def throttled_work():
-                while active_requests():
+                while active_requests() or active_metadata_fetches():
                     threading.Event().wait(0.05)
                 return work()
 
@@ -587,6 +646,7 @@ class MetadataIngestService:
             metadata_service = MetadataService()
         self.metadata_service = metadata_service
         self.settings = settings or MetadataLanguageSettings()
+        self._locales = self.settings.get()
         if image_ingest is None:
             cache = getattr(metadata_service, "cache", None)
             if cache is not None and getattr(cache, "db", None) is not None:
@@ -600,7 +660,7 @@ class MetadataIngestService:
         self.credit_ingest = credit_ingest
 
     def locales(self) -> list[str]:
-        return self.settings.get()
+        return list(self._locales)
 
     def ingest(
         self,
@@ -614,16 +674,58 @@ class MetadataIngestService:
         if provider not in {"tmdb", "tvdb", "musicbrainz"}:
             return []
         should_terminate = should_terminate or (lambda: False)
-        values = []
+        locales = []
         for locale in self.locales():
             if should_terminate():
                 break
-            values.append(
-                self.ingest_locale(
-                    provider, entity_type, provider_id, locale, force=force
-                )
+            locales.append(locale)
+        return list(
+            self.ingest_locales(
+                provider, entity_type, provider_id, locales, force=force
+            ).values()
+        )
+
+    def ingest_locales(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locales: list[str] | None = None,
+        *,
+        force: bool = False,
+    ) -> dict[str, dict]:
+        locales = list(dict.fromkeys(locales or self.locales()))
+        unsupported = [locale for locale in locales if locale not in self._locales]
+        if unsupported:
+            raise ValueError(
+                f"Metadata language is not configured: {unsupported[0]}"
             )
-        return values
+        with metadata_fetch_activity():
+            if hasattr(self.metadata_service, "fetch_locales"):
+                values = self.metadata_service.fetch_locales(
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locales,
+                    force=force,
+                )
+            else:
+                values = {
+                    locale: self.metadata_service.fetch(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        force=force,
+                    )
+                    for locale in locales
+                }
+        return {
+            locale: self.ingest_document(
+                provider, entity_type, provider_id, locale, values[locale]
+            )
+            for locale in locales
+        }
 
     def ingest_locale(
         self,
@@ -636,12 +738,9 @@ class MetadataIngestService:
     ) -> dict:
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
-        normalized = self.metadata_service.fetch(
-            provider, entity_type, provider_id, locale, force=force
-        )
-        return self.ingest_document(
-            provider, entity_type, provider_id, locale, normalized
-        )
+        return self.ingest_locales(
+            provider, entity_type, provider_id, [locale], force=force
+        )[locale]
 
     def ingest_document(
         self,
@@ -685,6 +784,8 @@ class MetadataImageIngestService:
     """Download every normalized artwork item during scan/refresh ingestion."""
 
     MAX_IMAGE_BYTES = 20 * 1024 * 1024
+    _http_local = threading.local()
+    _file_locks = tuple(threading.Lock() for _ in range(64))
 
     def __init__(
         self,
@@ -722,6 +823,10 @@ class MetadataImageIngestService:
         name = hashlib.sha256(url.encode("utf-8")).hexdigest()
         return self.image_root / f"{name}.webp"
 
+    @classmethod
+    def _file_lock(cls, target: Path):
+        return cls._file_locks[hash(str(target)) % len(cls._file_locks)]
+
     def _download(self, url: str, target: Path) -> None:
         if self.downloader is not None:
             content = self.downloader(url)
@@ -731,12 +836,21 @@ class MetadataImageIngestService:
             configured_timeout = float(
                 os.getenv("METADATA_IMAGE_TIMEOUT_SECONDS", "20")
             )
-            response = httpx.get(
-                url,
-                timeout=max(3.0, min(60.0, configured_timeout)),
-                follow_redirects=True,
-                headers={"Accept": "image/*", "User-Agent": "ZenStream/metadata"},
-            )
+            timeout = max(3.0, min(60.0, configured_timeout))
+            client = getattr(self._http_local, "client", None)
+            if client is None:
+                client = self._http_local.client = httpx.Client(
+                    timeout=timeout,
+                    follow_redirects=True,
+                    headers={
+                        "Accept": "image/*",
+                        "User-Agent": "ZenStream/metadata",
+                    },
+                    limits=httpx.Limits(
+                        max_connections=16, max_keepalive_connections=8
+                    ),
+                )
+            response = client.get(url, timeout=timeout)
             response.raise_for_status()
             content_type = response.headers.get("content-type", "").split(";", 1)[0]
             if content_type and not content_type.startswith("image/"):
@@ -770,6 +884,7 @@ class MetadataImageIngestService:
         if self.image_root is None:
             return {"ready": 0, "failed": 0, "skipped": 0}
         ready = failed = skipped = 0
+        records = []
         images = document.get("images", []) if isinstance(document, dict) else []
         for image in images if isinstance(images, list) else []:
             if not isinstance(image, dict):
@@ -785,30 +900,42 @@ class MetadataImageIngestService:
             if target is None:
                 continue
             try:
-                if target.is_file() and target.stat().st_size > 0:
-                    skipped += 1
-                else:
-                    self._download(url, target)
-                    ready += 1
-                blur_hash = None
-                try:
-                    blur_hash = self.hasher(target)
-                except Exception as error:
-                    logger.warning(
-                        "metadata image BlurHash encoding failed type=%s url=%s error=%s",
+                with self._file_lock(target):
+                    if target.is_file() and target.stat().st_size > 0:
+                        skipped += 1
+                    else:
+                        self._download(url, target)
+                        ready += 1
+                existing = (
+                    self.db.execute(
+                        "SELECT blur_hash FROM metadata_images WHERE image_url=? AND local_path=? AND blur_hash IS NOT NULL LIMIT 1",
+                        (url, str(target)),
+                    )
+                    if hasattr(self.cache, "put_images")
+                    else []
+                )
+                blur_hash = existing[0][0] if existing else None
+                if blur_hash is None:
+                    try:
+                        blur_hash = self.hasher(target)
+                    except Exception as error:
+                        logger.warning(
+                            "metadata image BlurHash encoding failed type=%s url=%s error=%s",
+                            image_type,
+                            url,
+                            error,
+                        )
+                records.append(
+                    (
+                        provider,
+                        entity_type,
+                        provider_id,
+                        image.get("language"),
                         image_type,
                         url,
-                        error,
+                        blur_hash,
+                        str(target),
                     )
-                self.cache.put_image(
-                    provider,
-                    entity_type,
-                    provider_id,
-                    image.get("language"),
-                    image_type,
-                    url,
-                    blur_hash,
-                    str(target),
                 )
             except Exception as error:
                 failed += 1
@@ -822,6 +949,12 @@ class MetadataImageIngestService:
                     url,
                     error,
                 )
+        if records:
+            if hasattr(self.cache, "put_images"):
+                self.cache.put_images(records)
+            else:
+                for record in records:
+                    self.cache.put_image(*record)
         return {"ready": ready, "failed": failed, "skipped": skipped}
 
 
@@ -865,35 +998,47 @@ class PersonCreditIngestService:
                     values.append((credit_type, index, record))
         return values
 
-    def _portrait(self, person_id: str, image_url: object) -> None:
+    def _portrait(self, person_id: str, image_url: object):
         if not isinstance(image_url, str) or not image_url:
-            return
+            return None
         parsed = urlparse(image_url)
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.netloc
             or self.image_root is None
         ):
-            return
+            return None
         target = self.images._target(image_url)
         if target is None:
-            return
+            return None
         try:
-            if not target.is_file() or not target.stat().st_size:
-                self.images._download(image_url, target)
-            blur_hash = None
+            current = self.db.execute(
+                "SELECT image_url,local_path,image_blur_hash FROM people WHERE id=?",
+                (person_id,),
+            )
+            if (
+                current
+                and current[0][0] == image_url
+                and current[0][1] == str(target)
+                and current[0][2]
+                and target.is_file()
+                and target.stat().st_size
+            ):
+                return None
+            with self.images._file_lock(target):
+                if not target.is_file() or not target.stat().st_size:
+                    self.images._download(image_url, target)
+            blur_hash = current[0][2] if current and current[0][0] == image_url else None
             try:
-                blur_hash = self.images.hasher(target)
+                if blur_hash is None:
+                    blur_hash = self.images.hasher(target)
             except Exception as error:
                 logger.warning(
                     "person portrait BlurHash encoding failed url=%s error=%s",
                     image_url,
                     error,
                 )
-            self.db.execute(
-                "UPDATE people SET image_url=?,local_path=?,image_blur_hash=?,updated_at=? WHERE id=?",
-                (image_url, str(target), blur_hash, iso_now(), person_id),
-            )
+            return (image_url, str(target), blur_hash, iso_now(), person_id)
         except Exception as error:
             logger.warning(
                 "person portrait ingest failed person_id=%s url=%s error=%s",
@@ -901,6 +1046,7 @@ class PersonCreditIngestService:
                 image_url,
                 error,
             )
+            return None
 
     def _person_id(
         self, cursor, provider: str, identity: str, name: str, locale: str
@@ -1001,5 +1147,14 @@ class PersonCreditIngestService:
                     "INSERT INTO entity_person_credits(id,entity_id,person_id,provider,locale,credit_type,role,department,credit_order) VALUES(?,?,?,?,?,?,?,?,?)",
                     credits,
                 )
-        for person_id, image_url in portraits:
-            self._portrait(person_id, image_url)
+        updates = [
+            update
+            for person_id, image_url in portraits
+            if (update := self._portrait(person_id, image_url)) is not None
+        ]
+        if updates:
+            with self.db.transaction() as cursor:
+                cursor.executemany(
+                    "UPDATE people SET image_url=?,local_path=?,image_blur_hash=?,updated_at=? WHERE id=?",
+                    updates,
+                )

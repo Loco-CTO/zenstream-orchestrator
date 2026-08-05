@@ -40,6 +40,22 @@ class _Fetcher:
         }
 
 
+class _BulkFetcher(_Fetcher):
+    def __init__(self):
+        super().__init__()
+        self.bulk_calls = []
+
+    def fetch_locales(
+        self, provider, entity_type, provider_id, locales, force=False
+    ):
+        self.bulk_calls.append(
+            (provider, entity_type, provider_id, tuple(locales), force)
+        )
+        return {
+            locale: {"title": locale, "images": []} for locale in locales
+        }
+
+
 class _ImageCache:
     def __init__(self, db):
         self.db = db
@@ -144,6 +160,16 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual([call[3] for call in fetcher.calls], ["ja", "de"])
         self.assertNotIn("en", [call[3] for call in fetcher.calls])
         self.assertNotIn("original", [call[3] for call in fetcher.calls])
+
+    def test_ingest_batches_all_configured_locales(self):
+        fetcher = _BulkFetcher()
+        ingest = MetadataIngestService(fetcher, _Settings(["en", "ja", "zh-TW"]))
+
+        values = ingest.ingest("tmdb", "movie", "10")
+
+        self.assertEqual(len(fetcher.bulk_calls), 1)
+        self.assertEqual(fetcher.bulk_calls[0][3], ("en", "ja", "zh-TW"))
+        self.assertEqual([value["title"] for value in values], ["en", "ja", "zh-TW"])
 
     def test_ingest_locale_rejects_unconfigured_language(self):
         fetcher = _Fetcher()

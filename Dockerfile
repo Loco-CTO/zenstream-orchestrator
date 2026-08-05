@@ -1,10 +1,11 @@
-FROM mwader/static-ffmpeg:7.1.1 AS media-tools
+# syntax=docker/dockerfile:1
 
 FROM node:26-slim AS dashboard-build
 WORKDIR /frontend
-COPY frontend/package.json ./
+COPY frontend/package.json frontend/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --ignore-scripts --no-audit --no-fund
 COPY frontend/ ./
-RUN npm install --ignore-scripts --no-audit --no-fund
 RUN npm run build && test -f /frontend/out/web/login/index.html
 
 FROM python:3.14-slim
@@ -21,9 +22,8 @@ COPY alembic.ini ./
 COPY .main-version.json ./
 COPY migrations/ ./migrations/
 COPY assets/ ./assets/
-COPY --from=media-tools /ffmpeg ./assets/ffmpeg/linux/ffmpeg
-COPY --from=media-tools /ffprobe ./assets/ffmpeg/linux/ffprobe
-RUN cp /usr/bin/ffmpeg ./assets/ffmpeg/linux/ffmpeg && \
+RUN mkdir -p ./assets/ffmpeg/linux && \
+    cp /usr/bin/ffmpeg ./assets/ffmpeg/linux/ffmpeg && \
     cp /usr/bin/ffprobe ./assets/ffmpeg/linux/ffprobe && \
     ./assets/ffmpeg/linux/ffmpeg -hide_banner -h muxer=chromaprint 2>&1 | grep -q fp_format
 COPY orchestrator/ ./orchestrator/

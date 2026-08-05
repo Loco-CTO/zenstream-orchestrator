@@ -1593,6 +1593,30 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(payload["data"]["name"], "Default title")
         self.assertEqual(request.call_count, 2)
 
+    def test_tvdb_fetches_extended_metadata_once_for_all_locales(self):
+        client = TVDBClient({"apiKey": "test"})
+
+        def request(path, params=None):
+            if path == "/episodes/10/extended":
+                return {"data": {"name": "Default title"}}
+            language = path.rsplit("/", 1)[-1]
+            return {"data": {"name": f"Title {language}"}}
+
+        with (
+            patch.object(client, "_language_code", side_effect=lambda value: value),
+            patch.object(client, "_request", side_effect=request) as provider_request,
+        ):
+            payloads = client.details_all_locales(
+                "episode", "10", ["en", "ja", "zh-TW"]
+            )
+
+        paths = [call.args[0] for call in provider_request.call_args_list]
+        self.assertEqual(paths.count("/episodes/10/extended"), 1)
+        self.assertEqual(
+            {payloads[locale]["translation"]["name"] for locale in payloads},
+            {"Title en", "Title ja", "Title zh-TW"},
+        )
+
     def test_tvdb_original_language_is_normalized_to_canonical_locale(self):
         client = TVDBClient({"apiKey": "test"})
         value = client.normalize(
@@ -1662,6 +1686,39 @@ class LibraryMetadataTest(unittest.TestCase):
         params = request.call_args_list[2].kwargs["params"]
         self.assertEqual(params["language"], "en-US")
         self.assertEqual(params["include_image_language"], "en-US,en,null")
+
+    def test_tmdb_fetches_all_locale_translations_in_one_request(self):
+        client = TMDBClient({"value": "test"})
+        payload = {
+            "title": "Base",
+            "translations": {
+                "translations": [
+                    {
+                        "iso_639_1": "en",
+                        "iso_3166_1": "US",
+                        "data": {"title": "English"},
+                    },
+                    {
+                        "iso_639_1": "ja",
+                        "iso_3166_1": "JP",
+                        "data": {"title": "Japanese"},
+                    },
+                ]
+            },
+        }
+        with (
+            patch.object(client, "_language_code", side_effect=lambda value: value),
+            patch.object(client, "_request", return_value=payload) as provider_request,
+        ):
+            values = client.details_all_locales("movie", "10", ["en-US", "ja-JP"])
+
+        self.assertEqual(provider_request.call_count, 1)
+        self.assertEqual(values["en-US"]["title"], "English")
+        self.assertEqual(values["ja-JP"]["title"], "Japanese")
+        self.assertIn(
+            "translations",
+            provider_request.call_args.kwargs["params"]["append_to_response"],
+        )
 
     def test_provider_language_catalogs_pass_unknown_locale_through(self):
         tvdb = TVDBClient({"apiKey": "test"})

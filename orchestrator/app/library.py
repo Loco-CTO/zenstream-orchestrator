@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import multiprocessing
 import os
 import re
 import stat
 import threading
 import time
-import uuid
 import traceback
+import uuid
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable
 from queue import Empty
 
 from app.config import Config
@@ -3574,8 +3574,8 @@ class LibraryScanner:
         self._scan_refresh_root_ids = set()
         self._scan_complete = False
         try:
-            from app.providers import MetadataService, ProviderError, TVDBClient
             from app.library_cleanup import cleanup_entities
+            from app.providers import MetadataService, ProviderError, TVDBClient
 
             service = MetadataService()
             client = service.client("tvdb")

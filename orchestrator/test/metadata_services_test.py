@@ -3,6 +3,7 @@ import threading
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.database import DatabaseHandler
 from app.metadata_services import (
@@ -10,6 +11,7 @@ from app.metadata_services import (
     MetadataImageIngestService,
     MetadataIngestService,
     MetadataReadService,
+    MetadataSearchProjection,
 )
 
 
@@ -103,6 +105,94 @@ class MetadataServicesTest(unittest.TestCase):
         finally:
             zero.shutdown()
             oversized.shutdown()
+
+    def test_concurrent_projection_preparation_merges_after_writer_recheck(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
+            try:
+                database.execute(
+                    "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))"
+                )
+                database.execute(
+                    "INSERT INTO library_entities VALUES('movie','library',NULL,'movie')"
+                )
+                database.execute(
+                    "INSERT INTO entity_provider_ids VALUES('movie','tmdb','1')"
+                )
+                database.execute(
+                    "INSERT INTO entity_provider_ids VALUES('movie','tvdb','2')"
+                )
+                barrier = threading.Barrier(2)
+                calls = 0
+                calls_lock = threading.Lock()
+                from app.catalog_read_model import normalize_search_text
+
+                def synchronized_normalize(value):
+                    nonlocal calls
+                    with calls_lock:
+                        calls += 1
+                        should_wait = calls <= 2
+                    if should_wait:
+                        barrier.wait(2)
+                    return normalize_search_text(value)
+
+                errors = []
+
+                def project(provider, provider_id, payload):
+                    try:
+                        MetadataSearchProjection(database).project(
+                            provider, "movie", provider_id, "en", payload
+                        )
+                    except Exception as error:
+                        errors.append(error)
+
+                with patch(
+                    "app.catalog_read_model.normalize_search_text",
+                    side_effect=synchronized_normalize,
+                ):
+                    workers = [
+                        threading.Thread(
+                            target=project,
+                            args=("tmdb", "1", {"title": "Movie"}),
+                        ),
+                        threading.Thread(
+                            target=project,
+                            args=("tvdb", "2", {"genres": ["Drama"]}),
+                        ),
+                    ]
+                    for worker in workers:
+                        worker.start()
+                    for worker in workers:
+                        worker.join(3)
+
+                self.assertEqual(errors, [])
+                self.assertFalse(any(worker.is_alive() for worker in workers))
+                projected = json.loads(
+                    database.execute(
+                        "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
+                    )[0][0]
+                )
+                self.assertEqual(projected["title"], "Movie")
+                self.assertEqual(projected["genres"], ["Drama"])
+            finally:
+                database.close()
 
     def _cache(self, locale, payload):
         payload = {"_imageLanguageSchema": 3, **payload}

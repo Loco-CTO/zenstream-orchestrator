@@ -236,109 +236,167 @@ class MetadataSearchProjection:
         locale: str,
         payload: dict,
     ) -> None:
-        with self.db.transaction() as cursor:
-            if not cursor.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_search'"
-            ).fetchone():
-                return
-            entities = cursor.execute(
-                "SELECT e.id,e.library_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? AND p.provider_id=? AND e.entity_type=?",
-                (provider, provider_id, entity_type),
-            ).fetchall()
-            for entity_id, library_id in entities:
-                cursor.execute(
-                    "DELETE FROM catalog_search WHERE entity_id=? AND locale=?",
-                    (entity_id, locale),
-                )
-                if payload.get("title"):
-                    cursor.execute(
-                        "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
-                        (entity_id, library_id, locale, str(payload["title"])),
-                    )
-                if payload.get("originalTitle"):
-                    cursor.execute(
-                        "DELETE FROM catalog_search WHERE entity_id=? AND locale='original'",
-                        (entity_id,),
-                    )
-                    cursor.execute(
-                        "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
-                        (
-                            entity_id,
-                            library_id,
-                            "original",
-                            str(payload["originalTitle"]),
-                        ),
-                    )
-                if cursor.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_item_projection'"
-                ).fetchone():
-                    from app.catalog_read_model import normalize_search_text
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "catalog_search" not in tables:
+            return
+        entities = self.db.execute(
+            "SELECT e.id,e.library_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? AND p.provider_id=? AND e.entity_type=?",
+            (provider, provider_id, entity_type),
+        )
+        has_projection = "catalog_item_projection" in tables
+        has_genres = "catalog_item_genres" in tables
+        if has_projection:
+            from app.catalog_read_model import normalize_search_text
 
-                    entity = cursor.execute(
+        for entity_id, library_id in entities:
+            while True:
+                previous_text = None
+                entity = None
+                payload_text = None
+                title_sort = ""
+                rating_sort = 0.0
+                release_sort = ""
+                runtime_sort = 0.0
+                gram_rows = []
+                genre_rows = []
+                if has_projection:
+                    entity_rows = self.db.execute(
                         "SELECT parent_id,entity_type FROM library_entities WHERE id=?",
                         (entity_id,),
-                    ).fetchone()
-                    previous = cursor.execute(
+                    )
+                    entity = entity_rows[0] if entity_rows else None
+                    previous = self.db.execute(
                         "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
                         (entity_id, locale),
-                    ).fetchone()
+                    )
+                    previous_text = previous[0][0] if previous else None
                     try:
-                        merged = json.loads(previous[0]) if previous else {}
+                        merged = json.loads(previous_text) if previous_text else {}
                     except (TypeError, ValueError, json.JSONDecodeError):
                         merged = {}
                     if not isinstance(merged, dict):
                         merged = {}
-                    for field in ("title", "originalTitle", "genres", "tags", "date", "releaseDate", "runtimeMinutes", "communityRating"):
+                    for field in (
+                        "title",
+                        "originalTitle",
+                        "genres",
+                        "tags",
+                        "date",
+                        "releaseDate",
+                        "runtimeMinutes",
+                        "communityRating",
+                    ):
                         if field in payload:
                             merged[field] = payload[field]
                     payload_text = json.dumps(merged, ensure_ascii=False)
-                    cursor.execute(
-                        "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,1) "
-                        "ON CONFLICT(entity_id,locale) DO UPDATE SET payload=excluded.payload,title_sort=excluded.title_sort,rating_sort=excluded.rating_sort,release_sort=excluded.release_sort,runtime_sort=excluded.runtime_sort,updated_at=excluded.updated_at",
+                    title_sort = normalize_search_text(merged.get("title") or "")
+                    rating_sort = float(merged.get("communityRating") or 0)
+                    release_sort = str(
+                        merged.get("date") or merged.get("releaseDate") or ""
+                    )
+                    runtime_sort = float(merged.get("runtimeMinutes") or 0)
+                    searchable = normalize_search_text(
+                        f"{merged.get('title') or ''} {payload.get('originalTitle') or ''}"
+                    )
+                    grams = {
+                        searchable[index : index + size]
+                        for size in (1, 2)
+                        for index in range(max(0, len(searchable) - size + 1))
+                        if searchable[index : index + size]
+                    }
+                    gram_rows = [
                         (
+                            gram,
                             entity_id,
                             locale,
                             library_id,
                             entity[0] if entity else None,
-                            entity[1] if entity else entity_type,
-                            payload_text,
-                            normalize_search_text(merged.get("title") or ""),
-                            float(merged.get("communityRating") or 0),
-                            str(merged.get("date") or merged.get("releaseDate") or ""),
-                            float(merged.get("runtimeMinutes") or 0),
-                        ),
-                    )
+                        )
+                        for gram in grams
+                    ]
+                    genres = merged.get("genres") or merged.get("tags") or []
+                    genre_rows = [
+                        (
+                            entity_id,
+                            locale,
+                            normalize_search_text(genre),
+                            str(genre).strip(),
+                        )
+                        for genre in genres
+                        if isinstance(genre, str) and genre.strip()
+                    ]
+                with self.db.transaction() as cursor:
+                    if has_projection:
+                        current = cursor.execute(
+                            "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
+                            (entity_id, locale),
+                        ).fetchone()
+                        current_text = current[0] if current else None
+                        if current_text != previous_text:
+                            continue
                     cursor.execute(
-                        "DELETE FROM catalog_search_grams WHERE entity_id=? AND locale=?",
+                        "DELETE FROM catalog_search WHERE entity_id=? AND locale=?",
                         (entity_id, locale),
                     )
-                    searchable = normalize_search_text(f"{merged.get('title') or ''} {payload.get('originalTitle') or ''}")
-                    grams = {
-                        searchable[index:index + size]
-                        for size in (1, 2)
-                        for index in range(max(0, len(searchable) - size + 1))
-                        if searchable[index:index + size]
-                    }
-                    cursor.executemany(
-                        "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,?)",
-                        [(gram, entity_id, locale, library_id, entity[0] if entity else None) for gram in grams],
-                    )
-                    if cursor.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_item_genres'"
-                    ).fetchone():
+                    if payload.get("title"):
                         cursor.execute(
-                            "DELETE FROM catalog_item_genres WHERE entity_id=? AND locale=?",
+                            "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
+                            (entity_id, library_id, locale, str(payload["title"])),
+                        )
+                    if payload.get("originalTitle"):
+                        cursor.execute(
+                            "DELETE FROM catalog_search WHERE entity_id=? AND locale='original'",
+                            (entity_id,),
+                        )
+                        cursor.execute(
+                            "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
+                            (
+                                entity_id,
+                                library_id,
+                                "original",
+                                str(payload["originalTitle"]),
+                            ),
+                        )
+                    if has_projection:
+                        cursor.execute(
+                            "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,1) "
+                            "ON CONFLICT(entity_id,locale) DO UPDATE SET payload=excluded.payload,title_sort=excluded.title_sort,rating_sort=excluded.rating_sort,release_sort=excluded.release_sort,runtime_sort=excluded.runtime_sort,updated_at=excluded.updated_at",
+                            (
+                                entity_id,
+                                locale,
+                                library_id,
+                                entity[0] if entity else None,
+                                entity[1] if entity else entity_type,
+                                payload_text,
+                                title_sort,
+                                rating_sort,
+                                release_sort,
+                                runtime_sort,
+                            ),
+                        )
+                        cursor.execute(
+                            "DELETE FROM catalog_search_grams WHERE entity_id=? AND locale=?",
                             (entity_id, locale),
                         )
-                        genres = merged.get("genres") or merged.get("tags") or []
                         cursor.executemany(
-                            "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
-                            [
-                                (entity_id, locale, normalize_search_text(genre), str(genre).strip())
-                                for genre in genres
-                                if isinstance(genre, str) and genre.strip()
-                            ],
+                            "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,?)",
+                            gram_rows,
                         )
+                        if has_genres:
+                            cursor.execute(
+                                "DELETE FROM catalog_item_genres WHERE entity_id=? AND locale=?",
+                                (entity_id, locale),
+                            )
+                            cursor.executemany(
+                                "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                                genre_rows,
+                            )
+                break
 
 
 class MetadataReadService:
@@ -1090,45 +1148,88 @@ class PersonCreditIngestService:
             return
         if not self._tables_ready():
             return
-        records = self._records(document)
+        normalized_records = []
+        for credit_type, fallback_order, record in self._records(document):
+            name = str(record.get("name") or "").strip()
+            source_id = str(record.get("id") or "").strip()
+            role = str(record.get("role") or "").strip() or None
+            department = str(record.get("department") or "").strip() or None
+            order = record.get("order", fallback_order)
+            try:
+                order = int(order)
+            except (TypeError, ValueError):
+                order = fallback_order
+            normalized_records.append(
+                (
+                    credit_type,
+                    fallback_order,
+                    name,
+                    source_id,
+                    role,
+                    department,
+                    order,
+                    record.get("imageUrl"),
+                )
+            )
+        entity_ids = [
+            row[0]
+            for row in self.db.execute(
+                "SELECT p.entity_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
+                "WHERE p.provider=? AND p.provider_id=? AND p.is_primary=1 AND e.entity_type=?",
+                (provider, provider_id, entity_type),
+            )
+        ]
+        prepared_by_entity = {}
+        for entity_id in entity_ids:
+            prepared_by_entity[entity_id] = [
+                (
+                    str(uuid.uuid4()),
+                    credit_type,
+                    name,
+                    source_id
+                    or "credit:"
+                    + hashlib.sha256(
+                        f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode(
+                            "utf-8"
+                        )
+                    ).hexdigest(),
+                    role,
+                    department,
+                    order,
+                    image_url,
+                )
+                for (
+                    credit_type,
+                    fallback_order,
+                    name,
+                    source_id,
+                    role,
+                    department,
+                    order,
+                    image_url,
+                ) in normalized_records
+            ]
         portraits = []
         with self.db.transaction() as cursor:
-            entity_ids = [
-                row[0]
-                for row in cursor.execute(
-                    "SELECT p.entity_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
-                    "WHERE p.provider=? AND p.provider_id=? AND p.is_primary=1 AND e.entity_type=?",
-                    (provider, provider_id, entity_type),
-                ).fetchall()
-            ]
             for entity_id in entity_ids:
                 credits = []
-                for credit_type, fallback_order, record in records:
-                    name = str(record.get("name") or "").strip()
-                    source_id = str(record.get("id") or "").strip()
-                    role = str(record.get("role") or "").strip() or None
-                    department = str(record.get("department") or "").strip() or None
-                    order = record.get("order", fallback_order)
-                    try:
-                        order = int(order)
-                    except (TypeError, ValueError):
-                        order = fallback_order
-                    identity = (
-                        source_id
-                        or "credit:"
-                        + hashlib.sha256(
-                            f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode(
-                                "utf-8"
-                            )
-                        ).hexdigest()
-                    )
+                for (
+                    credit_id,
+                    credit_type,
+                    name,
+                    identity,
+                    role,
+                    department,
+                    order,
+                    image_url,
+                ) in prepared_by_entity[entity_id]:
                     person_id = self._person_id(
                         cursor, provider, identity, name, locale
                     )
-                    portraits.append((person_id, record.get("imageUrl")))
+                    portraits.append((person_id, image_url))
                     credits.append(
                         (
-                            str(uuid.uuid4()),
+                            credit_id,
                             entity_id,
                             person_id,
                             provider,

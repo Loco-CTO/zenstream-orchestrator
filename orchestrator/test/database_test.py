@@ -1,5 +1,6 @@
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -31,3 +32,67 @@ class DatabaseHandlerTest(unittest.TestCase):
             database.close()
 
         self.assertEqual(len(set(connections)), 2)
+
+    def test_write_many_prepares_generator_before_acquiring_writer(self):
+        database = DatabaseHandler("sqlite", {}, ":memory:")
+        database.execute(
+            "CREATE TABLE values_table(sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT)"
+        )
+        preparing = threading.Event()
+        prepared = threading.Event()
+
+        def statements():
+            preparing.set()
+            self.assertTrue(prepared.wait(2))
+            yield "INSERT INTO values_table(value) VALUES(?)", ("batch",)
+
+        worker = threading.Thread(target=lambda: database.write_many(statements()))
+        worker.start()
+        self.assertTrue(preparing.wait(2))
+        database.execute("INSERT INTO values_table(value) VALUES(?)", ("immediate",))
+        prepared.set()
+        worker.join(2)
+        try:
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(
+                database.execute(
+                    "SELECT value FROM values_table ORDER BY sequence"
+                ),
+                [("immediate",), ("batch",)],
+            )
+        finally:
+            database.close()
+
+    def test_writer_gate_admits_waiters_in_arrival_order(self):
+        database = DatabaseHandler("sqlite", {}, ":memory:")
+        database.execute("CREATE TABLE values_table(value INTEGER)")
+        holder_ready = threading.Event()
+        release_holder = threading.Event()
+        order = []
+
+        def holder():
+            with database.transaction():
+                holder_ready.set()
+                self.assertTrue(release_holder.wait(2))
+
+        def writer(value):
+            database.execute("INSERT INTO values_table VALUES(?)", (value,))
+            order.append(value)
+
+        holding = threading.Thread(target=holder)
+        holding.start()
+        self.assertTrue(holder_ready.wait(2))
+        writers = []
+        for value in range(4):
+            thread = threading.Thread(target=writer, args=(value,))
+            thread.start()
+            writers.append(thread)
+            time.sleep(0.02)
+        release_holder.set()
+        holding.join(2)
+        for thread in writers:
+            thread.join(2)
+        try:
+            self.assertEqual(order, [0, 1, 2, 3])
+        finally:
+            database.close()

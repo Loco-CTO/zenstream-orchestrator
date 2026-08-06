@@ -1,6 +1,57 @@
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
+
+from app.logging_config import get_logger
+
+
+logger = get_logger("database")
+
+
+class FairWriteGate:
+    """Provide re-entrant FIFO admission to SQLite's single writer."""
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._next_ticket = 0
+        self._serving_ticket = 0
+        self._owner = None
+        self._depth = 0
+
+    def acquire(self) -> float:
+        thread_id = threading.get_ident()
+        started = time.monotonic()
+        with self._condition:
+            if self._owner == thread_id:
+                self._depth += 1
+                return 0.0
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            while ticket != self._serving_ticket:
+                self._condition.wait()
+            self._owner = thread_id
+            self._depth = 1
+        return time.monotonic() - started
+
+    def release(self) -> None:
+        thread_id = threading.get_ident()
+        with self._condition:
+            if self._owner != thread_id:
+                raise RuntimeError("SQLite writer released by a non-owner thread")
+            self._depth -= 1
+            if self._depth:
+                return
+            self._owner = None
+            self._serving_ticket += 1
+            self._condition.notify_all()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.release()
 
 
 class DatabaseHandler:
@@ -18,7 +69,7 @@ class DatabaseHandler:
         self.db_file = db_file
         self.connection = None
         self.read_connection = None
-        self.lock = threading.RLock()
+        self.lock = FairWriteGate()
         self.read_lock = threading.RLock()
         self.read_local = threading.local()
         self.read_connections = []
@@ -67,7 +118,10 @@ class DatabaseHandler:
 
     def write(self, query, params=None):
         """Execute one serialized mutation and commit it."""
-        with self.lock:
+        wait_started = time.monotonic()
+        wait_seconds = self.lock.acquire()
+        acquired_at = time.monotonic()
+        try:
             cursor = self.connection.cursor()
             try:
                 cursor.execute(query, params or ())
@@ -82,9 +136,18 @@ class DatabaseHandler:
                 return e
             finally:
                 cursor.close()
+        finally:
+            hold_seconds = time.monotonic() - acquired_at
+            self.lock.release()
+            self._log_writer_timing(
+                "statement", wait_seconds, hold_seconds, wait_started
+            )
 
     def write_many(self, statements):
         """Commit a bounded batch of mutations in one short transaction."""
+        statements = list(statements)
+        if not statements:
+            return True
         with self.transaction() as cursor:
             for query, params in statements:
                 cursor.execute(query, params or ())
@@ -93,7 +156,10 @@ class DatabaseHandler:
     @contextmanager
     def transaction(self):
         """Run a sequence of statements as one serialized SQLite transaction."""
-        with self.lock:
+        wait_started = time.monotonic()
+        wait_seconds = self.lock.acquire()
+        acquired_at = time.monotonic()
+        try:
             cursor = self.connection.cursor()
             try:
                 cursor.execute("BEGIN IMMEDIATE")
@@ -104,6 +170,12 @@ class DatabaseHandler:
                 raise
             finally:
                 cursor.close()
+        finally:
+            hold_seconds = time.monotonic() - acquired_at
+            self.lock.release()
+            self._log_writer_timing(
+                "transaction", wait_seconds, hold_seconds, wait_started
+            )
 
     def read_execute(self, query, params=None):
         """Execute a read without waiting on writer or unrelated reader locks."""
@@ -134,10 +206,24 @@ class DatabaseHandler:
                 raise
             finally:
                 cursor.close()
+
         if lock is not None:
             with lock:
                 return execute_read()
         return execute_read()
+
+    @staticmethod
+    def _log_writer_timing(
+        operation: str, wait_seconds: float, hold_seconds: float, started: float
+    ) -> None:
+        if wait_seconds >= 0.1 or hold_seconds >= 0.25:
+            logger.warning(
+                "sqlite writer timing operation=%s wait_seconds=%.3f hold_seconds=%.3f total_seconds=%.3f",
+                operation,
+                wait_seconds,
+                hold_seconds,
+                time.monotonic() - started,
+            )
 
     def fetchall(self):
         """Fetch all rows from the database."""

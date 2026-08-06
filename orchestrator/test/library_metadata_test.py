@@ -15,6 +15,7 @@ from app.library import (
     LibraryRuntime,
     LibraryScanner,
     LibraryStore,
+    _SidecarStatWorker,
     guess_media,
     normalized_path,
     provider_ids,
@@ -130,11 +131,10 @@ class LibraryMetadataTest(unittest.TestCase):
         scanner._prune_rejected_entities()
         scanner._prune_missing_entities(library_id, root)
 
-    def test_scan_stage_persistence_is_throttled_for_file_updates(self):
+    def test_file_scan_stages_never_persist_writer_updates(self):
         db, scanner = self._scanner_db()
         try:
             scanner.store.update_job = MagicMock()
-            scanner._last_stage_persisted_at = time.monotonic()
             for index in range(20):
                 scanner._set_stage(
                     "job-1",
@@ -145,13 +145,9 @@ class LibraryMetadataTest(unittest.TestCase):
                 )
             self.assertEqual(scanner.store.update_job.call_count, 0)
 
-            scanner._last_stage_persisted_at = time.monotonic() - 3
             scanner._set_stage(
                 "job-1",
-                "Inspecting another file",
-                persist=False,
-                entityId="entity-1",
-                path="another-file",
+                "Indexing series",
             )
             self.assertEqual(scanner.store.update_job.call_count, 1)
         finally:
@@ -751,6 +747,36 @@ class LibraryMetadataTest(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_enumerated_file_stat_is_reused_during_reconciliation(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                video = root / "Movie.mkv"
+                video.write_bytes(b"video")
+                entries = list(scanner._walk_file_entries(root))
+
+                with patch.object(
+                    Path,
+                    "stat",
+                    side_effect=AssertionError("unexpected second stat"),
+                ), patch("app.playback.PlaybackManager.probe_entity"):
+                    result = scanner._files("entity-1", root, entries)
+
+                self.assertEqual(result["added"], 1)
+        finally:
+            db.close()
+
+    def test_sidecar_stat_timeout_includes_waiting_for_shared_worker(self):
+        worker = _SidecarStatWorker()
+        worker._lock.acquire()
+        started = time.monotonic()
+        try:
+            self.assertIsNone(worker.stat(Path("blocked.srt"), timeout=0.05))
+        finally:
+            worker._lock.release()
+        self.assertLess(time.monotonic() - started, 0.25)
+
     def test_deleting_large_library_batches_sqlite_variables(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         try:
@@ -1009,7 +1035,9 @@ class LibraryMetadataTest(unittest.TestCase):
 
                 self._prepare_incremental_scan(scanner)
                 with patch.object(
-                    scanner, "_walk_paths", side_effect=PermissionError("denied")
+                    scanner,
+                    "_walk_file_entries",
+                    side_effect=PermissionError("denied"),
                 ):
                     with self.assertRaises(PermissionError):
                         scanner._scan_movies(

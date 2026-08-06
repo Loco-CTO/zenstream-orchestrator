@@ -264,7 +264,10 @@ class _SidecarStatWorker:
     def stat(
         self, path: Path, timeout: float = SIDECAR_STAT_TIMEOUT_SECONDS
     ) -> tuple[int, int] | None:
-        with self._lock:
+        started = time.monotonic()
+        if not self._lock.acquire(timeout=timeout):
+            return None
+        try:
             if self._process is None or not self._process.is_alive():
                 self._stop()
                 if not self._start():
@@ -272,8 +275,14 @@ class _SidecarStatWorker:
             self._request_id += 1
             request_id = self._request_id
             try:
-                self._request_queue.put((request_id, str(path)), timeout=0.25)
-                deadline = time.monotonic() + timeout
+                deadline = started + timeout
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._stop()
+                    return None
+                self._request_queue.put(
+                    (request_id, str(path)), timeout=min(0.25, remaining)
+                )
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -286,6 +295,8 @@ class _SidecarStatWorker:
             except (Empty, OSError, EOFError, ValueError):
                 self._stop()
                 return None
+        finally:
+            self._lock.release()
 
 
 _SIDECAR_STAT_WORKER = _SidecarStatWorker()
@@ -751,10 +762,9 @@ class LibraryScanner:
             stage,
             context,
         )
-        now_monotonic = time.monotonic()
-        if persist or now_monotonic - self._last_stage_persisted_at >= 2.0:
+        if persist:
             self.store.update_job(job_id, message=stage)
-            self._last_stage_persisted_at = now_monotonic
+            self._last_stage_persisted_at = time.monotonic()
 
     def _start_heartbeat(self, library_id: str, job_id: str) -> None:
         self._heartbeat_stop = threading.Event()
@@ -2638,7 +2648,7 @@ class LibraryScanner:
         self,
         entity_id: str,
         root: Path,
-        files: Iterable[Path],
+        files: Iterable[Path | tuple[Path, os.stat_result | None]],
         job_id: str | None = None,
     ) -> dict:
         """Reconcile media rows in place and return a scan delta."""
@@ -2658,17 +2668,14 @@ class LibraryScanner:
             "unchanged": 0,
             "content_changed": False,
         }
-        for path in files:
+        for file_entry in files:
+            if isinstance(file_entry, tuple):
+                path, discovered_stat = file_entry
+            else:
+                path, discovered_stat = file_entry, None
             role = media_role(path)
             if not role:
                 continue
-            file_started = time.monotonic()
-            logger.info(
-                "library scan file stat start entity_id=%s path=%s role=%s",
-                entity_id,
-                path,
-                role,
-            )
             if job_id:
                 self._set_stage(
                     job_id,
@@ -2677,7 +2684,17 @@ class LibraryScanner:
                     entityId=entity_id,
                     path=str(path),
                 )
-            if role in {"subtitle", "lyrics"}:
+            file_started = time.monotonic()
+            logger.info(
+                "library scan file stat start entity_id=%s path=%s role=%s",
+                entity_id,
+                path,
+                role,
+            )
+            if discovered_stat is not None:
+                file_size = discovered_stat.st_size
+                modified_ns = discovered_stat.st_mtime_ns
+            elif role in {"subtitle", "lyrics"}:
                 sidecar_stat = _bounded_sidecar_stat(path)
                 if sidecar_stat is None:
                     relative_path = relative(str(root), str(path))
@@ -2777,7 +2794,16 @@ class LibraryScanner:
                 path,
                 file_size,
             )
-            quick_fingerprint, bytes_read = _quick_fingerprint(path, file_size)
+            try:
+                quick_fingerprint, bytes_read = _quick_fingerprint(path, file_size)
+            except OSError:
+                logger.warning(
+                    "library scan file fingerprint deferred entity_id=%s path=%s duration_seconds=%.1f",
+                    entity_id,
+                    path,
+                    time.monotonic() - fingerprint_started,
+                )
+                continue
             logger.info(
                 "library scan file fingerprint complete entity_id=%s path=%s bytes_read=%s duration_seconds=%.1f",
                 entity_id,
@@ -2922,16 +2948,30 @@ class LibraryScanner:
                 )
 
     @staticmethod
-    def _walk_paths(directory: Path):
+    def _walk_file_entries(directory: Path):
         def traversal_error(error):
             raise error
 
-        for current, directories, filenames in os.walk(
+        for current, _directories, filenames in os.walk(
             directory, onerror=traversal_error
         ):
             current_path = Path(current)
-            yield from (current_path / name for name in directories)
-            yield from (current_path / name for name in filenames)
+            for name in filenames:
+                path = current_path / name
+                stat_started = time.monotonic()
+                try:
+                    file_stat = path.stat()
+                except OSError:
+                    yield path, None
+                    continue
+                stat_seconds = time.monotonic() - stat_started
+                if stat_seconds >= 1.0:
+                    logger.warning(
+                        "library scan enumeration stat slow path=%s duration_seconds=%.1f",
+                        path,
+                        stat_seconds,
+                    )
+                yield path, file_stat
 
     @staticmethod
     def _target_entries(root: Path, targets: set[str] | None) -> list[Path]:
@@ -2945,11 +2985,14 @@ class LibraryScanner:
         return entries
 
     @staticmethod
-    def _is_supported_video(path: Path) -> bool:
+    def _is_supported_video(
+        path: Path, file_stat: os.stat_result | None = None
+    ) -> bool:
         if path.suffix.lower() not in VIDEO_EXTENSIONS:
             return False
         try:
-            return stat.S_ISREG(path.stat().st_mode) and os.access(path, os.R_OK)
+            value = file_stat if file_stat is not None else path.stat()
+            return stat.S_ISREG(value.st_mode)
         except OSError:
             return False
 
@@ -2963,7 +3006,16 @@ class LibraryScanner:
         tuple[
             Path,
             int,
-            list[tuple[int, str, Path, int, int | None, list[Path]]],
+            list[
+                tuple[
+                    int,
+                    str,
+                    Path,
+                    int,
+                    int | None,
+                    list[tuple[Path, os.stat_result | None]],
+                ]
+            ],
         ]
     ]:
         children = children if children is not None else list(series_dir.iterdir())
@@ -2996,20 +3048,29 @@ class LibraryScanner:
                 else (0 if season_dir.name.lower() == "specials" else 1)
             )
             if season_dir == series_dir:
-                episode_paths = children
+                episode_entries = []
+                for path in children:
+                    try:
+                        value = path.stat()
+                    except OSError:
+                        episode_entries.append((path, None))
+                        continue
+                    if stat.S_ISREG(value.st_mode):
+                        episode_entries.append((path, value))
             else:
-                episode_paths = []
-                for candidate in self._walk_paths(season_dir):
+                episode_entries = []
+                for candidate in self._walk_file_entries(season_dir):
                     self._check_termination(should_terminate)
-                    episode_paths.append(candidate)
-            files_by_parent: dict[Path, list[Path]] = {}
-            for path in episode_paths:
-                if path.is_file():
-                    files_by_parent.setdefault(path.parent, []).append(path)
+                    episode_entries.append(candidate)
+            files_by_parent: dict[
+                Path, list[tuple[Path, os.stat_result | None]]
+            ] = {}
+            for entry in episode_entries:
+                files_by_parent.setdefault(entry[0].parent, []).append(entry)
             episode_records = []
-            for media in episode_paths:
+            for media, media_stat in episode_entries:
                 self._check_termination(should_terminate)
-                if not self._is_supported_video(media):
+                if not self._is_supported_video(media, media_stat):
                     continue
                 episode_match = EPISODE_RE.search(media.stem)
                 guessed = guess_media(media) if not episode_match else {}
@@ -3045,12 +3106,13 @@ class LibraryScanner:
                         filename_season_number,
                         end_number,
                         [
-                            sidecar
-                            for sidecar in files_by_parent.get(media.parent, [])
-                            if sidecar == media
+                            sidecar_entry
+                            for sidecar_entry in files_by_parent.get(media.parent, [])
+                            if sidecar_entry[0] == media
                             or (
-                                sidecar.stem.startswith(media.stem)
-                                and sidecar.suffix.lower() not in VIDEO_EXTENSIONS
+                                sidecar_entry[0].stem.startswith(media.stem)
+                                and sidecar_entry[0].suffix.lower()
+                                not in VIDEO_EXTENSIONS
                             )
                         ],
                     )
@@ -3099,13 +3161,19 @@ class LibraryScanner:
             self._check_termination(should_terminate)
             if entry.is_dir():
                 files = []
-                for candidate in self._walk_paths(entry):
+                for candidate in self._walk_file_entries(entry):
                     self._check_termination(should_terminate)
                     files.append(candidate)
             else:
-                files = [entry]
+                try:
+                    files = [(entry, entry.stat())]
+                except OSError:
+                    files = []
             relative_path = relative(str(root), str(entry))
-            if not any(self._is_supported_video(path) for path in files):
+            if not any(
+                self._is_supported_video(path, file_stat)
+                for path, file_stat in files
+            ):
                 self._reject_existing_entity(library_id, "movie", relative_path)
                 self.store.update_job(
                     job_id,
@@ -3115,14 +3183,16 @@ class LibraryScanner:
                 continue
             entity = self._entity(library_id, None, "movie", relative_path)
             discovered_ids = list(provider_ids(entry.name))
-            for nfo in (path for path in files if path.suffix.lower() == ".nfo"):
+            for nfo in (
+                path for path, _file_stat in files if path.suffix.lower() == ".nfo"
+            ):
                 discovered_ids.extend(parse_nfo_ids(nfo))
             if discovered_ids:
                 self._replace_ids(entity, discovered_ids)
             file_delta = self._files(
                 entity,
                 root,
-                [path for path in files if path.is_file()],
+                files,
                 job_id=job_id,
             )
             if not self.db.execute(

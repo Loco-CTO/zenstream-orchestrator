@@ -60,12 +60,14 @@ class CatalogReadModelTest(unittest.TestCase):
     def test_refresh_root_handles_timestamp_decrease_without_library_scan(self, _languages):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
+        initial_generation = model.status()[1]
         self.db.execute("UPDATE media_files SET modified_ns=5 WHERE id='file-2'")
         model.refresh_roots(["series"])
         values = self.db.read_execute(
             "SELECT added_sort_ns,last_added_sort_ns FROM catalog_entity_summary WHERE entity_id='series'"
         )[0]
         self.assertEqual(values, (5, 10))
+        self.assertEqual(model.status()[1], initial_generation + 1)
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_refresh_root_admits_new_collection_entity(self, _languages):

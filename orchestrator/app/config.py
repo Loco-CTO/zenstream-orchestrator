@@ -1,5 +1,6 @@
 from .database import DatabaseHandler
 import os
+import time
 from pathlib import Path
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -9,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Config:
+    SCHEMA_GENERATION = "sqlalchemy-metadata-v2"
     _instance = None
     _isDev = True
 
@@ -126,6 +128,32 @@ class Config:
             db_file=str(database_file),
         )
 
+        # This release intentionally starts from a clean SQLAlchemy schema.
+        # Preserve the old file for recovery/debugging, then let Alembic build
+        # the fresh baseline below. WAL sidecars must move with the database.
+        if database_file.exists() and database_file.stat().st_size:
+            generation_rows = []
+            try:
+                generation_rows = self._database.execute(
+                    "SELECT value FROM schema_metadata WHERE key='generation'"
+                )
+            except Exception:
+                generation_rows = []
+            generation = generation_rows[0][0] if generation_rows else None
+            if generation != self.SCHEMA_GENERATION:
+                self._database.close()
+                archive = database_file.with_name(
+                    f"{database_file.name}.pre-{time.strftime('%Y%m%d%H%M%S')}"
+                )
+                database_file.replace(archive)
+                for suffix in ("-wal", "-shm"):
+                    sidecar = Path(f"{database_file}{suffix}")
+                    if sidecar.exists():
+                        sidecar.replace(Path(f"{archive}{suffix}"))
+                self._database = DatabaseHandler(
+                    db_type="sqlite", create_query={}, db_file=str(database_file)
+                )
+
         self._run_migrations()
 
     @property
@@ -142,6 +170,65 @@ class Config:
 
     def _migrate_syncplay_members_participant_key(self):
         """Compatibility entry point for callers of the former one-off migration."""
+        database = self._database
+        # Test and embedded callers may provide a lightweight database facade
+        # without a filesystem path. Keep the participant-key repair usable
+        # for those callers while normal installations use Alembic.
+        if not getattr(database, "db_file", None):
+            columns = database.execute("PRAGMA table_info(syncplay_members)", ())
+            if not columns:
+                return
+            names = [row[1] for row in columns]
+            if "participant_id" not in names:
+                with database.transaction() as cursor:
+                    cursor.execute(
+                        "ALTER TABLE syncplay_members ADD COLUMN participant_id TEXT NOT NULL DEFAULT ''"
+                    )
+                columns = database.execute("PRAGMA table_info(syncplay_members)", ())
+                names = [row[1] for row in columns]
+            primary = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
+            indexes = database.execute("PRAGMA index_list(syncplay_members)", ())
+            has_old_unique = any(
+                bool(row[2]) and str(row[1]).lower() not in {"sqlite_autoindex_syncplay_members_1"}
+                for row in indexes
+            )
+            if primary == ["group_id", "participant_id"] and not has_old_unique:
+                return
+            with database.transaction() as cursor:
+                source_names = set(names)
+                source_expr = lambda name, default: name if name in source_names else default
+                cursor.execute("ALTER TABLE syncplay_members RENAME TO syncplay_members_legacy")
+                cursor.execute(
+                    """CREATE TABLE syncplay_members (
+                        group_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                        participant_id TEXT NOT NULL DEFAULT '', username TEXT NOT NULL,
+                        watching_together INTEGER NOT NULL DEFAULT 1,
+                        viewing INTEGER NOT NULL DEFAULT 0, loading INTEGER NOT NULL DEFAULT 0,
+                        ready_generation INTEGER NOT NULL DEFAULT -1,
+                        presence_sequence INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(group_id, participant_id)
+                    )"""
+                )
+                cursor.execute(
+                    """INSERT INTO syncplay_members(
+                        group_id,user_id,participant_id,username,watching_together,
+                        viewing,loading,ready_generation,presence_sequence
+                    )
+                    SELECT group_id,user_id,
+                        CASE WHEN COALESCE(participant_id,'')='' THEN '__legacy__:' || user_id ELSE participant_id END,
+                        username,COALESCE({watching_together},1),COALESCE({viewing},0),
+                        COALESCE({loading},0),COALESCE({ready_generation},-1),COALESCE({presence_sequence},0)
+                    FROM syncplay_members_legacy"""
+                    .format(
+                        watching_together=source_expr("watching_together", "1"),
+                        viewing=source_expr("viewing", "0"),
+                        loading=source_expr("loading", "0"),
+                        ready_generation=source_expr("ready_generation", "-1"),
+                        presence_sequence=source_expr("presence_sequence", "0"),
+                    )
+                )
+                cursor.execute("DROP TABLE syncplay_members_legacy")
+            return
         self._run_migrations()
 
     @property

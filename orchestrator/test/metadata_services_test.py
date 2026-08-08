@@ -6,12 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.database import DatabaseHandler
+from app.models.metadata import MetadataCache
 from app.metadata_services import (
     MetadataAssetExecutor,
     MetadataImageIngestService,
     MetadataIngestService,
     MetadataReadService,
     MetadataSearchProjection,
+    metadata_fetch_activity,
 )
 
 
@@ -96,6 +98,33 @@ class MetadataServicesTest(unittest.TestCase):
             executor.shutdown()
         self.assertEqual(calls, [1])
 
+    def test_neutral_image_writes_use_one_non_null_identity(self):
+        self.db.execute(
+            "CREATE TABLE metadata_images("
+            "provider TEXT NOT NULL,entity_type TEXT NOT NULL,provider_id TEXT NOT NULL,"
+            "locale TEXT NOT NULL DEFAULT '',image_type TEXT NOT NULL,image_url TEXT NOT NULL,"
+            "blur_hash TEXT,local_path TEXT,fetched_at TEXT,expires_at TEXT,"
+            "PRIMARY KEY(provider,entity_type,provider_id,locale,image_type,image_url))"
+        )
+        cache = MetadataCache.__new__(MetadataCache)
+        cache.db = self.db
+        record = (
+            "tmdb",
+            "movie",
+            "10",
+            None,
+            "Primary",
+            "https://images.example/poster.jpg",
+            "blurhash",
+            "/cache/poster.webp",
+        )
+        cache.put_images([record])
+        cache.put_images([record])
+        self.assertEqual(
+            self.db.read_execute("SELECT locale,COUNT(*) FROM metadata_images"),
+            [("", 1)],
+        )
+
     def test_asset_executor_clamps_worker_limits(self):
         zero = MetadataAssetExecutor(max_workers=0)
         oversized = MetadataAssetExecutor(max_workers=99)
@@ -105,6 +134,65 @@ class MetadataServicesTest(unittest.TestCase):
         finally:
             zero.shutdown()
             oversized.shutdown()
+
+    def test_asset_executor_does_not_wait_for_metadata_fetch_quiet_period(self):
+        executor = MetadataAssetExecutor(max_workers=1)
+        started = threading.Event()
+        try:
+            with metadata_fetch_activity():
+                executor.submit(("tmdb", "movie", "10", "en", "digest"), started.set)
+                self.assertTrue(started.wait(1))
+        finally:
+            executor.shutdown()
+
+    def test_cached_document_reprojects_after_provider_identity_is_attached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
+            try:
+                database.execute(
+                    "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))"
+                )
+                database.execute(
+                    "INSERT INTO library_entities VALUES('movie','library',NULL,'movie')"
+                )
+                database.execute(
+                    "INSERT INTO entity_provider_ids VALUES('movie','tmdb','1')"
+                )
+                fetcher = _BulkFetcher()
+                fetcher.cache = type("Cache", (), {"db": database})()
+                ingest = MetadataIngestService(
+                    fetcher,
+                    _Settings(["en"]),
+                    background_assets=False,
+                )
+
+                ingest.ingest_document(
+                    "tmdb", "movie", "1", "en", {"title": "Cached Movie"}
+                )
+
+                projected = database.execute(
+                    "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
+                )
+                self.assertEqual(json.loads(projected[0][0])["title"], "Cached Movie")
+            finally:
+                database.close()
 
     def test_concurrent_projection_preparation_merges_after_writer_recheck(self):
         with tempfile.TemporaryDirectory() as directory:

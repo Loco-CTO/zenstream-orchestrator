@@ -33,6 +33,8 @@ from app.worker_config import configured_worker_limit
 
 logger = get_logger("metadata")
 
+CATALOG_ITEM_PROJECTION_SCHEMA = 1
+
 
 _fetch_activity_lock = threading.Lock()
 _active_fetches = 0
@@ -286,6 +288,8 @@ class MetadataSearchProjection:
                     for field in (
                         "title",
                         "originalTitle",
+                        "overview",
+                        "description",
                         "genres",
                         "tags",
                         "date",
@@ -295,6 +299,9 @@ class MetadataSearchProjection:
                     ):
                         if field in payload:
                             merged[field] = payload[field]
+                    merged["_catalogItemProjectionSchema"] = (
+                        CATALOG_ITEM_PROJECTION_SCHEMA
+                    )
                     images = payload.get("images")
                     if isinstance(images, list):
                         projected_images = {}

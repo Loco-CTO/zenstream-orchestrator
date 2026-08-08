@@ -134,9 +134,13 @@ class Config:
         if database_file.exists() and database_file.stat().st_size:
             generation_rows = []
             try:
-                generation_rows = self._database.execute(
-                    "SELECT value FROM schema_metadata WHERE key='generation'"
+                has_schema_metadata = self._database.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_metadata'"
                 )
+                if has_schema_metadata:
+                    generation_rows = self._database.execute(
+                        "SELECT value FROM schema_metadata WHERE key='generation'"
+                    )
             except Exception:
                 generation_rows = []
             generation = generation_rows[0][0] if generation_rows else None

@@ -10,8 +10,9 @@ import threading
 import time
 import traceback
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty
@@ -160,6 +161,57 @@ EPISODE_RE = re.compile(
 SEASON_RE = re.compile(r"(?i)^(?:season\s*|s)(\d+)$")
 ACTIVE_JOB_STATES = ("queued", "running", "terminating")
 logger = get_logger("library")
+
+
+class FairMetadataExecutor:
+    """Bound metadata root work globally and rotate admission across libraries."""
+
+    def __init__(self, max_workers: int | None = None):
+        self.max_workers = max_workers or configured_worker_limit(
+            "METADATA_ROOT_WORKERS", 64
+        )
+        self._condition = threading.Condition()
+        self._queues: dict[str, deque] = {}
+        self._libraries = deque()
+        for index in range(self.max_workers):
+            threading.Thread(
+                target=self._worker,
+                name=f"zenstream-metadata-roots-{index + 1}",
+                daemon=True,
+            ).start()
+
+    def submit(self, library_id: str, work, /, *args, **kwargs) -> Future:
+        future = Future()
+        with self._condition:
+            queue = self._queues.get(library_id)
+            if queue is None:
+                queue = self._queues[library_id] = deque()
+                self._libraries.append(library_id)
+            queue.append((future, work, args, kwargs))
+            self._condition.notify()
+        return future
+
+    def _worker(self) -> None:
+        while True:
+            with self._condition:
+                while not self._libraries:
+                    self._condition.wait()
+                library_id = self._libraries.popleft()
+                queue = self._queues[library_id]
+                future, work, args, kwargs = queue.popleft()
+                if queue:
+                    self._libraries.append(library_id)
+                else:
+                    self._queues.pop(library_id, None)
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(work(*args, **kwargs))
+            except BaseException as error:
+                future.set_exception(error)
+
+
+metadata_root_executor = FairMetadataExecutor()
 
 
 class JobTerminated(Exception):
@@ -677,6 +729,27 @@ class LibraryStore:
         if not rows:
             return None
         row = rows[0]
+        has_queue = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrichment_queue'"
+            )
+        )
+        pending_repairs = (
+            self.db.execute(
+                "SELECT COUNT(*) FROM enrichment_queue WHERE library_id=? AND state IN ('queued','claimed','retry')",
+                (row[1],),
+            )
+            if has_queue
+            else []
+        )
+        failed_repairs = (
+            self.db.execute(
+                "SELECT COUNT(*) FROM enrichment_queue WHERE library_id=? AND state='failed'",
+                (row[1],),
+            )
+            if has_queue
+            else []
+        )
         return {
             "id": row[0],
             "libraryId": row[1],
@@ -690,6 +763,8 @@ class LibraryStore:
             "createdAt": row[9],
             "startedAt": row[10],
             "finishedAt": row[11],
+            "warningCount": int(failed_repairs[0][0]) if failed_repairs else 0,
+            "repairPending": bool(pending_repairs and pending_repairs[0][0]),
         }
 
     def jobs(self, library_id: str) -> list[dict]:
@@ -748,6 +823,7 @@ class LibraryScanner:
         self._last_stage_persisted_at = 0.0
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
+        self._publication_lock = threading.Lock()
 
     def _set_stage(
         self, job_id: str, stage: str, *, persist: bool = True, **context
@@ -1194,6 +1270,17 @@ class LibraryScanner:
         for offset in range(0, len(roots), 300):
             model.refresh_roots(roots[offset : offset + 300])
 
+    def _publish_root(self, root_id: str) -> None:
+        from app.catalog_read_model import CatalogReadModel
+        from app.metadata_services import asset_executor
+
+        # Artwork/credits are part of the publishable unit. Give queued asset
+        # work a bounded drain before exposing the root; unresolved assets stay
+        # repairable without delaying the rest of the scan indefinitely.
+        asset_executor.drain(timeout=30.0)
+        with self._publication_lock:
+            CatalogReadModel(self.db).refresh_roots([root_id])
+
     def _refresh_dependent_collections(self, library_id: str) -> None:
         """Re-evaluate affected derived collections without provider enumeration."""
         tables = {
@@ -1480,14 +1567,22 @@ class LibraryScanner:
             if provider not in {"tmdb", "tvdb", "musicbrainz"}:
                 continue
             for locale in locales:
-                cached = self.db.execute(
-                    "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
-                    (provider, entity_type, str(provider_id), locale),
+                cached = ingest.metadata_service.cache.get(
+                    provider, entity_type, str(provider_id), locale
                 )
                 if cached:
                     # A normal library scan is inventory-driven. Do not
-                    # rematerialize or refetch an already cached locale; the
-                    # explicit metadata refresh job owns that work.
+                    # refetch an already cached locale, but do replay its
+                    # projection and enrichment so a newly attached entity or
+                    # interrupted asset task becomes visible and repairable.
+                    cached.pop("_stale", None)
+                    ingest.ingest_document(
+                        provider,
+                        entity_type,
+                        str(provider_id),
+                        locale,
+                        cached,
+                    )
                     continue
                 tasks.setdefault(
                     (provider, entity_type, str(provider_id)), []
@@ -1745,26 +1840,55 @@ class LibraryScanner:
         job_id: str,
         should_terminate: Callable[[], bool],
     ) -> None:
-        workers = configured_worker_limit("METADATA_ROOT_WORKERS", 64)
+        futures = [
+            metadata_root_executor.submit(
+                library_id,
+                self._resolve_movie_and_publish,
+                library_id,
+                row,
+                job_id,
+                should_terminate,
+                index,
+                len(rows),
+            )
+            for index, row in enumerate(rows, start=1)
+        ]
+        self._await_metadata_futures(futures, should_terminate)
 
-        with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="zenstream-metadata-roots"
-        ) as executor:
-            futures = [
-                executor.submit(
-                    self._resolve_movie_row,
-                    library_id,
-                    row,
-                    job_id,
-                    should_terminate,
-                    index,
-                    len(rows),
-                )
-                for index, row in enumerate(rows, start=1)
-            ]
-            for future in as_completed(futures):
-                self._check_termination(should_terminate)
-                future.result()
+    def _await_metadata_futures(
+        self, futures: list[Future], should_terminate: Callable[[], bool]
+    ) -> None:
+        first_error: BaseException | None = None
+        for future in as_completed(futures):
+            if first_error is None:
+                try:
+                    self._check_termination(should_terminate)
+                    future.result()
+                except BaseException as error:
+                    first_error = error
+                    for pending in futures:
+                        pending.cancel()
+            else:
+                try:
+                    future.result()
+                except BaseException:
+                    pass
+        if first_error is not None:
+            raise first_error
+
+    def _resolve_movie_and_publish(
+        self,
+        library_id: str,
+        row: tuple,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        index: int,
+        total: int,
+    ) -> None:
+        self._resolve_movie_row(
+            library_id, row, job_id, should_terminate, index, total
+        )
+        self._publish_root(row[0])
 
     def _resolve_movie_row(
         self,
@@ -3152,10 +3276,6 @@ class LibraryScanner:
         )
         self.store.update_job(job_id, progress_total=len(entries))
         count = 0
-        metadata_executor = ThreadPoolExecutor(
-            max_workers=configured_worker_limit("METADATA_ROOT_WORKERS", 64),
-            thread_name_prefix="zenstream-metadata-roots",
-        )
         metadata_futures = []
         for entry in entries:
             self._check_termination(should_terminate)
@@ -3208,8 +3328,9 @@ class LibraryScanner:
                 or entity in self._scan_provider_identity_changed
             ) and self._needs_metadata(entity):
                 metadata_futures.append(
-                    metadata_executor.submit(
-                        self._resolve_movie_row,
+                    metadata_root_executor.submit(
+                        library_id,
+                        self._resolve_movie_and_publish,
                         library_id,
                         (entity, "movie", relative(str(root), str(entry)), None, None),
                         job_id,
@@ -3218,14 +3339,13 @@ class LibraryScanner:
                         len(entries),
                     )
                 )
+            else:
+                self._publish_root(entity)
             count += 1
             self.store.update_job(
                 job_id, progress_current=count, message=f"Indexed {entry.name}"
             )
-        for future in metadata_futures:
-            self._check_termination(should_terminate)
-            future.result()
-        metadata_executor.shutdown(wait=True)
+        self._await_metadata_futures(metadata_futures, should_terminate)
         self._scan_complete = True
         return count
 
@@ -3523,6 +3643,7 @@ class LibraryScanner:
                             message=f"Metadata failed for season {season_folder_number}; continuing",
                         )
             self._scan_refresh_root_ids.add(series)
+            self._publish_root(series)
             series_count += 1
             self.store.update_job(
                 job_id,

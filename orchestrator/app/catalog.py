@@ -376,7 +376,11 @@ class Catalog:
             raise HTTPException(400, "Metadata language is not configured.")
         context = self._context(user_id)
         projected = context.projected_metadata.get((entity_id, language)) if context else None
-        if projected is not None and not include_credits:
+        if (
+            projected is not None
+            and not include_credits
+            and isinstance(projected.get("images"), dict)
+        ):
             return {"metadata": projected}
         projection_table = (
             "catalog_item_projection"
@@ -393,7 +397,7 @@ class Catalog:
             if rows:
                 try:
                     value = json.loads(rows[0][0])
-                    if isinstance(value, dict):
+                    if isinstance(value, dict) and isinstance(value.get("images"), dict):
                         if context:
                             context.projected_metadata[(entity_id, language)] = value
                         return {"metadata": value}

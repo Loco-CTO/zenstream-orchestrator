@@ -102,7 +102,7 @@ TABLES = [
         PRIMARY KEY(provider, entity_type, provider_id, locale)
     )""",
     """CREATE TABLE metadata_images (
-        provider TEXT NOT NULL, entity_type TEXT NOT NULL, provider_id TEXT NOT NULL, locale TEXT,
+        provider TEXT NOT NULL, entity_type TEXT NOT NULL, provider_id TEXT NOT NULL, locale TEXT NOT NULL DEFAULT '',
         image_type TEXT NOT NULL, image_url TEXT NOT NULL, local_path TEXT, fetched_at TEXT,
         expires_at TEXT, blur_hash TEXT,
         PRIMARY KEY(provider, entity_type, provider_id, locale, image_type, image_url)
@@ -234,7 +234,8 @@ TABLES = [
         id TEXT PRIMARY KEY NOT NULL, entity_id TEXT NOT NULL, library_id TEXT NOT NULL,
         kind TEXT NOT NULL, locale TEXT, priority INTEGER NOT NULL DEFAULT 0,
         state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
-        error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        next_attempt_at TEXT, lease_owner TEXT, lease_expires_at TEXT,
+        source_job_id TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
         UNIQUE(entity_id, kind, locale),
         FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE,
         FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
@@ -286,7 +287,9 @@ INDEXES = [
     "CREATE INDEX idx_library_entities_parent ON library_entities(library_id, parent_id)",
     "CREATE INDEX idx_library_entities_status ON library_entities(library_id, match_status)",
     "CREATE INDEX idx_entity_provider_ids_lookup ON entity_provider_ids(provider, identifier_type, provider_id)",
+    "CREATE INDEX idx_entity_provider_ids_provider_id ON entity_provider_ids(provider, provider_id, entity_id)",
     "CREATE INDEX idx_library_jobs_state ON library_jobs(library_id, state, created_at)",
+    "CREATE INDEX idx_library_jobs_global_queue ON library_jobs(state, created_at)",
     "CREATE INDEX idx_job_definitions_due ON job_definitions(enabled, next_run_at)",
     "CREATE INDEX idx_job_runs_queue ON job_runs(state, created_at)",
     "CREATE INDEX idx_job_runs_definition ON job_runs(definition_id, created_at)",
@@ -308,6 +311,8 @@ INDEXES = [
     "CREATE INDEX idx_catalog_user_rollups_user ON catalog_user_rollups(user_id, last_played_at)",
     "CREATE INDEX idx_catalog_metadata_locale ON catalog_metadata_projection(locale, entity_id)",
     "CREATE INDEX idx_catalog_home_lookup ON catalog_home_projection(user_id, section, rank)",
+    "CREATE INDEX idx_metadata_images_url_path_ready ON metadata_images(image_url, local_path) WHERE blur_hash IS NOT NULL",
+    "CREATE INDEX idx_metadata_images_type_url_fetched ON metadata_images(image_type, image_url, fetched_at DESC)",
 ]
 
 

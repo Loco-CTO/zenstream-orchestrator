@@ -196,6 +196,12 @@ def upgrade():
         """
     )
     op.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_catalog_search_grams_entity_locale
+        ON catalog_search_grams(entity_id, locale)
+        """
+    )
+    op.execute(
         "CREATE INDEX IF NOT EXISTS idx_collection_members_source "
         "ON collection_members(source_entity_id, collection_entity_id)"
     )

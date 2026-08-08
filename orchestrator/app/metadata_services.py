@@ -29,7 +29,6 @@ from app.models.metadata import (
 from app.logging_config import get_logger
 from app.images import blurhash_for_image, encode_webp_bytes
 from app.worker_config import configured_worker_limit
-from app.foreground import active_requests
 
 
 logger = get_logger("metadata")
@@ -37,6 +36,9 @@ logger = get_logger("metadata")
 
 _fetch_activity_lock = threading.Lock()
 _active_fetches = 0
+_metadata_fetch_slots = threading.BoundedSemaphore(
+    configured_worker_limit("METADATA_FETCH_WORKERS", 64, default=12)
+)
 
 
 def active_metadata_fetches() -> int:
@@ -65,6 +67,11 @@ def metadata_task_results(tasks, work, should_terminate=None, max_workers=None):
         else max(1, min(64, max_workers))
     )
     iterator = iter(tasks)
+
+    def admitted_work(task):
+        with _metadata_fetch_slots:
+            return work(task)
+
     with ThreadPoolExecutor(
         max_workers=workers, thread_name_prefix="zenstream-metadata-fetch"
     ) as executor:
@@ -77,7 +84,7 @@ def metadata_task_results(tasks, work, should_terminate=None, max_workers=None):
                     task = next(iterator)
                 except StopIteration:
                     break
-                batch.append((task, executor.submit(work, task)))
+                batch.append((task, executor.submit(admitted_work, task)))
             if not batch:
                 return
             by_future = {future: task for task, future in batch}
@@ -115,12 +122,7 @@ class MetadataAssetExecutor:
                 return self._states.get(key, "pending")
             self._states[key] = "pending"
 
-            def throttled_work():
-                while active_requests() or active_metadata_fetches():
-                    threading.Event().wait(0.05)
-                return work()
-
-            future = self._executor.submit(throttled_work)
+            future = self._executor.submit(work)
             self._pending[key] = future
 
             def finished(done: Future) -> None:
@@ -811,6 +813,12 @@ class MetadataIngestService:
         """Materialize a normalized document, including documents cached by aggregation."""
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
+        cache = getattr(self.metadata_service, "cache", None)
+        db = getattr(cache, "db", None)
+        if db is not None:
+            MetadataSearchProjection(db).project(
+                provider, entity_type, provider_id, locale, normalized
+            )
         if self.image_ingest is not None or self.credit_ingest is not None:
 
             def materialize_assets() -> None:

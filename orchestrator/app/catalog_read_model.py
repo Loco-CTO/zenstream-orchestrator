@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 import json
+import threading
 from pathlib import Path
 import re
 import time
@@ -14,6 +15,14 @@ from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataLanguageSettings
 
 
 logger = get_logger("catalog_read_model")
+
+_latest_root_lock = threading.Lock()
+_latest_root_by_library: dict[str, str] = {}
+
+
+def latest_catalog_root(library_id: str) -> str | None:
+    with _latest_root_lock:
+        return _latest_root_by_library.get(library_id)
 LEAF_TYPES = {"movie", "episode", "track", "release"}
 _SPACE_RE = re.compile(r"\s+")
 
@@ -613,6 +622,17 @@ class CatalogReadModel:
                 projection_rows.append(
                     (entity_id, locale, row[1], row[2], row[3], payload, title, 0.0, "", 0.0, now, 1)
                 )
+        affected_collections: list[str] = []
+        if self._has_table("collection_members") and entities:
+            entity_placeholders = ",".join("?" for _ in entities)
+            affected_collections = [
+                row[0]
+                for row in self.db.read_execute(
+                    "SELECT DISTINCT collection_entity_id FROM collection_members "
+                    f"WHERE source_entity_id IN ({entity_placeholders}) OR collection_entity_id IN ({entity_placeholders})",
+                    [*entities.keys(), *entities.keys()],
+                )
+            ]
         with self.db.transaction() as cursor:
             cursor.executemany(
                 "INSERT INTO catalog_entity_summary(entity_id,library_id,parent_id,entity_type,playable_leaf_count,media_file_count,media_added_ns,media_last_added_ns,added_sort_ns,last_added_sort_ns,generation,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
@@ -623,17 +643,39 @@ class CatalogReadModel:
                 "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id,locale) DO NOTHING",
                 projection_rows,
             )
-            if self._has_table("collection_members"):
-                cursor.execute("DELETE FROM catalog_collection_summary")
+            if affected_collections:
+                collection_placeholders = ",".join("?" for _ in affected_collections)
+                cursor.execute(
+                    f"DELETE FROM catalog_collection_summary WHERE collection_entity_id IN ({collection_placeholders})",
+                    affected_collections,
+                )
                 cursor.execute(
                     "INSERT INTO catalog_collection_summary(collection_entity_id,collection_library_id,source_library_id,playable_leaf_count,media_file_count,added_sort_ns,last_added_sort_ns,updated_at) "
                     "SELECT m.collection_entity_id,c.library_id,s.library_id,SUM(x.playable_leaf_count),SUM(x.media_file_count),MIN(x.added_sort_ns),MAX(x.last_added_sort_ns),? "
                     "FROM collection_members m JOIN library_entities c ON c.id=m.collection_entity_id "
                     "JOIN library_entities s ON s.id=m.source_entity_id "
                     "JOIN catalog_entity_summary x ON x.entity_id=m.source_entity_id "
+                    f"WHERE m.collection_entity_id IN ({collection_placeholders}) "
                     "GROUP BY m.collection_entity_id,s.library_id",
-                    (now,),
+                    [now, *affected_collections],
                 )
+            cursor.execute(
+                "UPDATE catalog_read_model_status SET state='ready',generation=generation+1,updated_at=?,error=NULL WHERE id=1",
+                (now,),
+            )
+            if self._has_table("catalog_projection_status"):
+                for library_id in {row[1] for row in summaries}:
+                    cursor.execute(
+                        "INSERT INTO catalog_projection_status(library_id,generation,state,progress_current,progress_total,error,updated_at) "
+                        "VALUES(?,COALESCE((SELECT generation FROM catalog_projection_status WHERE library_id=?),0)+1,'ready',0,0,NULL,?) "
+                        "ON CONFLICT(library_id) DO UPDATE SET generation=excluded.generation,state='ready',error=NULL,updated_at=excluded.updated_at",
+                        (library_id, library_id, now),
+                    )
+        with _latest_root_lock:
+            for root_id in roots:
+                row = entities.get(root_id)
+                if row:
+                    _latest_root_by_library[row[1]] = root_id
         return len(summaries)
 
     def refresh_user_entities(self, user_id: str, entity_ids: Iterable[str]) -> int:

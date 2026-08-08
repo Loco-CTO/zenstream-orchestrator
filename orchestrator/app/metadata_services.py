@@ -295,6 +295,26 @@ class MetadataSearchProjection:
                     ):
                         if field in payload:
                             merged[field] = payload[field]
+                    images = payload.get("images")
+                    if isinstance(images, list):
+                        projected_images = {}
+                        for image_type in ARTWORK_CATEGORY_SET:
+                            choice = choose_artwork(
+                                images,
+                                locale,
+                                image_type,
+                                payload.get("originalLanguage"),
+                                [provider],
+                            )
+                            if not choice:
+                                continue
+                            projected_images[image_type] = {
+                                "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}",
+                                "language": choice.get("language"),
+                                "width": choice.get("width") or 0,
+                                "height": choice.get("height") or 0,
+                            }
+                        merged["images"] = projected_images
                     payload_text = json.dumps(merged, ensure_ascii=False)
                     title_sort = normalize_search_text(merged.get("title") or "")
                     rating_sort = float(merged.get("communityRating") or 0)

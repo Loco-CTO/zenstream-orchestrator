@@ -184,13 +184,31 @@ class MetadataServicesTest(unittest.TestCase):
                 )
 
                 ingest.ingest_document(
-                    "tmdb", "movie", "1", "en", {"title": "Cached Movie"}
+                    "tmdb",
+                    "movie",
+                    "1",
+                    "en",
+                    {
+                        "title": "Cached Movie",
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "language": "en",
+                                "url": "https://images.example/movie.jpg",
+                            }
+                        ],
+                    },
                 )
 
                 projected = database.execute(
                     "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
                 )
-                self.assertEqual(json.loads(projected[0][0])["title"], "Cached Movie")
+                value = json.loads(projected[0][0])
+                self.assertEqual(value["title"], "Cached Movie")
+                self.assertEqual(
+                    value["images"]["Primary"]["url"],
+                    "/api/catalog/items/movie/images/Primary?language=en",
+                )
             finally:
                 database.close()
 

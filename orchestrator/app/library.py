@@ -1273,11 +1273,22 @@ class LibraryScanner:
     def _publish_root(self, root_id: str) -> None:
         from app.catalog_read_model import CatalogReadModel
         from app.metadata_services import asset_executor
+        from app.models.metadata import MetadataLanguageSettings
 
-        # Artwork/credits are part of the publishable unit. Give queued asset
-        # work a bounded drain before exposing the root; unresolved assets stay
-        # repairable without delaying the rest of the scan indefinitely.
-        asset_executor.drain(timeout=30.0)
+        identities = {
+            (provider, entity_type, str(provider_id), locale)
+            for entity_id, entity_type, provider, provider_id in self.db.execute(
+                "WITH RECURSIVE subtree(id) AS ("
+                "SELECT id FROM library_entities WHERE id=? "
+                "UNION ALL SELECT e.id FROM library_entities e JOIN subtree s ON e.parent_id=s.id) "
+                "SELECT DISTINCT e.id,e.entity_type,p.provider,p.provider_id "
+                "FROM subtree s JOIN library_entities e ON e.id=s.id "
+                "JOIN entity_provider_ids p ON p.entity_id=e.id",
+                (root_id,),
+            )
+            for locale in MetadataLanguageSettings().get()
+        }
+        asset_executor.wait_for_identities(identities, timeout=30.0)
         with self._publication_lock:
             CatalogReadModel(self.db).refresh_roots([root_id])
 

@@ -11,6 +11,7 @@ from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import (
     EPISODE_RE,
+    FairMetadataExecutor,
     QUICK_FINGERPRINT_SAMPLE_SIZE,
     LibraryRuntime,
     LibraryScanner,
@@ -53,6 +54,48 @@ class _JsonRequest:
 
 
 class LibraryMetadataTest(unittest.TestCase):
+    def test_fair_metadata_executor_bounds_head_of_line_work_per_library(self):
+        executor = FairMetadataExecutor(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+        order = []
+
+        def first():
+            order.append("a1")
+            started.set()
+            release.wait(2)
+
+        first_future = executor.submit("library-a", first)
+        self.assertTrue(started.wait(1))
+        futures = [
+            executor.submit("library-a", lambda: order.append("a2")),
+            executor.submit("library-a", lambda: order.append("a3")),
+            executor.submit("library-b", lambda: order.append("b1")),
+        ]
+        release.set()
+        first_future.result(2)
+        for future in futures:
+            future.result(2)
+
+        self.assertLess(order.index("b1"), order.index("a3"))
+
+    def test_movie_resolution_publishes_root_after_metadata(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._resolve_movie_row = MagicMock()
+        scanner._publish_root = MagicMock()
+
+        scanner._resolve_movie_and_publish(
+            "library-1",
+            ("movie-1", "movie", "Movie", None, None),
+            "job-1",
+            lambda: False,
+            1,
+            1,
+        )
+
+        scanner._resolve_movie_row.assert_called_once()
+        scanner._publish_root.assert_called_once_with("movie-1")
+
     def test_metadata_languages_normalize_without_forcing_english(self):
         self.assertEqual(
             MetadataLanguageSettings.normalize(["ja", "zh_tw", "en", "ja"]),
@@ -947,6 +990,31 @@ class LibraryMetadataTest(unittest.TestCase):
                     ),
                     [("Example/Season 1/Example - S01E02.mkv",)],
                 )
+        finally:
+            db.close()
+
+    def test_series_scan_publishes_each_admitted_series_in_order(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name in ("Alpha", "Beta"):
+                    season = root / name / "Season 1"
+                    season.mkdir(parents=True)
+                    (season / f"{name} - S01E01.mkv").touch()
+                self._prepare_incremental_scan(scanner)
+                scanner._publish_root = MagicMock()
+
+                scanner._scan_series("library-1", root, "job-1", lambda: False)
+
+                published_paths = [
+                    db.execute(
+                        "SELECT relative_path FROM library_entities WHERE id=?",
+                        (call.args[0],),
+                    )[0][0]
+                    for call in scanner._publish_root.call_args_list
+                ]
+                self.assertEqual(published_paths, ["Alpha", "Beta"])
         finally:
             db.close()
 

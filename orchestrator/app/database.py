@@ -1,8 +1,10 @@
-import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 
+from sqlalchemy.exc import SQLAlchemyError
+
+from app.database_session import create_sqlite_persistence
 from app.logging_config import get_logger
 
 
@@ -69,6 +71,7 @@ class DatabaseHandler:
         self.db_file = db_file
         self.connection = None
         self.read_connection = None
+        self.persistence = None
         self.lock = FairWriteGate()
         self.read_lock = threading.RLock()
         self.read_local = threading.local()
@@ -84,25 +87,11 @@ class DatabaseHandler:
     def _connect_sqlite(self, db_file):
         """Connect to a SQLite database."""
         try:
-            self.connection = sqlite3.connect(db_file, check_same_thread=False, timeout=5.0)
-            self.connection.execute("PRAGMA foreign_keys = ON")
-            self.connection.execute("PRAGMA busy_timeout = 5000")
+            self.persistence = create_sqlite_persistence(db_file)
+            self.connection = self.persistence.writer_engine.raw_connection()
             if db_file != ":memory:":
                 self.connection.execute("PRAGMA journal_mode = WAL")
-                self.connection.execute("PRAGMA synchronous = NORMAL")
-                self.connection.execute("PRAGMA wal_autocheckpoint = 1000")
-                self.connection.execute("PRAGMA cache_size = -64000")
-                self.connection.execute("PRAGMA temp_store = MEMORY")
-                self.read_connection = sqlite3.connect(
-                    db_file, check_same_thread=False, timeout=0.5
-                )
-                self.read_connection.execute("PRAGMA query_only = ON")
-                self.read_connection.execute("PRAGMA busy_timeout = 500")
-                self.read_connection.execute("PRAGMA cache_size = -64000")
-                self.read_connection.execute("PRAGMA temp_store = MEMORY")
-            else:
-                self.read_connection = self.connection
-        except sqlite3.Error as e:
+        except Exception as e:
             print(f"Error connecting to SQLite: {e}")
 
     def execute(self, query, params=None):
@@ -127,7 +116,7 @@ class DatabaseHandler:
                 cursor.execute(query, params or ())
                 self.connection.commit()
                 return cursor.fetchall()
-            except sqlite3.Error as e:
+            except Exception as e:
                 # sqlite3 leaves the connection inside the failed transaction
                 # after constraint/locking errors. Always roll it back before
                 # returning so the next serialized operation can begin cleanly.
@@ -183,24 +172,25 @@ class DatabaseHandler:
             connection = self.connection
             lock = self.read_lock
         else:
-            connection = getattr(self.read_local, "connection", None)
-            if connection is None:
-                connection = sqlite3.connect(self.db_file, check_same_thread=False, timeout=0.5)
-                connection.execute("PRAGMA query_only = ON")
-                connection.execute("PRAGMA busy_timeout = 500")
-                connection.execute("PRAGMA cache_size = -64000")
-                connection.execute("PRAGMA temp_store = MEMORY")
+            if self.persistence is None or self.persistence.read_sessions is None:
+                raise RuntimeError("SQLite read sessions are not available")
+            with self.persistence.read_sessions() as session:
+                connection = session.connection()
                 self.read_local.connection = connection
-                with self.read_connections_lock:
-                    self.read_connections.append(connection)
-            lock = None
+                try:
+                    result = connection.exec_driver_sql(query, tuple(params or ()))
+                    return [tuple(row) for row in result.fetchall()]
+                except SQLAlchemyError as e:
+                    session.rollback()
+                    print(f"Database read error: {e}")
+                    raise
 
         def execute_read():
             cursor = connection.cursor()
             try:
                 cursor.execute(query, params or ())
                 return cursor.fetchall()
-            except sqlite3.Error as e:
+            except Exception as e:
                 connection.rollback()
                 print(f"Database read error: {e}")
                 raise
@@ -230,7 +220,7 @@ class DatabaseHandler:
         cursor = self.connection.cursor()
         try:
             return cursor.fetchall() if cursor else None
-        except sqlite3.Error as e:
+        except Exception as e:
             print(f"Database error: {e}")
             return e
         finally:
@@ -241,7 +231,7 @@ class DatabaseHandler:
         cursor = self.connection.cursor()
         try:
             return cursor.fetchone() if cursor else None
-        except sqlite3.Error as e:
+        except Exception as e:
             print(f"Database error: {e}")
             return None
         finally:
@@ -251,9 +241,8 @@ class DatabaseHandler:
         """Close the database connection."""
         if self.connection:
             self.connection.close()
-        if self.read_connection and self.read_connection is not self.connection:
-            self.read_connection.close()
-        with self.read_connections_lock:
-            for connection in self.read_connections:
-                connection.close()
-            self.read_connections.clear()
+            self.connection = None
+        if self.persistence:
+            self.persistence.close()
+            self.persistence = None
+        self.read_connections.clear()

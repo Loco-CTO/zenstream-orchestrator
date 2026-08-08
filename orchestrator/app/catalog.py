@@ -377,7 +377,7 @@ class Catalog:
         context = self._context(user_id)
         projected = context.projected_metadata.get((entity_id, language)) if context else None
         if (
-            projected is not None
+            isinstance(projected, dict)
             and not include_credits
             and isinstance(projected.get("images"), dict)
         ):

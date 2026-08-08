@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
@@ -148,6 +149,26 @@ class MetadataAssetExecutor:
             futures = list(self._pending.values())
         if futures:
             wait(futures, timeout=timeout)
+
+    def wait_for_identities(
+        self, identities: set[tuple[str, str, str, str]], timeout: float | None = None
+    ) -> None:
+        if not identities:
+            return
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            with self._lock:
+                futures = [
+                    future
+                    for key, future in self._pending.items()
+                    if tuple(key[:4]) in identities
+                ]
+            if not futures:
+                return
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if remaining == 0.0:
+                return
+            wait(futures, timeout=remaining)
 
     def shutdown(self, wait_timeout: float = 5) -> None:
         self.drain(wait_timeout)

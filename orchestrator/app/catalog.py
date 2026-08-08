@@ -14,7 +14,10 @@ from fastapi import HTTPException
 from app.config import Config
 from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
 from app.metadata_domain import choose_artwork, fallback_tiers, locale_variants
-from app.metadata_services import MetadataReadService
+from app.metadata_services import (
+    CATALOG_ITEM_PROJECTION_SCHEMA,
+    MetadataReadService,
+)
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
 from app.images import LocalArtworkCache
 from app.logging_config import get_logger
@@ -380,6 +383,8 @@ class Catalog:
             isinstance(projected, dict)
             and not include_credits
             and isinstance(projected.get("images"), dict)
+            and projected.get("_catalogItemProjectionSchema")
+            == CATALOG_ITEM_PROJECTION_SCHEMA
         ):
             return {"metadata": projected}
         projection_table = (
@@ -397,7 +402,12 @@ class Catalog:
             if rows:
                 try:
                     value = json.loads(rows[0][0])
-                    if isinstance(value, dict) and isinstance(value.get("images"), dict):
+                    if (
+                        isinstance(value, dict)
+                        and isinstance(value.get("images"), dict)
+                        and value.get("_catalogItemProjectionSchema")
+                        == CATALOG_ITEM_PROJECTION_SCHEMA
+                    ):
                         if context:
                             context.projected_metadata[(entity_id, language)] = value
                         return {"metadata": value}

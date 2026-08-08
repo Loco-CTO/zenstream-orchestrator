@@ -46,8 +46,9 @@ class Admin:
         return token
 
     def authenticate(self, token: str) -> bool:
+        reader = getattr(self._db, "read_execute", self._db.execute)
         return bool(
-            self._db.read_execute(
+            reader(
                 "SELECT 1 FROM admin_sessions s JOIN admins a ON a.username = s.username "
                 "WHERE s.username = ? AND s.token = ? AND a.disabled = 0",
                 (self.username, token),
@@ -60,9 +61,10 @@ class Admin:
         )
 
     def list_accounts(self) -> list[dict]:
+        reader = getattr(self._db, "read_execute", self._db.execute)
         return [
             {"username": row[0], "is_root": bool(row[1]), "disabled": bool(row[2])}
-            for row in self._db.read_execute(
+            for row in reader(
                 "SELECT username, is_root, disabled FROM admins ORDER BY username"
             )
         ]
@@ -94,7 +96,8 @@ class Admin:
         )
 
     def profile(self) -> dict | None:
-        rows = self._db.read_execute(
+        reader = getattr(self._db, "read_execute", self._db.execute)
+        rows = reader(
             "SELECT username, is_root, disabled FROM admins WHERE username = ?",
             (self.username,),
         )

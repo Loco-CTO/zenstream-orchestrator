@@ -8,7 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app.catalog import Catalog, LOCAL_ARTWORK_NAMES
@@ -16,7 +16,8 @@ from app.images import LocalArtworkCache
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
-from app.client_auth import account_from_access, issue_ticket, require_account
+from app.client_auth import account_from_access, issue_ticket, require_account, websocket_account
+from app.catalog_read_model import CatalogReadModel, latest_catalog_root
 from app.logging_config import get_logger
 from app.foreground import run_foreground
 from app.playback import PlaybackManager, ffmpeg_path
@@ -31,6 +32,56 @@ media = PlaybackManager()
 trickplay = TrickplayExtractor()
 intro_outro = IntroOutroStore()
 logger = get_logger("playback_routes")
+
+
+def _catalog_status_payload(user_id: str) -> dict:
+    status = CatalogReadModel(catalog.db).status()
+    allowed = catalog.allowed_libraries(user_id)
+    has_projection_status = bool(
+        catalog.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_projection_status'"
+        )
+    )
+    libraries = (
+        catalog.db.execute(
+            (
+                f"SELECT l.id,l.scan_state,l.last_scan_finished_at,COALESCE(p.generation,0) "
+                f"FROM libraries l LEFT JOIN catalog_projection_status p ON p.library_id=l.id "
+                f"WHERE l.id IN ({','.join('?' for _ in allowed)}) ORDER BY l.id"
+                if has_projection_status
+                else f"SELECT id,scan_state,last_scan_finished_at,0 FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) ORDER BY id"
+            ),
+            sorted(allowed),
+        )
+        if allowed
+        else []
+    )
+    return {
+        "generation": int(status[1] or 0) if status else 0,
+        "state": status[0] if status else "unavailable",
+        "updatedAt": status[2] if status else None,
+        "libraries": [
+            {
+                "id": row[0],
+                "scanState": row[1],
+                "lastScanFinishedAt": row[2],
+                "catalogGeneration": int(row[3]),
+                "lastRootEntityId": latest_catalog_root(row[0]),
+            }
+            for row in libraries
+        ],
+    }
+
+
+def _catalog_status_fingerprint(payload: dict) -> tuple:
+    return (
+        payload["generation"],
+        payload["state"],
+        tuple(
+            (value["id"], value["scanState"], value["lastScanFinishedAt"], value["catalogGeneration"], value["lastRootEntityId"])
+            for value in payload["libraries"]
+        ),
+    )
 
 
 @router.post("/api/auth/login")
@@ -71,6 +122,59 @@ async def resource_ticket(request: Request):
 async def socket_ticket(request: Request):
     account, _ = require_account(request)
     return {"ticket": issue_ticket(account["id"], "socket", 60), "expiresIn": 60}
+
+
+@router.get("/api/catalog/status")
+async def catalog_status(request: Request):
+    account, _ = require_account(request)
+    return await asyncio.to_thread(_catalog_status_payload, account["id"])
+
+
+@router.websocket("/api/ws/catalog")
+async def catalog_socket(websocket: WebSocket):
+    account = websocket_account(websocket)
+    if not account:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    previous = None
+    last_sent = 0.0
+    try:
+        while True:
+            payload = await asyncio.to_thread(_catalog_status_payload, account["id"])
+            fingerprint = _catalog_status_fingerprint(payload)
+            current = asyncio.get_running_loop().time()
+            changed = fingerprint != previous
+            if changed or current - last_sent >= 15:
+                if previous is not None and changed:
+                    previous_libraries = {
+                        value[0]: value for value in previous[2]
+                    }
+                    for library in payload["libraries"]:
+                        current_value = (
+                            library["id"],
+                            library["scanState"],
+                            library["lastScanFinishedAt"],
+                            library["catalogGeneration"],
+                        )
+                        if previous_libraries.get(library["id"]) == current_value:
+                            continue
+                        await websocket.send_json(
+                            {
+                                "type": "catalog.updated",
+                                "libraryId": library["id"],
+                                "rootEntityId": library["lastRootEntityId"],
+                                "generation": library["catalogGeneration"],
+                                "reason": "scan" if library["scanState"] != "idle" else "refresh",
+                            }
+                        )
+                else:
+                    await websocket.send_json({"type": "catalog.status", **payload})
+                previous = fingerprint
+                last_sent = current
+            await asyncio.sleep(1)
+    except (WebSocketDisconnect, RuntimeError):
+        return
 
 
 @router.get("/api/metadata/languages")

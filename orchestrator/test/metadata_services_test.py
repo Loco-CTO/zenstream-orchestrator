@@ -190,6 +190,8 @@ class MetadataServicesTest(unittest.TestCase):
                     "en",
                     {
                         "title": "Cached Movie",
+                        "overview": "Cached overview",
+                        "description": "Cached description",
                         "images": [
                             {
                                 "type": "Primary",
@@ -205,6 +207,9 @@ class MetadataServicesTest(unittest.TestCase):
                 )
                 value = json.loads(projected[0][0])
                 self.assertEqual(value["title"], "Cached Movie")
+                self.assertEqual(value["overview"], "Cached overview")
+                self.assertEqual(value["description"], "Cached description")
+                self.assertEqual(value["_catalogItemProjectionSchema"], 1)
                 self.assertEqual(
                     value["images"]["Primary"]["url"],
                     "/api/catalog/items/movie/images/Primary?language=en",

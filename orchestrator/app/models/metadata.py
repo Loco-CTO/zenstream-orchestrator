@@ -256,7 +256,7 @@ class MetadataCache:
                 provider,
                 entity_type,
                 provider_id,
-                locale,
+                locale or "",
                 image_type,
                 image_url,
                 blur_hash,
@@ -276,9 +276,12 @@ class MetadataCache:
         for record in records:
             if record[4] not in ARTWORK_CATEGORY_SET:
                 raise ValueError(f"Unsupported image type '{record[4]}'.")
+        normalized_records = [
+            (*record[:3], record[3] or "", *record[4:]) for record in records
+        ]
         with self.db.transaction() as cursor:
             cursor.executemany(
                 "INSERT INTO metadata_images(provider, entity_type, provider_id, locale, image_type, image_url, blur_hash, local_path, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(provider, entity_type, provider_id, locale, image_type, image_url) DO UPDATE SET blur_hash=excluded.blur_hash, local_path=excluded.local_path, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
-                [(*record, fetched_at, expires_at) for record in records],
+                [(*record, fetched_at, expires_at) for record in normalized_records],
             )

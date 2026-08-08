@@ -250,6 +250,14 @@ class Catalog:
         if not rows:
             raise HTTPException(404, "Library not found.")
         row = rows[0]
+        generation = (
+            self.db.execute(
+                "SELECT generation FROM catalog_projection_status WHERE library_id=?",
+                (library_id,),
+            )
+            if self._has_table("catalog_projection_status")
+            else []
+        )
         context = self._context(user_id)
         supported = (
             context.measure("library_capabilities", lambda: self._library_supports_last_added({library_id}))
@@ -263,6 +271,7 @@ class Catalog:
             "scanState": row[3],
             "lastScanFinishedAt": row[4],
             "supportsLastAdded": library_id in supported,
+            "catalogGeneration": int(generation[0][0]) if generation else 0,
         }
 
     def _supports_last_added(self, library_id: str) -> bool:
@@ -297,6 +306,15 @@ class Catalog:
             if context
             else self._library_supports_last_added({row[0] for row in rows})
         )
+        generations = {}
+        if rows and self._has_table("catalog_projection_status"):
+            generations = {
+                row[0]: int(row[1])
+                for row in self.db.execute(
+                    f"SELECT library_id,generation FROM catalog_projection_status WHERE library_id IN ({','.join('?' for _ in rows)})",
+                    [row[0] for row in rows],
+                )
+            }
         return [
             {
                 "id": row[0],
@@ -305,6 +323,7 @@ class Catalog:
                 "scanState": row[3],
                 "lastScanFinishedAt": row[4],
                 "supportsLastAdded": row[0] in supported,
+                "catalogGeneration": generations.get(row[0], 0),
             }
             for row in rows
         ]

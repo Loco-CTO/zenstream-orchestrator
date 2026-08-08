@@ -11,7 +11,7 @@ from app.config import Config
 from app.library import JobTerminated, runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.providers import ProviderError
-from app.metadata_services import MetadataIngestService, metadata_task_results
+from app.metadata_services import MetadataIngestService, asset_executor, metadata_task_results
 from app.logging_config import get_logger
 from app.trickplay import TrickplayExtractor
 from app.intro_outro import IntroOutroDetector
@@ -405,6 +405,13 @@ class MetadataMissingJob:
         should_terminate = should_terminate or (lambda: False)
         ingest = MetadataIngestService()
         locales = ingest.locales()
+        config = definition.get("config") or {}
+        batch_size = max(1, min(500, int(config.get("batchSize") or 50)))
+        has_enrichment_queue = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrichment_queue'"
+            )
+        )
         rows = self.db.execute(
             "SELECT DISTINCT p.provider,e.entity_type,p.provider_id "
             "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
@@ -429,9 +436,25 @@ class MetadataMissingJob:
                     provider, entity_type, provider_id, locale
                 )
                 if cached and not force:
-                    ingest.ingest_document(
-                        provider, entity_type, provider_id, locale, cached
+                    needs_projection = bool(
+                        self.db.execute(
+                            "SELECT 1 FROM entity_provider_ids ep "
+                            "JOIN library_entities e ON e.id=ep.entity_id "
+                            "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=? "
+                            "AND NOT EXISTS (SELECT 1 FROM catalog_item_projection cp WHERE cp.entity_id=e.id AND cp.locale=?) LIMIT 1",
+                            (provider, entity_type, provider_id, locale),
+                        )
                     )
+                    needs_assets = bool(
+                        self.db.execute(
+                            "SELECT 1 FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? AND local_path IS NULL LIMIT 1",
+                            (provider, entity_type, provider_id, locale),
+                        )
+                    )
+                    if needs_projection or needs_assets:
+                        ingest.ingest_document(
+                            provider, entity_type, provider_id, locale, cached
+                        )
                 else:
                     missing.append(locale)
             if missing:
@@ -461,28 +484,57 @@ class MetadataMissingJob:
                         provider_id,
                         missing,
                     )
+            if item_failures and has_enrichment_queue:
+                entity_rows = self.db.execute(
+                    "SELECT ep.entity_id,e.library_id FROM entity_provider_ids ep "
+                    "JOIN library_entities e ON e.id=ep.entity_id "
+                    "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=?",
+                    (provider, entity_type, provider_id),
+                )
+                message = json.dumps(item_failures, ensure_ascii=False)
+                with self.db.transaction() as cursor:
+                    for entity_id, library_id in entity_rows:
+                        for locale in missing:
+                            cursor.execute(
+                                "INSERT INTO enrichment_queue(id,entity_id,library_id,kind,locale,priority,state,attempts,error,created_at,updated_at) "
+                                "VALUES(?,?,?,?,?,0,'retry',1,?,?,?) "
+                                "ON CONFLICT(entity_id,kind,locale) DO UPDATE SET state='retry',attempts=enrichment_queue.attempts+1,error=excluded.error,updated_at=excluded.updated_at",
+                                (
+                                    str(uuid.uuid4()),
+                                    entity_id,
+                                    library_id,
+                                    "metadata",
+                                    locale,
+                                    message,
+                                    now(),
+                                    now(),
+                                ),
+                            )
             return len(locales), item_failures
 
         completed = 0
         failures = []
         next_update = 10
-        for item, result, error in metadata_task_results(
-            items, process_item, should_terminate
-        ):
-            if error is not None:
-                raise error
-            processed, item_failures = result
-            failures.extend(item_failures)
-            completed += processed
-            if completed >= next_update or completed == total:
-                self.store.update_run(
-                    run_id,
-                    progress_current=completed,
-                    message=f"Checked {completed} of {total} metadata documents",
-                )
-                next_update = completed + 10
+        for offset in range(0, len(items), batch_size):
+            batch = items[offset : offset + batch_size]
+            for item, result, error in metadata_task_results(
+                batch, process_item, should_terminate
+            ):
+                if error is not None:
+                    raise error
+                processed, item_failures = result
+                failures.extend(item_failures)
+                completed += processed
+                if completed >= next_update or completed == total:
+                    self.store.update_run(
+                        run_id,
+                        progress_current=completed,
+                        message=f"Checked {completed} of {total} metadata documents",
+                    )
+                    next_update = completed + 10
         if should_terminate():
             raise JobTerminated()
+        asset_executor.drain(timeout=30.0)
         if failures:
             summary = f"Checked {completed} metadata documents; {len(failures)} repairs failed"
             self.store.update_run(

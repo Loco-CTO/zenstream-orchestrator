@@ -1245,8 +1245,8 @@ class PersonCreditIngestService:
                 ) in normalized_records
             ]
         portraits = []
-        with self.db.transaction() as cursor:
-            for entity_id in entity_ids:
+        for entity_id in entity_ids:
+            with self.db.transaction() as cursor:
                 credits = []
                 for (
                     credit_id,

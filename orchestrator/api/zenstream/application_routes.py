@@ -287,6 +287,7 @@ async def update_admin_playback_settings(
             width,
             height,
             data.get("trickplayIntervalSeconds", current["trickplayIntervalSeconds"]),
+            data.get("trickplayWorkers", current["trickplayWorkers"]),
         )
         return values
     except ValueError as error:

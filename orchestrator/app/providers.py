@@ -18,7 +18,11 @@ import httpx
 import pycountry
 
 from app.models.metadata import MetadataCache, MetadataCredentials
-from app.metadata_domain import ARTWORK_CATEGORIES, choose_artwork
+from app.metadata_domain import (
+    ARTWORK_CATEGORIES,
+    choose_artwork,
+    is_language_code_placeholder,
+)
 from app.logging_config import get_logger
 from version import __version__
 
@@ -1051,12 +1055,40 @@ class TVDBClient(ProviderClient):
             entity_type, data, self._language_code_for_artwork, self._artwork_type
         )
         overview_translations = data.get("overviewTranslations") or []
+        translated_overview = next(
+            (
+                value.get("overview")
+                for value in overview_translations
+                if isinstance(value, dict)
+                and not is_language_code_placeholder(value.get("overview"))
+                and value.get("overview")
+            ),
+            None,
+        )
+        overview = next(
+            (
+                value
+                for value in (
+                    translation.get("overview"),
+                    data.get("overview"),
+                    translated_overview,
+                )
+                if value and not is_language_code_placeholder(value)
+            ),
+            None,
+        )
+        description = next(
+            (
+                value
+                for value in (translation.get("overview"), data.get("overview"))
+                if value and not is_language_code_placeholder(value)
+            ),
+            None,
+        )
         return {
             "title": translation.get("name") or data.get("name") or data.get("title"),
-            "overview": translation.get("overview")
-            or data.get("overview")
-            or (overview_translations[0] if overview_translations else None),
-            "description": translation.get("overview") or data.get("overview"),
+            "overview": overview,
+            "description": description,
             "date": dates or None,
             "firstAired": data.get("firstAired"),
             "lastAired": data.get("lastAired"),

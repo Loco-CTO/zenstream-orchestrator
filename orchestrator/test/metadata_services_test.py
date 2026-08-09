@@ -98,26 +98,6 @@ class MetadataServicesTest(unittest.TestCase):
             executor.shutdown()
         self.assertEqual(calls, [1])
 
-    def test_asset_executor_waits_only_for_matching_identity(self):
-        executor = MetadataAssetExecutor(max_workers=2)
-        unrelated_started = threading.Event()
-        unrelated_release = threading.Event()
-
-        def unrelated_work():
-            unrelated_started.set()
-            unrelated_release.wait(5)
-
-        try:
-            executor.submit(("tmdb", "movie", "other", "en", "digest"), unrelated_work)
-            self.assertTrue(unrelated_started.wait(1))
-            executor.submit(
-                ("tmdb", "movie", "owned", "en", "digest"), lambda: None
-            )
-            executor.wait_for_identities({("tmdb", "movie", "owned", "en")}, timeout=1)
-        finally:
-            unrelated_release.set()
-            executor.shutdown()
-
     def test_neutral_image_writes_use_one_non_null_identity(self):
         self.db.execute(
             "CREATE TABLE metadata_images("

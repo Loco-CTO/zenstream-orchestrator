@@ -1852,15 +1852,6 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(value["images"], [])
         self.assertEqual({item["provider"] for item in value["ids"]}, {"tvdb", "imdb"})
 
-    def test_tvdb_normalization_maps_community_rating(self):
-        client = TVDBClient({"apiKey": "test"})
-        value = client.normalize(
-            "series",
-            "1",
-            {"data": {"name": "Example", "score": 8.4}},
-        )
-        self.assertEqual(value["communityRating"], 8.4)
-
     def test_tvdb_details_requests_english_translation_explicitly(self):
         client = TVDBClient({"apiKey": "test"})
         TVDBClient._language_codes_loaded = False

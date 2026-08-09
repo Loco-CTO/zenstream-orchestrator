@@ -410,7 +410,6 @@ class CatalogReadModel:
         )
         progress("collection_summary", len(collections), len(collections), force=True)
         now = _now()
-        artwork_selections = self._artwork_selection_values(locales, now)
         gram_write_count = len(grams) * (
             2 if self._has_table("catalog_root_search_grams") else 1
         )
@@ -422,7 +421,6 @@ class CatalogReadModel:
             + len(users)
             + len(collections)
             + len(collection_members)
-            + len(artwork_selections)
         )
         progress("writing", 0, write_total, force=True, persist=False)
         written = 0
@@ -495,12 +493,13 @@ class CatalogReadModel:
                     "writing_collection_members",
                 )
             if self._has_table("catalog_artwork_selection"):
+                artwork_selections = self._artwork_selection_values(
+                    locales, now, execute=cursor.execute
+                )
                 cursor.execute("DELETE FROM catalog_artwork_selection")
-                write_rows(
-                    cursor,
-                    "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,?)",
+                cursor.executemany(
+                    "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,provider,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                     artwork_selections,
-                    "writing_artwork_selection",
                 )
             if self._has_progress_columns():
                 cursor.execute(
@@ -581,7 +580,13 @@ class CatalogReadModel:
             for (collection_id, source_library_id), value in grouped.items()
         ]
 
-    def _artwork_selection_values(self, locales: list[str], now: str) -> list[tuple]:
+    def _artwork_selection_values(
+        self,
+        locales: list[str],
+        now: str,
+        *,
+        execute=None,
+    ) -> list[tuple]:
         required = {
             "catalog_artwork_selection",
             "metadata_images",
@@ -591,9 +596,9 @@ class CatalogReadModel:
         if not all(self._has_table(table) for table in required):
             return []
         placeholders = ",".join("?" for _ in locales)
-        rows = self.db.read_execute(
+        result = (execute or self.db.read_execute)(
             "WITH candidates AS ("
-            "SELECT p.entity_id,p.locale,mi.image_type,mi.local_path,mi.blur_hash,mi.fetched_at,"
+            "SELECT p.entity_id,p.locale,mi.image_type,ep.provider,mi.local_path,mi.blur_hash,mi.fetched_at,"
             "ROW_NUMBER() OVER (PARTITION BY p.entity_id,p.locale,mi.image_type ORDER BY "
             "ep.is_primary DESC,CASE WHEN mi.locale=p.locale THEN 0 WHEN mi.locale='' THEN 1 "
             "WHEN mi.locale='en' THEN 2 ELSE 3 END,mi.fetched_at DESC) AS choice "
@@ -606,15 +611,17 @@ class CatalogReadModel:
             "AND mi.image_type IN ('Primary','Backdrop','Logo','Banner') "
             "AND (mi.locale=p.locale OR mi.locale='' OR mi.locale='en' "
             "OR mi.locale=COALESCE(json_extract(p.payload,'$.originalLanguage'),''))"
-            ") SELECT entity_id,locale,image_type,local_path,blur_hash,fetched_at "
+            ") SELECT entity_id,locale,image_type,provider,local_path,blur_hash,fetched_at "
             "FROM candidates WHERE choice=1",
             locales,
         )
+        rows = result.fetchall() if hasattr(result, "fetchall") else result
         return [
             (
                 entity_id,
                 locale,
                 image_type,
+                provider,
                 local_path,
                 blur_hash,
                 hashlib.sha256(
@@ -622,7 +629,7 @@ class CatalogReadModel:
                 ).hexdigest()[:12],
                 now,
             )
-            for entity_id, locale, image_type, local_path, blur_hash, fetched_at in rows
+            for entity_id, locale, image_type, provider, local_path, blur_hash, fetched_at in rows
         ]
 
     def _coverage_gaps(

@@ -2,7 +2,9 @@ import ssl
 import unittest
 from unittest.mock import MagicMock, patch
 
-from app.providers import TVDBClient
+import httpx
+
+from app.providers import ProviderClient, TVDBClient
 
 
 class TVDBTLSCompatibilityTest(unittest.TestCase):
@@ -36,6 +38,26 @@ class TVDBTLSCompatibilityTest(unittest.TestCase):
         context = factory.call_args.args[0]
         self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
         self.assertEqual(context.maximum_version, ssl.TLSVersion.TLSv1_2)
+
+    def test_transport_disconnect_is_retried(self):
+        response = MagicMock()
+        response.json.return_value = {"ok": True}
+        response.status_code = 200
+        response.headers = {}
+        client = ProviderClient()
+        transport = MagicMock()
+        transport.get.side_effect = [httpx.ReadError("disconnected"), response]
+
+        with (
+            patch.object(client, "_http_client", return_value=transport),
+            patch("app.providers.random.uniform", return_value=1.0),
+            patch("app.providers.time.sleep") as sleep,
+        ):
+            payload = client._get("https://provider.example/item")
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(transport.get.call_count, 2)
+        sleep.assert_called_once_with(0.25)
 
 
 if __name__ == "__main__":

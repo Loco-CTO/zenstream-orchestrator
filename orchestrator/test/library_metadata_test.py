@@ -147,6 +147,65 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_child_metadata_failure_does_not_skip_later_siblings(self):
+        db, scanner = self._scanner_db()
+        try:
+            for entity_id, episode_number in (("episode-1", 1), ("episode-2", 2)):
+                db.execute(
+                    "INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,created_at,updated_at,match_status) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        entity_id,
+                        "library-1",
+                        "season-1",
+                        "episode",
+                        f"Series/Season 1/Episode {episode_number}.mkv",
+                        1,
+                        episode_number,
+                        "now",
+                        "now",
+                        "matched",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+                    (entity_id, "tvdb", "episode", str(100 + episode_number), 1),
+                )
+            scanner._scan_seen_ids = {"episode-1", "episode-2"}
+            scanner._scan_created_ids = ["episode-1", "episode-2"]
+            scanner._scan_provider_identity_changed = set()
+            scanner._scan_delta = {"content_changed": set()}
+            ingest = MagicMock()
+            ingest.locales.return_value = ["en"]
+            ingest.ingest_locales.side_effect = [
+                OSError("disconnect"),
+                {"en": {"title": "Episode 2"}},
+            ]
+
+            with (
+                patch.object(scanner, "_metadata_candidates", return_value={"episode-1", "episode-2"}),
+                patch("app.metadata_services.MetadataIngestService", return_value=ingest),
+                patch.object(scanner, "_persist_normalized_ids"),
+                patch.object(scanner, "_persist_child_ids"),
+            ):
+                scanner._seed_all_children(
+                    "library-1",
+                    MagicMock(),
+                    "job-1",
+                    lambda: False,
+                    parent_id="season-1",
+                )
+
+            states = dict(
+                db.execute(
+                    "SELECT id,match_status FROM library_entities WHERE id IN ('episode-1','episode-2')"
+                )
+            )
+            self.assertEqual(states["episode-1"], "failed")
+            self.assertEqual(states["episode-2"], "matched")
+            self.assertEqual(ingest.ingest_locales.call_count, 2)
+        finally:
+            db.close()
+
     def test_metadata_languages_normalize_without_forcing_english(self):
         self.assertEqual(
             MetadataLanguageSettings.normalize(["ja", "zh_tw", "en", "ja"]),

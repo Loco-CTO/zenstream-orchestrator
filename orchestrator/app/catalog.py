@@ -2002,6 +2002,81 @@ class Catalog:
         ranked.sort(key=lambda value: value[:3])
         return {"items": [value[3] for value in ranked[:limit]]}
 
+    @_catalog_read
+    def detail(
+        self,
+        user_id: str,
+        entity_id: str,
+        language: str,
+        season_id: str | None = None,
+    ) -> dict:
+        """Return the bounded data needed to render one detail route."""
+        row = self.require_entity(user_id, entity_id)
+        item = self.item(user_id, entity_id, language)
+        root_row = row
+        if row[3] == "episode" and row[2]:
+            season_row = self.require_entity(user_id, row[2])
+            root_row = self.require_entity(user_id, season_row[2]) if season_row[2] else season_row
+            season_id = season_id or season_row[0]
+        elif row[3] == "season" and row[2]:
+            root_row = self.require_entity(user_id, row[2])
+            season_id = season_id or row[0]
+
+        seasons: list[dict] = []
+        episodes: list[dict] = []
+        collection_items: list[dict] | None = None
+        if root_row[3] == "series":
+            seasons = self.list_items(
+                user_id,
+                root_row[1],
+                language,
+                parent_id=root_row[0],
+                page_size=100,
+            )["items"]
+            season_ids = {value["id"] for value in seasons}
+            if season_id not in season_ids:
+                preferred = next(
+                    (value for value in seasons if value.get("seasonNumber") == 1),
+                    seasons[0] if seasons else None,
+                )
+                season_id = preferred["id"] if preferred else None
+            if season_id:
+                episodes = self.list_items(
+                    user_id,
+                    root_row[1],
+                    language,
+                    parent_id=season_id,
+                    page_size=100,
+                )["items"]
+        elif row[3] == "collection":
+            collection_items = self.list_items(
+                user_id,
+                row[1],
+                language,
+                parent_id=row[0],
+                page_size=100,
+            )["items"]
+
+        generation_rows = (
+            self.db.execute(
+                "SELECT generation FROM catalog_library_summary WHERE library_id=?",
+                (row[1],),
+            )
+            if self._has_table("catalog_library_summary")
+            else []
+        )
+        return {
+            "item": item,
+            "backgroundItem": None,
+            "seasons": seasons,
+            "selectedSeasonId": season_id,
+            "episodes": episodes,
+            "similar": self.similar(user_id, entity_id, language)["items"],
+            "collectionItems": collection_items,
+            "rootEntityId": root_row[0],
+            "catalogGeneration": int(generation_rows[0][0]) if generation_rows else 0,
+        }
+
     def _home_series_name(
         self,
         user_id: str,

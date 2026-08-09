@@ -882,7 +882,14 @@ class MetadataIngestService:
                     json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
                 ).hexdigest()
                 asset_executor.submit(
-                    (provider, entity_type, provider_id, locale, digest),
+                    (
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        digest,
+                        int(force_assets),
+                    ),
                     materialize_assets,
                 )
             else:

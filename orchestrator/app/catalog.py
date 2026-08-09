@@ -436,6 +436,10 @@ class Catalog:
         context = self._read_context.get()
         if context is not None and entity_id in context.provider_ids:
             return context.provider_ids[entity_id]
+        if not self._has_table("entity_provider_ids"):
+            if context is not None:
+                context.provider_ids[entity_id] = []
+            return []
         primary = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
         rows = self.db.execute(
             "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY CASE WHEN provider=? THEN 0 ELSE 1 END,provider",

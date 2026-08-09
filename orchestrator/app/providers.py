@@ -1087,9 +1087,6 @@ class TVDBClient(ProviderClient):
                 str(data.get("originalLanguage") or "")
             )
             or data.get("originalLanguage"),
-            "communityRating": data.get("score")
-            if data.get("score") is not None
-            else data.get("rating"),
             "trailers": trailers,
             "people": people,
             "credits": normalized_credits,

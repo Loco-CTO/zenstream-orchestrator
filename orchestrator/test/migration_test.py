@@ -51,6 +51,16 @@ class PersistenceMigrationTest(unittest.TestCase):
                     }
                     <= indexes
                 )
+                playback_columns = {
+                    row[1]: row
+                    for row in connection.execute("PRAGMA table_info(playback_settings)")
+                }
+                intro_outro_columns = {
+                    row[1]: row
+                    for row in connection.execute("PRAGMA table_info(intro_outro_settings)")
+                }
+                self.assertIn(playback_columns["trickplay_workers"][4], {"1", "'1'"})
+                self.assertIn(intro_outro_columns["intro_outro_workers"][4], {"1", "'1'"})
             finally:
                 connection.close()
 

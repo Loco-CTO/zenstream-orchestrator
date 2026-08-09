@@ -79,7 +79,7 @@ class TrickplayTest(unittest.TestCase):
             def recover_generating(self):
                 return 0
 
-            def queue_pending(self):
+            def queue_pending(self, settings=None):
                 return len(self.assets)
 
             def claim_next(self):

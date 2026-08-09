@@ -19,6 +19,7 @@ from app.metadata_domain import (
     fallback_tiers,
     locale_variants,
     nonempty,
+    usable_text,
 )
 from app.models.metadata import (
     IMAGE_LANGUAGE_SCHEMA,
@@ -517,7 +518,7 @@ class MetadataReadService:
                 for locale in locale_variants(tier, available):
                     for provider in providers:
                         value = payloads.get((provider, locale), {}).get(key)
-                        if nonempty(value):
+                        if usable_text(key, value):
                             result[key] = value
                             found = True
                             break
@@ -545,7 +546,7 @@ class MetadataReadService:
                         for tier in tiers
                         for locale in locale_variants(tier, available)
                         if (provider, locale) in payloads
-                        and nonempty(payloads[(provider, locale)].get(key))
+                        and usable_text(key, payloads[(provider, locale)].get(key))
                     ),
                     None,
                 )

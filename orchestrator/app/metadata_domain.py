@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+import pycountry
+
 
 ARTWORK_CATEGORIES = ("Primary", "Backdrop", "Logo", "Banner")
 ARTWORK_CATEGORY_SET = frozenset(ARTWORK_CATEGORIES)
@@ -42,6 +44,33 @@ def fallback_tiers(requested: str, original: str | None, *, media: bool, include
 
 def nonempty(value: Any) -> bool:
     return value is not None and value != "" and value != [] and value != {}
+
+
+def is_language_code_placeholder(value: Any) -> bool:
+    """Return whether a provider supplied a language code instead of text."""
+    if not isinstance(value, str):
+        return False
+    raw = value.strip().replace("_", "-")
+    if not raw or raw != raw.lower():
+        return False
+    parts = raw.split("-")
+    if len(parts) > 2 or len(parts[0]) not in {2, 3}:
+        return False
+    if len(parts) == 2 and len(parts[1]) not in {2, 3}:
+        return False
+    language = None
+    for field in ("alpha_2", "alpha_3", "bibliographic"):
+        language = pycountry.languages.get(**{field: parts[0]})
+        if language:
+            break
+    return language is not None
+
+
+def usable_text(field: str, value: Any) -> bool:
+    return nonempty(value) and not (
+        field in {"overview", "description"}
+        and is_language_code_placeholder(value)
+    )
 
 
 @dataclass(frozen=True)

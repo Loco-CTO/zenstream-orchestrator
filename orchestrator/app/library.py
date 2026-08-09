@@ -948,13 +948,13 @@ class LibraryScanner:
                     library_id, root, job_id, should_terminate, targets
                 )
             self._scan_complete = True
-            if library["type"] != "tv_series":
+            if library["type"] == "music":
                 self._set_stage(job_id, "Resolving new or changed metadata")
                 self._resolve_and_seed(
                     library_id, library["type"], job_id, should_terminate
                 )
-            self._set_stage(job_id, "Populating changed metadata locales")
-            self._fetch_seen_locales(should_terminate)
+                self._set_stage(job_id, "Populating changed metadata locales")
+                self._fetch_seen_locales(should_terminate)
             self._set_stage(job_id, "Reconciling moved entities")
             self._reconcile_moved_entities(library_id, root)
             self._set_stage(job_id, "Pruning entities without playable media")
@@ -1272,23 +1272,7 @@ class LibraryScanner:
 
     def _publish_root(self, root_id: str) -> None:
         from app.catalog_read_model import CatalogReadModel
-        from app.metadata_services import asset_executor
-        from app.models.metadata import MetadataLanguageSettings
 
-        identities = {
-            (provider, entity_type, str(provider_id), locale)
-            for entity_id, entity_type, provider, provider_id in self.db.execute(
-                "WITH RECURSIVE subtree(id) AS ("
-                "SELECT id FROM library_entities WHERE id=? "
-                "UNION ALL SELECT e.id FROM library_entities e JOIN subtree s ON e.parent_id=s.id) "
-                "SELECT DISTINCT e.id,e.entity_type,p.provider,p.provider_id "
-                "FROM subtree s JOIN library_entities e ON e.id=s.id "
-                "JOIN entity_provider_ids p ON p.entity_id=e.id",
-                (root_id,),
-            )
-            for locale in MetadataLanguageSettings().get()
-        }
-        asset_executor.wait_for_identities(identities, timeout=30.0)
         with self._publication_lock:
             CatalogReadModel(self.db).refresh_roots([root_id])
 

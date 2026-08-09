@@ -1000,10 +1000,9 @@ class LibraryScanner:
                 message=f"Indexed {count} entries",
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
-            self.db.optimize()
-            self.db.maintain_wal(scan_complete=True)
             if removed:
                 self._refresh_dependent_collections(library_id)
+            self.db.schedule_maintenance(scan_complete=True)
         except JobTerminated:
             self._scan_complete = False
             # A terminated traversal is not authoritative. Remove only rows

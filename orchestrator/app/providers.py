@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 import threading
 import time
+import random
 import re
 import ssl
 import os
@@ -274,7 +275,24 @@ class ProviderClient:
             client = self._http_client(verify)
             response = None
             for attempt in range(3):
-                response = client.get(url, timeout=self.timeout, **kwargs)
+                try:
+                    response = client.get(url, timeout=self.timeout, **kwargs)
+                except httpx.TransportError as error:
+                    if attempt == 2:
+                        raise
+                    delay = min(5.0, 0.25 * (2**attempt)) * random.uniform(
+                        0.8, 1.2
+                    )
+                    logger.warning(
+                        "metadata provider transport retry client=%s url=%s delay_seconds=%.2f attempt=%s error=%s",
+                        client_name,
+                        url,
+                        delay,
+                        attempt + 1,
+                        error,
+                    )
+                    time.sleep(delay)
+                    continue
                 if response.status_code not in {429, 502, 503, 504} or attempt == 2:
                     break
                 retry_after = response.headers.get("retry-after")
@@ -282,7 +300,7 @@ class ProviderClient:
                     delay = float(retry_after) if retry_after is not None else 0.25 * (2**attempt)
                 except ValueError:
                     delay = 0.25 * (2**attempt)
-                delay = max(0.05, min(5.0, delay))
+                delay = max(0.05, min(5.0, delay)) * random.uniform(0.8, 1.2)
                 logger.warning(
                     "metadata provider request retry client=%s url=%s status=%s delay_seconds=%.2f attempt=%s",
                     client_name,

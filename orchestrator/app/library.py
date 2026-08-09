@@ -2925,7 +2925,7 @@ class LibraryScanner:
                     path=str(path),
                 )
             file_started = time.monotonic()
-            logger.info(
+            logger.debug(
                 "library scan file stat start entity_id=%s path=%s role=%s",
                 entity_id,
                 path,
@@ -2961,7 +2961,7 @@ class LibraryScanner:
                         time.monotonic() - file_started,
                     )
                     continue
-            logger.info(
+            logger.debug(
                 "library scan file stat complete entity_id=%s path=%s size=%s modified_ns=%s duration_seconds=%.1f",
                 entity_id,
                 path,
@@ -3028,7 +3028,7 @@ class LibraryScanner:
                     path=str(path),
                     size=file_size,
                 )
-            logger.info(
+            logger.debug(
                 "library scan file fingerprint start entity_id=%s path=%s size=%s",
                 entity_id,
                 path,
@@ -3044,7 +3044,7 @@ class LibraryScanner:
                     time.monotonic() - fingerprint_started,
                 )
                 continue
-            logger.info(
+            logger.debug(
                 "library scan file fingerprint complete entity_id=%s path=%s bytes_read=%s duration_seconds=%.1f",
                 entity_id,
                 path,

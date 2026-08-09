@@ -726,6 +726,9 @@ function EntityDetailView({
 	const [refreshMessage, setRefreshMessage] = useState("");
 	const [retry, setRetry] = useState(0);
 	useEffect(() => {
+		setRefreshMessage("");
+	}, [entry.id, locale]);
+	useEffect(() => {
 		const controller = new AbortController();
 		let cancelled = false;
 		const load = () =>
@@ -850,7 +853,9 @@ function EntityDetailView({
 								size={16}
 								className={refreshingMetadata ? "animate-spin" : ""}
 							/>
-							{refreshingMetadata ? "Refreshing…" : "Refresh metadata"}
+							{refreshingMetadata
+								? "Refreshing…"
+								: "Refresh metadata & artwork"}
 						</button>
 					)}
 					<button

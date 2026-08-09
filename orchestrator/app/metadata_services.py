@@ -505,10 +505,10 @@ class MetadataSearchProjection:
                                 "DELETE FROM catalog_root_search_grams WHERE entity_id=? AND locale='original'",
                                 (entity_id,),
                             )
-                        cursor.executemany(
-                            "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) VALUES(?,?,?,?,?)",
-                            gram_rows,
-                        )
+                            cursor.executemany(
+                                "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) VALUES(?,?,?,?,?)",
+                                gram_rows,
+                            )
                         if has_genres:
                             cursor.execute(
                                 "DELETE FROM catalog_item_genres WHERE entity_id=? AND locale=?",

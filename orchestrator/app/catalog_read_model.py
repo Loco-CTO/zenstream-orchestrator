@@ -11,6 +11,7 @@ from typing import Iterable
 from app.config import Config
 from app.logging_config import get_logger
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataLanguageSettings
+from app.search_scoring import normalize_search_text, search_grams
 
 
 logger = get_logger("catalog_read_model")
@@ -37,10 +38,6 @@ def _created_ns(value: str | None) -> int:
         return int(parsed.timestamp() * 1_000_000_000)
     except (TypeError, ValueError, OverflowError):
         return 0
-
-
-def normalize_search_text(value: object) -> str:
-    return _SPACE_RE.sub(" ", str(value or "").casefold()).strip()
 
 
 def _numeric(value: object, default: float = 0.0) -> float:
@@ -212,7 +209,7 @@ class CatalogReadModel:
         grams = []
         now = _now()
         for entity_id, row in entities.items():
-        for locale in locales:
+            for locale in locales:
                 payload_text = old.get((entity_id, locale))
                 try:
                     payload = json.loads(payload_text) if payload_text else self._fallback_payload(row)
@@ -242,18 +239,22 @@ class CatalogReadModel:
                 if progress is not None:
                     progress("projections", len(values), len(entities) * len(locales))
                 if row[2] is None and row[3] in {"movie", "series", "collection"}:
-                    seen_grams = set()
-                    searchable = normalize_search_text(
-                        f"{payload.get('title') or ''} {payload.get('originalTitle') or ''}"
-                    )
-                    for size in (1, 2):
-                        for index in range(0, max(0, len(searchable) - size + 1)):
-                            gram = searchable[index : index + size]
-                            if gram and gram not in seen_grams:
-                                grams.append(
-                                    (gram, entity_id, locale, row[1], title)
-                                )
-                                seen_grams.add(gram)
+                    documents = [(locale, payload.get("title") or row[4] or row[3])]
+                    original_title = payload.get("originalTitle")
+                    if original_title:
+                        documents.append(("original", original_title))
+                    for document_locale, document_title in documents:
+                        document_sort = normalize_search_text(document_title)
+                        grams.extend(
+                            (
+                                gram,
+                                entity_id,
+                                document_locale,
+                                row[1],
+                                document_sort,
+                            )
+                            for gram in search_grams(document_title)
+                        )
                 for genre in payload.get("genres") or payload.get("tags") or []:
                     if isinstance(genre, str) and genre.strip():
                         key = normalize_search_text(genre)
@@ -817,6 +818,7 @@ class CatalogReadModel:
         locales = list(MetadataLanguageSettings().get()) or ["en"]
         now = _now()
         projection_rows = []
+        gram_rows = []
         for entity_id, row in entities.items():
             payload = json.dumps(self._fallback_payload(row), ensure_ascii=False)
             title = normalize_search_text(json.loads(payload).get("title"))
@@ -824,6 +826,17 @@ class CatalogReadModel:
                 projection_rows.append(
                     (entity_id, locale, row[1], row[2], row[3], payload, title, 0.0, "", 0.0, now, 1)
                 )
+                if row[2] is None and row[3] in {"movie", "series", "collection"}:
+                    gram_rows.extend(
+                        (
+                            gram,
+                            entity_id,
+                            locale,
+                            row[1],
+                            title,
+                        )
+                        for gram in search_grams(title)
+                    )
         affected_collections: list[str] = []
         if self._has_table("collection_members") and entities:
             entity_placeholders = ",".join("?" for _ in entities)
@@ -845,6 +858,26 @@ class CatalogReadModel:
                 "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id,locale) DO NOTHING",
                 projection_rows,
             )
+            if entities and self._has_table("catalog_search_grams"):
+                entity_placeholders = ",".join("?" for _ in entities)
+                cursor.execute(
+                    f"DELETE FROM catalog_search_grams WHERE entity_id IN ({entity_placeholders})",
+                    list(entities),
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,NULL)",
+                    [row[:4] for row in gram_rows],
+                )
+            if entities and self._has_table("catalog_root_search_grams"):
+                entity_placeholders = ",".join("?" for _ in entities)
+                cursor.execute(
+                    f"DELETE FROM catalog_root_search_grams WHERE entity_id IN ({entity_placeholders})",
+                    list(entities),
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) VALUES(?,?,?,?,?)",
+                    gram_rows,
+                )
             if affected_collections:
                 collection_placeholders = ",".join("?" for _ in affected_collections)
                 cursor.execute(

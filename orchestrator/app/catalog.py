@@ -99,6 +99,7 @@ class _CatalogReadContext:
         self.date_scan_states: set[str] = set()
         self.selected_rows = 0
         self.query_count = 0
+        self.read_model_ready: bool | None = None
 
     def measure(self, stage: str, action):
         started = time.perf_counter()
@@ -118,7 +119,8 @@ def _catalog_read(method):
         token = self._read_context.set(context)
         started = time.perf_counter()
         try:
-            return method(self, user_id, *args, **kwargs)
+            with self.db.read_session():
+                return method(self, user_id, *args, **kwargs)
         finally:
             elapsed = time.perf_counter() - started
             details = " ".join(
@@ -210,6 +212,9 @@ class Catalog:
         return self._table_exists(name)
 
     def _read_model_ready(self) -> bool:
+        context = self._read_context.get()
+        if context and context.read_model_ready is not None:
+            return context.read_model_ready
         if not all(
             self._has_table(name)
             for name in (
@@ -218,13 +223,28 @@ class Catalog:
                 "catalog_read_model_status",
             )
         ):
-            return False
+            value = False
+            if context:
+                context.read_model_ready = value
+            return value
         rows = self.db.execute("SELECT state FROM catalog_read_model_status WHERE id=1")
-        return bool(rows and rows[0][0] == "ready")
+        value = bool(rows and rows[0][0] == "ready")
+        if context:
+            context.read_model_ready = value
+        return value
 
     def _library_supports_last_added(self, library_ids: set[str]) -> set[str]:
         if not library_ids:
             return set()
+        if self._has_table("catalog_library_summary"):
+            placeholders = ",".join("?" for _ in library_ids)
+            return {
+                row[0]
+                for row in self.db.execute(
+                    f"SELECT library_id FROM catalog_library_summary WHERE supports_last_added=1 AND library_id IN ({placeholders})",
+                    sorted(library_ids),
+                )
+            }
         placeholders = ",".join("?" for _ in library_ids)
         supported = {
             row[0]
@@ -259,12 +279,19 @@ class Catalog:
         if not rows:
             raise HTTPException(404, "Library not found.")
         row = rows[0]
+        generation_table = (
+            "catalog_library_summary"
+            if self._has_table("catalog_library_summary")
+            else "catalog_projection_status"
+            if self._has_table("catalog_projection_status")
+            else None
+        )
         generation = (
             self.db.execute(
-                "SELECT generation FROM catalog_projection_status WHERE library_id=?",
+                f"SELECT generation FROM {generation_table} WHERE library_id=?",
                 (library_id,),
             )
-            if self._has_table("catalog_projection_status")
+            if generation_table
             else []
         )
         context = self._context(user_id)
@@ -316,11 +343,18 @@ class Catalog:
             else self._library_supports_last_added({row[0] for row in rows})
         )
         generations = {}
-        if rows and self._has_table("catalog_projection_status"):
+        generation_table = (
+            "catalog_library_summary"
+            if self._has_table("catalog_library_summary")
+            else "catalog_projection_status"
+            if self._has_table("catalog_projection_status")
+            else None
+        )
+        if rows and generation_table:
             generations = {
                 row[0]: int(row[1])
                 for row in self.db.execute(
-                    f"SELECT library_id,generation FROM catalog_projection_status WHERE library_id IN ({','.join('?' for _ in rows)})",
+                    f"SELECT library_id,generation FROM {generation_table} WHERE library_id IN ({','.join('?' for _ in rows)})",
                     [row[0] for row in rows],
                 )
             }
@@ -387,7 +421,6 @@ class Catalog:
         projected = context.projected_metadata.get((entity_id, language)) if context else None
         if (
             isinstance(projected, dict)
-            and not include_credits
             and isinstance(projected.get("images"), dict)
             and projected.get("_catalogItemProjectionSchema")
             == CATALOG_ITEM_PROJECTION_SCHEMA
@@ -396,7 +429,12 @@ class Catalog:
                 for field in ("overview", "description")
             )
         ):
-            return {"metadata": projected}
+            value = dict(projected)
+            if include_credits:
+                value["credits"] = self.credits(
+                    user_id, entity_id, language, value.get("originalLanguage")
+                )
+            return {"metadata": value}
         projection_table = (
             "catalog_item_projection"
             if self._read_model_ready() and self._has_table("catalog_item_projection")
@@ -404,7 +442,7 @@ class Catalog:
             if self._has_table("catalog_metadata_projection")
             else None
         )
-        if not include_credits and projection_table:
+        if projection_table:
             rows = self.db.execute(
                 f"SELECT payload FROM {projection_table} WHERE entity_id=? AND locale=?",
                 (entity_id, language),
@@ -424,7 +462,15 @@ class Catalog:
                     ):
                         if context:
                             context.projected_metadata[(entity_id, language)] = value
-                        return {"metadata": value}
+                        resolved_value = dict(value)
+                        if include_credits:
+                            resolved_value["credits"] = self.credits(
+                                user_id,
+                                entity_id,
+                                language,
+                                resolved_value.get("originalLanguage"),
+                            )
+                        return {"metadata": resolved_value}
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
         resolve = lambda: self._read_service().resolve_public(
@@ -468,30 +514,32 @@ class Catalog:
         tiers = fallback_tiers(
             language, original_language, media=False, include_english="en" in configured
         )
+        locale_order: list[str] = []
+        for tier in tiers:
+            for variant in locale_variants(tier, available):
+                if variant not in locale_order:
+                    locale_order.append(variant)
+        if not locale_order:
+            return {"cast": [], "crew": []}
+        rank_sql = "CASE c.locale " + " ".join(
+            "WHEN ? THEN ?" for _ in locale_order
+        ) + " ELSE 999 END"
+        rank_params: list[object] = []
+        for index, locale in enumerate(locale_order):
+            rank_params.extend([locale, index])
+        rows = self.db.execute(
+            "WITH ranked AS ("
+            "SELECT c.person_id,c.credit_type,COALESCE(l.name,''),c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,c.id,"
+            f"DENSE_RANK() OVER (PARTITION BY c.credit_type ORDER BY {rank_sql}) AS locale_rank "
+            "FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
+            "LEFT JOIN person_localizations l ON l.person_id=p.id AND l.locale=c.locale "
+            "WHERE c.entity_id=? AND c.locale IN (" + ",".join("?" for _ in locale_order) + ")"
+            ") SELECT person_id,credit_type,name,role,department,credit_order,local_path,image_blur_hash "
+            "FROM ranked WHERE locale_rank=1 ORDER BY credit_type,credit_order,id",
+            [*rank_params, entity_id, *locale_order],
+        )
         result = {"cast": [], "crew": []}
-        for credit_type in ("cast", "crew"):
-            selected_locale = None
-            for tier in tiers:
-                for variant in locale_variants(tier, available):
-                    if self.db.execute(
-                        "SELECT 1 FROM entity_person_credits WHERE entity_id=? AND locale=? AND credit_type=? LIMIT 1",
-                        (entity_id, variant, credit_type),
-                    ):
-                        selected_locale = variant
-                        break
-                if selected_locale:
-                    break
-            if not selected_locale:
-                continue
-            rows = self.db.execute(
-                "SELECT c.person_id,COALESCE(l.name,''),c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash "
-                "FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
-                "LEFT JOIN person_localizations l ON l.person_id=p.id AND l.locale=c.locale "
-                "WHERE c.entity_id=? AND c.locale=? AND c.credit_type=? "
-                "ORDER BY c.credit_order,c.id",
-                (entity_id, selected_locale, credit_type),
-            )
-            for person_id, name, role, department, order, local_path, blur_hash in rows:
+        for person_id, credit_type, name, role, department, order, local_path, blur_hash in rows:
                 value = {"id": person_id, "name": name, "order": order}
                 if credit_type == "cast":
                     value["character"] = role
@@ -499,8 +547,9 @@ class Catalog:
                     value["job"] = role
                     value["department"] = department
                 if local_path and Path(local_path).is_file():
+                    version = str(Path(local_path).stat().st_mtime_ns)
                     value["image"] = {
-                        "url": f"/api/catalog/items/{entity_id}/people/{person_id}/image"
+                        "url": f"/api/catalog/items/{entity_id}/people/{person_id}/image?v={version}"
                     }
                     if blur_hash:
                         value["image"]["blurHash"] = blur_hash
@@ -567,6 +616,8 @@ class Catalog:
     @_catalog_read
     def item(self, user_id: str, entity_id: str, language: str) -> dict:
         row = self.require_entity(user_id, entity_id)
+        self._preload_projected_states(user_id, [entity_id])
+        self._preload_projected_metadata(user_id, [entity_id], language)
         metadata = self.metadata(user_id, entity_id, language, include_credits=True)["metadata"]
         if row[3] == "collection":
             allowed = self.allowed_libraries(user_id)
@@ -1003,8 +1054,8 @@ class Catalog:
         library_id = library["id"]
         offset = max(0, page - 1) * page_size
         count_rows = self.db.execute(
-            "SELECT COUNT(*) FROM library_entities WHERE library_id=? AND parent_id IS ?",
-            (library_id, parent_id),
+            "SELECT COUNT(*) FROM catalog_item_projection WHERE locale=? AND library_id=? AND parent_id IS ?",
+            (language, library_id, parent_id),
         )
         total = int(count_rows[0][0] or 0) if count_rows else 0
         direction = "DESC" if sort_order.lower() == "descending" else "ASC"
@@ -1026,8 +1077,8 @@ class Catalog:
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at," + select_dates + " "
-                "FROM library_entities e JOIN catalog_entity_summary s ON s.entity_id=e.id "
-                "WHERE e.library_id=? AND e.parent_id IS ? ORDER BY " + order + " LIMIT ? OFFSET ?"
+                "FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
+                "WHERE s.library_id=? AND s.parent_id IS ? ORDER BY " + order + " LIMIT ? OFFSET ?"
             )
             if date_params:
                 # The computed date aliases are used only for ordering; SQLite
@@ -1054,8 +1105,8 @@ class Catalog:
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-                "FROM library_entities e JOIN catalog_item_projection p ON p.entity_id=e.id AND p.locale=? "
-                "WHERE e.library_id=? AND e.parent_id IS ? ORDER BY " + projection_order + " " + direction + ",e.id " + direction + " LIMIT ? OFFSET ?"
+                "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
+                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY " + projection_order + " " + direction + ",p.entity_id " + direction + " LIMIT ? OFFSET ?"
             )
             params.extend([page_size, offset])
         else:
@@ -1669,33 +1720,34 @@ class Catalog:
                     "SELECT p.entity_id,MIN(" + title_rank + ") AS match_rank,"
                     "MIN(" + locale_rank + ") AS locale_rank,0.0 AS score "
                     "FROM catalog_search JOIN catalog_item_projection p ON p.entity_id=catalog_search.entity_id AND p.locale=catalog_search.locale "
-                    "JOIN library_entities e ON e.id=p.entity_id AND e.entity_type IN ('movie','series','collection') "
-                    f"WHERE catalog_search MATCH ? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) "
+                    f"WHERE catalog_search MATCH ? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) AND p.entity_type IN ('movie','series','collection') "
                     "GROUP BY p.entity_id"
                 )
                 match_params = [wanted, wanted, wanted, *locale_order, f'"{wanted.replace(chr(34), chr(34) * 2)}"', *allowed, *locale_order]
             else:
-                source = (
-                    "SELECT p.entity_id,CASE WHEN p.title_sort=? THEN 0 ELSE 2 END AS match_rank,"
-                    "MIN(" + locale_rank + ") AS locale_rank,0.0 AS score "
-                    "FROM catalog_search_grams g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
-                    "JOIN library_entities e ON e.id=p.entity_id AND e.entity_type IN ('movie','series','collection') "
-                    f"WHERE g.gram=? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) GROUP BY p.entity_id"
+                grams_table = (
+                    "catalog_root_search_grams"
+                    if self._has_table("catalog_root_search_grams")
+                    else "catalog_search_grams"
                 )
-                match_params = [wanted, *locale_order, wanted, *allowed, *locale_order]
-            total_rows = self.db.execute(f"SELECT COUNT(*) FROM ({source}) matches", match_params)
-            total = int(total_rows[0][0] or 0) if total_rows else 0
-            if not total:
-                return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+                source = (
+                    "SELECT p.entity_id,MIN(CASE WHEN p.title_sort=? THEN 0 WHEN p.title_sort LIKE ? || '%' THEN 1 ELSE 2 END) AS match_rank,"
+                    "MIN(" + locale_rank + ") AS locale_rank,0.0 AS score "
+                    f"FROM {grams_table} g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
+                    f"WHERE g.gram=? AND g.library_id IN ({placeholders}) AND g.locale IN ({locale_placeholders}) GROUP BY p.entity_id"
+                )
+                match_params = [wanted, wanted, *locale_order, wanted, *allowed, *locale_order]
             page_rows = self.db.execute(
-                "WITH matches AS (" + source + ") "
-                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-                "FROM matches JOIN library_entities e ON e.id=matches.entity_id "
-                "WHERE e.entity_type IN ('movie','series','collection') "
-                "ORDER BY matches.match_rank,matches.locale_rank,matches.score,e.id LIMIT ? OFFSET ?",
+                "WITH matches AS (" + source + "), page_ids AS ("
+                "SELECT entity_id,match_rank,locale_rank,score,COUNT(*) OVER() AS total FROM matches "
+                "ORDER BY match_rank,locale_rank,score,entity_id LIMIT ? OFFSET ?) "
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,page_ids.total "
+                "FROM page_ids JOIN library_entities e ON e.id=page_ids.entity_id "
+                "ORDER BY page_ids.match_rank,page_ids.locale_rank,page_ids.score,page_ids.entity_id",
                 [*match_params, page_size, max(0, page - 1) * page_size],
             )
-            values = self._hydrate_rows(user_id, list(page_rows), language)
+            total = int(page_rows[0][10] or 0) if page_rows else 0
+            values = self._hydrate_rows(user_id, [row[:10] for row in page_rows], language)
             return {"items": values, "page": page, "pageSize": page_size, "total": total}
         if len(wanted) >= 3:
             indexed = self.db.execute(
@@ -1915,11 +1967,12 @@ class Catalog:
                 allowed_placeholders = ",".join("?" for _ in allowed)
                 genre_placeholders = ",".join("?" for _ in keys)
                 rows = self.db.execute(
-                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,COUNT(DISTINCT g.genre_key) AS score,p.title_sort "
+                    "WITH ranked AS (SELECT g.entity_id,COUNT(*) AS score,MIN(p.title_sort) AS title_sort "
                     "FROM catalog_item_genres g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
-                    "JOIN library_entities e ON e.id=g.entity_id "
-                    f"WHERE g.locale=? AND g.genre_key IN ({genre_placeholders}) AND e.id<>? AND e.library_id IN ({allowed_placeholders}) AND e.entity_type=? "
-                    "GROUP BY e.id ORDER BY score DESC,p.title_sort,e.id LIMIT ?",
+                    f"WHERE g.locale=? AND g.genre_key IN ({genre_placeholders}) AND g.entity_id<>? AND g.library_id IN ({allowed_placeholders}) AND g.entity_type=? "
+                    "GROUP BY g.entity_id ORDER BY score DESC,title_sort,g.entity_id LIMIT ?) "
+                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                    "FROM ranked JOIN library_entities e ON e.id=ranked.entity_id ORDER BY ranked.score DESC,ranked.title_sort,ranked.entity_id",
                     [normalize_metadata_locale(language), *keys, entity_id, *allowed, source_row[3], limit],
                 )
                 values = self._hydrate_rows(user_id, [row[:10] for row in rows], language)
@@ -1976,9 +2029,9 @@ class Catalog:
         if self._read_model_ready():
             select_rows = lambda: self.db.execute(
                 f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,s.added_sort_ns,s.last_added_sort_ns "
-                f"FROM library_entities e JOIN catalog_entity_summary s ON s.entity_id=e.id "
-                f"WHERE e.library_id IN ({placeholders}) AND e.entity_type IN ('movie','series','collection') "
-                "ORDER BY s.last_added_sort_ns DESC,e.id LIMIT 36",
+                f"FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
+                f"WHERE s.library_id IN ({placeholders}) AND s.entity_type IN ('movie','series','collection') "
+                "ORDER BY s.last_added_sort_ns DESC,s.entity_id LIMIT 36",
                 list(allowed),
             )
             rows = context.measure("home_discovery_sql", select_rows) if context else select_rows()
@@ -2213,57 +2266,14 @@ class Catalog:
         }
 
     def _newly_added_rows(self, library_id: str, entity_type: str) -> list[tuple]:
-        columns = (
-            "e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
-            "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at"
+        return self.db.execute(
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+            "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+            "FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
+            "WHERE s.library_id=? AND s.entity_type=? AND s.media_file_count>0 "
+            "ORDER BY s.last_added_sort_ns DESC,s.entity_id LIMIT 18",
+            (library_id, entity_type),
         )
-        rows_by_entity: dict[str, tuple] = {}
-        last_modified: int | None = None
-        last_entity: str | None = None
-        last_file: str | None = None
-        boundary: int | None = None
-        while True:
-            params: list[object] = [library_id, entity_type]
-            cursor_filter = ""
-            if last_modified is not None:
-                cursor_filter = (
-                    " AND (f.modified_ns < ? OR (f.modified_ns = ? AND "
-                    "(f.entity_id > ? OR (f.entity_id = ? AND f.id > ?))))"
-                )
-                params.extend(
-                    [last_modified, last_modified, last_entity, last_entity, last_file]
-                )
-            batch = self.db.execute(
-                f"SELECT {columns},f.modified_ns,f.id "
-                "FROM media_files f "
-                "JOIN library_entities e ON e.id=f.entity_id "
-                "WHERE f.role='media' AND e.library_id=? AND e.entity_type=?"
-                f"{cursor_filter} ORDER BY f.modified_ns DESC,f.entity_id,f.id LIMIT 256",
-                params,
-            )
-            if not batch:
-                break
-            for row in batch:
-                entity_id = row[0]
-                rows_by_entity.setdefault(entity_id, row[:10] + (row[10],))
-            last_modified = batch[-1][10]
-            last_entity = batch[-1][0]
-            last_file = batch[-1][11]
-            if len(rows_by_entity) >= 18:
-                ordered = sorted(
-                    rows_by_entity.values(),
-                    key=lambda row: (-int(row[10] or 0), row[0]),
-                )
-                boundary = int(ordered[17][10] or 0)
-                if last_modified < boundary:
-                    break
-        return [
-            row[:10]
-            for row in sorted(
-                rows_by_entity.values(),
-                key=lambda row: (-int(row[10] or 0), row[0]),
-            )[:18]
-        ]
 
     @_catalog_read
     def home(self, user_id: str, language: str) -> dict:

@@ -259,6 +259,11 @@ class MetadataSearchProjection:
         )
         has_projection = "catalog_item_projection" in tables
         has_genres = "catalog_item_genres" in tables
+        genre_columns = (
+            {row[1] for row in self.db.execute("PRAGMA table_info(catalog_item_genres)")}
+            if has_genres
+            else set()
+        )
         has_root_grams = "catalog_root_search_grams" in tables
         has_artwork_selection = "catalog_artwork_selection" in tables
         metadata_image_columns = (
@@ -502,10 +507,16 @@ class MetadataSearchProjection:
                                 "DELETE FROM catalog_item_genres WHERE entity_id=? AND locale=?",
                                 (entity_id, locale),
                             )
-                            cursor.executemany(
-                                "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
-                                genre_rows,
-                            )
+                            if {"library_id", "entity_type"} <= genre_columns:
+                                cursor.executemany(
+                                    "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
+                                    genre_rows,
+                                )
+                            else:
+                                cursor.executemany(
+                                    "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                                    [(row[0], row[1], row[4], row[5]) for row in genre_rows],
+                                )
                         if has_artwork_selection:
                             cursor.execute(
                                 "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",

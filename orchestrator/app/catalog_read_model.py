@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import json
 import threading
 from pathlib import Path
-import re
 import time
 from typing import Iterable
 
@@ -24,9 +23,6 @@ def latest_catalog_root(library_id: str) -> str | None:
     with _latest_root_lock:
         return _latest_root_by_library.get(library_id)
 LEAF_TYPES = {"movie", "episode", "track", "release"}
-_SPACE_RE = re.compile(r"\s+")
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -216,8 +212,7 @@ class CatalogReadModel:
         grams = []
         now = _now()
         for entity_id, row in entities.items():
-            path_text = normalize_search_text(row[4])
-            for locale in locales:
+        for locale in locales:
                 payload_text = old.get((entity_id, locale))
                 try:
                     payload = json.loads(payload_text) if payload_text else self._fallback_payload(row)
@@ -249,7 +244,7 @@ class CatalogReadModel:
                 if row[2] is None and row[3] in {"movie", "series", "collection"}:
                     seen_grams = set()
                     searchable = normalize_search_text(
-                        f"{payload.get('title') or ''} {path_text}"
+                        f"{payload.get('title') or ''} {payload.get('originalTitle') or ''}"
                     )
                     for size in (1, 2):
                         for index in range(0, max(0, len(searchable) - size + 1)):
@@ -401,9 +396,30 @@ class CatalogReadModel:
         progress("user_summary", len(users), len(users), force=True)
         progress("collection_summary", 0, 0, force=True)
         collections = self._collection_values_from_db(entities, summaries, progress)
+        collection_members = (
+            self.db.read_execute(
+                "SELECT m.collection_entity_id,m.source_entity_id,e.library_id,m.position,? "
+                "FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id",
+                (_now(),),
+            )
+            if self._has_table("catalog_collection_member_projection")
+            and self._has_table("collection_members")
+            else []
+        )
         progress("collection_summary", len(collections), len(collections), force=True)
         now = _now()
-        write_total = len(summaries) + len(projections) + len(genres) + len(grams) + len(users) + len(collections)
+        gram_write_count = len(grams) * (
+            2 if self._has_table("catalog_root_search_grams") else 1
+        )
+        write_total = (
+            len(summaries)
+            + len(projections)
+            + len(genres)
+            + gram_write_count
+            + len(users)
+            + len(collections)
+            + len(collection_members)
+        )
         progress("writing", 0, write_total, force=True, persist=False)
         written = 0
 
@@ -466,6 +482,18 @@ class CatalogReadModel:
                 collections,
                 "writing_collection_summary",
             )
+            if self._has_table("catalog_collection_member_projection"):
+                cursor.execute("DELETE FROM catalog_collection_member_projection")
+                write_rows(
+                    cursor,
+                    "INSERT INTO catalog_collection_member_projection(collection_entity_id,source_entity_id,source_library_id,position,updated_at) VALUES(?,?,?,?,?)",
+                    collection_members,
+                    "writing_collection_members",
+                )
+            if self._has_table("catalog_artwork_selection"):
+                # Metadata projection is the sole owner of selected artwork.
+                # A rebuild must not retain paths for removed locales/entities.
+                cursor.execute("DELETE FROM catalog_artwork_selection")
             if self._has_progress_columns():
                 cursor.execute(
                     "INSERT INTO catalog_read_model_status(id,state,generation,updated_at,error,stage,processed,total,started_at,heartbeat_at) VALUES(1,'ready',1,?,NULL,'complete',?,?,?,?) ON CONFLICT(id) DO UPDATE SET state='ready',generation=1,updated_at=excluded.updated_at,error=NULL,stage='complete',processed=excluded.processed,total=excluded.total,started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at",
@@ -755,22 +783,31 @@ class CatalogReadModel:
             ):
                 cursor.execute(f"DROP TABLE IF EXISTS {table}")
 
-    def refresh_roots(self, root_ids: Iterable[str]) -> int:
+    def refresh_roots(
+        self,
+        root_ids: Iterable[str],
+        *,
+        affected_library_ids: Iterable[str] = (),
+    ) -> int:
         """Refresh committed scanner subtrees without touching unrelated roots."""
         if not self.available():
             return 0
         roots = list(dict.fromkeys(root_ids))
-        if not roots:
+        explicit_libraries = set(affected_library_ids)
+        if not roots and not explicit_libraries:
             return 0
-        placeholders = ",".join("?" for _ in roots)
-        rows = self.db.read_execute(
-            "WITH RECURSIVE subtree(id) AS ("
-            f"SELECT id FROM library_entities WHERE id IN ({placeholders}) "
-            "UNION ALL SELECT e.id FROM library_entities e JOIN subtree s ON e.parent_id=s.id) "
-            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.created_at "
-            "FROM library_entities e JOIN subtree s ON s.id=e.id",
-            roots,
-        )
+        if roots:
+            placeholders = ",".join("?" for _ in roots)
+            rows = self.db.read_execute(
+                "WITH RECURSIVE subtree(id) AS ("
+                f"SELECT id FROM library_entities WHERE id IN ({placeholders}) "
+                "UNION ALL SELECT e.id FROM library_entities e JOIN subtree s ON e.parent_id=s.id) "
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.created_at "
+                "FROM library_entities e JOIN subtree s ON s.id=e.id",
+                roots,
+            )
+        else:
+            rows = []
         entities = {row[0]: row for row in rows}
         children: dict[str, list[str]] = defaultdict(list)
         for row in rows:
@@ -824,11 +861,23 @@ class CatalogReadModel:
                     "GROUP BY m.collection_entity_id,s.library_id",
                     [now, *affected_collections],
                 )
+                if self._has_table("catalog_collection_member_projection"):
+                    cursor.execute(
+                        f"DELETE FROM catalog_collection_member_projection WHERE collection_entity_id IN ({collection_placeholders})",
+                        affected_collections,
+                    )
+                    cursor.execute(
+                        "INSERT INTO catalog_collection_member_projection(collection_entity_id,source_entity_id,source_library_id,position,updated_at) "
+                        "SELECT m.collection_entity_id,m.source_entity_id,e.library_id,m.position,? "
+                        "FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id "
+                        f"WHERE m.collection_entity_id IN ({collection_placeholders})",
+                        [now, *affected_collections],
+                    )
             cursor.execute(
                 "UPDATE catalog_read_model_status SET state='ready',generation=generation+1,updated_at=?,error=NULL WHERE id=1",
                 (now,),
             )
-            affected_libraries = {row[1] for row in summaries}
+            affected_libraries = explicit_libraries | {row[1] for row in summaries}
             if self._has_table("catalog_library_summary"):
                 for library_id in affected_libraries:
                     library_roots = [
@@ -836,14 +885,15 @@ class CatalogReadModel:
                         for root_id in roots
                         if entities.get(root_id) and entities[root_id][1] == library_id
                     ]
+                    published_root = library_roots[0] if len(library_roots) == 1 else None
                     cursor.execute(
                         "INSERT INTO catalog_library_summary(library_id,generation,supports_last_added,last_root_entity_id,updated_at) "
                         "VALUES(?,1,EXISTS(SELECT 1 FROM catalog_entity_summary WHERE library_id=? AND parent_id IS NOT NULL),?,?) "
-                        "ON CONFLICT(library_id) DO UPDATE SET generation=catalog_library_summary.generation+1,supports_last_added=excluded.supports_last_added,last_root_entity_id=COALESCE(excluded.last_root_entity_id,catalog_library_summary.last_root_entity_id),updated_at=excluded.updated_at",
+                        "ON CONFLICT(library_id) DO UPDATE SET generation=catalog_library_summary.generation+1,supports_last_added=excluded.supports_last_added,last_root_entity_id=excluded.last_root_entity_id,updated_at=excluded.updated_at",
                         (
                             library_id,
                             library_id,
-                            library_roots[-1] if library_roots else None,
+                            published_root,
                             now,
                         ),
                     )
@@ -856,10 +906,16 @@ class CatalogReadModel:
                         (library_id, library_id, now),
                     )
         with _latest_root_lock:
-            for root_id in roots:
-                row = entities.get(root_id)
-                if row:
-                    _latest_root_by_library[row[1]] = root_id
+            for library_id in explicit_libraries | {row[1] for row in entities.values()}:
+                library_roots = [
+                    root_id
+                    for root_id in roots
+                    if entities.get(root_id) and entities[root_id][1] == library_id
+                ]
+                if len(library_roots) == 1:
+                    _latest_root_by_library[library_id] = library_roots[0]
+                else:
+                    _latest_root_by_library.pop(library_id, None)
         return len(summaries)
 
     def refresh_user_entities(self, user_id: str, entity_ids: Iterable[str]) -> int:

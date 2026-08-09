@@ -48,6 +48,7 @@ TEXT_FIELDS = {
     "productionCompanies",
     "people",
 }
+
 FACT_FIELDS = {
     "date",
     "releaseDate",
@@ -67,7 +68,6 @@ FACT_FIELDS = {
     "ids",
     "children",
 }
-
 
 PROVIDER_PRIORITIES = {
     "series": ["tvdb", "tmdb"],

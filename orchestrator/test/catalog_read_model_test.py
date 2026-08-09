@@ -108,6 +108,50 @@ class CatalogReadModelTest(unittest.TestCase):
         )
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_bootstrap_repairs_small_projection_gap_without_full_rebuild(self, _languages):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute(
+            "DELETE FROM catalog_item_projection WHERE entity_id='episode-1' AND locale='en'"
+        )
+
+        with patch.object(model, "rebuild", side_effect=AssertionError("unexpected full rebuild")):
+            result = model.bootstrap(["en"])
+
+        self.assertEqual(result, 5)
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM catalog_item_projection WHERE entity_id='episode-1' AND locale='en'"
+            )[0][0],
+            1,
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_bootstrap_defers_unpublished_scan_inventory(self, _languages):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute(
+            "CREATE TABLE library_jobs(id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,state TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO library_jobs VALUES('job','library','scan','running')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('unpublished','library','series','episode','Series/Season 1/Episode 3.mkv',1,3,NULL,NULL,NULL,'2026','2026')"
+        )
+
+        with patch.object(model, "rebuild", side_effect=AssertionError("unexpected full rebuild")):
+            result = model.bootstrap(["en"])
+
+        self.assertEqual(result, 5)
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM catalog_entity_summary WHERE entity_id='unpublished'"
+            )[0][0],
+            0,
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_missing_metadata_still_gets_deterministic_projection(self, _languages):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])

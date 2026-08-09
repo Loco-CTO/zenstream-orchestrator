@@ -501,6 +501,109 @@ class CatalogReadModel:
             for (collection_id, source_library_id), value in grouped.items()
         ]
 
+    def _coverage_gaps(
+        self, configured: list[str]
+    ) -> tuple[dict[str, tuple], list[str], list[str]]:
+        entity_rows = self.db.read_execute(
+            "SELECT id,library_id,parent_id,entity_type,relative_path,created_at FROM library_entities"
+        )
+        entities = {row[0]: row for row in entity_rows}
+        summary_ids = {
+            row[0]
+            for row in self.db.read_execute(
+                "SELECT entity_id FROM catalog_entity_summary"
+            )
+            if row[0] in entities
+        }
+        projection_locales: dict[str, set[str]] = defaultdict(set)
+        for entity_id, locale in self.db.read_execute(
+            "SELECT entity_id,locale FROM catalog_item_projection"
+        ):
+            if entity_id in entities:
+                projection_locales[entity_id].add(locale)
+        required = set(configured)
+        missing_summaries = [
+            entity_id for entity_id in entities if entity_id not in summary_ids
+        ]
+        missing_projections = [
+            entity_id
+            for entity_id in entities
+            if not required.issubset(projection_locales.get(entity_id, set()))
+        ]
+        return entities, missing_summaries, missing_projections
+
+    @staticmethod
+    def _top_roots(entities: dict[str, tuple], entity_ids: Iterable[str]) -> list[str]:
+        roots = []
+        for entity_id in entity_ids:
+            current = entity_id
+            seen = set()
+            while current in entities and current not in seen:
+                seen.add(current)
+                parent_id = entities[current][2]
+                if parent_id not in entities:
+                    break
+                current = parent_id
+            roots.append(current)
+        return list(dict.fromkeys(roots))
+
+    def _active_inventory_jobs(self) -> bool:
+        if not self._has_table("library_jobs"):
+            return False
+        return bool(
+            self.db.read_execute(
+                "SELECT 1 FROM library_jobs WHERE kind IN ('scan','reconcile') "
+                "AND state IN ('queued','running','terminating') LIMIT 1"
+            )
+        )
+
+    def _repair_projection_roots(
+        self, root_ids: Iterable[str], configured: list[str]
+    ) -> int:
+        roots = list(dict.fromkeys(root_ids))
+        if not roots:
+            return 0
+        self.refresh_roots(roots)
+        placeholders = ",".join("?" for _ in roots)
+        rows = self.db.read_execute(
+            "WITH RECURSIVE subtree(id) AS ("
+            f"SELECT id FROM library_entities WHERE id IN ({placeholders}) "
+            "UNION ALL SELECT e.id FROM library_entities e JOIN subtree s ON e.parent_id=s.id) "
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.created_at "
+            "FROM library_entities e JOIN subtree s ON s.id=e.id",
+            roots,
+        )
+        entities = {row[0]: row for row in rows}
+        projections, genres, grams = self._projection_values(entities, configured)
+        entity_ids = list(entities)
+        entity_placeholders = ",".join("?" for _ in entity_ids)
+        with self.db.transaction() as cursor:
+            cursor.executemany(
+                "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id,locale) DO UPDATE SET "
+                "library_id=excluded.library_id,parent_id=excluded.parent_id,entity_type=excluded.entity_type,payload=excluded.payload,title_sort=excluded.title_sort,rating_sort=excluded.rating_sort,release_sort=excluded.release_sort,runtime_sort=excluded.runtime_sort,updated_at=excluded.updated_at,generation=excluded.generation",
+                projections,
+            )
+            if entity_ids and self._has_table("catalog_item_genres"):
+                cursor.execute(
+                    f"DELETE FROM catalog_item_genres WHERE entity_id IN ({entity_placeholders})",
+                    entity_ids,
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                    genres,
+                )
+            if entity_ids and self._has_table("catalog_search_grams"):
+                cursor.execute(
+                    f"DELETE FROM catalog_search_grams WHERE entity_id IN ({entity_placeholders})",
+                    entity_ids,
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,?)",
+                    grams,
+                )
+        return len(entities)
+
     def bootstrap(self, locales: Iterable[str] | None = None) -> int:
         """Build the read model before interactive services become healthy."""
         if not self.available() or not self._has_table("catalog_read_model_status"):
@@ -511,43 +614,46 @@ class CatalogReadModel:
         summary_count = int(self.db.read_execute("SELECT COUNT(*) FROM catalog_entity_summary")[0][0])
         projection_count = int(self.db.read_execute("SELECT COUNT(*) FROM catalog_item_projection")[0][0])
         expected_projections = entity_count * len(configured)
-        if status and status[0] == "ready" and summary_count == entity_count and projection_count == expected_projections:
+        entities, missing_summary_ids, missing_projection_ids = self._coverage_gaps(
+            configured
+        )
+        if (
+            status
+            and status[0] == "ready"
+            and not missing_summary_ids
+            and not missing_projection_ids
+        ):
             return entity_count
-        if status and projection_count == expected_projections and summary_count < entity_count:
-            missing_summary_ids = [
-                row[0]
-                for row in self.db.read_execute(
-                    "SELECT e.id FROM library_entities e "
-                    "LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id "
-                    "WHERE s.entity_id IS NULL LIMIT 301"
+        missing_ids = list(
+            dict.fromkeys([*missing_summary_ids, *missing_projection_ids])
+        )
+        if status and status[0] == "ready" and self._active_inventory_jobs():
+            logger.info(
+                "catalog read model bootstrap deferred coverage repair active_inventory=true entities=%s summaries=%s projections=%s expected_projections=%s missing_entities=%s",
+                entity_count,
+                summary_count,
+                projection_count,
+                expected_projections,
+                len(missing_ids),
+            )
+            return summary_count
+        if status and 0 < len(missing_ids) <= 300:
+            try:
+                roots = self._top_roots(entities, missing_ids)
+                self._repair_projection_roots(roots, configured)
+                _, remaining_summaries, remaining_projections = self._coverage_gaps(
+                    configured
                 )
-            ]
-            if 0 < len(missing_summary_ids) <= 300:
-                try:
-                    self.refresh_roots(missing_summary_ids)
-                    repaired_count = int(
-                        self.db.read_execute("SELECT COUNT(*) FROM catalog_entity_summary")[0][0]
+                if not remaining_summaries and not remaining_projections:
+                    logger.info(
+                        "catalog read model bootstrap repaired roots=%s missing_summaries=%s missing_projections=%s",
+                        len(roots),
+                        len(missing_summary_ids),
+                        len(missing_projection_ids),
                     )
-                    if repaired_count == entity_count:
-                        now = _now()
-                        with self.db.transaction() as cursor:
-                            if self._has_progress_columns():
-                                cursor.execute(
-                                    "UPDATE catalog_read_model_status SET state='ready',generation=1,updated_at=?,error=NULL,stage='complete',processed=?,total=?,started_at=COALESCE(started_at,?),heartbeat_at=? WHERE id=1",
-                                    (now, entity_count, entity_count, now, now),
-                                )
-                            else:
-                                cursor.execute(
-                                    "UPDATE catalog_read_model_status SET state='ready',generation=1,updated_at=?,error=NULL WHERE id=1",
-                                    (now,),
-                                )
-                        logger.info(
-                            "catalog read model bootstrap repaired missing summaries=%s",
-                            len(missing_summary_ids),
-                        )
-                        return entity_count
-                except Exception:
-                    logger.exception("catalog read model targeted summary repair failed")
+                    return entity_count
+            except Exception:
+                logger.exception("catalog read model targeted coverage repair failed")
         logger.info(
             "catalog read model bootstrap state=%s entities=%s summaries=%s projections=%s expected_projections=%s",
             status[0] if status else "missing",

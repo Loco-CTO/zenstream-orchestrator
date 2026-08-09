@@ -809,7 +809,12 @@ class MetadataIngestService:
                 }
         return {
             locale: self.ingest_document(
-                provider, entity_type, provider_id, locale, values[locale]
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                values[locale],
+                force_assets=force,
             )
             for locale in locales
         }
@@ -836,6 +841,8 @@ class MetadataIngestService:
         provider_id: str,
         locale: str,
         normalized: dict,
+        *,
+        force_assets: bool = False,
     ) -> dict:
         """Materialize a normalized document, including documents cached by aggregation."""
         if locale not in self.locales():
@@ -853,11 +860,21 @@ class MetadataIngestService:
                 # asset ingestion are repaired without blocking metadata.
                 if self.image_ingest is not None:
                     self.image_ingest.ingest(
-                        provider, entity_type, provider_id, locale, normalized
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        normalized,
+                        force=force_assets,
                     )
                 if self.credit_ingest is not None:
                     self.credit_ingest.ingest(
-                        provider, entity_type, provider_id, locale, normalized
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        normalized,
+                        force_images=force_assets,
                     )
 
             if self.background_assets:
@@ -967,6 +984,8 @@ class MetadataImageIngestService:
         provider_id: str,
         locale: str,
         document: dict,
+        *,
+        force: bool = False,
     ) -> dict[str, int]:
         """Persist local files and image rows for all artwork in a document.
 
@@ -994,7 +1013,11 @@ class MetadataImageIngestService:
                 continue
             try:
                 with self._file_lock(target):
-                    if target.is_file() and target.stat().st_size > 0:
+                    if (
+                        not force
+                        and target.is_file()
+                        and target.stat().st_size > 0
+                    ):
                         skipped += 1
                     else:
                         self._download(url, target)
@@ -1091,7 +1114,7 @@ class PersonCreditIngestService:
                     values.append((credit_type, index, record))
         return values
 
-    def _portrait(self, person_id: str, image_url: object):
+    def _portrait(self, person_id: str, image_url: object, force: bool = False):
         if not isinstance(image_url, str) or not image_url:
             return None
         parsed = urlparse(image_url)
@@ -1110,7 +1133,8 @@ class PersonCreditIngestService:
                 (person_id,),
             )
             if (
-                current
+                not force
+                and current
                 and current[0][0] == image_url
                 and current[0][1] == str(target)
                 and current[0][2]
@@ -1119,9 +1143,13 @@ class PersonCreditIngestService:
             ):
                 return None
             with self.images._file_lock(target):
-                if not target.is_file() or not target.stat().st_size:
+                if force or not target.is_file() or not target.stat().st_size:
                     self.images._download(image_url, target)
-            blur_hash = current[0][2] if current and current[0][0] == image_url else None
+            blur_hash = (
+                current[0][2]
+                if not force and current and current[0][0] == image_url
+                else None
+            )
             try:
                 if blur_hash is None:
                     blur_hash = self.images.hasher(target)
@@ -1173,6 +1201,8 @@ class PersonCreditIngestService:
         provider_id: str,
         locale: str,
         document: dict,
+        *,
+        force_images: bool = False,
     ) -> None:
         if provider not in {"tmdb", "tvdb"} or entity_type not in {
             "movie",
@@ -1286,7 +1316,12 @@ class PersonCreditIngestService:
         updates = [
             update
             for person_id, image_url in portraits
-            if (update := self._portrait(person_id, image_url)) is not None
+            if (
+                update := self._portrait(
+                    person_id, image_url, force=force_images
+                )
+            )
+            is not None
         ]
         if updates:
             with self.db.transaction() as cursor:

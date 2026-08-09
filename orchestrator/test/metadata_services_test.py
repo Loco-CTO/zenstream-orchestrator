@@ -3,7 +3,7 @@ import threading
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.database import DatabaseHandler
 from app.models.metadata import MetadataCache
@@ -398,6 +398,64 @@ class MetadataServicesTest(unittest.TestCase):
             self.assertEqual(len(cache.rows), 2)
             self.assertTrue(all(value[-1] and Path(value[-1]).is_file() for value in cache.rows))
             self.assertTrue(all(str(value[-1]).endswith(".webp") for value in cache.rows))
+
+    def test_forced_ingest_redownloads_existing_artwork_and_portraits(self):
+        fetcher = _BulkFetcher()
+        image_ingest = MagicMock()
+        credit_ingest = MagicMock()
+        ingest = MetadataIngestService(
+            fetcher,
+            _Settings(["en"]),
+            image_ingest=image_ingest,
+            credit_ingest=credit_ingest,
+            background_assets=False,
+        )
+
+        ingest.ingest_locales("tmdb", "movie", "10", ["en"], force=True)
+
+        image_ingest.ingest.assert_called_once_with(
+            "tmdb",
+            "movie",
+            "10",
+            "en",
+            {"title": "en", "images": []},
+            force=True,
+        )
+        credit_ingest.ingest.assert_called_once_with(
+            "tmdb",
+            "movie",
+            "10",
+            "en",
+            {"title": "en", "images": []},
+            force_images=True,
+        )
+
+    def test_forced_image_ingest_replaces_an_existing_cached_file(self):
+        cache = _ImageCache(self.db)
+        downloads = []
+        with tempfile.TemporaryDirectory() as directory:
+            image_ingest = MetadataImageIngestService(
+                cache,
+                directory,
+                downloader=lambda url: downloads.append(url) or b"image-data",
+                encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
+                hasher=lambda target: "hash",
+            )
+            document = {
+                "images": [
+                    {
+                        "type": "Primary",
+                        "url": "https://images.example/poster.jpg",
+                    }
+                ]
+            }
+            image_ingest.ingest("tmdb", "movie", "10", "en", document)
+            result = image_ingest.ingest(
+                "tmdb", "movie", "10", "en", document, force=True
+            )
+
+        self.assertEqual(len(downloads), 2)
+        self.assertEqual(result, {"ready": 1, "failed": 0, "skipped": 0})
 
     def test_ingest_document_materializes_aggregated_series(self):
         cache = _ImageCache(self.db)

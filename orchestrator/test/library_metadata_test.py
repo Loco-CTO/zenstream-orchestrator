@@ -1731,6 +1731,58 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(response, {"backfill": {"id": "run-1"}})
         refresh.assert_called_once_with()
 
+    def test_item_metadata_refresh_forces_all_locales_assets_and_publication(self):
+        ingest = MagicMock()
+        ingest.locales.return_value = ["en", "ja"]
+        model = MagicMock()
+        item = {
+            "id": "series-1",
+            "type": "series",
+            "providerIds": [
+                {"provider": "tvdb", "id": "100"},
+                {"provider": "tmdb", "id": "200"},
+            ],
+        }
+        with (
+            patch.object(library_routes, "_entity", return_value=item),
+            patch.object(library_routes, "MetadataService") as service_type,
+            patch.object(
+                library_routes, "MetadataIngestService", return_value=ingest
+            ) as ingest_type,
+            patch("app.catalog_read_model.CatalogReadModel", return_value=model),
+        ):
+            result = library_routes._refresh_item_metadata_sync("series-1")
+
+        ingest_type.assert_called_once_with(
+            service_type.return_value, background_assets=False
+        )
+        self.assertEqual(ingest.ingest_locales.call_count, 2)
+        ingest.ingest_locales.assert_any_call(
+            "tvdb", "series", "100", ["en", "ja"], force=True
+        )
+        ingest.ingest_locales.assert_any_call(
+            "tmdb", "series", "200", ["en", "ja"], force=True
+        )
+        model.refresh_roots.assert_called_once_with(["series-1"])
+        self.assertEqual(result["state"], "completed")
+
+    def test_item_metadata_refresh_endpoint_runs_off_event_loop(self):
+        expected = {"itemId": "movie-1", "state": "completed"}
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(
+                library_routes, "_refresh_item_metadata_sync", return_value=expected
+            ) as refresh,
+        ):
+            result = asyncio.run(
+                library_routes.refresh_item_metadata(
+                    "movie-1", Username="admin", TOKEN="token"
+                )
+            )
+
+        self.assertEqual(result, expected)
+        refresh.assert_called_once_with("movie-1")
+
     def test_local_image_names_are_matched_to_canonical_artwork_types(self):
         self.assertTrue(
             library_routes._local_image_for_type("Series/poster.jpg", "Primary")

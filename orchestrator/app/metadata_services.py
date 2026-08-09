@@ -29,6 +29,7 @@ from app.models.metadata import (
 )
 from app.logging_config import get_logger
 from app.images import blurhash_for_image, encode_webp_bytes
+from app.search_scoring import normalize_search_text, search_grams
 from app.worker_config import configured_worker_limit
 
 
@@ -231,6 +232,18 @@ def _usable_projection_value(value) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
+def _asset_version(local_path: object, fallback: object) -> str:
+    """Return a content-derived version for immutable authenticated assets."""
+    digest = hashlib.sha256()
+    try:
+        with open(str(local_path), "rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()[:12]
+    except (OSError, TypeError, ValueError):
+        return hashlib.sha256(str(fallback or "").encode("utf-8")).hexdigest()[:12]
+
+
 class MetadataSearchProjection:
     """Project cached titles into the transactional catalog search index."""
 
@@ -260,7 +273,10 @@ class MetadataSearchProjection:
         has_projection = "catalog_item_projection" in tables
         has_genres = "catalog_item_genres" in tables
         genre_columns = (
-            {row[1] for row in self.db.execute("PRAGMA table_info(catalog_item_genres)")}
+            {
+                row[1]
+                for row in self.db.execute("PRAGMA table_info(catalog_item_genres)")
+            }
             if has_genres
             else set()
         )
@@ -273,9 +289,6 @@ class MetadataSearchProjection:
         )
         has_blur_hash = "blur_hash" in metadata_image_columns
         has_fetched_at = "fetched_at" in metadata_image_columns
-        if has_projection:
-            from app.catalog_read_model import normalize_search_text
-
         for entity_id, library_id, is_primary in entities:
             while True:
                 previous_text = None
@@ -333,63 +346,55 @@ class MetadataSearchProjection:
                             )
                             if not choice:
                                 continue
+                            if not (is_primary or image_type not in current_images):
+                                continue
                             projected = {
                                 "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}",
                                 "language": choice.get("language"),
                                 "width": choice.get("width") or 0,
                                 "height": choice.get("height") or 0,
                             }
-                            version = hashlib.sha256(
-                                str(choice.get("url") or "").encode("utf-8")
-                            ).hexdigest()[:12]
+                            cached_image = self.db.execute(
+                                "SELECT local_path"
+                                + (",blur_hash" if has_blur_hash else ",NULL")
+                                + (",fetched_at" if has_fetched_at else ",NULL")
+                                + " FROM metadata_images "
+                                "WHERE provider=? AND entity_type=? AND provider_id=? "
+                                "AND image_type=? AND image_url=? AND local_path IS NOT NULL "
+                                + (
+                                    "ORDER BY fetched_at DESC "
+                                    if has_fetched_at
+                                    else ""
+                                )
+                                + "LIMIT 1",
+                                (
+                                    provider,
+                                    entity_type,
+                                    provider_id,
+                                    image_type,
+                                    choice.get("url"),
+                                ),
+                            )
+                            cached_row = cached_image[0] if cached_image else None
+                            version = _asset_version(
+                                cached_row[0] if cached_row else None,
+                                f"{choice.get('url') or ''}:{cached_row[2] if cached_row else ''}",
+                            )
                             projected["url"] += f"&v={version}"
-                            if image_type != "Logo" and has_blur_hash:
-                                order = " ORDER BY fetched_at DESC" if has_fetched_at else ""
-                                cached_hash = self.db.execute(
-                                    "SELECT blur_hash FROM metadata_images "
-                                    "WHERE provider=? AND entity_type=? AND provider_id=? "
-                                    "AND image_type=? AND image_url=? "
-                                    "AND blur_hash IS NOT NULL "
-                                    + order
-                                    + " LIMIT 1",
+                            if image_type != "Logo" and cached_row and cached_row[1]:
+                                projected["blurHash"] = cached_row[1]
+                            if has_artwork_selection and cached_row and cached_row[0]:
+                                artwork_rows.append(
                                     (
-                                        provider,
-                                        entity_type,
-                                        provider_id,
+                                        entity_id,
+                                        locale,
                                         image_type,
-                                        choice.get("url"),
-                                    ),
-                                )
-                                if cached_hash and cached_hash[0][0]:
-                                    projected["blurHash"] = cached_hash[0][0]
-                            if has_artwork_selection:
-                                cached_image = self.db.execute(
-                                    "SELECT local_path,blur_hash FROM metadata_images "
-                                    "WHERE provider=? AND entity_type=? AND provider_id=? "
-                                    "AND image_type=? AND image_url=? AND local_path IS NOT NULL "
-                                    + ("ORDER BY fetched_at DESC " if has_fetched_at else "")
-                                    + "LIMIT 1",
-                                    (
-                                        provider,
-                                        entity_type,
-                                        provider_id,
-                                        image_type,
-                                        choice.get("url"),
-                                    ),
-                                )
-                                if cached_image and cached_image[0][0]:
-                                    artwork_rows.append(
-                                        (
-                                            entity_id,
-                                            locale,
-                                            image_type,
-                                            cached_image[0][0],
-                                            cached_image[0][1],
-                                            version,
-                                        )
+                                        cached_row[0],
+                                        cached_row[1],
+                                        version,
                                     )
-                            if is_primary or image_type not in current_images:
-                                current_images[image_type] = projected
+                                )
+                            current_images[image_type] = projected
                     merged["images"] = current_images
                     payload_text = json.dumps(merged, ensure_ascii=False)
                     title_sort = normalize_search_text(merged.get("title") or "")
@@ -398,31 +403,25 @@ class MetadataSearchProjection:
                         merged.get("date") or merged.get("releaseDate") or ""
                     )
                     runtime_sort = float(merged.get("runtimeMinutes") or 0)
-                    searchable = normalize_search_text(
-                        f"{merged.get('title') or ''} {merged.get('originalTitle') or ''}"
-                    )
-                    grams = (
-                        {
-                            searchable[index : index + size]
-                            for size in (1, 2)
-                            for index in range(max(0, len(searchable) - size + 1))
-                            if searchable[index : index + size]
-                        }
-                        if entity
+                    if (
+                        entity
                         and entity[0] is None
                         and entity[1] in {"movie", "series", "collection"}
-                        else set()
-                    )
-                    gram_rows = [
-                        (
-                            gram,
-                            entity_id,
-                            locale,
-                            library_id,
-                            title_sort,
-                        )
-                        for gram in grams
-                    ]
+                    ):
+                        documents = [(locale, merged.get("title") or "")]
+                        if merged.get("originalTitle"):
+                            documents.append(("original", merged["originalTitle"]))
+                        gram_rows = [
+                            (
+                                gram,
+                                entity_id,
+                                document_locale,
+                                library_id,
+                                normalize_search_text(document_title),
+                            )
+                            for document_locale, document_title in documents
+                            for gram in search_grams(document_title)
+                        ]
                     genres = merged.get("genres") or merged.get("tags") or []
                     genre_rows = [
                         (
@@ -489,6 +488,10 @@ class MetadataSearchProjection:
                             "DELETE FROM catalog_search_grams WHERE entity_id=? AND locale=?",
                             (entity_id, locale),
                         )
+                        cursor.execute(
+                            "DELETE FROM catalog_search_grams WHERE entity_id=? AND locale='original'",
+                            (entity_id,),
+                        )
                         cursor.executemany(
                             "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,NULL)",
                             [row[:4] for row in gram_rows],
@@ -497,6 +500,10 @@ class MetadataSearchProjection:
                             cursor.execute(
                                 "DELETE FROM catalog_root_search_grams WHERE entity_id=? AND locale=?",
                                 (entity_id, locale),
+                            )
+                            cursor.execute(
+                                "DELETE FROM catalog_root_search_grams WHERE entity_id=? AND locale='original'",
+                                (entity_id,),
                             )
                             cursor.executemany(
                                 "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) VALUES(?,?,?,?,?)",
@@ -515,13 +522,25 @@ class MetadataSearchProjection:
                             else:
                                 cursor.executemany(
                                     "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
-                                    [(row[0], row[1], row[4], row[5]) for row in genre_rows],
+                                    [
+                                        (row[0], row[1], row[4], row[5])
+                                        for row in genre_rows
+                                    ],
                                 )
                         if has_artwork_selection:
-                            cursor.execute(
-                                "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
-                                (entity_id, locale),
-                            )
+                            if is_primary:
+                                cursor.execute(
+                                    "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
+                                    (entity_id, locale),
+                                )
+                            elif artwork_rows:
+                                cursor.executemany(
+                                    "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
+                                    [
+                                        (entity_id, locale, row[2])
+                                        for row in artwork_rows
+                                    ],
+                                )
                             cursor.executemany(
                                 "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) "
                                 "ON CONFLICT(entity_id,locale,image_type) DO UPDATE SET local_path=excluded.local_path,blur_hash=excluded.blur_hash,version=excluded.version,updated_at=excluded.updated_at",

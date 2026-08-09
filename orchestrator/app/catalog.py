@@ -13,7 +13,12 @@ from fastapi import HTTPException
 
 from app.config import Config
 from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
-from app.metadata_domain import choose_artwork, fallback_tiers, locale_variants
+from app.metadata_domain import (
+    choose_artwork,
+    fallback_tiers,
+    is_language_code_placeholder,
+    locale_variants,
+)
 from app.metadata_services import (
     CATALOG_ITEM_PROJECTION_SCHEMA,
     MetadataReadService,
@@ -386,6 +391,10 @@ class Catalog:
             and isinstance(projected.get("images"), dict)
             and projected.get("_catalogItemProjectionSchema")
             == CATALOG_ITEM_PROJECTION_SCHEMA
+            and not any(
+                is_language_code_placeholder(projected.get(field))
+                for field in ("overview", "description")
+            )
         ):
             return {"metadata": projected}
         projection_table = (
@@ -408,6 +417,10 @@ class Catalog:
                         and isinstance(value.get("images"), dict)
                         and value.get("_catalogItemProjectionSchema")
                         == CATALOG_ITEM_PROJECTION_SCHEMA
+                        and not any(
+                            is_language_code_placeholder(value.get(field))
+                            for field in ("overview", "description")
+                        )
                     ):
                         if context:
                             context.projected_metadata[(entity_id, language)] = value

@@ -326,6 +326,13 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(value["overview"], "English overview")
         self.assertEqual(value["images"][0]["url"], "neutral.jpg")
 
+    def test_read_fallback_ignores_language_code_overview_placeholders(self):
+        self._cache("ja", {"title": "Japanese", "overview": "eng", "originalLanguage": "ja"})
+        self._cache("en", {"overview": "English overview", "originalLanguage": "ja"})
+        service = MetadataReadService(self.db)
+        value = service.resolve_raw("movie", [{"provider": "tmdb", "id": "10"}], "ja")
+        self.assertEqual(value["overview"], "English overview")
+
     def test_english_is_optional_and_original_is_only_used_when_cached(self):
         self._cache("ja", {"title": "Japanese", "originalLanguage": "ja"})
         service = MetadataReadService(self.db)

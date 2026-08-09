@@ -831,6 +831,44 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(metadata["overview"], "English overview")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
+    def test_projection_with_language_code_overview_falls_back_to_metadata_cache(
+        self, _languages
+    ):
+        account = self.account().create("stale-projection", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.seed_item()
+        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT)")
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie",
+                "ja",
+                json.dumps(
+                    {
+                        "title": "Japanese",
+                        "overview": "eng",
+                        "images": {"Primary": {"url": "poster.jpg"}},
+                        "_catalogItemProjectionSchema": 1,
+                    }
+                ),
+            ),
+        )
+
+        metadata = self.catalog().metadata(account["id"], "movie", "ja")["metadata"]
+
+        self.assertEqual(metadata["overview"], "English overview")
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
     def test_progress_marks_played_at_ninety_percent(self, _languages):
         account = self.account().create("progress", "password-123")
         self.db.execute(

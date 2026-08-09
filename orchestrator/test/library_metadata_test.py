@@ -1924,6 +1924,22 @@ class LibraryMetadataTest(unittest.TestCase):
         )
         self.assertEqual(value["originalLanguage"], "en")
 
+    def test_tvdb_overview_translation_codes_are_not_used_as_overview(self):
+        client = TVDBClient({"apiKey": "test"})
+        with patch("app.providers._tvdb_images", return_value=([], [])):
+            value = client.normalize(
+                "episode",
+                "1",
+                {
+                    "data": {
+                        "name": "Example episode",
+                        "overview": "eng",
+                        "overviewTranslations": ["eng", "jpn"],
+                    }
+                },
+            )
+        self.assertIsNone(value["overview"])
+
     def test_tvdb_normalization_preserves_localized_trailer_url(self):
         client = TVDBClient({"apiKey": "test"})
         with (

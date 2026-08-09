@@ -96,6 +96,57 @@ class LibraryMetadataTest(unittest.TestCase):
         scanner._resolve_movie_row.assert_called_once()
         scanner._publish_root.assert_called_once_with("movie-1")
 
+    def test_scanner_locale_ingest_materializes_assets_inline(self):
+        service = MagicMock()
+        ingest = MagicMock()
+        ingest.locales.return_value = ["en", "ja"]
+        with patch(
+            "app.metadata_services.MetadataIngestService", return_value=ingest
+        ) as ingest_type:
+            LibraryScanner._fetch_configured_locales(
+                service, "tmdb", "movie", "123", required=True
+            )
+
+        ingest_type.assert_called_once_with(service, background_assets=False)
+        ingest.ingest_locales.assert_called_once_with(
+            "tmdb", "movie", "123", ["en", "ja"], force=False
+        )
+
+    def test_explicit_movie_identity_is_materialized_before_scan_advances(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first = root / "A [tmdbid-1]"
+                second = root / "B [tmdbid-2]"
+                first.mkdir()
+                second.mkdir()
+                (first / "A.mkv").touch()
+                (second / "B.mkv").touch()
+                self._prepare_incremental_scan(scanner)
+                order = []
+
+                def resolve_and_publish(_library, row, *_args):
+                    order.append(row[2])
+
+                with (
+                    patch.object(
+                        scanner,
+                        "_resolve_movie_and_publish",
+                        side_effect=resolve_and_publish,
+                    ) as resolve,
+                    patch.object(scanner, "_publish_root") as publish,
+                ):
+                    scanner._scan_movies(
+                        "library-1", root, "job-1", lambda: False
+                    )
+
+                self.assertEqual(order, ["A [tmdbid-1]", "B [tmdbid-2]"])
+                self.assertEqual(resolve.call_count, 2)
+                publish.assert_not_called()
+        finally:
+            db.close()
+
     def test_metadata_languages_normalize_without_forcing_english(self):
         self.assertEqual(
             MetadataLanguageSettings.normalize(["ja", "zh_tw", "en", "ja"]),

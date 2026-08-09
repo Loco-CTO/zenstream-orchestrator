@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+import hashlib
 import json
 import threading
 from pathlib import Path
@@ -409,6 +410,7 @@ class CatalogReadModel:
         )
         progress("collection_summary", len(collections), len(collections), force=True)
         now = _now()
+        artwork_selections = self._artwork_selection_values(locales, now)
         gram_write_count = len(grams) * (
             2 if self._has_table("catalog_root_search_grams") else 1
         )
@@ -420,6 +422,7 @@ class CatalogReadModel:
             + len(users)
             + len(collections)
             + len(collection_members)
+            + len(artwork_selections)
         )
         progress("writing", 0, write_total, force=True, persist=False)
         written = 0
@@ -492,9 +495,13 @@ class CatalogReadModel:
                     "writing_collection_members",
                 )
             if self._has_table("catalog_artwork_selection"):
-                # Metadata projection is the sole owner of selected artwork.
-                # A rebuild must not retain paths for removed locales/entities.
                 cursor.execute("DELETE FROM catalog_artwork_selection")
+                write_rows(
+                    cursor,
+                    "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,?)",
+                    artwork_selections,
+                    "writing_artwork_selection",
+                )
             if self._has_progress_columns():
                 cursor.execute(
                     "INSERT INTO catalog_read_model_status(id,state,generation,updated_at,error,stage,processed,total,started_at,heartbeat_at) VALUES(1,'ready',1,?,NULL,'complete',?,?,?,?) ON CONFLICT(id) DO UPDATE SET state='ready',generation=1,updated_at=excluded.updated_at,error=NULL,stage='complete',processed=excluded.processed,total=excluded.total,started_at=excluded.started_at,heartbeat_at=excluded.heartbeat_at",
@@ -572,6 +579,50 @@ class CatalogReadModel:
                 now,
             )
             for (collection_id, source_library_id), value in grouped.items()
+        ]
+
+    def _artwork_selection_values(self, locales: list[str], now: str) -> list[tuple]:
+        required = {
+            "catalog_artwork_selection",
+            "metadata_images",
+            "entity_provider_ids",
+            "catalog_item_projection",
+        }
+        if not all(self._has_table(table) for table in required):
+            return []
+        placeholders = ",".join("?" for _ in locales)
+        rows = self.db.read_execute(
+            "WITH candidates AS ("
+            "SELECT p.entity_id,p.locale,mi.image_type,mi.local_path,mi.blur_hash,mi.fetched_at,"
+            "ROW_NUMBER() OVER (PARTITION BY p.entity_id,p.locale,mi.image_type ORDER BY "
+            "ep.is_primary DESC,CASE WHEN mi.locale=p.locale THEN 0 WHEN mi.locale='' THEN 1 "
+            "WHEN mi.locale='en' THEN 2 ELSE 3 END,mi.fetched_at DESC) AS choice "
+            "FROM catalog_item_projection p "
+            "JOIN library_entities e ON e.id=p.entity_id "
+            "JOIN entity_provider_ids ep ON ep.entity_id=e.id "
+            "JOIN metadata_images mi ON mi.provider=ep.provider AND mi.provider_id=ep.provider_id "
+            "AND mi.entity_type=e.entity_type "
+            f"WHERE p.locale IN ({placeholders}) AND mi.local_path IS NOT NULL "
+            "AND mi.image_type IN ('Primary','Backdrop','Logo','Banner') "
+            "AND (mi.locale=p.locale OR mi.locale='' OR mi.locale='en' "
+            "OR mi.locale=COALESCE(json_extract(p.payload,'$.originalLanguage'),''))"
+            ") SELECT entity_id,locale,image_type,local_path,blur_hash,fetched_at "
+            "FROM candidates WHERE choice=1",
+            locales,
+        )
+        return [
+            (
+                entity_id,
+                locale,
+                image_type,
+                local_path,
+                blur_hash,
+                hashlib.sha256(
+                    f"{local_path}:{fetched_at or ''}".encode("utf-8")
+                ).hexdigest()[:12],
+                now,
+            )
+            for entity_id, locale, image_type, local_path, blur_hash, fetched_at in rows
         ]
 
     def _coverage_gaps(

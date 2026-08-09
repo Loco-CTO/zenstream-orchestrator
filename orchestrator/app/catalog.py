@@ -181,9 +181,11 @@ class Catalog:
             return
         with lock:
             if user_id is None:
-                self._home_cache_epoch += 1
+                self._home_cache_epoch = getattr(self, "_home_cache_epoch", 0) + 1
                 self._home_cache.clear()
             else:
+                if not hasattr(self, "_home_user_epochs"):
+                    self._home_user_epochs = {}
                 self._home_user_epochs[user_id] = self._home_user_epochs.get(user_id, 0) + 1
                 self._home_cache = {
                     key: value

@@ -80,15 +80,24 @@ def _metadata_document_gaps(
         and isinstance(image.get("url"), str)
         and image.get("url")
     }
+    image_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(metadata_images)")
+    }
+    blur_hash_column = ",blur_hash" if "blur_hash" in image_columns else ""
     image_rows = db.execute(
-        "SELECT image_type,image_url,local_path FROM metadata_images "
-        "WHERE provider=? AND entity_type=? AND provider_id=?",
+        "SELECT image_type,image_url,local_path" + blur_hash_column + " "
+        "FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=?",
         (provider, entity_type, provider_id),
     )
     ready_images = {
         (str(image_type), str(image_url))
-        for image_type, image_url, local_path in image_rows
+        for image_type, image_url, local_path, *_rest in image_rows
         if _ready_cache_path(local_path)
+    }
+    ready_hashes = {
+        (str(row[0]), str(row[1])): str(row[3]).strip()
+        for row in image_rows
+        if len(row) > 3 and _ready_cache_path(row[2]) and row[3]
     }
     for image_type, image_url in source_images - ready_images:
         gaps.add(f"artwork:{image_type}")
@@ -138,6 +147,16 @@ def _metadata_document_gaps(
             )
             if expected and image_type not in projected_images:
                 gaps.add(f"projection-artwork:{image_type}")
+            elif (
+                expected
+                and image_type != "Logo"
+                and image_type in projected_images
+                and ready_hashes.get((image_type, str(expected.get("url"))))
+                and not str(
+                    (projected_images.get(image_type) or {}).get("blurHash") or ""
+                ).strip()
+            ):
+                gaps.add(f"projection-artwork-blurhash:{image_type}")
 
         if (
             is_primary

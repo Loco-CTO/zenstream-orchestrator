@@ -259,6 +259,8 @@ class MetadataSearchProjection:
         )
         has_projection = "catalog_item_projection" in tables
         has_genres = "catalog_item_genres" in tables
+        has_root_grams = "catalog_root_search_grams" in tables
+        has_artwork_selection = "catalog_artwork_selection" in tables
         metadata_image_columns = (
             {row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")}
             if "metadata_images" in tables
@@ -280,6 +282,7 @@ class MetadataSearchProjection:
                 runtime_sort = 0.0
                 gram_rows = []
                 genre_rows = []
+                artwork_rows = []
                 if has_projection:
                     entity_rows = self.db.execute(
                         "SELECT parent_id,entity_type FROM library_entities WHERE id=?",
@@ -331,6 +334,10 @@ class MetadataSearchProjection:
                                 "width": choice.get("width") or 0,
                                 "height": choice.get("height") or 0,
                             }
+                            version = hashlib.sha256(
+                                str(choice.get("url") or "").encode("utf-8")
+                            ).hexdigest()[:12]
+                            projected["url"] += f"&v={version}"
                             if image_type != "Logo" and has_blur_hash:
                                 order = " ORDER BY fetched_at DESC" if has_fetched_at else ""
                                 cached_hash = self.db.execute(
@@ -350,6 +357,32 @@ class MetadataSearchProjection:
                                 )
                                 if cached_hash and cached_hash[0][0]:
                                     projected["blurHash"] = cached_hash[0][0]
+                            if has_artwork_selection:
+                                cached_image = self.db.execute(
+                                    "SELECT local_path,blur_hash FROM metadata_images "
+                                    "WHERE provider=? AND entity_type=? AND provider_id=? "
+                                    "AND image_type=? AND image_url=? AND local_path IS NOT NULL "
+                                    + ("ORDER BY fetched_at DESC " if has_fetched_at else "")
+                                    + "LIMIT 1",
+                                    (
+                                        provider,
+                                        entity_type,
+                                        provider_id,
+                                        image_type,
+                                        choice.get("url"),
+                                    ),
+                                )
+                                if cached_image and cached_image[0][0]:
+                                    artwork_rows.append(
+                                        (
+                                            entity_id,
+                                            locale,
+                                            image_type,
+                                            cached_image[0][0],
+                                            cached_image[0][1],
+                                            version,
+                                        )
+                                    )
                             if is_primary or image_type not in current_images:
                                 current_images[image_type] = projected
                     merged["images"] = current_images
@@ -363,19 +396,25 @@ class MetadataSearchProjection:
                     searchable = normalize_search_text(
                         f"{merged.get('title') or ''} {merged.get('originalTitle') or ''}"
                     )
-                    grams = {
-                        searchable[index : index + size]
-                        for size in (1, 2)
-                        for index in range(max(0, len(searchable) - size + 1))
-                        if searchable[index : index + size]
-                    }
+                    grams = (
+                        {
+                            searchable[index : index + size]
+                            for size in (1, 2)
+                            for index in range(max(0, len(searchable) - size + 1))
+                            if searchable[index : index + size]
+                        }
+                        if entity
+                        and entity[0] is None
+                        and entity[1] in {"movie", "series", "collection"}
+                        else set()
+                    )
                     gram_rows = [
                         (
                             gram,
                             entity_id,
                             locale,
                             library_id,
-                            entity[0] if entity else None,
+                            title_sort,
                         )
                         for gram in grams
                     ]
@@ -384,6 +423,8 @@ class MetadataSearchProjection:
                         (
                             entity_id,
                             locale,
+                            library_id,
+                            entity[1] if entity else entity_type,
                             normalize_search_text(genre),
                             str(genre).strip(),
                         )
@@ -444,17 +485,36 @@ class MetadataSearchProjection:
                             (entity_id, locale),
                         )
                         cursor.executemany(
-                            "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,?)",
-                            gram_rows,
+                            "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,NULL)",
+                            [row[:4] for row in gram_rows],
                         )
+                        if has_root_grams:
+                            cursor.execute(
+                                "DELETE FROM catalog_root_search_grams WHERE entity_id=? AND locale=?",
+                                (entity_id, locale),
+                            )
+                            cursor.executemany(
+                                "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) VALUES(?,?,?,?,?)",
+                                gram_rows,
+                            )
                         if has_genres:
                             cursor.execute(
                                 "DELETE FROM catalog_item_genres WHERE entity_id=? AND locale=?",
                                 (entity_id, locale),
                             )
                             cursor.executemany(
-                                "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                                "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
                                 genre_rows,
+                            )
+                        if has_artwork_selection:
+                            cursor.execute(
+                                "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
+                                (entity_id, locale),
+                            )
+                            cursor.executemany(
+                                "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) "
+                                "ON CONFLICT(entity_id,locale,image_type) DO UPDATE SET local_path=excluded.local_path,blur_hash=excluded.blur_hash,version=excluded.version,updated_at=excluded.updated_at",
+                                artwork_rows,
                             )
                 break
 

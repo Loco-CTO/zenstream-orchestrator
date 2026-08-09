@@ -824,7 +824,7 @@ class LibraryScanner:
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._publication_lock = threading.Lock()
-        self._pending_publication_roots: set[str] = set()
+        self._pending_publication_roots: dict[str, None] = {}
         self._last_publication_at = 0.0
 
     def _set_stage(
@@ -966,7 +966,7 @@ class LibraryScanner:
             self._set_stage(job_id, "Refreshing catalog read model")
             removed = rejected | missing
             self._flush_publications()
-            self._refresh_catalog_after_cleanup()
+            self._refresh_catalog_after_cleanup(library_id)
             self._set_stage(job_id, "Pruning local artwork cache")
             LocalArtworkCache(self.db).prune()
             from app.trickplay import TrickplayStore
@@ -1267,17 +1267,19 @@ class LibraryScanner:
         self._scan_refresh_root_ids.difference_update(removed)
         return removed
 
-    def _refresh_catalog_after_cleanup(self) -> None:
+    def _refresh_catalog_after_cleanup(self, library_id: str) -> None:
         from app.catalog_read_model import CatalogReadModel
 
         model = CatalogReadModel(self.db)
         roots = sorted(self._scan_refresh_root_ids)
         for offset in range(0, len(roots), 300):
             model.refresh_roots(roots[offset : offset + 300])
+        if not roots or self._scan_delta.get("removed"):
+            model.refresh_roots([], affected_library_ids=[library_id])
 
     def _publish_root(self, root_id: str) -> None:
         with self._publication_lock:
-            self._pending_publication_roots.add(root_id)
+            self._pending_publication_roots[root_id] = None
             if time.monotonic() - self._last_publication_at < 2.0:
                 return
             self._flush_publications_locked()
@@ -1294,11 +1296,26 @@ class LibraryScanner:
 
         if active_requests():
             time.sleep(0.05)
-        roots = sorted(self._pending_publication_roots)
-        self._pending_publication_roots.clear()
+        roots = list(self._pending_publication_roots)
         model = CatalogReadModel(self.db)
-        for offset in range(0, len(roots), 300):
-            model.refresh_roots(roots[offset : offset + 300])
+        try:
+            for offset in range(0, len(roots), 300):
+                model.refresh_roots(roots[offset : offset + 300])
+            if len(roots) > 1:
+                placeholders = ",".join("?" for _ in roots)
+                affected_libraries = [
+                    row[0]
+                    for row in self.db.execute(
+                        f"SELECT DISTINCT library_id FROM library_entities WHERE id IN ({placeholders})",
+                        roots,
+                    )
+                ]
+                model.refresh_roots([], affected_library_ids=affected_libraries)
+        except Exception:
+            logger.exception("catalog publication failed roots=%s", len(roots))
+            return
+        for root_id in roots:
+            self._pending_publication_roots.pop(root_id, None)
         self._last_publication_at = time.monotonic()
         if not active_requests():
             self.db.maintain_wal()
@@ -4027,7 +4044,7 @@ class LibraryScanner:
             if stale:
                 cleanup_entities(self.db, stale)
                 self._scan_delta["removed"].update(stale)
-            self._refresh_catalog_after_cleanup()
+            self._refresh_catalog_after_cleanup(library_id)
             self._scan_complete = True
             self.store.update_job(
                 job_id,

@@ -89,6 +89,37 @@ class CatalogTest(unittest.TestCase):
                 (locale, json.dumps(payload), "now", "later"),
             )
 
+    def test_credits_supports_legacy_localization_value_column(self):
+        """Deployed databases may use ``value`` instead of ``name``."""
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('credit-movie','allowed',NULL,'movie','Credit',NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        account = self.account().create("credits-user", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.db.execute(
+            "CREATE TABLE people(id TEXT PRIMARY KEY, local_path TEXT, image_blur_hash TEXT, updated_at TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE entity_person_credits(id TEXT PRIMARY KEY, entity_id TEXT, person_id TEXT, locale TEXT, credit_type TEXT, role TEXT, department TEXT, credit_order INTEGER)"
+        )
+        self.db.execute(
+            "CREATE TABLE person_localizations(person_id TEXT, locale TEXT, value TEXT, updated_at TEXT)"
+        )
+        self.db.execute("INSERT INTO people VALUES('person-1',NULL,NULL,'now')")
+        self.db.execute(
+            "INSERT INTO entity_person_credits VALUES('credit-1','credit-movie','person-1','en','cast','Hero',NULL,0)"
+        )
+        self.db.execute(
+            "INSERT INTO person_localizations VALUES('person-1','en','Legacy Actor','now')"
+        )
+
+        result = self.catalog().credits(account["id"], "credit-movie", "en")
+
+        self.assertEqual(result["cast"][0]["name"], "Legacy Actor")
+
     def seed_series_hierarchy(self):
         account = self.account().create("series", "password-123")
         self.db.execute(

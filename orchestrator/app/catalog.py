@@ -593,7 +593,7 @@ class Catalog:
             rank_params.extend([locale, index])
         rows = self.db.execute(
             "WITH ranked AS ("
-            "SELECT c.person_id,c.credit_type,COALESCE(" + localization_name + ",''),c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,p.updated_at,c.id,"
+            "SELECT c.person_id,c.credit_type,COALESCE(" + localization_name + ", '') AS name,c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,p.updated_at,c.id,"
             f"DENSE_RANK() OVER (PARTITION BY c.credit_type ORDER BY {rank_sql}) AS locale_rank "
             "FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
             + localization_join +

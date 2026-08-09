@@ -35,6 +35,50 @@ logger = get_logger("metadata")
 
 CATALOG_ITEM_PROJECTION_SCHEMA = 1
 
+TEXT_FIELDS = {
+    "title",
+    "originalTitle",
+    "overview",
+    "description",
+    "status",
+    "tags",
+    "genres",
+    "studios",
+    "networks",
+    "productionCompanies",
+    "people",
+}
+FACT_FIELDS = {
+    "date",
+    "releaseDate",
+    "firstAired",
+    "lastAired",
+    "airTime",
+    "runtimeMinutes",
+    "seasonNumber",
+    "episodeNumber",
+    "originalCountry",
+    "year",
+    "originalLanguage",
+    "communityRating",
+    "criticRating",
+    "provider",
+    "providerId",
+    "ids",
+    "children",
+}
+
+
+PROVIDER_PRIORITIES = {
+    "series": ["tvdb", "tmdb"],
+    "season": ["tvdb", "tmdb"],
+    "episode": ["tvdb", "tmdb"],
+    "movie": ["tmdb", "tvdb"],
+    "collection": ["tvdb"],
+    "artist": ["musicbrainz"],
+    "release": ["musicbrainz"],
+    "track": ["musicbrainz"],
+}
 
 _fetch_activity_lock = threading.Lock()
 _active_fetches = 0
@@ -182,48 +226,8 @@ def _canonical_metadata_language(value: object) -> str | None:
     return base if len(parts) == 1 else f"{base}-{parts[1].upper()}"
 
 
-TEXT_FIELDS = {
-    "title",
-    "originalTitle",
-    "overview",
-    "description",
-    "status",
-    "tags",
-    "genres",
-    "studios",
-    "networks",
-    "productionCompanies",
-    "people",
-}
-FACT_FIELDS = {
-    "date",
-    "releaseDate",
-    "firstAired",
-    "lastAired",
-    "airTime",
-    "runtimeMinutes",
-    "seasonNumber",
-    "episodeNumber",
-    "originalCountry",
-    "year",
-    "originalLanguage",
-    "communityRating",
-    "criticRating",
-    "provider",
-    "providerId",
-    "ids",
-    "children",
-}
-PROVIDER_PRIORITIES = {
-    "series": ["tvdb", "tmdb"],
-    "season": ["tvdb", "tmdb"],
-    "episode": ["tvdb", "tmdb"],
-    "movie": ["tmdb", "tvdb"],
-    "collection": ["tvdb"],
-    "artist": ["musicbrainz"],
-    "release": ["musicbrainz"],
-    "track": ["musicbrainz"],
-}
+def _usable_projection_value(value) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
 
 
 class MetadataSearchProjection:
@@ -249,7 +253,7 @@ class MetadataSearchProjection:
         if "catalog_search" not in tables:
             return
         entities = self.db.execute(
-            "SELECT e.id,e.library_id FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? AND p.provider_id=? AND e.entity_type=?",
+            "SELECT e.id,e.library_id,p.is_primary FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? AND p.provider_id=? AND e.entity_type=?",
             (provider, provider_id, entity_type),
         )
         has_projection = "catalog_item_projection" in tables
@@ -257,7 +261,7 @@ class MetadataSearchProjection:
         if has_projection:
             from app.catalog_read_model import normalize_search_text
 
-        for entity_id, library_id in entities:
+        for entity_id, library_id, is_primary in entities:
             while True:
                 previous_text = None
                 entity = None
@@ -286,14 +290,23 @@ class MetadataSearchProjection:
                     if not isinstance(merged, dict):
                         merged = {}
                     for field in TEXT_FIELDS | FACT_FIELDS:
-                        if field in payload:
+                        if (
+                            field in payload
+                            and _usable_projection_value(payload[field])
+                            and (
+                                is_primary
+                                or not _usable_projection_value(merged.get(field))
+                            )
+                        ):
                             merged[field] = payload[field]
                     merged["_catalogItemProjectionSchema"] = (
                         CATALOG_ITEM_PROJECTION_SCHEMA
                     )
+                    current_images = merged.get("images")
+                    if not isinstance(current_images, dict):
+                        current_images = {}
                     images = payload.get("images")
                     if isinstance(images, list):
-                        projected_images = {}
                         for image_type in ARTWORK_CATEGORY_SET:
                             choice = choose_artwork(
                                 images,
@@ -304,13 +317,15 @@ class MetadataSearchProjection:
                             )
                             if not choice:
                                 continue
-                            projected_images[image_type] = {
+                            projected = {
                                 "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}",
                                 "language": choice.get("language"),
                                 "width": choice.get("width") or 0,
                                 "height": choice.get("height") or 0,
                             }
-                        merged["images"] = projected_images
+                            if is_primary or image_type not in current_images:
+                                current_images[image_type] = projected
+                    merged["images"] = current_images
                     payload_text = json.dumps(merged, ensure_ascii=False)
                     title_sort = normalize_search_text(merged.get("title") or "")
                     rating_sort = float(merged.get("communityRating") or 0)
@@ -319,7 +334,7 @@ class MetadataSearchProjection:
                     )
                     runtime_sort = float(merged.get("runtimeMinutes") or 0)
                     searchable = normalize_search_text(
-                        f"{merged.get('title') or ''} {payload.get('originalTitle') or ''}"
+                        f"{merged.get('title') or ''} {merged.get('originalTitle') or ''}"
                     )
                     grams = {
                         searchable[index : index + size]
@@ -361,12 +376,12 @@ class MetadataSearchProjection:
                         "DELETE FROM catalog_search WHERE entity_id=? AND locale=?",
                         (entity_id, locale),
                     )
-                    if payload.get("title"):
+                    if merged.get("title"):
                         cursor.execute(
                             "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
-                            (entity_id, library_id, locale, str(payload["title"])),
+                            (entity_id, library_id, locale, str(merged["title"])),
                         )
-                    if payload.get("originalTitle"):
+                    if merged.get("originalTitle"):
                         cursor.execute(
                             "DELETE FROM catalog_search WHERE entity_id=? AND locale='original'",
                             (entity_id,),
@@ -377,7 +392,7 @@ class MetadataSearchProjection:
                                 entity_id,
                                 library_id,
                                 "original",
-                                str(payload["originalTitle"]),
+                                str(merged["originalTitle"]),
                             ),
                         )
                     if has_projection:
@@ -773,9 +788,7 @@ class MetadataIngestService:
         locales = list(dict.fromkeys(locales or self.locales()))
         unsupported = [locale for locale in locales if locale not in self._locales]
         if unsupported:
-            raise ValueError(
-                f"Metadata language is not configured: {unsupported[0]}"
-            )
+            raise ValueError(f"Metadata language is not configured: {unsupported[0]}")
         with metadata_fetch_activity():
             if hasattr(self.metadata_service, "fetch_locales"):
                 values = self.metadata_service.fetch_locales(
@@ -1009,11 +1022,7 @@ class MetadataImageIngestService:
                 continue
             try:
                 with self._file_lock(target):
-                    if (
-                        not force
-                        and target.is_file()
-                        and target.stat().st_size > 0
-                    ):
+                    if not force and target.is_file() and target.stat().st_size > 0:
                         skipped += 1
                     else:
                         self._download(url, target)
@@ -1312,11 +1321,7 @@ class PersonCreditIngestService:
         updates = [
             update
             for person_id, image_url in portraits
-            if (
-                update := self._portrait(
-                    person_id, image_url, force=force_images
-                )
-            )
+            if (update := self._portrait(person_id, image_url, force=force_images))
             is not None
         ]
         if updates:

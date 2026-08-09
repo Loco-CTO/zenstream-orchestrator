@@ -155,7 +155,7 @@ class MetadataServicesTest(unittest.TestCase):
                     "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)"
                 )
                 database.execute(
-                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT)"
+                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT,is_primary INTEGER NOT NULL DEFAULT 0)"
                 )
                 database.execute(
                     "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)"
@@ -173,7 +173,7 @@ class MetadataServicesTest(unittest.TestCase):
                     "INSERT INTO library_entities VALUES('movie','library',NULL,'movie')"
                 )
                 database.execute(
-                    "INSERT INTO entity_provider_ids VALUES('movie','tmdb','1')"
+                    "INSERT INTO entity_provider_ids(entity_id,provider,provider_id,is_primary) VALUES('movie','tmdb','1',1)"
                 )
                 fetcher = _BulkFetcher()
                 fetcher.cache = type("Cache", (), {"db": database})()
@@ -227,7 +227,7 @@ class MetadataServicesTest(unittest.TestCase):
                     "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)"
                 )
                 database.execute(
-                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT)"
+                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT,is_primary INTEGER NOT NULL DEFAULT 0)"
                 )
                 database.execute(
                     "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)"
@@ -245,10 +245,10 @@ class MetadataServicesTest(unittest.TestCase):
                     "INSERT INTO library_entities VALUES('movie','library',NULL,'movie')"
                 )
                 database.execute(
-                    "INSERT INTO entity_provider_ids VALUES('movie','tmdb','1')"
+                    "INSERT INTO entity_provider_ids(entity_id,provider,provider_id,is_primary) VALUES('movie','tmdb','1',1)"
                 )
                 database.execute(
-                    "INSERT INTO entity_provider_ids VALUES('movie','tvdb','2')"
+                    "INSERT INTO entity_provider_ids(entity_id,provider,provider_id,is_primary) VALUES('movie','tvdb','2',0)"
                 )
                 barrier = threading.Barrier(2)
                 calls = 0

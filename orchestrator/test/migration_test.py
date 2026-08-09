@@ -46,6 +46,9 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "idx_entity_provider_ids_provider_id",
                         "idx_library_jobs_global_queue",
                         "idx_catalog_search_grams_entity_locale",
+                        "idx_catalog_root_search_grams_lookup",
+                        "idx_catalog_item_genres_covering",
+                        "idx_catalog_artwork_selection_lookup",
                         "idx_metadata_images_url_path_ready",
                         "idx_metadata_images_type_url_fetched",
                     }
@@ -61,6 +64,27 @@ class PersistenceMigrationTest(unittest.TestCase):
                 }
                 self.assertIn(playback_columns["trickplay_workers"][4], {"1", "'1'"})
                 self.assertIn(intro_outro_columns["intro_outro_workers"][4], {"1", "'1'"})
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                self.assertTrue(
+                    {
+                        "catalog_library_summary",
+                        "catalog_root_search_grams",
+                        "catalog_artwork_selection",
+                    }
+                    <= tables
+                )
+                genre_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(catalog_item_genres)"
+                    )
+                }
+                self.assertTrue({"library_id", "entity_type"} <= genre_columns)
             finally:
                 connection.close()
 

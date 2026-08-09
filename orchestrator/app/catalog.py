@@ -569,6 +569,22 @@ class Catalog:
                     locale_order.append(variant)
         if not locale_order:
             return {"cast": [], "crew": []}
+        localization_name = "''"
+        localization_join = ""
+        if self._has_table("person_localizations"):
+            localization_join = (
+                "LEFT JOIN person_localizations l ON l.person_id=c.person_id AND l.locale=c.locale "
+            )
+            localization_columns = {
+                row[1]
+                for row in self.db.execute("PRAGMA table_info(person_localizations)")
+            }
+            if "name" in localization_columns:
+                localization_name = "l.name"
+            elif "localized_name" in localization_columns:
+                localization_name = "l.localized_name"
+            elif "value" in localization_columns:
+                localization_name = "l.value"
         rank_sql = "CASE c.locale " + " ".join(
             "WHEN ? THEN ?" for _ in locale_order
         ) + " ELSE 999 END"
@@ -577,10 +593,10 @@ class Catalog:
             rank_params.extend([locale, index])
         rows = self.db.execute(
             "WITH ranked AS ("
-            "SELECT c.person_id,c.credit_type,COALESCE(l.name,''),c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,p.updated_at,c.id,"
+            "SELECT c.person_id,c.credit_type,COALESCE(" + localization_name + ",''),c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,p.updated_at,c.id,"
             f"DENSE_RANK() OVER (PARTITION BY c.credit_type ORDER BY {rank_sql}) AS locale_rank "
             "FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
-            "LEFT JOIN person_localizations l ON l.person_id=p.id AND l.locale=c.locale "
+            + localization_join +
             "WHERE c.entity_id=? AND c.locale IN (" + ",".join("?" for _ in locale_order) + ")"
             ") SELECT person_id,credit_type,name,role,department,credit_order,local_path,image_blur_hash,updated_at "
             "FROM ranked WHERE locale_rank=1 ORDER BY credit_type,credit_order,id",

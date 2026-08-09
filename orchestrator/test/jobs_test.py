@@ -412,5 +412,34 @@ class JobLockingTest(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM job_runs")[0][0], 2)
 
 
+class AnalysisCapacityTest(unittest.TestCase):
+    def test_intro_outro_and_trickplay_analysis_jobs_can_run_together(self):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = MagicMock()
+        barrier = threading.Barrier(2)
+        errors = []
+
+        class Worker:
+            def run(self, run_id, store, should_terminate):
+                barrier.wait(timeout=2)
+
+        def run(kind):
+            try:
+                with patch("app.jobs.active_requests", return_value=0):
+                    scheduler._run_analysis(kind, kind, Worker(), lambda: False)
+            except Exception as error:
+                errors.append(error)
+
+        first = threading.Thread(target=run, args=("intro_outro_detect",))
+        second = threading.Thread(target=run, args=("trickplay_extract",))
+        first.start()
+        second.start()
+        first.join(timeout=3)
+        second.join(timeout=3)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+
+
 if __name__ == "__main__":
     unittest.main()

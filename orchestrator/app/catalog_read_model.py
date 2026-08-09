@@ -776,7 +776,7 @@ class CatalogReadModel:
                 len(missing_ids),
             )
             return summary_count
-        if status and 0 < len(missing_ids) <= 300:
+        if status and status[0] == "ready" and 0 < len(missing_ids) <= 300:
             try:
                 roots = self._top_roots(entities, missing_ids)
                 self._repair_projection_roots(roots, configured)
@@ -870,24 +870,52 @@ class CatalogReadModel:
         now = _now()
         projection_rows = []
         gram_rows = []
+        existing_payloads = {}
+        if entities:
+            entity_placeholders = ",".join("?" for _ in entities)
+            existing_payloads = {
+                (value[0], value[1]): value[2]
+                for value in self.db.read_execute(
+                    f"SELECT entity_id,locale,payload FROM catalog_item_projection WHERE entity_id IN ({entity_placeholders})",
+                    list(entities),
+                )
+            }
         for entity_id, row in entities.items():
-            payload = json.dumps(self._fallback_payload(row), ensure_ascii=False)
-            title = normalize_search_text(json.loads(payload).get("title"))
             for locale in locales:
+                payload = existing_payloads.get((entity_id, locale))
+                try:
+                    payload_value = (
+                        json.loads(payload)
+                        if payload
+                        else self._fallback_payload(row)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload_value = self._fallback_payload(row)
+                if not isinstance(payload_value, dict):
+                    payload_value = self._fallback_payload(row)
+                payload = json.dumps(payload_value, ensure_ascii=False)
+                title = normalize_search_text(
+                    payload_value.get("title") or row[4] or row[3]
+                )
                 projection_rows.append(
                     (entity_id, locale, row[1], row[2], row[3], payload, title, 0.0, "", 0.0, now, 1)
                 )
                 if row[2] is None and row[3] in {"movie", "series", "collection"}:
-                    gram_rows.extend(
-                        (
-                            gram,
-                            entity_id,
-                            locale,
-                            row[1],
-                            title,
+                    documents = [(locale, payload_value.get("title") or row[4] or row[3])]
+                    if payload_value.get("originalTitle"):
+                        documents.append(("original", payload_value["originalTitle"]))
+                    for document_locale, document_title in documents:
+                        document_sort = normalize_search_text(document_title)
+                        gram_rows.extend(
+                            (
+                                gram,
+                                entity_id,
+                                document_locale,
+                                row[1],
+                                document_sort,
+                            )
+                            for gram in search_grams(document_title)
                         )
-                        for gram in search_grams(title)
-                    )
         affected_collections: list[str] = []
         if self._has_table("collection_members") and entities:
             entity_placeholders = ",".join("?" for _ in entities)

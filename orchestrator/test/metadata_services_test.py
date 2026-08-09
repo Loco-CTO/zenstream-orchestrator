@@ -284,9 +284,9 @@ class MetadataServicesTest(unittest.TestCase):
                 self.assertEqual(value["overview"], "Cached overview")
                 self.assertEqual(value["description"], "Cached description")
                 self.assertEqual(value["_catalogItemProjectionSchema"], 1)
-                self.assertEqual(
+                self.assertRegex(
                     value["images"]["Primary"]["url"],
-                    "/api/catalog/items/movie/images/Primary?language=en",
+                    r"^/api/catalog/items/movie/images/Primary\?language=en&v=[0-9a-f]{12}$",
                 )
                 self.assertEqual(
                     value["images"]["Primary"]["blurHash"],

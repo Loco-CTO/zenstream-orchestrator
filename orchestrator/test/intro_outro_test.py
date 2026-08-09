@@ -58,3 +58,18 @@ class IntroOutroTest(unittest.TestCase):
         left = tuple(0xFFFFFFFF if index % 5 else index for index in range(points))
         right = tuple(0 if index % 5 else index for index in range(points))
         self.assertIsNone(shared_region(left, right, DEFAULTS, 15, 120))
+
+    def test_worker_limit_defaults_and_is_bounded(self):
+        self.assertEqual(DEFAULTS["introOutroWorkers"], 1)
+        self.assertEqual(
+            __import__("app.intro_outro", fromlist=["normalize_settings"]).normalize_settings(
+                {"introOutroWorkers": 64}
+            )["introOutroWorkers"],
+            64,
+        )
+        self.assertEqual(
+            __import__("app.intro_outro", fromlist=["normalize_settings"]).normalize_settings(
+                {"introOutroWorkers": 0}
+            )["introOutroWorkers"],
+            1,
+        )

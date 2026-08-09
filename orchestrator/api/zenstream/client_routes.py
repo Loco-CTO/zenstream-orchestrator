@@ -17,7 +17,7 @@ from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
 from app.client_auth import account_from_access, issue_ticket, require_account, websocket_account
-from app.catalog_read_model import CatalogReadModel, latest_catalog_root
+from app.catalog_read_model import CatalogReadModel
 from app.logging_config import get_logger
 from app.foreground import run_foreground
 from app.playback import PlaybackManager, ffmpeg_path
@@ -37,19 +37,19 @@ logger = get_logger("playback_routes")
 def _catalog_status_payload(user_id: str) -> dict:
     status = CatalogReadModel(catalog.db).status()
     allowed = catalog.allowed_libraries(user_id)
-    has_projection_status = bool(
+    has_library_summary = bool(
         catalog.db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_projection_status'"
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_library_summary'"
         )
     )
     libraries = (
         catalog.db.execute(
             (
-                f"SELECT l.id,l.scan_state,l.last_scan_finished_at,COALESCE(p.generation,0) "
-                f"FROM libraries l LEFT JOIN catalog_projection_status p ON p.library_id=l.id "
+                f"SELECT l.id,l.scan_state,l.last_scan_finished_at,COALESCE(p.generation,0),p.last_root_entity_id "
+                f"FROM libraries l LEFT JOIN catalog_library_summary p ON p.library_id=l.id "
                 f"WHERE l.id IN ({','.join('?' for _ in allowed)}) ORDER BY l.id"
-                if has_projection_status
-                else f"SELECT id,scan_state,last_scan_finished_at,0 FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) ORDER BY id"
+                if has_library_summary
+                else f"SELECT id,scan_state,last_scan_finished_at,0,NULL FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) ORDER BY id"
             ),
             sorted(allowed),
         )
@@ -66,7 +66,7 @@ def _catalog_status_payload(user_id: str) -> dict:
                 "scanState": row[1],
                 "lastScanFinishedAt": row[2],
                 "catalogGeneration": int(row[3]),
-                "lastRootEntityId": latest_catalog_root(row[0]),
+                "lastRootEntityId": row[4],
             }
             for row in libraries
         ],
@@ -156,6 +156,7 @@ async def catalog_socket(websocket: WebSocket):
                             library["scanState"],
                             library["lastScanFinishedAt"],
                             library["catalogGeneration"],
+                            library["lastRootEntityId"],
                         )
                         if previous_libraries.get(library["id"]) == current_value:
                             continue
@@ -172,7 +173,7 @@ async def catalog_socket(websocket: WebSocket):
                     await websocket.send_json({"type": "catalog.status", **payload})
                 previous = fingerprint
                 last_sent = current
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
     except (WebSocketDisconnect, RuntimeError):
         return
 
@@ -380,9 +381,16 @@ async def item_metadata(entity_id: str, request: Request, language: str = Query(
 async def item_image(
     entity_id: str, image_type: str, request: Request, language: str = Query(...)
 ):
-    account = account_from_access(request)
     def resolve_cached_image() -> Path | None:
+        account = account_from_access(request)
         row = catalog.require_entity(account["id"], entity_id)
+        if catalog._has_table("catalog_artwork_selection"):
+            projected = catalog.db.execute(
+                "SELECT local_path FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
+                (entity_id, language, image_type),
+            )
+            if projected and projected[0][0] and Path(projected[0][0]).is_file():
+                return Path(projected[0][0])
         library_rows = catalog.db.execute(
             "SELECT directory FROM libraries WHERE id=?", (row[1],)
         )
@@ -416,7 +424,7 @@ async def item_image(
         return FileResponse(
             cached_image,
             media_type="image/webp",
-            headers={"Cache-Control": "private, max-age=86400"},
+            headers={"Cache-Control": "private, max-age=31536000, immutable"},
         )
     return Response(
         status_code=202,
@@ -426,13 +434,17 @@ async def item_image(
 
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
-    account = account_from_access(request)
+    account = await run_foreground(account_from_access, request)
     image = await run_foreground(
         catalog.person_image, account["id"], entity_id, person_id
     )
     if image is None:
         raise HTTPException(404, "Person image not found.")
-    return FileResponse(image, media_type="image/webp")
+    return FileResponse(
+        image,
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=31536000, immutable"},
+    )
 
 
 @router.patch("/api/catalog/items/{entity_id}/state")

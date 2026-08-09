@@ -206,6 +206,44 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_scan_failure_persists_durable_locale_repairs(self):
+        db, scanner = self._scanner_db()
+        try:
+            db.execute(
+                "CREATE TABLE enrichment_queue(id TEXT PRIMARY KEY,entity_id TEXT,library_id TEXT,kind TEXT,locale TEXT,priority INTEGER,state TEXT,attempts INTEGER,next_attempt_at TEXT,lease_owner TEXT,lease_expires_at TEXT,source_job_id TEXT,error TEXT,created_at TEXT,updated_at TEXT,UNIQUE(entity_id,kind,locale))"
+            )
+            db.execute(
+                "INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path,created_at,updated_at,match_status) VALUES('movie-1','library-1',NULL,'movie','Movie','now','now','failed')"
+            )
+
+            scanner._queue_metadata_repair(
+                "movie-1",
+                "library-1",
+                "job-1",
+                "transport failure",
+                ["en", "ja"],
+            )
+            scanner._queue_metadata_repair(
+                "movie-1",
+                "library-1",
+                "job-2",
+                "retry failure",
+                ["en", "ja"],
+            )
+
+            rows = db.execute(
+                "SELECT locale,state,attempts,source_job_id,error FROM enrichment_queue ORDER BY locale"
+            )
+            self.assertEqual(
+                rows,
+                [
+                    ("en", "retry", 2, "job-2", "retry failure"),
+                    ("ja", "retry", 2, "job-2", "retry failure"),
+                ],
+            )
+        finally:
+            db.close()
+
     def test_metadata_languages_normalize_without_forcing_english(self):
         self.assertEqual(
             MetadataLanguageSettings.normalize(["ja", "zh_tw", "en", "ja"]),

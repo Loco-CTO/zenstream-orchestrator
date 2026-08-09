@@ -265,6 +265,7 @@ class MetadataSearchProjection:
             else set()
         )
         has_blur_hash = "blur_hash" in metadata_image_columns
+        has_fetched_at = "fetched_at" in metadata_image_columns
         if has_projection:
             from app.catalog_read_model import normalize_search_text
 
@@ -331,12 +332,14 @@ class MetadataSearchProjection:
                                 "height": choice.get("height") or 0,
                             }
                             if image_type != "Logo" and has_blur_hash:
+                                order = " ORDER BY fetched_at DESC" if has_fetched_at else ""
                                 cached_hash = self.db.execute(
                                     "SELECT blur_hash FROM metadata_images "
                                     "WHERE provider=? AND entity_type=? AND provider_id=? "
                                     "AND image_type=? AND image_url=? "
                                     "AND blur_hash IS NOT NULL "
-                                    "ORDER BY fetched_at DESC LIMIT 1",
+                                    + order
+                                    + " LIMIT 1",
                                     (
                                         provider,
                                         entity_type,

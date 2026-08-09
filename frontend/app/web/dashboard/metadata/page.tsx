@@ -148,14 +148,14 @@ export default function MetadataPage() {
 				title="Provider connections"
 				description="Choose the metadata languages and services used while library content is indexed."
 				actions={
-				<button
-					onClick={() => session && load(session)}
-					className="material-icon-button"
-					aria-label="Refresh metadata providers"
-					title="Refresh metadata providers"
-				>
-					<IconRefresh size={17} />
-				</button>
+					<button
+						onClick={() => session && load(session)}
+						className="material-icon-button"
+						aria-label="Refresh metadata providers"
+						title="Refresh metadata providers"
+					>
+						<IconRefresh size={17} />
+					</button>
 				}
 			/>
 			<div className="mt-7 grid gap-6 lg:grid-cols-2">
@@ -374,19 +374,6 @@ export default function MetadataPage() {
 				</div>
 			</div>
 			{message && <StatusMessage>{message}</StatusMessage>}
-			<p className="mt-8 text-xs leading-5 console-muted">
-				This product uses the TMDB API but is not endorsed or certified by TMDB.
-				Metadata provided by{" "}
-				<a
-					className="text-[#aeb9ff]"
-					href="https://thetvdb.com/"
-					target="_blank"
-					rel="noreferrer"
-				>
-					TheTVDB
-				</a>
-				.
-			</p>
 		</div>
 	);
 }

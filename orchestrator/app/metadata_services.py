@@ -37,6 +37,13 @@ logger = get_logger("metadata")
 
 CATALOG_ITEM_PROJECTION_SCHEMA = 1
 
+LOCAL_ARTWORK_NAMES = {
+    "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
+    "Backdrop": {"backdrop", "fanart", "background"},
+    "Logo": {"logo", "clearlogo", "clear-logo"},
+    "Banner": {"banner"},
+}
+
 TEXT_FIELDS = {
     "title",
     "originalTitle",
@@ -334,6 +341,36 @@ class MetadataSearchProjection:
                     current_images = merged.get("images")
                     if not isinstance(current_images, dict):
                         current_images = {}
+                    artwork_providers = merged.get("_catalogArtworkProviders")
+                    if not isinstance(artwork_providers, dict):
+                        artwork_providers = {}
+                    artwork_fallbacks = merged.get("_catalogArtworkFallbacks")
+                    if not isinstance(artwork_fallbacks, dict):
+                        artwork_fallbacks = {}
+                    for local_type in [
+                        image_type
+                        for image_type, owner in artwork_providers.items()
+                        if owner == "local"
+                    ]:
+                        fallback = artwork_fallbacks.pop(local_type, None)
+                        if (
+                            isinstance(fallback, dict)
+                            and isinstance(fallback.get("image"), dict)
+                            and fallback.get("provider")
+                        ):
+                            current_images[local_type] = fallback["image"]
+                            artwork_providers[local_type] = fallback["provider"]
+                        else:
+                            current_images.pop(local_type, None)
+                            artwork_providers.pop(local_type, None)
+                    if is_primary:
+                        for owned_type in [
+                            image_type
+                            for image_type, owner in artwork_providers.items()
+                            if owner == provider
+                        ]:
+                            current_images.pop(owned_type, None)
+                            artwork_providers.pop(owned_type, None)
                     images = payload.get("images")
                     if isinstance(images, list):
                         for image_type in ARTWORK_CATEGORY_SET:
@@ -346,7 +383,11 @@ class MetadataSearchProjection:
                             )
                             if not choice:
                                 continue
-                            if not (is_primary or image_type not in current_images):
+                            if not (
+                                is_primary
+                                or image_type not in current_images
+                                or artwork_providers.get(image_type) == provider
+                            ):
                                 continue
                             projected = {
                                 "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}",
@@ -386,16 +427,63 @@ class MetadataSearchProjection:
                             if has_artwork_selection and cached_row and cached_row[0]:
                                 artwork_rows.append(
                                     (
-                                        entity_id,
-                                        locale,
-                                        image_type,
-                                        cached_row[0],
-                                        cached_row[1],
-                                        version,
+                                            entity_id,
+                                            locale,
+                                            image_type,
+                                            provider,
+                                            cached_row[0],
+                                            cached_row[1],
+                                            version,
+                                        )
                                     )
-                                )
                             current_images[image_type] = projected
+                            artwork_providers[image_type] = provider
+                    if "media_files" in tables:
+                        media_columns = {
+                            row[1]
+                            for row in self.db.execute("PRAGMA table_info(media_files)")
+                        }
+                        if "quick_fingerprint" in media_columns:
+                            blur_field = (
+                                ",image_blur_hash"
+                                if "image_blur_hash" in media_columns
+                                else ",NULL"
+                            )
+                            selected_local: set[str] = set()
+                            for relative_path, fingerprint, blur_hash in self.db.execute(
+                                "SELECT relative_path,quick_fingerprint"
+                                + blur_field
+                                + " FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path COLLATE NOCASE",
+                                (entity_id,),
+                            ):
+                                stem = Path(relative_path or "").stem.casefold()
+                                for image_type, names in LOCAL_ARTWORK_NAMES.items():
+                                    if (
+                                        image_type in selected_local
+                                        or stem not in names
+                                        or not fingerprint
+                                    ):
+                                        continue
+                                    if image_type in current_images:
+                                        artwork_fallbacks[image_type] = {
+                                            "image": current_images[image_type],
+                                            "provider": artwork_providers.get(image_type),
+                                        }
+                                    local_image = {
+                                        "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}&v={str(fingerprint)[:12]}",
+                                        "language": None,
+                                        "width": 0,
+                                        "height": 0,
+                                    }
+                                    if image_type != "Logo" and blur_hash:
+                                        local_image["blurHash"] = blur_hash
+                                    current_images[image_type] = local_image
+                                    artwork_providers[image_type] = "local"
+                                    selected_local.add(image_type)
+                                    break
                     merged["images"] = current_images
+                    merged["_catalogArtworkProviders"] = artwork_providers
+                    merged["_catalogArtworkFallbacks"] = artwork_fallbacks
                     payload_text = json.dumps(merged, ensure_ascii=False)
                     title_sort = normalize_search_text(merged.get("title") or "")
                     rating_sort = float(merged.get("communityRating") or 0)
@@ -528,22 +616,13 @@ class MetadataSearchProjection:
                                     ],
                                 )
                         if has_artwork_selection:
-                            if is_primary:
-                                cursor.execute(
-                                    "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
-                                    (entity_id, locale),
-                                )
-                            elif artwork_rows:
-                                cursor.executemany(
-                                    "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
-                                    [
-                                        (entity_id, locale, row[2])
-                                        for row in artwork_rows
-                                    ],
-                                )
+                            cursor.execute(
+                                "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND provider=?",
+                                (entity_id, locale, provider),
+                            )
                             cursor.executemany(
-                                "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP) "
-                                "ON CONFLICT(entity_id,locale,image_type) DO UPDATE SET local_path=excluded.local_path,blur_hash=excluded.blur_hash,version=excluded.version,updated_at=excluded.updated_at",
+                                "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,provider,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP) "
+                                "ON CONFLICT(entity_id,locale,image_type) DO UPDATE SET provider=excluded.provider,local_path=excluded.local_path,blur_hash=excluded.blur_hash,version=excluded.version,updated_at=excluded.updated_at",
                                 artwork_rows,
                             )
                 break

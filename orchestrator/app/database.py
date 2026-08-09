@@ -188,6 +188,7 @@ class DatabaseHandler:
             return
         with self.persistence.read_sessions() as session:
             self.read_local.session = session
+            self.read_local.connection = session.connection()
             self.read_local.depth = 1
             try:
                 yield
@@ -219,6 +220,7 @@ class DatabaseHandler:
                     raise
             with self.persistence.read_sessions() as session:
                 connection = session.connection()
+                self.read_local.connection = connection
                 try:
                     result = connection.exec_driver_sql(query, tuple(params or ()))
                     return [tuple(row) for row in result.fetchall()]

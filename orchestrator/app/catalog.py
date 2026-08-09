@@ -2036,7 +2036,6 @@ class Catalog:
     ) -> dict:
         """Return the bounded data needed to render one detail route."""
         row = self.require_entity(user_id, entity_id)
-        item = self.item(user_id, entity_id, language)
         root_row = row
         if row[3] == "episode" and row[2]:
             season_row = self.require_entity(user_id, row[2])
@@ -2046,36 +2045,34 @@ class Catalog:
             root_row = self.require_entity(user_id, row[2])
             season_id = season_id or row[0]
 
-        seasons: list[dict] = []
-        episodes: list[dict] = []
-        collection_items: list[dict] | None = None
+        season_rows: list[tuple] = []
+        episode_rows: list[tuple] = []
+        collection_rows: list[tuple] = []
         if root_row[3] == "series":
-            seasons = self.list_items(
-                user_id,
-                root_row[1],
-                language,
-                parent_id=root_row[0],
-                page_size=100,
-            )["items"]
-            season_ids = {value["id"] for value in seasons}
+            season_rows = self.db.execute(
+                "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at "
+                "FROM library_entities WHERE library_id=? AND parent_id=? "
+                "ORDER BY season_number IS NULL,season_number,relative_path COLLATE NOCASE,id LIMIT 100",
+                (root_row[1], root_row[0]),
+            )
+            season_ids = {value[0] for value in season_rows}
             if season_id not in season_ids:
                 preferred = next(
-                    (value for value in seasons if value.get("seasonNumber") == 1),
-                    seasons[0] if seasons else None,
+                    (value for value in season_rows if value[5] == 1),
+                    season_rows[0] if season_rows else None,
                 )
-                season_id = preferred["id"] if preferred else None
+                season_id = preferred[0] if preferred else None
             if season_id:
-                episodes = self.list_items(
-                    user_id,
-                    root_row[1],
-                    language,
-                    parent_id=season_id,
-                    page_size=100,
-                )["items"]
+                episode_rows = self.db.execute(
+                    "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at "
+                    "FROM library_entities WHERE library_id=? AND parent_id=? "
+                    "ORDER BY episode_number IS NULL,episode_number,relative_path COLLATE NOCASE,id LIMIT 100",
+                    (root_row[1], season_id),
+                )
         elif row[3] == "collection":
             allowed = sorted(self.allowed_libraries(user_id))
             placeholders = ",".join("?" for _ in allowed)
-            collection_rows = (
+            collection_rows = list(
                 self.db.execute(
                     "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                     "FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id "
@@ -2086,9 +2083,33 @@ class Catalog:
                 if allowed and self._has_table("collection_members")
                 else []
             )
-            collection_items = self._hydrate_rows(
-                user_id, list(collection_rows), language
+
+        hydration_rows = list(
+            {value[0]: value for value in [row, root_row, *season_rows, *episode_rows, *collection_rows]}.values()
+        )
+        self._seed_hydration_rows(user_id, hydration_rows, language)
+        hydrated = {
+            value[0]: self._serialize(
+                user_id,
+                value,
+                self.metadata(user_id, value[0], language)["metadata"],
+                language=language,
             )
+            for value in hydration_rows
+        }
+        item_metadata = self.metadata(
+            user_id, entity_id, language, include_credits=True
+        )["metadata"]
+        item_children = (
+            [value[0] for value in season_rows]
+            if row[0] == root_row[0] and root_row[3] == "series"
+            else [value[0] for value in collection_rows]
+            if row[3] == "collection"
+            else []
+        )
+        item = self._serialize(
+            user_id, row, item_metadata, item_children, language=language
+        )
 
         generation_rows = (
             self.db.execute(
@@ -2101,15 +2122,19 @@ class Catalog:
         return {
             "item": item,
             "backgroundItem": (
-                self._hydrate_rows(user_id, [root_row], language)[0]
+                hydrated[root_row[0]]
                 if root_row[0] != row[0]
                 else None
             ),
-            "seasons": seasons,
+            "seasons": [hydrated[value[0]] for value in season_rows],
             "selectedSeasonId": season_id,
-            "episodes": episodes,
+            "episodes": [hydrated[value[0]] for value in episode_rows],
             "similar": self.similar(user_id, entity_id, language)["items"],
-            "collectionItems": collection_items,
+            "collectionItems": (
+                [hydrated[value[0]] for value in collection_rows]
+                if row[3] == "collection"
+                else None
+            ),
             "rootEntityId": root_row[0],
             "catalogGeneration": int(generation_rows[0][0]) if generation_rows else 0,
         }

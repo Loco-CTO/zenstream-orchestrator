@@ -42,14 +42,14 @@ class TrickplayStore:
     def output_key(fingerprint: str, width: int, height: int, interval: int) -> str:
         return hashlib.sha256(f"{fingerprint}:{width}x{height}:{interval}".encode()).hexdigest()
 
-    def queue_pending(self, library_id: str | None = None) -> int:
+    def queue_pending(self, library_id: str | None = None, settings: dict | None = None) -> int:
         tables = {
             row[0]
             for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         if not {"media_files", "media_sources", "trickplay_assets"}.issubset(tables):
             return 0
-        settings = PlaybackSettings(self.db).get()
+        settings = settings or PlaybackSettings(self.db).get()
         width = settings["trickplayFrameWidth"]
         height = settings["trickplayFrameHeight"]
         interval = settings["trickplayIntervalSeconds"]
@@ -273,8 +273,9 @@ class TrickplayExtractor:
         should_terminate = should_terminate or (lambda: False)
         self.remove_orphan_cache()
         self.store.recover_generating()
-        discovered = self.store.queue_pending()
-        workers = PlaybackSettings(self.store.db).get()["trickplayWorkers"]
+        settings = PlaybackSettings(self.store.db).get()
+        discovered = self.store.queue_pending(settings=settings)
+        workers = settings["trickplayWorkers"]
         job_store.update_run(run_id, state="running", started_at=now(), message="Extracting trickplay sheets")
         completed = 0
         failures = []

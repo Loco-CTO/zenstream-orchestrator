@@ -1,6 +1,7 @@
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -239,6 +240,56 @@ class DatabaseHandler:
             with lock:
                 return execute_read()
         return execute_read()
+
+    def wal_bytes(self) -> int:
+        if not self.db_file or self.db_file == ":memory:":
+            return 0
+        wal = Path(f"{self.db_file}-wal")
+        try:
+            return wal.stat().st_size
+        except OSError:
+            return 0
+
+    def checkpoint(self, mode: str = "PASSIVE") -> tuple[int, int, int]:
+        selected = mode.upper()
+        if selected not in {"PASSIVE", "TRUNCATE"}:
+            raise ValueError("Unsupported SQLite checkpoint mode")
+        wait_started = time.monotonic()
+        wait_seconds = self.lock.acquire()
+        acquired_at = time.monotonic()
+        try:
+            cursor = self.connection.cursor()
+            try:
+                row = cursor.execute(f"PRAGMA wal_checkpoint({selected})").fetchone()
+                result = tuple(int(value or 0) for value in (row or (0, 0, 0)))
+                logger.info(
+                    "sqlite wal checkpoint mode=%s busy=%s log_frames=%s checkpointed_frames=%s wal_bytes=%s",
+                    selected,
+                    result[0],
+                    result[1],
+                    result[2],
+                    self.wal_bytes(),
+                )
+                return result
+            finally:
+                cursor.close()
+        finally:
+            hold_seconds = time.monotonic() - acquired_at
+            self.lock.release()
+            self._log_writer_timing(
+                "checkpoint", wait_seconds, hold_seconds, wait_started
+            )
+
+    def maintain_wal(self, *, scan_complete: bool = False) -> tuple[int, int, int] | None:
+        threshold = 64 * 1024 * 1024
+        if scan_complete:
+            return self.checkpoint("TRUNCATE")
+        if self.wal_bytes() >= threshold:
+            return self.checkpoint("PASSIVE")
+        return None
+
+    def optimize(self) -> None:
+        self.write("PRAGMA optimize")
 
     @staticmethod
     def _log_writer_timing(

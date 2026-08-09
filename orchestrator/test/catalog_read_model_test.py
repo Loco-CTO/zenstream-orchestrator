@@ -253,6 +253,40 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(response["total"], 1)
         self.assertEqual(response["items"][0]["id"], "series")
 
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_catalog_search_ranks_typo_candidates_by_score_before_pagination(self, _languages):
+        for entity_id, title in (
+            ("gintama", "Gintama"),
+            ("gintama-chronicles", "Gintama Chronicles"),
+            ("the-gintama-story", "The Gintama Story"),
+            ("gintara", "Gintara"),
+        ):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (entity_id, "library", None, "series", title, None, None, None, None, None, "2026", "2026"),
+            )
+            self.db.execute(
+                "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (entity_id, "en", "library", None, "series", '{"title":"' + title + '"}', title.casefold(), 0, "", 0, "2026", 1),
+            )
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+
+        response = catalog.search("user", "gintma", "en", 1, 2)
+        self.assertEqual(response["total"], 4)
+        self.assertEqual(
+            [item["id"] for item in response["items"]], ["gintama", "gintama-chronicles"]
+        )
+        self.assertEqual(
+            [
+                item["id"]
+                for item in catalog.search("user", "gintma", "en", 2, 2)["items"]
+            ],
+            ["the-gintama-story", "gintara"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

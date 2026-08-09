@@ -20,8 +20,8 @@ const defaults: Settings = {
 	introOutroWorkers: 1,
 };
 
-function NumberField({ label, hint, value, onChange, step = 1, minimum = 0 }: { label: string; hint: string; value: number; onChange: (value: number) => void; step?: number; minimum?: number }) {
-	return <label className="block text-sm"><span className="font-medium text-white">{label}</span><span className="mt-1 block text-xs leading-5 console-muted">{hint}</span><input className="mt-2 w-full rounded-lg border console-divider bg-black/20 px-3 py-2 text-sm" type="number" min={minimum} max={64} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
+function NumberField({ label, hint, value, onChange, step = 1, minimum = 0, maximum }: { label: string; hint: string; value: number; onChange: (value: number) => void; step?: number; minimum?: number; maximum?: number }) {
+	return <label className="block text-sm"><span className="font-medium text-white">{label}</span><span className="mt-1 block text-xs leading-5 console-muted">{hint}</span><input className="mt-2 w-full rounded-lg border console-divider bg-black/20 px-3 py-2 text-sm" type="number" min={minimum} max={maximum} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} /></label>;
 }
 
 export default function IntroOutroPage() {
@@ -78,7 +78,7 @@ export default function IntroOutroPage() {
 				<label className="flex items-start gap-3 text-sm"><input type="checkbox" checked={settings.scanCredits} onChange={(event) => update("scanCredits", event.target.checked)} /><span><span className="font-medium text-white">Scan credits / outros</span><span className="mt-1 block leading-6 console-muted">Fingerprint the tail window and detect recurring credits.</span></span></label>
 			</div>
 			<div className="mt-7 grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-				<NumberField label="Detection workers" hint="Maximum concurrent FFmpeg fingerprint processes. Use 1–64 workers." value={settings.introOutroWorkers} minimum={1} onChange={(value) => update("introOutroWorkers", value)} />
+				<NumberField label="Detection workers" hint="Maximum concurrent FFmpeg fingerprint processes. Use 1–64 workers." value={settings.introOutroWorkers} minimum={1} maximum={64} onChange={(value) => update("introOutroWorkers", value)} />
 				<NumberField label="Opening analysis (%)" hint="Episode percentage analysed from the beginning." value={settings.analysisPercent} onChange={(value) => update("analysisPercent", value)} />
 				<NumberField label="Opening analysis limit (minutes)" hint="Upper bound for each opening fingerprint." value={settings.analysisLengthLimitMinutes} onChange={(value) => update("analysisLengthLimitMinutes", value)} />
 				<NumberField label="Minimum intro (seconds)" hint="Ignore shorter opening matches." value={settings.minimumIntroDuration} onChange={(value) => update("minimumIntroDuration", value)} />

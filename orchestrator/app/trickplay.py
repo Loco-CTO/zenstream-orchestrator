@@ -5,8 +5,10 @@ import math
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 
 from fastapi import HTTPException
 
@@ -272,26 +274,37 @@ class TrickplayExtractor:
         self.remove_orphan_cache()
         self.store.recover_generating()
         discovered = self.store.queue_pending()
+        workers = PlaybackSettings(self.store.db).get()["trickplayWorkers"]
         job_store.update_run(run_id, state="running", started_at=now(), message="Extracting trickplay sheets")
         completed = 0
         failures = []
-        while True:
-            if should_terminate():
-                break
-            asset = self.store.claim_next()
-            if not asset:
-                break
-            try:
-                self.extract(asset)
-                completed += 1
-                job_store.update_run(
-                    run_id, progress_current=completed, progress_total=max(completed, discovered),
-                    message=f"Extracted {completed} trickplay assets",
-                )
-            except Exception as error:
-                self.store.mark_failed(asset, str(error))
-                failures.append(asset["mediaFileId"])
-                logger.warning("trickplay extraction failed entity_id=%s media_file_id=%s error=%s", asset["entityId"], asset["mediaFileId"], error)
+        progress_lock = Lock()
+
+        def process_assets():
+            nonlocal completed
+            while not should_terminate():
+                asset = self.store.claim_next()
+                if not asset:
+                    return
+                try:
+                    self.extract(asset)
+                    with progress_lock:
+                        completed += 1
+                        current = completed
+                        job_store.update_run(
+                            run_id, progress_current=current, progress_total=max(current, discovered),
+                            message=f"Extracted {current} trickplay assets",
+                        )
+                except Exception as error:
+                    self.store.mark_failed(asset, str(error))
+                    with progress_lock:
+                        failures.append(asset["mediaFileId"])
+                    logger.warning("trickplay extraction failed entity_id=%s media_file_id=%s error=%s", asset["entityId"], asset["mediaFileId"], error)
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="trickplay") as executor:
+            futures = [executor.submit(process_assets) for _ in range(workers)]
+            for future in futures:
+                future.result()
         if should_terminate():
             job_store.update_run(run_id, state="terminated", finished_at=now(), message="Terminated by administrator")
         elif failures:

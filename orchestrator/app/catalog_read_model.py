@@ -233,18 +233,25 @@ class CatalogReadModel:
                 ))
                 if progress is not None:
                     progress("projections", len(values), len(entities) * len(locales))
-                seen_grams = set()
-                searchable = normalize_search_text(f"{payload.get('title') or ''} {path_text}")
-                for size in (1, 2):
-                    for index in range(0, max(0, len(searchable) - size + 1)):
-                        gram = searchable[index : index + size]
-                        if gram and gram not in seen_grams:
-                            grams.append((gram, entity_id, locale, row[1], row[2]))
-                            seen_grams.add(gram)
+                if row[2] is None and row[3] in {"movie", "series", "collection"}:
+                    seen_grams = set()
+                    searchable = normalize_search_text(
+                        f"{payload.get('title') or ''} {path_text}"
+                    )
+                    for size in (1, 2):
+                        for index in range(0, max(0, len(searchable) - size + 1)):
+                            gram = searchable[index : index + size]
+                            if gram and gram not in seen_grams:
+                                grams.append(
+                                    (gram, entity_id, locale, row[1], title)
+                                )
+                                seen_grams.add(gram)
                 for genre in payload.get("genres") or payload.get("tags") or []:
                     if isinstance(genre, str) and genre.strip():
                         key = normalize_search_text(genre)
-                        genres.append((entity_id, locale, key, genre.strip()))
+                        genres.append(
+                            (entity_id, locale, row[1], row[3], key, genre.strip())
+                        )
         return values, genres, grams
 
     def _user_values(self, entities, children, progress=None):
@@ -410,16 +417,23 @@ class CatalogReadModel:
             )
             cursor.execute("DELETE FROM catalog_item_genres")
             write_rows(cursor,
-                "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
                 genres,
                 "writing_genres",
             )
             cursor.execute("DELETE FROM catalog_search_grams")
             write_rows(cursor,
-                "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,?)",
-                grams,
+                "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,NULL)",
+                [row[:4] for row in grams],
                 "writing_search_grams",
             )
+            if self._has_table("catalog_root_search_grams"):
+                cursor.execute("DELETE FROM catalog_root_search_grams")
+                write_rows(cursor,
+                    "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) VALUES(?,?,?,?,?)",
+                    grams,
+                    "writing_root_search_grams",
+                )
             cursor.execute("DELETE FROM catalog_user_summary")
             write_rows(cursor,
                 "INSERT INTO catalog_user_summary(user_id,entity_id,played_leaf_count,updated_at) VALUES(?,?,?,?)",
@@ -440,6 +454,13 @@ class CatalogReadModel:
             else:
                 cursor.execute(
                     "INSERT INTO catalog_read_model_status(id,state,generation,updated_at,error) VALUES(1,'ready',1,?,NULL) ON CONFLICT(id) DO UPDATE SET state='ready',generation=1,updated_at=excluded.updated_at,error=NULL",
+                    (now,),
+                )
+            if self._has_table("catalog_library_summary"):
+                cursor.execute("DELETE FROM catalog_library_summary")
+                cursor.execute(
+                    "INSERT INTO catalog_library_summary(library_id,generation,supports_last_added,last_root_entity_id,updated_at) "
+                    "SELECT l.id,1,CASE WHEN EXISTS(SELECT 1 FROM catalog_entity_summary s WHERE s.library_id=l.id AND s.parent_id IS NOT NULL) THEN 1 ELSE 0 END,NULL,? FROM libraries l",
                     (now,),
                 )
         progress("complete", write_total, write_total, force=True, persist=False)
@@ -590,7 +611,7 @@ class CatalogReadModel:
                     entity_ids,
                 )
                 cursor.executemany(
-                    "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                    "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
                     genres,
                 )
             if entity_ids and self._has_table("catalog_search_grams"):
@@ -599,7 +620,16 @@ class CatalogReadModel:
                     entity_ids,
                 )
                 cursor.executemany(
-                    "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,NULL)",
+                    [row[:4] for row in grams],
+                )
+            if entity_ids and self._has_table("catalog_root_search_grams"):
+                cursor.execute(
+                    f"DELETE FROM catalog_root_search_grams WHERE entity_id IN ({entity_placeholders})",
+                    entity_ids,
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) VALUES(?,?,?,?,?)",
                     grams,
                 )
         return len(entities)
@@ -769,8 +799,27 @@ class CatalogReadModel:
                 "UPDATE catalog_read_model_status SET state='ready',generation=generation+1,updated_at=?,error=NULL WHERE id=1",
                 (now,),
             )
+            affected_libraries = {row[1] for row in summaries}
+            if self._has_table("catalog_library_summary"):
+                for library_id in affected_libraries:
+                    library_roots = [
+                        root_id
+                        for root_id in roots
+                        if entities.get(root_id) and entities[root_id][1] == library_id
+                    ]
+                    cursor.execute(
+                        "INSERT INTO catalog_library_summary(library_id,generation,supports_last_added,last_root_entity_id,updated_at) "
+                        "VALUES(?,1,EXISTS(SELECT 1 FROM catalog_entity_summary WHERE library_id=? AND parent_id IS NOT NULL),?,?) "
+                        "ON CONFLICT(library_id) DO UPDATE SET generation=catalog_library_summary.generation+1,supports_last_added=excluded.supports_last_added,last_root_entity_id=COALESCE(excluded.last_root_entity_id,catalog_library_summary.last_root_entity_id),updated_at=excluded.updated_at",
+                        (
+                            library_id,
+                            library_id,
+                            library_roots[-1] if library_roots else None,
+                            now,
+                        ),
+                    )
             if self._has_table("catalog_projection_status"):
-                for library_id in {row[1] for row in summaries}:
+                for library_id in affected_libraries:
                     cursor.execute(
                         "INSERT INTO catalog_projection_status(library_id,generation,state,progress_current,progress_total,error,updated_at) "
                         "VALUES(?,COALESCE((SELECT generation FROM catalog_projection_status WHERE library_id=?),0)+1,'ready',0,0,NULL,?) "

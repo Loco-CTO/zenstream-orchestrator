@@ -1274,7 +1274,7 @@ class LibraryScanner:
         roots = sorted(self._scan_refresh_root_ids)
         for offset in range(0, len(roots), 300):
             model.refresh_roots(roots[offset : offset + 300])
-        if not roots or self._scan_delta.get("removed"):
+        if len(roots) != 1 or self._scan_delta.get("removed"):
             model.refresh_roots([], affected_library_ids=[library_id])
 
     def _publish_root(self, root_id: str) -> None:

@@ -118,6 +118,27 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(library, (2, "series"))
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_refresh_root_preserves_localized_and_original_title_grams(self, _languages):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute(
+            "UPDATE catalog_item_projection SET payload=?,title_sort=? WHERE entity_id='series' AND locale='en'",
+            ('{"title":"Localized Name","originalTitle":"Original Name"}', "localized name"),
+        )
+        model.refresh_roots(["series"])
+        indexed = set(
+            self.db.read_execute(
+                "SELECT locale,title_sort FROM catalog_root_search_grams WHERE entity_id='series'"
+            )
+        )
+        self.assertIn(("en", "localized name"), indexed)
+        self.assertIn(("original", "original name"), indexed)
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        self.assertEqual(catalog.search("user", "localized", "en", 1, 10)["total"], 1)
+        self.assertEqual(catalog.search("user", "original", "en", 1, 10)["total"], 1)
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_refresh_root_admits_new_collection_entity(self, _languages):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])

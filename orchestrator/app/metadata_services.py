@@ -259,6 +259,12 @@ class MetadataSearchProjection:
         )
         has_projection = "catalog_item_projection" in tables
         has_genres = "catalog_item_genres" in tables
+        metadata_image_columns = (
+            {row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")}
+            if "metadata_images" in tables
+            else set()
+        )
+        has_blur_hash = "blur_hash" in metadata_image_columns
         if has_projection:
             from app.catalog_read_model import normalize_search_text
 
@@ -324,6 +330,23 @@ class MetadataSearchProjection:
                                 "width": choice.get("width") or 0,
                                 "height": choice.get("height") or 0,
                             }
+                            if image_type != "Logo" and has_blur_hash:
+                                cached_hash = self.db.execute(
+                                    "SELECT blur_hash FROM metadata_images "
+                                    "WHERE provider=? AND entity_type=? AND provider_id=? "
+                                    "AND image_type=? AND image_url=? "
+                                    "AND blur_hash IS NOT NULL "
+                                    "ORDER BY fetched_at DESC LIMIT 1",
+                                    (
+                                        provider,
+                                        entity_type,
+                                        provider_id,
+                                        image_type,
+                                        choice.get("url"),
+                                    ),
+                                )
+                                if cached_hash and cached_hash[0][0]:
+                                    projected["blurHash"] = cached_hash[0][0]
                             if is_primary or image_type not in current_images:
                                 current_images[image_type] = projected
                     merged["images"] = current_images
@@ -1077,6 +1100,12 @@ class MetadataImageIngestService:
             else:
                 for record in records:
                     self.cache.put_image(*record)
+            # Image ingestion can create the hash after the metadata projection
+            # was written. Rebuild the affected projection from the now-ready
+            # cache so normal catalog reads expose it immediately.
+            MetadataSearchProjection(self.db).project(
+                provider, entity_type, provider_id, locale, document
+            )
         return {"ready": ready, "failed": failed, "skipped": skipped}
 
 

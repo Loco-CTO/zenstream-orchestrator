@@ -653,7 +653,7 @@ function EntityPoster({
 			adminFetch(
 				`/api/admin/library-items/${entityId}/image?imageType=${imageType}&locale=${encodeURIComponent(locale)}`,
 				session,
-				{ signal: controller.signal },
+				{ signal: controller.signal, cache: "no-store" },
 			)
 				.then(async (response) => {
 					if (response.status === 202) {
@@ -722,6 +722,8 @@ function EntityDetailView({
 }) {
 	const [detail, setDetail] = useState<Item | null>(null);
 	const [error, setError] = useState("");
+	const [refreshingMetadata, setRefreshingMetadata] = useState(false);
+	const [refreshMessage, setRefreshMessage] = useState("");
 	const [retry, setRetry] = useState(0);
 	useEffect(() => {
 		const controller = new AbortController();
@@ -770,6 +772,50 @@ function EntityDetailView({
 							: "";
 	const episodeView = detail?.type === "season";
 	const hasChildren = children.length > 0;
+	const canRefreshMetadata =
+		detail && ["movie", "series", "season", "episode"].includes(detail.type);
+	const refreshMetadata = async () => {
+		if (!detail || refreshingMetadata) return;
+		setRefreshingMetadata(true);
+		setRefreshMessage("");
+		setError("");
+		try {
+			const response = await adminFetch(
+				`/api/admin/library-items/${detail.id}/metadata/refresh`,
+				session,
+				{ method: "POST" },
+			);
+			const payload = (await response.json().catch(() => null)) as
+				| {
+						state?: string;
+						failures?: { provider?: string }[];
+						detail?: string | { message?: string };
+				  }
+				| null;
+			if (!response.ok) {
+				const message =
+					typeof payload?.detail === "string"
+						? payload.detail
+						: payload?.detail?.message;
+				throw new Error(message || "Metadata and artwork could not be refreshed.");
+			}
+			setRefreshMessage(
+				payload?.state === "completed_with_warnings"
+					? `Metadata and artwork refreshed with ${payload.failures?.length || 0} provider warning(s).`
+					: "Metadata and artwork refreshed.",
+			);
+			setDetail(null);
+			setRetry((value) => value + 1);
+		} catch (caught) {
+			setError(
+				caught instanceof Error
+					? caught.message
+					: "Metadata and artwork could not be refreshed.",
+			);
+		} finally {
+			setRefreshingMetadata(false);
+		}
+	};
 	return (
 		<div className="dashboard-page min-h-[calc(100vh-7rem)]">
 			<button onClick={onBack} className="material-back">
@@ -792,14 +838,36 @@ function EntityDetailView({
 						</h1>
 					)}
 				</div>
-				<button
-					onClick={onBack}
-					className="material-icon-button"
-					aria-label="Close detail"
-				>
-					<IconX size={17} />
-				</button>
+				<div className="flex items-center gap-2">
+					{canRefreshMetadata && (
+						<button
+							type="button"
+							onClick={refreshMetadata}
+							disabled={refreshingMetadata}
+							className="flex items-center gap-2 rounded-xl border console-divider px-4 py-2.5 text-sm font-semibold disabled:cursor-wait disabled:opacity-60"
+						>
+							<IconRefresh
+								size={16}
+								className={refreshingMetadata ? "animate-spin" : ""}
+							/>
+							{refreshingMetadata ? "Refreshing…" : "Refresh metadata"}
+						</button>
+					)}
+					<button
+						onClick={onBack}
+						className="material-icon-button"
+						aria-label="Close detail"
+					>
+						<IconX size={17} />
+					</button>
+				</div>
 			</div>
+			{refreshMessage && (
+				<div className="dashboard-alert material-alert mt-5" role="status">
+					<IconRefresh size={18} />
+					{refreshMessage}
+				</div>
+			)}
 			{error && (
 				<div className="dashboard-alert material-alert mt-5" role="alert">
 					<IconAlertCircle size={18} />

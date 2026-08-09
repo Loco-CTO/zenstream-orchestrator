@@ -153,7 +153,12 @@ def _metadata_document_gaps(
                 and image_type in projected_images
                 and ready_hashes.get((image_type, str(expected.get("url"))))
                 and not str(
-                    (projected_images.get(image_type) or {}).get("blurHash") or ""
+                    (
+                        projected_images.get(image_type)
+                        if isinstance(projected_images.get(image_type), dict)
+                        else {}
+                    ).get("blurHash")
+                    or ""
                 ).strip()
             ):
                 gaps.add(f"projection-artwork-blurhash:{image_type}")

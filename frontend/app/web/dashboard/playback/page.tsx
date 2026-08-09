@@ -10,6 +10,7 @@ type PlaybackSettings = {
 	maxTranscodesPerUser: number;
 	trickplayFrameWidth: number;
 	trickplayIntervalSeconds: number;
+	trickplayWorkers: number;
 };
 
 const DEFAULTS: PlaybackSettings = {
@@ -17,9 +18,10 @@ const DEFAULTS: PlaybackSettings = {
 	maxTranscodesPerUser: 0,
 	trickplayFrameWidth: 320,
 	trickplayIntervalSeconds: 10,
+	trickplayWorkers: 1,
 };
 
-function validTrickplaySettings(width: number, intervalSeconds: number) {
+function validTrickplaySettings(width: number, intervalSeconds: number, workers: number) {
 	return (
 		Number.isInteger(width) &&
 		width >= 160 &&
@@ -27,7 +29,10 @@ function validTrickplaySettings(width: number, intervalSeconds: number) {
 		width % 16 === 0 &&
 		Number.isInteger(intervalSeconds) &&
 		intervalSeconds >= 1 &&
-		intervalSeconds <= 60
+		intervalSeconds <= 60 &&
+		Number.isInteger(workers) &&
+		workers >= 1 &&
+		workers <= 64
 	);
 }
 
@@ -47,6 +52,7 @@ export default function PlaybackPage() {
 			const maxTranscodesPerUser = Number(data?.maxTranscodesPerUser);
 			const trickplayFrameWidth = Number(data?.trickplayFrameWidth);
 			const trickplayIntervalSeconds = Number(data?.trickplayIntervalSeconds);
+			const trickplayWorkers = Number(data?.trickplayWorkers);
 			setSettings({
 				maxTranscodes: Number.isFinite(maxTranscodes)
 					? maxTranscodes
@@ -62,6 +68,10 @@ export default function PlaybackPage() {
 					Number.isFinite(trickplayIntervalSeconds) && trickplayIntervalSeconds > 0
 						? trickplayIntervalSeconds
 						: DEFAULTS.trickplayIntervalSeconds,
+				trickplayWorkers:
+					Number.isFinite(trickplayWorkers) && trickplayWorkers >= 1
+						? trickplayWorkers
+						: DEFAULTS.trickplayWorkers,
 			});
 		} else {
 			setMessage(data?.detail || "Could not load playback settings.");
@@ -80,8 +90,8 @@ export default function PlaybackPage() {
 	async function save(event: FormEvent) {
 		event.preventDefault();
 		if (!session) return;
-		if (!validTrickplaySettings(settings.trickplayFrameWidth, settings.trickplayIntervalSeconds)) {
-			setMessage("Choose a frame width from 160 to 640 in 16 px steps and an interval from 1 to 60 seconds.");
+		if (!validTrickplaySettings(settings.trickplayFrameWidth, settings.trickplayIntervalSeconds, settings.trickplayWorkers)) {
+			setMessage("Choose a frame width from 160 to 640 in 16 px steps, an interval from 1 to 60 seconds, and 1 to 64 workers.");
 			return;
 		}
 		setSaving(true);
@@ -117,6 +127,10 @@ export default function PlaybackPage() {
 					Number(data.trickplayIntervalSeconds) > 0
 						? Number(data.trickplayIntervalSeconds)
 						: current.trickplayIntervalSeconds,
+				trickplayWorkers:
+					Number.isFinite(Number(data?.trickplayWorkers)) && Number(data.trickplayWorkers) >= 1
+						? Number(data.trickplayWorkers)
+						: current.trickplayWorkers,
 			}));
 		}
 		setSaving(false);
@@ -127,6 +141,7 @@ export default function PlaybackPage() {
 	const trickplaySettingsAreValid = validTrickplaySettings(
 		settings.trickplayFrameWidth,
 		settings.trickplayIntervalSeconds,
+		settings.trickplayWorkers,
 	);
 
 	return (
@@ -174,6 +189,26 @@ export default function PlaybackPage() {
 								setSettings((current) => ({
 									...current,
 									maxTranscodes: Number(event.target.value),
+								}))
+							}
+							className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none"
+						/>
+					</label>
+					<label className="block">
+						<span className="text-sm font-semibold">Trickplay workers</span>
+						<span className="mt-1 block text-xs console-muted">
+							Maximum concurrent FFmpeg trickplay extractions. Use 1–64 workers.
+						</span>
+						<input
+							type="number"
+							min={1}
+							max={64}
+							step={1}
+							value={settings.trickplayWorkers}
+							onChange={(event) =>
+								setSettings((current) => ({
+									...current,
+									trickplayWorkers: Number(event.target.value),
 								}))
 							}
 							className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none"

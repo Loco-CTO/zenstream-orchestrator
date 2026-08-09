@@ -25,6 +25,9 @@ class CatalogReadModelTest(unittest.TestCase):
             "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))",
             "CREATE TABLE catalog_root_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,title_sort TEXT,PRIMARY KEY(gram,entity_id,locale))",
             "CREATE TABLE catalog_library_summary(library_id TEXT PRIMARY KEY,generation INTEGER,supports_last_added INTEGER,last_root_entity_id TEXT,updated_at TEXT)",
+            "CREATE TABLE catalog_artwork_selection(entity_id TEXT,locale TEXT,image_type TEXT,provider TEXT,local_path TEXT,blur_hash TEXT,version TEXT,updated_at TEXT,PRIMARY KEY(entity_id,locale,image_type))",
+            "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,is_primary INTEGER)",
+            "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT,fetched_at TEXT,blur_hash TEXT)",
             "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT,generation INTEGER,updated_at TEXT,error TEXT)",
             "CREATE INDEX idx_catalog_item_projection_title ON catalog_item_projection(library_id,parent_id,locale,title_sort,entity_id)",
             "CREATE INDEX idx_catalog_entity_summary_parent_last ON catalog_entity_summary(library_id,parent_id,last_added_sort_ns DESC,entity_id)",
@@ -67,6 +70,23 @@ class CatalogReadModelTest(unittest.TestCase):
                 "SELECT collection_entity_id,source_entity_id,source_library_id,position FROM catalog_collection_member_projection"
             ),
             [("collection-item", "series", "library", 1)],
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_rebuild_backfills_cached_artwork_selection(self, _languages):
+        self.db.execute("INSERT INTO entity_provider_ids VALUES('series','tvdb','series','1',1)")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES('series','en','library',NULL,'series','{\"title\":\"Series\"}','series',0,'',0,'2026',1)"
+        )
+        self.db.execute(
+            "INSERT INTO metadata_images VALUES('tvdb','series','1','en','Primary','url','cached.webp','2026','blur')"
+        )
+        CatalogReadModel(self.db).rebuild(["en"])
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT provider,local_path,blur_hash FROM catalog_artwork_selection WHERE entity_id='series' AND locale='en' AND image_type='Primary'"
+            ),
+            [("tvdb", "cached.webp", "blur")],
         )
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
@@ -163,7 +183,7 @@ class CatalogReadModelTest(unittest.TestCase):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
         self.db.execute("DELETE FROM catalog_entity_summary WHERE entity_id='series'")
-        self.db.execute("UPDATE catalog_read_model_status SET state='building' WHERE id=1")
+        self.db.execute("UPDATE catalog_read_model_status SET state='ready' WHERE id=1")
 
         with patch.object(model, "rebuild", side_effect=AssertionError("unexpected full rebuild")):
             result = model.bootstrap(["en"])
@@ -175,6 +195,17 @@ class CatalogReadModelTest(unittest.TestCase):
             )[0][0],
             5,
         )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_building_status_forces_full_rebuild_even_with_small_gap(self, _languages):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute("DELETE FROM catalog_entity_summary WHERE entity_id='series'")
+        self.db.execute("UPDATE catalog_read_model_status SET state='building' WHERE id=1")
+        with patch.object(model, "rebuild", wraps=model.rebuild) as rebuild:
+            result = model.bootstrap(["en"])
+        self.assertEqual(result, 5)
+        rebuild.assert_called_once_with(["en"])
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_bootstrap_repairs_small_projection_gap_without_full_rebuild(self, _languages):

@@ -85,8 +85,10 @@ class MetadataServicesTest(unittest.TestCase):
             database = DatabaseHandler("sqlite", {}, str(Path(directory) / "db.sqlite"))
             primary_path = Path(directory) / "primary.webp"
             secondary_path = Path(directory) / "secondary.webp"
+            refreshed_logo_path = Path(directory) / "secondary-logo-refreshed.webp"
             primary_path.write_bytes(b"primary")
             secondary_path.write_bytes(b"secondary")
+            refreshed_logo_path.write_bytes(b"secondary-logo-refreshed")
             try:
                 for statement in (
                     "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)",
@@ -96,13 +98,15 @@ class MetadataServicesTest(unittest.TestCase):
                     "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))",
                     "CREATE TABLE catalog_root_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,title_sort TEXT,PRIMARY KEY(gram,entity_id,locale))",
                     "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))",
-                    "CREATE TABLE catalog_artwork_selection(entity_id TEXT,locale TEXT,image_type TEXT,local_path TEXT,blur_hash TEXT,version TEXT,updated_at TEXT,PRIMARY KEY(entity_id,locale,image_type))",
+                    "CREATE TABLE catalog_artwork_selection(entity_id TEXT,locale TEXT,image_type TEXT,provider TEXT,local_path TEXT,blur_hash TEXT,version TEXT,updated_at TEXT,PRIMARY KEY(entity_id,locale,image_type))",
                     "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT,fetched_at TEXT,blur_hash TEXT)",
+                    "CREATE TABLE media_files(entity_id TEXT,relative_path TEXT,role TEXT,quick_fingerprint TEXT,image_blur_hash TEXT)",
                 ):
                     database.execute(statement)
                 database.execute("INSERT INTO library_entities VALUES('movie','library',NULL,'movie')")
                 database.execute("INSERT INTO entity_provider_ids VALUES('movie','tmdb','1',1)")
                 database.execute("INSERT INTO entity_provider_ids VALUES('movie','tvdb','2',0)")
+                database.execute("INSERT INTO media_files VALUES('movie','poster.jpg','image','local-v1','local-blur')")
                 database.execute(
                     "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
                     ("tmdb", "movie", "1", "en", "Primary", "https://primary", str(primary_path), "1", "hash-primary"),
@@ -111,17 +115,71 @@ class MetadataServicesTest(unittest.TestCase):
                     "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
                     ("tvdb", "movie", "2", "en", "Primary", "https://secondary", str(secondary_path), "2", "hash-secondary"),
                 )
+                database.execute(
+                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("tvdb", "movie", "2", "en", "Logo", "https://secondary-logo", str(secondary_path), "2", None),
+                )
                 MetadataSearchProjection(database).project(
                     "tmdb", "movie", "1", "en", {"title": "Movie", "images": [{"type": "Primary", "url": "https://primary", "language": "en"}]}
                 )
                 MetadataSearchProjection(database).project(
-                    "tvdb", "movie", "2", "en", {"title": "Secondary", "images": [{"type": "Primary", "url": "https://secondary", "language": "en"}]}
+                    "tvdb", "movie", "2", "en", {"title": "Secondary", "images": [{"type": "Primary", "url": "https://secondary", "language": "en"}, {"type": "Logo", "url": "https://secondary-logo", "language": "en"}]}
                 )
                 self.assertEqual(
                     database.read_execute(
                         "SELECT local_path,blur_hash FROM catalog_artwork_selection WHERE entity_id='movie' AND locale='en' AND image_type='Primary'"
                     ),
                     [(str(primary_path), "hash-primary")],
+                )
+                database.execute(
+                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("tvdb", "movie", "2", "en", "Logo", "https://secondary-logo", str(refreshed_logo_path), "3", None),
+                )
+                MetadataSearchProjection(database).project(
+                    "tvdb", "movie", "2", "en", {"images": [{"type": "Logo", "url": "https://secondary-logo", "language": "en"}]}
+                )
+                self.assertEqual(
+                    database.read_execute(
+                        "SELECT local_path FROM catalog_artwork_selection WHERE entity_id='movie' AND locale='en' AND image_type='Logo'"
+                    ),
+                    [(str(refreshed_logo_path),)],
+                )
+                self.assertEqual(
+                    database.read_execute(
+                        "SELECT local_path FROM catalog_artwork_selection WHERE entity_id='movie' AND locale='en' AND image_type='Primary'"
+                    ),
+                    [(str(primary_path),)],
+                )
+                projected = json.loads(
+                    database.read_execute(
+                        "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
+                    )[0][0]
+                )
+                self.assertTrue(projected["images"]["Primary"]["url"].endswith("v=local-v1"))
+                database.execute(
+                    "UPDATE media_files SET quick_fingerprint='local-v2' WHERE entity_id='movie'"
+                )
+                MetadataSearchProjection(database).project(
+                    "tmdb", "movie", "1", "en", {"title": "Movie", "images": [{"type": "Primary", "url": "https://primary", "language": "en"}]}
+                )
+                refreshed = json.loads(
+                    database.read_execute(
+                        "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
+                    )[0][0]
+                )
+                self.assertTrue(refreshed["images"]["Primary"]["url"].endswith("v=local-v2"))
+                database.execute("DELETE FROM media_files WHERE entity_id='movie'")
+                MetadataSearchProjection(database).project(
+                    "tmdb", "movie", "1", "en", {"title": "Movie", "images": [{"type": "Primary", "url": "https://primary", "language": "en"}]}
+                )
+                without_local = json.loads(
+                    database.read_execute(
+                        "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
+                    )[0][0]
+                )
+                self.assertNotIn("v=local-v2", without_local["images"]["Primary"]["url"])
+                self.assertEqual(
+                    without_local["_catalogArtworkProviders"]["Primary"], "tmdb"
                 )
             finally:
                 database.close()

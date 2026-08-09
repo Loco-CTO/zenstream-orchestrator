@@ -87,6 +87,13 @@ class PersistenceMigrationTest(unittest.TestCase):
                     )
                 }
                 self.assertTrue({"library_id", "entity_type"} <= genre_columns)
+                artwork_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(catalog_artwork_selection)"
+                    )
+                }
+                self.assertIn("provider", artwork_columns)
             finally:
                 connection.close()
 

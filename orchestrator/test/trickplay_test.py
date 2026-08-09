@@ -1,4 +1,6 @@
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -59,3 +61,59 @@ class TrickplayTest(unittest.TestCase):
             extractor.remove_orphan_cache()
             self.assertTrue((cache / "present").is_dir())
             self.assertFalse((cache / "missing").exists())
+
+    def test_extraction_uses_configured_workers_and_claims_each_asset_once(self):
+        class Database:
+            db_file = "orchestrator.db"
+
+            def execute(self, query, params=None):
+                return []
+
+        class Store:
+            def __init__(self):
+                self.db = Database()
+                self.lock = threading.Lock()
+                self.assets = [{"mediaFileId": f"media-{index}"} for index in range(4)]
+                self.processed = []
+
+            def recover_generating(self):
+                return 0
+
+            def queue_pending(self):
+                return len(self.assets)
+
+            def claim_next(self):
+                with self.lock:
+                    return self.assets.pop(0) if self.assets else None
+
+            def mark_failed(self, asset, error):
+                raise AssertionError(error)
+
+        class JobStore:
+            def update_run(self, *args, **kwargs):
+                return None
+
+        store = Store()
+        extractor = TrickplayExtractor(store)
+        extractor.remove_orphan_cache = lambda: None
+        active = 0
+        maximum = 0
+        active_lock = threading.Lock()
+
+        def extract(asset):
+            nonlocal active, maximum
+            with active_lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.02)
+            with active_lock:
+                active -= 1
+            with store.lock:
+                store.processed.append(asset["mediaFileId"])
+
+        extractor.extract = extract
+        with patch("app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 2}):
+            extractor.run("run", JobStore())
+        self.assertEqual(set(store.processed), {f"media-{index}" for index in range(4)})
+        self.assertEqual(len(store.processed), 4)
+        self.assertEqual(maximum, 2)

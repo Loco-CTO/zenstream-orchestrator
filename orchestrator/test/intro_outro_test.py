@@ -1,4 +1,6 @@
 import struct
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from app.intro_outro import (
     audio_preview_command,
     decode_fingerprint,
     fingerprint_preview,
+    normalize_settings,
     shared_region,
 )
 
@@ -62,14 +65,66 @@ class IntroOutroTest(unittest.TestCase):
     def test_worker_limit_defaults_and_is_bounded(self):
         self.assertEqual(DEFAULTS["introOutroWorkers"], 1)
         self.assertEqual(
-            __import__("app.intro_outro", fromlist=["normalize_settings"]).normalize_settings(
-                {"introOutroWorkers": 64}
-            )["introOutroWorkers"],
+            normalize_settings({"introOutroWorkers": 64})["introOutroWorkers"],
             64,
         )
         self.assertEqual(
-            __import__("app.intro_outro", fromlist=["normalize_settings"]).normalize_settings(
-                {"introOutroWorkers": 0}
-            )["introOutroWorkers"],
+            normalize_settings({"introOutroWorkers": 0})["introOutroWorkers"],
             1,
         )
+
+    def test_detection_uses_configured_workers_and_claims_each_asset_once(self):
+        class Store:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.assets = [
+                    {"mediaFileId": f"episode-{index}", "entityId": f"entity-{index}", "durationSeconds": 600, "path": Path(f"episode-{index}.mkv")}
+                    for index in range(4)
+                ]
+                self.processed = []
+
+            def settings(self):
+                return {**DEFAULTS, "introOutroWorkers": 2}
+
+            def queue_pending(self, settings=None):
+                return len(self.assets)
+
+            def claim_next(self):
+                with self.lock:
+                    return self.assets.pop(0) if self.assets else None
+
+            def mark_fingerprinted(self, asset, intro, outro):
+                with self.lock:
+                    self.processed.append(asset["mediaFileId"])
+
+            def mark_failed(self, asset, error):
+                raise AssertionError(error)
+
+            def recompute_all(self, settings):
+                return 0
+
+        class JobStore:
+            def update_run(self, *args, **kwargs):
+                return None
+
+        store = Store()
+        detector = IntroOutroDetector(store)
+        active = 0
+        maximum = 0
+        active_lock = threading.Lock()
+
+        def fingerprint(path, start, duration, should_terminate):
+            nonlocal active, maximum
+            with active_lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.02)
+            with active_lock:
+                active -= 1
+            return b"\0\0\0\0"
+
+        detector._fingerprint = fingerprint
+        detector.run("run", JobStore())
+        self.assertEqual(set(store.processed), {f"episode-{index}" for index in range(4)})
+        self.assertEqual(len(store.processed), 4)
+        self.assertEqual(maximum, 2)

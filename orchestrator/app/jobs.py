@@ -11,12 +11,12 @@ from pathlib import Path
 from app.config import Config
 from app.library import JobTerminated, runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
+from app.metadata_domain import choose_artwork
 from app.providers import ProviderError
 from app.metadata_services import (
     FACT_FIELDS,
     TEXT_FIELDS,
     MetadataIngestService,
-    asset_executor,
     metadata_task_results,
 )
 from app.logging_config import get_logger
@@ -106,6 +106,8 @@ def _metadata_document_gaps(
                     expected_credit_records.append((credit_type, value))
 
     for entity_id, _library_id, is_primary in linked:
+        if not is_primary:
+            continue
         projection_rows = db.execute(
             "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
             (entity_id, locale),
@@ -127,8 +129,15 @@ def _metadata_document_gaps(
         projected_images = projection.get("images")
         if not isinstance(projected_images, dict):
             projected_images = {}
-        for image_type, _image_url in source_images:
-            if image_type not in projected_images:
+        for image_type in ARTWORK_TYPES:
+            expected = choose_artwork(
+                document.get("images", []),
+                locale,
+                image_type,
+                document.get("originalLanguage"),
+                [provider],
+            )
+            if expected and image_type not in projected_images:
                 gaps.add(f"projection-artwork:{image_type}")
 
         if (
@@ -144,7 +153,7 @@ def _metadata_document_gaps(
             if int(actual_credit_count) != len(expected_credit_records):
                 gaps.add("credits")
 
-    if expected_credit_records:
+    if expected_credit_records and any(bool(row[2]) for row in linked):
         for _credit_type, record in expected_credit_records:
             person_id = str(record.get("id") or "").strip()
             image_url = record.get("imageUrl")

@@ -4,7 +4,6 @@ import asyncio
 import contextvars
 import json
 import os
-import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +30,7 @@ from app.providers import (
     ProviderError,
 )
 from app.logging_config import get_logger
+from app.search_scoring import match_score, normalize_search_text
 from app.trickplay import TrickplayExtractor
 from app.intro_outro import IntroOutroStore, render_audio_preview
 
@@ -301,37 +301,8 @@ def _local_image_for_type(relative_path: str, image_type: str) -> bool:
     return stem in names.get(image_type, set())
 
 
-def _search_text(value: str | None) -> str:
-    normalized = unicodedata.normalize("NFKC", value or "").casefold()
-    return " ".join(
-        "".join(
-            character if character.isalnum() else " " for character in normalized
-        ).split()
-    )
-
-
-def _trigrams(value: str) -> set[str]:
-    padded = f"  {value} "
-    return {padded[index : index + 3] for index in range(max(1, len(padded) - 2))}
-
-
-def _trigram_score(query: str, candidate: str) -> float:
-    query = _search_text(query)
-    candidate = _search_text(candidate)
-    if not query or not candidate:
-        return 0.0
-    query_grams = _trigrams(query)
-    candidate_grams = _trigrams(candidate)
-    score = (2 * len(query_grams & candidate_grams)) / (
-        len(query_grams) + len(candidate_grams)
-    )
-    if query == candidate:
-        return 1.0
-    if candidate.startswith(query):
-        return max(score, 0.96)
-    if query in candidate:
-        return max(score, 0.9)
-    return score
+_search_text = normalize_search_text
+_trigram_score = match_score
 
 
 def _rank_library_item_ids(
@@ -361,18 +332,17 @@ def _rank_library_item_ids(
                 "_imageLanguageSchema"
             ) == IMAGE_LANGUAGE_SCHEMA and payload.get("title"):
                 candidate["values"].append(str(payload["title"]))
-    normalized_query = _search_text(query)
+    normalized_query = normalize_search_text(query)
     if not normalized_query:
         return []
-    threshold = 0.18 if len(normalized_query) <= 4 else 0.24
     ranked = []
     for entity_id, candidate in candidates.items():
         path = candidate["path"]
         values = [path, Path(path).stem, *candidate["values"]]
         score = max(
-            (_trigram_score(normalized_query, value) for value in values), default=0.0
+            (match_score(normalized_query, value) for value in values), default=0.0
         )
-        if score >= threshold:
+        if score > 0:
             ranked.append((-score, candidate["type"], path.casefold(), entity_id))
     ranked.sort()
     return [value[3] for value in ranked]

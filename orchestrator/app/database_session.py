@@ -7,6 +7,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool, StaticPool
 
+from app.search_scoring import register_sqlite_functions
+
 
 @dataclass
 class SQLitePersistence:
@@ -21,6 +23,7 @@ class SQLitePersistence:
 
 
 def _writer_pragmas(dbapi_connection, _connection_record) -> None:
+    register_sqlite_functions(dbapi_connection)
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys = ON")
@@ -34,6 +37,7 @@ def _writer_pragmas(dbapi_connection, _connection_record) -> None:
 
 
 def _reader_pragmas(dbapi_connection, _connection_record) -> None:
+    register_sqlite_functions(dbapi_connection)
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA query_only = ON")
@@ -70,6 +74,7 @@ def create_sqlite_persistence(db_file: str) -> SQLitePersistence:
     read_engine = create_engine(
         url,
         connect_args={"check_same_thread": False, "timeout": 0.5},
+        isolation_level="AUTOCOMMIT",
         poolclass=QueuePool,
         pool_size=16,
         max_overflow=16,

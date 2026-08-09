@@ -20,6 +20,7 @@ class CatalogReadModelTest(unittest.TestCase):
             "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))",
             "CREATE TABLE catalog_user_summary(user_id TEXT,entity_id TEXT,played_leaf_count INTEGER,updated_at TEXT,PRIMARY KEY(user_id,entity_id))",
             "CREATE TABLE catalog_collection_summary(collection_entity_id TEXT,collection_library_id TEXT,source_library_id TEXT,playable_leaf_count INTEGER,media_file_count INTEGER,added_sort_ns INTEGER,last_added_sort_ns INTEGER,updated_at TEXT,PRIMARY KEY(collection_entity_id,source_library_id))",
+            "CREATE TABLE catalog_collection_member_projection(collection_entity_id TEXT,source_entity_id TEXT,source_library_id TEXT,position INTEGER,updated_at TEXT,PRIMARY KEY(collection_entity_id,source_entity_id))",
             "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,library_id TEXT,entity_type TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))",
             "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))",
             "CREATE TABLE catalog_root_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,title_sort TEXT,PRIMARY KEY(gram,entity_id,locale))",
@@ -61,6 +62,43 @@ class CatalogReadModelTest(unittest.TestCase):
             "SELECT playable_leaf_count,added_sort_ns,last_added_sort_ns FROM catalog_collection_summary WHERE collection_entity_id='collection-item'"
         )[0]
         self.assertEqual(collection, (2, 10, 20))
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT collection_entity_id,source_entity_id,source_library_id,position FROM catalog_collection_member_projection"
+            ),
+            [("collection-item", "series", "library", 1)],
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_short_search_grams_contain_only_catalog_roots(self, _languages):
+        CatalogReadModel(self.db).rebuild(["en"])
+        entities = {
+            row[0]
+            for row in self.db.read_execute(
+                "SELECT DISTINCT entity_id FROM catalog_root_search_grams"
+            )
+        }
+        self.assertEqual(entities, {"series", "collection-item"})
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_multi_root_and_deletion_publications_are_library_wide(self, _languages):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('series-2','library',NULL,'series','Series 2',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        model.refresh_roots(["series", "series-2"])
+        generation, last_root = self.db.read_execute(
+            "SELECT generation,last_root_entity_id FROM catalog_library_summary WHERE library_id='library'"
+        )[0]
+        self.assertEqual((generation, last_root), (2, None))
+        model.refresh_roots([], affected_library_ids=["library"])
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT generation,last_root_entity_id FROM catalog_library_summary WHERE library_id='library'"
+            )[0],
+            (3, None),
+        )
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_refresh_root_handles_timestamp_decrease_without_library_scan(self, _languages):
@@ -286,6 +324,15 @@ class CatalogReadModelTest(unittest.TestCase):
             ],
             ["the-gintama-story", "gintara"],
         )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_search_out_of_range_page_preserves_total(self, _languages):
+        CatalogReadModel(self.db).rebuild(["en"])
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        response = catalog.search("user", "se", "en", 2, 10)
+        self.assertEqual(response["items"], [])
+        self.assertEqual(response["total"], 1)
 
 
 if __name__ == "__main__":

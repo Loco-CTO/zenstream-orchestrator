@@ -1911,28 +1911,43 @@ class LibraryScanner:
         explicit = [
             {"provider": value[0], "id": value[2]}
             for value in self.db.execute(
-                "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
                 (entity_id,),
             )
         ]
         try:
-            result = service.resolve_inventory_entity(
-                entity_type, query, year, explicit
+            provider_ids = explicit
+            if not provider_ids:
+                result = service.resolve_inventory_entity(
+                    entity_type, query, year, []
+                )
+                provider_ids = result["providerIds"]
+                self._ids(
+                    entity_id,
+                    [
+                        (value["provider"], "movie", value["id"])
+                        for value in provider_ids
+                    ],
+                )
+            supported = [
+                value
+                for value in provider_ids
+                if value["provider"] in {"tmdb", "tvdb"}
+            ]
+            if not supported:
+                raise ValueError(f"No supported metadata identity for movie '{query}'")
+            required_provider = (
+                "tmdb"
+                if any(value["provider"] == "tmdb" for value in supported)
+                else supported[0]["provider"]
             )
-            self._ids(
-                entity_id,
-                [
-                    (value["provider"], "movie", value["id"])
-                    for value in result["providerIds"]
-                ],
-            )
-            for value in result["providerIds"]:
+            for value in supported:
                 self._fetch_configured_locales(
                     service,
                     value["provider"],
                     entity_type,
                     str(value["id"]),
-                    required=True,
+                    required=value["provider"] == required_provider,
                 )
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
@@ -2172,7 +2187,7 @@ class LibraryScanner:
             raise ProviderError(f"Resolved series {series_id} has no TVDB ID")
         from app.metadata_services import MetadataIngestService
 
-        ingest = MetadataIngestService(service)
+        ingest = MetadataIngestService(service, background_assets=False)
         locales = ingest.locales()
         for provider, provider_id in by_provider.items():
             if provider not in {"tvdb", "tmdb"}:
@@ -2294,7 +2309,7 @@ class LibraryScanner:
         """Fetch common metadata and IDs for every season, episode, release, and track."""
         from app.metadata_services import MetadataIngestService
 
-        ingest = MetadataIngestService(service)
+        ingest = MetadataIngestService(service, background_assets=False)
         if season_id:
             rows = self.db.execute(
                 "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND (id=? OR parent_id=?) ORDER BY CASE WHEN entity_type='season' THEN 0 ELSE 1 END, episode_number IS NULL, episode_number, relative_path COLLATE NOCASE",
@@ -2316,7 +2331,11 @@ class LibraryScanner:
             entity_id, entity_type = row[0], row[1]
             if entity_id not in metadata_candidates:
                 return False
-            if entity_id in self._scan_delta["content_changed"]:
+            if (
+                entity_id in self._scan_created_ids
+                or entity_id in self._scan_provider_identity_changed
+                or entity_id in self._scan_delta["content_changed"]
+            ):
                 return True
             if self._needs_metadata(entity_id):
                 return True
@@ -2522,7 +2541,7 @@ class LibraryScanner:
         if provider not in {"tmdb", "tvdb", "musicbrainz"}:
             return
 
-        ingest = MetadataIngestService(service)
+        ingest = MetadataIngestService(service, background_assets=False)
         locales = ingest.locales()
         if progress:
             progress(
@@ -3271,7 +3290,6 @@ class LibraryScanner:
         )
         self.store.update_job(job_id, progress_total=len(entries))
         count = 0
-        metadata_futures = []
         for entry in entries:
             self._check_termination(should_terminate)
             if entry.is_dir():
@@ -3317,22 +3335,25 @@ class LibraryScanner:
                 self._scan_rejected_ids.add(entity)
                 continue
             self._scan_refresh_root_ids.add(entity)
-            if (
+            requires_materialization = (
                 entity in self._scan_created_ids
                 or file_delta["content_changed"]
                 or entity in self._scan_provider_identity_changed
-            ) and self._needs_metadata(entity):
-                metadata_futures.append(
-                    metadata_root_executor.submit(
-                        library_id,
-                        self._resolve_movie_and_publish,
-                        library_id,
-                        (entity, "movie", relative(str(root), str(entry)), None, None),
-                        job_id,
-                        should_terminate,
-                        count + 1,
-                        len(entries),
-                    )
+            )
+            if requires_materialization:
+                self._set_stage(
+                    job_id,
+                    f"Fetching metadata and artwork for {entry.name}",
+                    entityId=entity,
+                    path=str(entry),
+                )
+                self._resolve_movie_and_publish(
+                    library_id,
+                    (entity, "movie", relative(str(root), str(entry)), None, None),
+                    job_id,
+                    should_terminate,
+                    count + 1,
+                    len(entries),
                 )
             else:
                 self._publish_root(entity)
@@ -3340,7 +3361,6 @@ class LibraryScanner:
             self.store.update_job(
                 job_id, progress_current=count, message=f"Indexed {entry.name}"
             )
-        self._await_metadata_futures(metadata_futures, should_terminate)
         self._scan_complete = True
         return count
 

@@ -285,18 +285,7 @@ class MetadataSearchProjection:
                         merged = {}
                     if not isinstance(merged, dict):
                         merged = {}
-                    for field in (
-                        "title",
-                        "originalTitle",
-                        "overview",
-                        "description",
-                        "genres",
-                        "tags",
-                        "date",
-                        "releaseDate",
-                        "runtimeMinutes",
-                        "communityRating",
-                    ):
+                    for field in TEXT_FIELDS | FACT_FIELDS:
                         if field in payload:
                             merged[field] = payload[field]
                     merged["_catalogItemProjectionSchema"] = (

@@ -384,13 +384,6 @@ async def item_image(
     def resolve_cached_image() -> Path | None:
         account = account_from_access(request)
         row = catalog.require_entity(account["id"], entity_id)
-        if catalog._has_table("catalog_artwork_selection"):
-            projected = catalog.db.execute(
-                "SELECT local_path FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
-                (entity_id, language, image_type),
-            )
-            if projected and projected[0][0] and Path(projected[0][0]).is_file():
-                return Path(projected[0][0])
         library_rows = catalog.db.execute(
             "SELECT directory FROM libraries WHERE id=?", (row[1],)
         )
@@ -408,6 +401,13 @@ async def item_image(
                     if cached and cached.is_file():
                         return cached
                     raise HTTPException(404, "Image not found.")
+        if catalog._has_table("catalog_artwork_selection"):
+            projected = catalog.db.execute(
+                "SELECT local_path FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
+                (entity_id, language, image_type),
+            )
+            if projected and projected[0][0] and Path(projected[0][0]).is_file():
+                return Path(projected[0][0])
         image = catalog.selected_image(account["id"], entity_id, language, image_type)
         if not image:
             raise HTTPException(404, "Image not found.")

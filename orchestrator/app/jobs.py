@@ -6,12 +6,19 @@ import time
 import uuid
 import traceback
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from app.config import Config
 from app.library import JobTerminated, runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.providers import ProviderError
-from app.metadata_services import MetadataIngestService, asset_executor, metadata_task_results
+from app.metadata_services import (
+    FACT_FIELDS,
+    TEXT_FIELDS,
+    MetadataIngestService,
+    asset_executor,
+    metadata_task_results,
+)
 from app.logging_config import get_logger
 from app.trickplay import TrickplayExtractor
 from app.intro_outro import IntroOutroDetector
@@ -20,6 +27,8 @@ from app.foreground import active_requests
 
 logger = get_logger("jobs")
 analysis_slot = threading.Semaphore(1)
+VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
+ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
 
 
 def now() -> str:
@@ -28,6 +37,131 @@ def now() -> str:
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _usable_metadata_value(value) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
+
+
+def _ready_cache_path(value) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        path = Path(value)
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _metadata_document_gaps(
+    db,
+    provider: str,
+    entity_type: str,
+    provider_id: str,
+    locale: str,
+    document: dict,
+) -> tuple[set[str], list[tuple[str, str]]]:
+    gaps: set[str] = set()
+    linked = db.execute(
+        "SELECT ep.entity_id,e.library_id,ep.is_primary FROM entity_provider_ids ep "
+        "JOIN library_entities e ON e.id=ep.entity_id "
+        "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=?",
+        (provider, entity_type, provider_id),
+    )
+    entity_libraries = [(row[0], row[1]) for row in linked]
+    if not entity_libraries:
+        return {"identity:orphaned"}, []
+
+    projected_fields = TEXT_FIELDS | FACT_FIELDS
+    source_images = {
+        (str(image.get("type")), str(image.get("url")))
+        for image in document.get("images", [])
+        if isinstance(image, dict)
+        and image.get("type") in ARTWORK_TYPES
+        and isinstance(image.get("url"), str)
+        and image.get("url")
+    }
+    image_rows = db.execute(
+        "SELECT image_type,image_url,local_path FROM metadata_images "
+        "WHERE provider=? AND entity_type=? AND provider_id=?",
+        (provider, entity_type, provider_id),
+    )
+    ready_images = {
+        (str(image_type), str(image_url))
+        for image_type, image_url, local_path in image_rows
+        if _ready_cache_path(local_path)
+    }
+    for image_type, image_url in source_images - ready_images:
+        gaps.add(f"artwork:{image_type}")
+
+    expected_credit_records = []
+    credits = document.get("credits")
+    if isinstance(credits, dict):
+        for credit_type in ("cast", "crew"):
+            values = credits.get(credit_type)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if isinstance(value, dict) and str(value.get("name") or "").strip():
+                    expected_credit_records.append((credit_type, value))
+
+    for entity_id, _library_id, is_primary in linked:
+        projection_rows = db.execute(
+            "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
+            (entity_id, locale),
+        )
+        projection = {}
+        if projection_rows:
+            try:
+                projection = json.loads(projection_rows[0][0] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                projection = {}
+        if not isinstance(projection, dict):
+            projection = {}
+        if not projection_rows:
+            gaps.add("projection")
+        for field in projected_fields:
+            source_value = document.get(field)
+            if _usable_metadata_value(source_value) and projection.get(field) != source_value:
+                gaps.add(f"metadata:{field}")
+        projected_images = projection.get("images")
+        if not isinstance(projected_images, dict):
+            projected_images = {}
+        for image_type, _image_url in source_images:
+            if image_type not in projected_images:
+                gaps.add(f"projection-artwork:{image_type}")
+
+        if (
+            is_primary
+            and provider in {"tmdb", "tvdb"}
+            and entity_type in VIDEO_ENTITY_TYPES
+            and expected_credit_records
+        ):
+            actual_credit_count = db.execute(
+                "SELECT COUNT(*) FROM entity_person_credits WHERE entity_id=? AND provider=? AND locale=?",
+                (entity_id, provider, locale),
+            )[0][0]
+            if int(actual_credit_count) != len(expected_credit_records):
+                gaps.add("credits")
+
+    if expected_credit_records:
+        for _credit_type, record in expected_credit_records:
+            person_id = str(record.get("id") or "").strip()
+            image_url = record.get("imageUrl")
+            if not person_id or not isinstance(image_url, str) or not image_url:
+                continue
+            people = db.execute(
+                "SELECT image_url,local_path FROM people WHERE provider=? AND provider_person_id=?",
+                (provider, person_id),
+            )
+            if (
+                not people
+                or people[0][0] != image_url
+                or not _ready_cache_path(people[0][1])
+            ):
+                gaps.add("portrait")
+                break
+    return gaps, entity_libraries
 
 
 class JobStore:

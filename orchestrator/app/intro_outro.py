@@ -4,8 +4,10 @@ import hashlib
 import json
 import struct
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 
 from fastapi import HTTPException
 
@@ -30,6 +32,7 @@ DEFAULTS = {
     "maximumFingerprintPointDifferences": 6,
     "maximumTimeSkipSeconds": 3.5,
     "invertedIndexShift": 2,
+    "introOutroWorkers": 1,
 }
 
 
@@ -62,6 +65,7 @@ def normalize_settings(values: dict | None = None) -> dict:
         "maximumFingerprintPointDifferences": integer("maximumFingerprintPointDifferences", 0, 32),
         "maximumTimeSkipSeconds": decimal("maximumTimeSkipSeconds", 0.1, 10),
         "invertedIndexShift": integer("invertedIndexShift", 0, 8),
+        "introOutroWorkers": integer("introOutroWorkers", 1, 64),
     }
     result["maximumIntroDuration"] = max(result["minimumIntroDuration"], result["maximumIntroDuration"])
     result["maximumCreditsAnalysisSeconds"] = max(result["minimumCreditsDuration"], result["maximumCreditsAnalysisSeconds"])
@@ -97,6 +101,7 @@ class IntroOutroStore:
             ("maximumCreditsAnalysisSeconds", "maximum_credits_analysis_seconds"),
             ("maximumFingerprintPointDifferences", "maximum_fingerprint_point_differences"),
             ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"), ("invertedIndexShift", "inverted_index_shift"),
+            ("introOutroWorkers", "intro_outro_workers"),
         ]
         selected = [(key, column) for key, column in names if column in columns]
         rows = self.db.execute("SELECT " + ",".join(column for _, column in selected) + " FROM intro_outro_settings WHERE id=1")
@@ -108,7 +113,7 @@ class IntroOutroStore:
     def update_settings(self, values: dict) -> dict:
         normalized = normalize_settings({**self.settings(), **values})
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(intro_outro_settings)")}
-        mappings = [("scanOnAdded", "scan_on_added"), ("analysisPercent", "analysis_percent"), ("analysisLengthLimitMinutes", "analysis_length_limit_minutes"), ("scanIntroduction", "scan_introduction"), ("scanCredits", "scan_credits"), ("minimumIntroDuration", "minimum_intro_duration"), ("maximumIntroDuration", "maximum_intro_duration"), ("minimumCreditsDuration", "minimum_credits_duration"), ("maximumCreditsAnalysisSeconds", "maximum_credits_analysis_seconds"), ("maximumFingerprintPointDifferences", "maximum_fingerprint_point_differences"), ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"), ("invertedIndexShift", "inverted_index_shift")]
+        mappings = [("scanOnAdded", "scan_on_added"), ("analysisPercent", "analysis_percent"), ("analysisLengthLimitMinutes", "analysis_length_limit_minutes"), ("scanIntroduction", "scan_introduction"), ("scanCredits", "scan_credits"), ("minimumIntroDuration", "minimum_intro_duration"), ("maximumIntroDuration", "maximum_intro_duration"), ("minimumCreditsDuration", "minimum_credits_duration"), ("maximumCreditsAnalysisSeconds", "maximum_credits_analysis_seconds"), ("maximumFingerprintPointDifferences", "maximum_fingerprint_point_differences"), ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"), ("invertedIndexShift", "inverted_index_shift"), ("introOutroWorkers", "intro_outro_workers")]
         selected = [(key, column) for key, column in mappings if column in columns]
         self.db.execute(
             "INSERT INTO intro_outro_settings(id," + ",".join(column for _, column in selected) + ",updated_at) VALUES(1," + ",".join("?" for _ in selected) + ",?) "
@@ -500,28 +505,41 @@ class IntroOutroDetector:
         should_terminate = should_terminate or (lambda: False)
         settings = self.store.settings()
         queued = self.store.queue_pending(settings=settings)
+        workers = settings["introOutroWorkers"]
         job_store.update_run(run_id, state="running", started_at=now(), message="Detecting intro and outro segments")
         completed = failures = markers = 0
-        while not should_terminate():
-            asset = self.store.claim_next()
-            if not asset:
-                break
-            try:
-                duration = asset["durationSeconds"]
-                intro_duration = min(duration * settings["analysisPercent"] / 100.0, settings["analysisLengthLimitMinutes"] * 60.0)
-                outro_duration = min(duration, float(settings["maximumCreditsAnalysisSeconds"]))
-                outro_start = max(0.0, duration - outro_duration)
-                intro = self._fingerprint(asset["path"], 0.0, intro_duration, should_terminate) if settings["scanIntroduction"] else None
-                outro = self._fingerprint(asset["path"], outro_start, outro_duration, should_terminate) if settings["scanCredits"] else None
-                self.store.mark_fingerprinted(asset, intro, outro)
-                completed += 1
-                job_store.update_run(run_id, progress_current=completed, progress_total=max(completed, queued), message=f"Fingerprinting episode {completed}")
-            except Exception as error:
-                if should_terminate():
-                    break
-                self.store.mark_failed(asset, str(error))
-                failures += 1
-                logger.warning("intro/outro detection failed entity_id=%s media_file_id=%s error=%s", asset["entityId"], asset["mediaFileId"], error)
+        progress_lock = Lock()
+
+        def process_assets():
+            nonlocal completed, failures
+            while not should_terminate():
+                asset = self.store.claim_next()
+                if not asset:
+                    return
+                try:
+                    duration = asset["durationSeconds"]
+                    intro_duration = min(duration * settings["analysisPercent"] / 100.0, settings["analysisLengthLimitMinutes"] * 60.0)
+                    outro_duration = min(duration, float(settings["maximumCreditsAnalysisSeconds"]))
+                    outro_start = max(0.0, duration - outro_duration)
+                    intro = self._fingerprint(asset["path"], 0.0, intro_duration, should_terminate) if settings["scanIntroduction"] else None
+                    outro = self._fingerprint(asset["path"], outro_start, outro_duration, should_terminate) if settings["scanCredits"] else None
+                    self.store.mark_fingerprinted(asset, intro, outro)
+                    with progress_lock:
+                        completed += 1
+                        current = completed
+                        job_store.update_run(run_id, progress_current=current, progress_total=max(current, queued), message=f"Fingerprinting episode {current}")
+                except Exception as error:
+                    if should_terminate():
+                        return
+                    self.store.mark_failed(asset, str(error))
+                    with progress_lock:
+                        failures += 1
+                    logger.warning("intro/outro detection failed entity_id=%s media_file_id=%s error=%s", asset["entityId"], asset["mediaFileId"], error)
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="intro-outro") as executor:
+            futures = [executor.submit(process_assets) for _ in range(workers)]
+            for future in futures:
+                future.result()
         if should_terminate():
             job_store.update_run(run_id, state="terminated", finished_at=now(), message="Terminated by administrator")
         elif failures:

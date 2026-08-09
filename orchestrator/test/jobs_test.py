@@ -3,8 +3,14 @@ import threading
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 from app.database import DatabaseHandler
-from app.jobs import JobScheduler, JobStore, _metadata_document_gaps
+from app.jobs import (
+    JobScheduler,
+    JobStore,
+    MetadataMissingJob,
+    _metadata_document_gaps,
+)
 
 
 class DatabaseRollbackTest(unittest.TestCase):
@@ -145,6 +151,101 @@ class MetadataMissingInspectionTest(unittest.TestCase):
 
         self.assertIn("credits", gaps)
         self.assertIn("portrait", gaps)
+
+    def test_job_synchronously_repairs_and_publishes_partial_cached_document(self):
+        primary_path = self._ready_file("job-primary.webp")
+        backdrop_path = str(Path(self.directory.name) / "job-backdrop.webp")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie-1",
+                "en",
+                json.dumps(
+                    {
+                        "title": "Example",
+                        "images": {"Primary": {"url": "/primary"}},
+                    }
+                ),
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?)",
+            ("tmdb", "movie", "42", "", "Primary", "https://img/primary", primary_path),
+        )
+        document = {
+            "title": "Example",
+            "overview": "A complete overview",
+            "images": [
+                {"type": "Primary", "url": "https://img/primary"},
+                {"type": "Backdrop", "url": "https://img/backdrop"},
+            ],
+        }
+
+        class Cache:
+            def get(self, *_args):
+                return dict(document)
+
+        class Ingest:
+            metadata_service = type("MetadataService", (), {"cache": Cache()})()
+
+            def locales(self):
+                return ["en"]
+
+            def ingest_document(self, *_args):
+                Path(backdrop_path).write_bytes(b"webp")
+                self_db.execute(
+                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?)",
+                    (
+                        "tmdb",
+                        "movie",
+                        "42",
+                        "",
+                        "Backdrop",
+                        "https://img/backdrop",
+                        backdrop_path,
+                    ),
+                )
+                self_db.execute(
+                    "UPDATE catalog_item_projection SET payload=? WHERE entity_id='movie-1' AND locale='en'",
+                    (
+                        json.dumps(
+                            {
+                                "title": "Example",
+                                "overview": "A complete overview",
+                                "images": {
+                                    "Primary": {"url": "/primary"},
+                                    "Backdrop": {"url": "/backdrop"},
+                                },
+                            }
+                        ),
+                    ),
+                )
+
+        self_db = self.db
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+        read_model = MagicMock()
+
+        with patch("app.jobs.MetadataIngestService", return_value=ingest) as factory:
+            with patch(
+                "app.catalog_read_model.CatalogReadModel", return_value=read_model
+            ):
+                MetadataMissingJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        factory.assert_called_once_with(background_assets=False)
+        read_model.refresh_roots.assert_called_once_with(["movie-1"])
+        self.assertEqual(store.updates[-1]["state"], "completed")
+        self.assertIn("repaired 1", store.updates[-1]["message"])
 
 
 class JobMappingTest(unittest.TestCase):

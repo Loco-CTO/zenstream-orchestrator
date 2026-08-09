@@ -1640,7 +1640,7 @@ class LibraryMetadataTest(unittest.TestCase):
             library_routes._rank_library_item_ids(
                 db, "library-1", None, "en", "07 ghost"
             ),
-            ["ghost"],
+            ["ghost", "gintama"],
         )
         self.assertEqual(
             library_routes._rank_library_item_ids(db, "library-1", None, "ja", "銀魂"),

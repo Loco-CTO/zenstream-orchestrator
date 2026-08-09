@@ -1842,13 +1842,24 @@ class LibraryMetadataTest(unittest.TestCase):
                 "overview": "Overview",
                 "genres": [{"name": "Drama"}],
                 "original_language": "ja",
+                "vote_average": 8.2,
                 "external_ids": {"tvdb_id": 42, "imdb_id": "tt1"},
             },
         )
         self.assertEqual(value["year"], "2020")
         self.assertEqual(value["tags"], ["Drama"])
+        self.assertEqual(value["communityRating"], 8.2)
         self.assertEqual(value["images"], [])
         self.assertEqual({item["provider"] for item in value["ids"]}, {"tvdb", "imdb"})
+
+    def test_tvdb_normalization_maps_community_rating(self):
+        client = TVDBClient({"apiKey": "test"})
+        value = client.normalize(
+            "series",
+            "1",
+            {"data": {"name": "Example", "score": 8.4}},
+        )
+        self.assertEqual(value["communityRating"], 8.4)
 
     def test_tvdb_details_requests_english_translation_explicitly(self):
         client = TVDBClient({"apiKey": "test"})

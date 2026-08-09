@@ -95,6 +95,14 @@ class CatalogReadModel:
             )
         )
 
+    def _has_columns(self, table: str, columns: set[str]) -> bool:
+        if not self._has_table(table):
+            return False
+        existing = {
+            row[1] for row in self.db.read_execute(f"PRAGMA table_info({table})")
+        }
+        return columns.issubset(existing)
+
     def _summary_values(self, entities, children, entity_ids=None, progress=None):
         media_query = (
             "SELECT entity_id,MIN(modified_ns),MAX(modified_ns),COUNT(*) "
@@ -177,7 +185,12 @@ class CatalogReadModel:
     @staticmethod
     def _fallback_payload(row) -> dict:
         title = Path(row[4] or "").stem or row[3].replace("_", " ").title()
-        return {"title": title, "_imageLanguageSchema": IMAGE_LANGUAGE_SCHEMA}
+        return {
+            "title": title,
+            "images": {},
+            "_imageLanguageSchema": IMAGE_LANGUAGE_SCHEMA,
+            "_catalogItemProjectionSchema": 1,
+        }
 
     def _projection_values(self, entities, locales: list[str], progress=None):
         old: dict[tuple[str, str], str] = {}
@@ -416,11 +429,18 @@ class CatalogReadModel:
                 "writing_projections",
             )
             cursor.execute("DELETE FROM catalog_item_genres")
-            write_rows(cursor,
-                "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
-                genres,
-                "writing_genres",
-            )
+            if self._has_columns("catalog_item_genres", {"library_id", "entity_type"}):
+                write_rows(cursor,
+                    "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
+                    genres,
+                    "writing_genres",
+                )
+            else:
+                write_rows(cursor,
+                    "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                    [(row[0], row[1], row[4], row[5]) for row in genres],
+                    "writing_genres",
+                )
             cursor.execute("DELETE FROM catalog_search_grams")
             write_rows(cursor,
                 "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,NULL)",
@@ -610,10 +630,16 @@ class CatalogReadModel:
                     f"DELETE FROM catalog_item_genres WHERE entity_id IN ({entity_placeholders})",
                     entity_ids,
                 )
-                cursor.executemany(
-                    "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
-                    genres,
-                )
+                if self._has_columns("catalog_item_genres", {"library_id", "entity_type"}):
+                    cursor.executemany(
+                        "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
+                        genres,
+                    )
+                else:
+                    cursor.executemany(
+                        "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
+                        [(row[0], row[1], row[4], row[5]) for row in genres],
+                    )
             if entity_ids and self._has_table("catalog_search_grams"):
                 cursor.execute(
                     f"DELETE FROM catalog_search_grams WHERE entity_id IN ({entity_placeholders})",

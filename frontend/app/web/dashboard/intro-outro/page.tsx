@@ -10,12 +10,14 @@ type Settings = {
 	scanOnAdded: boolean; analysisPercent: number; analysisLengthLimitMinutes: number; scanIntroduction: boolean; scanCredits: boolean;
 	minimumIntroDuration: number; maximumIntroDuration: number; minimumCreditsDuration: number; maximumCreditsAnalysisSeconds: number;
 	maximumFingerprintPointDifferences: number; maximumTimeSkipSeconds: number; invertedIndexShift: number;
+	introOutroWorkers: number;
 };
 
 const defaults: Settings = {
 	scanOnAdded: true, analysisPercent: 25, analysisLengthLimitMinutes: 10, scanIntroduction: true, scanCredits: true,
 	minimumIntroDuration: 15, maximumIntroDuration: 120, minimumCreditsDuration: 15, maximumCreditsAnalysisSeconds: 450,
 	maximumFingerprintPointDifferences: 6, maximumTimeSkipSeconds: 3.5, invertedIndexShift: 2,
+	introOutroWorkers: 1,
 };
 
 function NumberField({ label, hint, value, onChange, step = 1 }: { label: string; hint: string; value: number; onChange: (value: number) => void; step?: number }) {
@@ -76,6 +78,7 @@ export default function IntroOutroPage() {
 				<label className="flex items-start gap-3 text-sm"><input type="checkbox" checked={settings.scanCredits} onChange={(event) => update("scanCredits", event.target.checked)} /><span><span className="font-medium text-white">Scan credits / outros</span><span className="mt-1 block leading-6 console-muted">Fingerprint the tail window and detect recurring credits.</span></span></label>
 			</div>
 			<div className="mt-7 grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+				<NumberField label="Detection workers" hint="Maximum concurrent FFmpeg fingerprint processes. Use 1–64 workers." value={settings.introOutroWorkers} onChange={(value) => update("introOutroWorkers", value)} />
 				<NumberField label="Opening analysis (%)" hint="Episode percentage analysed from the beginning." value={settings.analysisPercent} onChange={(value) => update("analysisPercent", value)} />
 				<NumberField label="Opening analysis limit (minutes)" hint="Upper bound for each opening fingerprint." value={settings.analysisLengthLimitMinutes} onChange={(value) => update("analysisLengthLimitMinutes", value)} />
 				<NumberField label="Minimum intro (seconds)" hint="Ignore shorter opening matches." value={settings.minimumIntroDuration} onChange={(value) => update("minimumIntroDuration", value)} />

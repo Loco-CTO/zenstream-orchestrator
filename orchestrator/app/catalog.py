@@ -5,6 +5,8 @@ import math
 import contextvars
 import time
 import json
+import hashlib
+import threading
 from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,6 +169,23 @@ class Catalog:
 
     def __init__(self):
         self.db = _CatalogDatabase(Config().database)
+        self._home_cache_lock = threading.Lock()
+        self._home_cache: dict[tuple, tuple[float, dict]] = {}
+        self._home_inflight: dict[tuple, threading.Event] = {}
+
+    def _invalidate_home_cache(self, user_id: str | None = None) -> None:
+        lock = getattr(self, "_home_cache_lock", None)
+        if lock is None:
+            return
+        with lock:
+            if user_id is None:
+                self._home_cache.clear()
+            else:
+                self._home_cache = {
+                    key: value
+                    for key, value in self._home_cache.items()
+                    if key[0] != user_id
+                }
 
     def _context(self, user_id: str) -> _CatalogReadContext | None:
         context = self._read_context.get()
@@ -546,8 +565,10 @@ class Catalog:
                 else:
                     value["job"] = role
                     value["department"] = department
-                if local_path and Path(local_path).is_file():
-                    version = str(Path(local_path).stat().st_mtime_ns)
+                if local_path:
+                    version = hashlib.sha256(
+                        f"{local_path}:{blur_hash or ''}".encode("utf-8")
+                    ).hexdigest()[:12]
                     value["image"] = {
                         "url": f"/api/catalog/items/{entity_id}/people/{person_id}/image?v={version}"
                     }
@@ -557,13 +578,15 @@ class Catalog:
         return result
 
     def person_image(self, user_id: str, entity_id: str, person_id: str) -> Path | None:
-        self.require_entity(user_id, entity_id)
         if not self._has_table("entity_person_credits"):
             return None
         rows = self.db.execute(
-            "SELECT p.local_path FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
+            "SELECT p.local_path FROM entity_person_credits c "
+            "JOIN people p ON p.id=c.person_id "
+            "JOIN library_entities e ON e.id=c.entity_id "
+            "JOIN user_library_access a ON a.library_id=e.library_id AND a.user_id=? "
             "WHERE c.entity_id=? AND c.person_id=? AND p.local_path IS NOT NULL LIMIT 1",
-            (entity_id, person_id),
+            (user_id, entity_id, person_id),
         )
         if not rows or not rows[0][0]:
             return None
@@ -1875,6 +1898,7 @@ class Catalog:
             from app.catalog_read_model import CatalogReadModel
 
             CatalogReadModel(self.db).refresh_user_entities(user_id, affected)
+        self._invalidate_home_cache(user_id)
         return self._state(user_id, entity_id)
 
     @_catalog_read
@@ -2361,7 +2385,49 @@ class Catalog:
 
     @_catalog_read
     def home(self, user_id: str, language: str) -> dict:
+        if not hasattr(self, "_home_cache_lock"):
+            self._home_cache_lock = threading.Lock()
+            self._home_cache = {}
+            self._home_inflight = {}
         allowed = self.allowed_libraries(user_id)
+        generations: list[tuple] = []
+        if allowed and self._has_table("catalog_library_summary"):
+            placeholders = ",".join("?" for _ in allowed)
+            generations = self.db.execute(
+                f"SELECT library_id,generation FROM catalog_library_summary WHERE library_id IN ({placeholders}) ORDER BY library_id",
+                sorted(allowed),
+            )
+        key = (user_id, language, tuple(generations))
+        owner = False
+        with self._home_cache_lock:
+            cached = self._home_cache.get(key)
+            if cached and cached[0] > time.monotonic() - 5.0:
+                return cached[1]
+            event = self._home_inflight.get(key)
+            if event is None:
+                event = threading.Event()
+                self._home_inflight[key] = event
+                owner = True
+        if not owner:
+            event.wait(5.0)
+            with self._home_cache_lock:
+                cached = self._home_cache.get(key)
+                if cached:
+                    return cached[1]
+        try:
+            value = self._home_uncached(user_id, language, allowed)
+            with self._home_cache_lock:
+                self._home_cache[key] = (time.monotonic(), value)
+            return value
+        finally:
+            with self._home_cache_lock:
+                pending = self._home_inflight.pop(key, None)
+                if pending:
+                    pending.set()
+
+    def _home_uncached(
+        self, user_id: str, language: str, allowed: set[str]
+    ) -> dict:
         if not allowed:
             return {
                 "latestItems": [],
@@ -2399,6 +2465,7 @@ class Catalog:
                 dates = self._date_values(
                     "", {library_id}, {row[0] for row in playable_rows}
                 )
+                self._seed_hydration_rows(user_id, playable_rows, language)
                 for playable_row in playable_rows:
                     episode_series_id = None
                     if entity_type == "episode":

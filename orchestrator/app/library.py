@@ -1365,12 +1365,14 @@ class LibraryScanner:
             self._delete_catalog_rows(closure)
             self._scan_delta["removed"].update(closure)
         surviving = [value for value in collection_ids if value not in set(empty)]
-        if surviving:
+        if surviving or empty:
             from app.catalog_read_model import CatalogReadModel
 
             model = CatalogReadModel(self.db)
             for offset in range(0, len(surviving), 300):
                 model.refresh_roots(surviving[offset : offset + 300])
+            if empty or len(surviving) != 1:
+                model.refresh_roots([], affected_library_ids=dependent_ids)
 
     def _entity_fingerprint(self, entity_id: str) -> str | None:
         if "quick_fingerprint" not in {

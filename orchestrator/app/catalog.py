@@ -172,6 +172,8 @@ class Catalog:
         self._home_cache_lock = threading.Lock()
         self._home_cache: dict[tuple, tuple[float, dict]] = {}
         self._home_inflight: dict[tuple, threading.Event] = {}
+        self._home_cache_epoch = 0
+        self._home_user_epochs: dict[str, int] = {}
 
     def _invalidate_home_cache(self, user_id: str | None = None) -> None:
         lock = getattr(self, "_home_cache_lock", None)
@@ -179,8 +181,10 @@ class Catalog:
             return
         with lock:
             if user_id is None:
+                self._home_cache_epoch += 1
                 self._home_cache.clear()
             else:
+                self._home_user_epochs[user_id] = self._home_user_epochs.get(user_id, 0) + 1
                 self._home_cache = {
                     key: value
                     for key, value in self._home_cache.items()
@@ -1101,6 +1105,7 @@ class Catalog:
         )
         total = int(count_rows[0][0] or 0) if count_rows else 0
         direction = "DESC" if sort_order.lower() == "descending" else "ASC"
+        index_tie_direction = "ASC" if direction == "DESC" else "DESC"
         params: list[object] = [language, library_id, parent_id]
         if sort_by in {"added", "lastAdded"}:
             order_column = "s.added_sort_ns" if sort_by == "added" else "s.last_added_sort_ns"
@@ -1115,7 +1120,13 @@ class Catalog:
                 )
                 order_column = "sort_added" if sort_by == "added" else "sort_last"
                 date_params = [*scope, *scope, *scope]
-            order = f"{order_column} {direction},e.id {direction}"
+            order = f"{order_column} {direction},e.id {index_tie_direction}"
+            if projection_order.startswith("p.") and projection_order != "p.title_sort":
+                projection_order = (
+                    f"{projection_order} {direction},p.title_sort {index_tie_direction}"
+                )
+            else:
+                projection_order = f"{projection_order} {direction}"
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at," + select_dates + " "
@@ -1148,7 +1159,7 @@ class Catalog:
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                 "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
-                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY " + projection_order + " " + direction + ",p.entity_id " + direction + " LIMIT ? OFFSET ?"
+                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY " + projection_order + ",p.entity_id " + index_tie_direction + " LIMIT ? OFFSET ?"
             )
             params.extend([page_size, offset])
         else:
@@ -1745,61 +1756,71 @@ class Catalog:
         locale_order.append("original")
         locale_placeholders = ",".join("?" for _ in locale_order)
         if self._read_model_ready():
-            locale_rank = "CASE " + " ".join(
-                f"WHEN p.locale=? THEN {index}" for index, _ in enumerate(locale_order)
-            ) + " ELSE 99 END"
-            title_rank = (
-                "CASE WHEN p.title_sort=? THEN 0 WHEN p.title_sort LIKE ? || '%' THEN 1 "
-                "WHEN p.title_sort LIKE '%' || ? || '%' THEN 2 ELSE 3 END"
+            grams_table = (
+                "catalog_root_search_grams"
+                if self._has_table("catalog_root_search_grams")
+                else "catalog_search_grams"
             )
-            if len(wanted) >= 3 and self._has_table("catalog_search"):
-                source = (
-                    "SELECT p.entity_id,MIN(" + title_rank + ") AS match_rank,"
-                    "MIN(" + locale_rank + ") AS locale_rank,0.0 AS score "
-                    "FROM catalog_search JOIN catalog_item_projection p ON p.entity_id=catalog_search.entity_id AND p.locale=catalog_search.locale "
-                    f"WHERE catalog_search MATCH ? AND p.library_id IN ({placeholders}) AND p.locale IN ({locale_placeholders}) AND p.entity_type IN ('movie','series','collection') "
-                    "GROUP BY p.entity_id"
-                )
-                match_params = [wanted, wanted, wanted, *locale_order, f'"{wanted.replace(chr(34), chr(34) * 2)}"', *allowed, *locale_order]
+            query_grams = sorted(
+                trigram_set(wanted) if len(wanted) >= 3 else {wanted}
+            )
+            gram_placeholders = ",".join("?" for _ in query_grams)
+            locale_rank = "CASE " + " ".join(
+                f"WHEN g.locale=? THEN {index}" for index, _ in enumerate(locale_order)
+            ) + " ELSE 99 END"
+            if grams_table == "catalog_root_search_grams":
+                title_expression = "g.title_sort"
+                source_join = ""
+                root_filter = "1=1"
             else:
-                grams_table = (
-                    "catalog_root_search_grams"
-                    if self._has_table("catalog_root_search_grams")
-                    else "catalog_search_grams"
-                )
-                source = (
-                    "SELECT p.entity_id,MIN(CASE WHEN p.title_sort=? THEN 0 WHEN p.title_sort LIKE ? || '%' THEN 1 ELSE 2 END) AS match_rank,"
-                    "MIN(" + locale_rank + ") AS locale_rank,0.0 AS score "
-                    f"FROM {grams_table} g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
-                    f"WHERE g.gram=? AND g.library_id IN ({placeholders}) AND g.locale IN ({locale_placeholders}) GROUP BY p.entity_id"
-                )
-                match_params = [wanted, wanted, *locale_order, wanted, *allowed, *locale_order]
+                title_expression = "p.title_sort"
+                source_join = "JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale JOIN library_entities e ON e.id=g.entity_id"
+                root_filter = "p.parent_id IS NULL AND p.entity_type IN ('movie','series','collection')"
+            source = (
+                "WITH scored AS ("
+                "SELECT g.entity_id,g.locale," + title_expression + " AS title_sort,"
+                "catalog_match_score(?," + title_expression + ") AS score,"
+                + locale_rank
+                + " AS locale_rank "
+                f"FROM {grams_table} g {source_join} "
+                f"WHERE g.gram IN ({gram_placeholders}) AND g.library_id IN ({placeholders}) "
+                f"AND g.locale IN ({locale_placeholders}) AND {root_filter} "
+                "GROUP BY g.entity_id,g.locale,title_sort), best AS ("
+                "SELECT entity_id,locale,title_sort,score,locale_rank,"
+                "ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY score DESC,locale_rank,title_sort,entity_id) AS locale_choice "
+                "FROM scored), matches AS ("
+                "SELECT entity_id,score,locale_rank,title_sort,COUNT(*) OVER() AS total "
+                "FROM best WHERE locale_choice=1 AND score>0) "
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,matches.total "
+                "FROM matches JOIN library_entities e ON e.id=matches.entity_id "
+                "ORDER BY matches.score DESC,matches.locale_rank,matches.title_sort,matches.entity_id LIMIT ? OFFSET ?"
+            )
+            match_params = [
+                wanted,
+                *locale_order,
+                *query_grams,
+                *allowed,
+                *locale_order,
+            ]
             page_rows = self.db.execute(
-                "WITH matches AS (" + source + "), page_ids AS ("
-                "SELECT entity_id,match_rank,locale_rank,score,COUNT(*) OVER() AS total FROM matches "
-                "ORDER BY match_rank,locale_rank,score,entity_id LIMIT ? OFFSET ?) "
-                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,page_ids.total "
-                "FROM page_ids JOIN library_entities e ON e.id=page_ids.entity_id "
-                "ORDER BY page_ids.match_rank,page_ids.locale_rank,page_ids.score,page_ids.entity_id",
+                source,
                 [*match_params, page_size, max(0, page - 1) * page_size],
             )
             total = int(page_rows[0][10] or 0) if page_rows else 0
+            if not page_rows and page > 1:
+                first_match = self.db.execute(source, [*match_params, 1, 0])
+                total = int(first_match[0][10] or 0) if first_match else 0
             values = self._hydrate_rows(user_id, [row[:10] for row in page_rows], language)
             return {"items": values, "page": page, "pageSize": page_size, "total": total}
-        if len(wanted) >= 3:
-            indexed = self.db.execute(
-                f"SELECT entity_id,locale,title,bm25(catalog_search) FROM catalog_search WHERE catalog_search MATCH ? AND library_id IN ({placeholders}) AND locale IN ({locale_placeholders})",
-                [f'"{wanted.replace(chr(34), chr(34) * 2)}"', *allowed, *locale_order],
-            )
-        else:
-            indexed = self.db.execute(
-                f"SELECT entity_id,locale,title,0 FROM catalog_search WHERE title LIKE ? ESCAPE '\\' AND library_id IN ({placeholders}) AND locale IN ({locale_placeholders})",
-                [
-                    f"%{wanted.replace('%', r'\%').replace('_', r'\_')}%",
-                    *allowed,
-                    *locale_order,
-                ],
-            )
+        if not self._has_table("catalog_search"):
+            return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+        indexed = self.db.execute(
+            "SELECT s.entity_id,s.locale,s.title,0 "
+            "FROM catalog_search s JOIN library_entities e ON e.id=s.entity_id "
+            f"WHERE s.library_id IN ({placeholders}) AND s.locale IN ({locale_placeholders}) "
+            "AND e.parent_id IS NULL AND e.entity_type IN ('movie','series','collection')",
+            [*allowed, *locale_order],
+        )
         indexed_by_entity: dict[str, list[tuple]] = {}
         for indexed_row in indexed:
             indexed_by_entity.setdefault(indexed_row[0], []).append(indexed_row)
@@ -1812,28 +1833,24 @@ class Catalog:
         )
         ranked = []
         for row in rows:
-            metadata = self.metadata(user_id, row[0], language)["metadata"]
             candidates = indexed_by_entity[row[0]]
             best = None
-            for _, locale, raw_title, fts_score in candidates:
-                title = self._search_text(str(raw_title or ""))
-                match_rank = (
-                    0
-                    if title == wanted
-                    else 1
-                    if title.startswith(wanted)
-                    else 2
-                    if wanted in title
-                    else 3
-                )
+            for _, locale, raw_title, _ in candidates:
+                title = normalize_search_text(str(raw_title or ""))
+                score = match_score(wanted, title)
+                if score <= 0:
+                    continue
                 language_rank = locale_order.index(locale)
-                candidate = (match_rank, language_rank, float(fts_score or 0), title)
+                candidate = (-score, language_rank, title)
                 best = min(best, candidate) if best is not None else candidate
+            if best is None:
+                continue
+            metadata = self.metadata(user_id, row[0], language)["metadata"]
             ranked.append(
                 (*best, row[0], self._serialize(user_id, row, metadata, language=language))
             )
-        ranked.sort(key=lambda value: value[:3])
-        values = [value[5] for value in ranked]
+        ranked.sort(key=lambda value: (*value[:3], value[3]))
+        values = [value[4] for value in ranked]
         start = (page - 1) * page_size
         return {
             "items": values[start : start + page_size],

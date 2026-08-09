@@ -447,6 +447,24 @@ async def person_image(entity_id: str, person_id: str, request: Request):
     )
 
 
+@router.get("/api/catalog/items/{entity_id}/detail")
+async def item_detail(
+    entity_id: str,
+    request: Request,
+    language: str | None = Query(None),
+    seasonId: str | None = Query(None),
+):
+    account, _ = require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(
+        catalog.detail,
+        account["id"],
+        entity_id,
+        preferred,
+        seasonId,
+    )
+
+
 @router.patch("/api/catalog/items/{entity_id}/state")
 async def update_item_state(entity_id: str, request: Request):
     account, _ = require_account(request)

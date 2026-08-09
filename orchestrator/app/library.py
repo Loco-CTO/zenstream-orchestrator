@@ -824,6 +824,8 @@ class LibraryScanner:
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._publication_lock = threading.Lock()
+        self._pending_publication_roots: set[str] = set()
+        self._last_publication_at = 0.0
 
     def _set_stage(
         self, job_id: str, stage: str, *, persist: bool = True, **context
@@ -963,6 +965,7 @@ class LibraryScanner:
             missing = self._prune_missing_entities(library_id, root, targets=targets)
             self._set_stage(job_id, "Refreshing catalog read model")
             removed = rejected | missing
+            self._flush_publications()
             self._refresh_catalog_after_cleanup()
             self._set_stage(job_id, "Pruning local artwork cache")
             LocalArtworkCache(self.db).prune()
@@ -997,6 +1000,8 @@ class LibraryScanner:
                 message=f"Indexed {count} entries",
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
+            self.db.optimize()
+            self.db.maintain_wal(scan_complete=True)
             if removed:
                 self._refresh_dependent_collections(library_id)
         except JobTerminated:
@@ -1271,10 +1276,32 @@ class LibraryScanner:
             model.refresh_roots(roots[offset : offset + 300])
 
     def _publish_root(self, root_id: str) -> None:
-        from app.catalog_read_model import CatalogReadModel
-
         with self._publication_lock:
-            CatalogReadModel(self.db).refresh_roots([root_id])
+            self._pending_publication_roots.add(root_id)
+            if time.monotonic() - self._last_publication_at < 2.0:
+                return
+            self._flush_publications_locked()
+
+    def _flush_publications(self) -> None:
+        with self._publication_lock:
+            self._flush_publications_locked()
+
+    def _flush_publications_locked(self) -> None:
+        if not self._pending_publication_roots:
+            return
+        from app.catalog_read_model import CatalogReadModel
+        from app.foreground import active_requests
+
+        if active_requests():
+            time.sleep(0.05)
+        roots = sorted(self._pending_publication_roots)
+        self._pending_publication_roots.clear()
+        model = CatalogReadModel(self.db)
+        for offset in range(0, len(roots), 300):
+            model.refresh_roots(roots[offset : offset + 300])
+        self._last_publication_at = time.monotonic()
+        if not active_requests():
+            self.db.maintain_wal()
 
     def _refresh_dependent_collections(self, library_id: str) -> None:
         """Re-evaluate affected derived collections without provider enumeration."""

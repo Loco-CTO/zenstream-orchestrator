@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import unicodedata
 import math
 import contextvars
 import time
@@ -28,6 +27,7 @@ from app.metadata_services import (
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
 from app.images import LocalArtworkCache
 from app.logging_config import get_logger
+from app.search_scoring import match_score, normalize_search_text, trigram_set
 
 
 LOCAL_ARTWORK_NAMES = {
@@ -1723,12 +1723,7 @@ class Catalog:
 
     @staticmethod
     def _search_text(value: str) -> str:
-        return " ".join(
-            "".join(
-                character if character.isalnum() else " "
-                for character in unicodedata.normalize("NFKC", value).casefold()
-            ).split()
-        )
+        return normalize_search_text(value)
 
     @_catalog_read
     def search(

@@ -13,6 +13,7 @@ from app.metadata_services import (
     MetadataIngestService,
     MetadataReadService,
     MetadataSearchProjection,
+    _asset_version,
     metadata_fetch_activity,
 )
 
@@ -70,6 +71,61 @@ class _ImageCache:
 
 
 class MetadataServicesTest(unittest.TestCase):
+    def test_asset_version_changes_when_same_url_bytes_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "image.webp"
+            target.write_bytes(b"first")
+            first = _asset_version(target, "https://images.example/poster")
+            target.write_bytes(b"second")
+            second = _asset_version(target, "https://images.example/poster")
+            self.assertNotEqual(first, second)
+
+    def test_secondary_provider_does_not_replace_primary_artwork_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler("sqlite", {}, str(Path(directory) / "db.sqlite"))
+            primary_path = Path(directory) / "primary.webp"
+            secondary_path = Path(directory) / "secondary.webp"
+            primary_path.write_bytes(b"primary")
+            secondary_path.write_bytes(b"secondary")
+            try:
+                for statement in (
+                    "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)",
+                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT,is_primary INTEGER)",
+                    "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)",
+                    "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))",
+                    "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))",
+                    "CREATE TABLE catalog_root_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,title_sort TEXT,PRIMARY KEY(gram,entity_id,locale))",
+                    "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))",
+                    "CREATE TABLE catalog_artwork_selection(entity_id TEXT,locale TEXT,image_type TEXT,local_path TEXT,blur_hash TEXT,version TEXT,updated_at TEXT,PRIMARY KEY(entity_id,locale,image_type))",
+                    "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT,fetched_at TEXT,blur_hash TEXT)",
+                ):
+                    database.execute(statement)
+                database.execute("INSERT INTO library_entities VALUES('movie','library',NULL,'movie')")
+                database.execute("INSERT INTO entity_provider_ids VALUES('movie','tmdb','1',1)")
+                database.execute("INSERT INTO entity_provider_ids VALUES('movie','tvdb','2',0)")
+                database.execute(
+                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("tmdb", "movie", "1", "en", "Primary", "https://primary", str(primary_path), "1", "hash-primary"),
+                )
+                database.execute(
+                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("tvdb", "movie", "2", "en", "Primary", "https://secondary", str(secondary_path), "2", "hash-secondary"),
+                )
+                MetadataSearchProjection(database).project(
+                    "tmdb", "movie", "1", "en", {"title": "Movie", "images": [{"type": "Primary", "url": "https://primary", "language": "en"}]}
+                )
+                MetadataSearchProjection(database).project(
+                    "tvdb", "movie", "2", "en", {"title": "Secondary", "images": [{"type": "Primary", "url": "https://secondary", "language": "en"}]}
+                )
+                self.assertEqual(
+                    database.read_execute(
+                        "SELECT local_path,blur_hash FROM catalog_artwork_selection WHERE entity_id='movie' AND locale='en' AND image_type='Primary'"
+                    ),
+                    [(str(primary_path), "hash-primary")],
+                )
+            finally:
+                database.close()
+
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
         self.db.execute("CREATE TABLE metadata_cache(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,payload TEXT,fetched_at TEXT,expires_at TEXT)")

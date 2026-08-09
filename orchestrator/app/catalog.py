@@ -234,14 +234,33 @@ class Catalog:
         context = self._read_context.get()
         if context and context.read_model_ready is not None:
             return context.read_model_ready
-        if not all(
-            self._has_table(name)
-            for name in (
-                "catalog_entity_summary",
-                "catalog_item_projection",
-                "catalog_read_model_status",
+        tracked = {
+            "catalog_entity_summary",
+            "catalog_item_projection",
+            "catalog_read_model_status",
+            "catalog_user_summary",
+            "catalog_item_genres",
+            "catalog_library_summary",
+            "catalog_root_search_grams",
+            "catalog_artwork_selection",
+        }
+        placeholders = ",".join("?" for _ in tracked)
+        present = {
+            row[0]
+            for row in self.db.execute(
+                f"SELECT name FROM sqlite_master WHERE type='table' AND name IN ({placeholders})",
+                sorted(tracked),
             )
-        ):
+        }
+        if context:
+            context.table_presence.update(
+                {name: name in present for name in tracked}
+            )
+        if not {
+            "catalog_entity_summary",
+            "catalog_item_projection",
+            "catalog_read_model_status",
+        }.issubset(present):
             value = False
             if context:
                 context.read_model_ready = value

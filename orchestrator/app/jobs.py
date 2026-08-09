@@ -195,6 +195,12 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
     metadata job must repair that durable gap before selecting provider
     documents; otherwise those children are invisible to the job forever.
     """
+    entity_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(library_entities)")
+    }
+    if not {"parent_id", "season_number", "episode_number"} <= entity_columns:
+        return 0
+
     child_identity_rows = db.execute(
         "SELECT child.id,child.entity_type,child.season_number,child.episode_number,"
         "CASE WHEN child.entity_type='season' THEN child.parent_id "
@@ -230,9 +236,6 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
             "SELECT entity_id,provider,identifier_type FROM entity_provider_ids "
             "WHERE provider IN ('tmdb','tvdb')"
         )
-    }
-    entity_columns = {
-        row[1] for row in db.execute("PRAGMA table_info(library_entities)")
     }
     repaired = 0
     for series_id, provider, series_provider_id in series_rows:

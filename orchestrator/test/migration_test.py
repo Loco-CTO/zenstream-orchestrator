@@ -49,6 +49,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "idx_catalog_root_search_grams_lookup",
                         "idx_catalog_item_genres_covering",
                         "idx_catalog_artwork_selection_lookup",
+                        "idx_catalog_collection_member_projection_page",
                         "idx_metadata_images_url_path_ready",
                         "idx_metadata_images_type_url_fetched",
                     }
@@ -75,6 +76,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "catalog_library_summary",
                         "catalog_root_search_grams",
                         "catalog_artwork_selection",
+                        "catalog_collection_member_projection",
                     }
                     <= tables
                 )
@@ -87,6 +89,26 @@ class PersistenceMigrationTest(unittest.TestCase):
                 self.assertTrue({"library_id", "entity_type"} <= genre_columns)
             finally:
                 connection.close()
+
+    def test_catalog_performance_migration_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "head")
+            command.downgrade(config, "0006_analysis_worker_limits")
+            connection = sqlite3.connect(database_path)
+            try:
+                genre_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(catalog_item_genres)"
+                    )
+                }
+                self.assertNotIn("library_id", genre_columns)
+                self.assertNotIn("entity_type", genre_columns)
+            finally:
+                connection.close()
+            command.upgrade(config, "head")
 
     def test_upgrade_deduplicates_neutral_images_before_enforcing_identity(self):
         with tempfile.TemporaryDirectory() as directory:

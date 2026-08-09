@@ -78,6 +78,9 @@ class DatabaseHandler:
         self.read_local = threading.local()
         self.read_connections = []
         self.read_connections_lock = threading.RLock()
+        self._wal_maintenance_lock = threading.Lock()
+        self._last_passive_checkpoint_at = 0.0
+        self._last_passive_checkpoint_clean = False
         self.connect()
 
     def connect(self):
@@ -281,12 +284,53 @@ class DatabaseHandler:
             )
 
     def maintain_wal(self, *, scan_complete: bool = False) -> tuple[int, int, int] | None:
+        """Best-effort, rate-limited WAL maintenance outside request transactions."""
         threshold = 64 * 1024 * 1024
-        if scan_complete:
-            return self.checkpoint("TRUNCATE")
-        if self.wal_bytes() >= threshold:
-            return self.checkpoint("PASSIVE")
-        return None
+        if not self._wal_maintenance_lock.acquire(blocking=False):
+            return None
+        try:
+            if scan_complete:
+                try:
+                    result = self.checkpoint("TRUNCATE")
+                except Exception:
+                    logger.exception("sqlite wal truncate checkpoint failed")
+                    return None
+                if result[0]:
+                    logger.warning(
+                        "sqlite wal truncate deferred busy=%s log_frames=%s checkpointed_frames=%s",
+                        *result,
+                    )
+                else:
+                    self._last_passive_checkpoint_clean = True
+                return result
+
+            if self.wal_bytes() < threshold:
+                return None
+            current = time.monotonic()
+            cooldown = 300.0 if self._last_passive_checkpoint_clean else 30.0
+            if current - self._last_passive_checkpoint_at < cooldown:
+                return None
+            self._last_passive_checkpoint_at = current
+            try:
+                result = self.checkpoint("PASSIVE")
+            except Exception:
+                logger.exception("sqlite wal passive checkpoint failed")
+                self._last_passive_checkpoint_clean = False
+                return None
+            busy, log_frames, checkpointed_frames = result
+            self._last_passive_checkpoint_clean = (
+                busy == 0 and checkpointed_frames >= log_frames
+            )
+            if busy:
+                logger.warning(
+                    "sqlite wal passive checkpoint incomplete busy=%s log_frames=%s checkpointed_frames=%s",
+                    busy,
+                    log_frames,
+                    checkpointed_frames,
+                )
+            return result
+        finally:
+            self._wal_maintenance_lock.release()
 
     def optimize(self) -> None:
         self.write("PRAGMA optimize")

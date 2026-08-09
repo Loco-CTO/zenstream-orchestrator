@@ -223,15 +223,16 @@ class CatalogReadModelTest(unittest.TestCase):
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_projection_first_title_plan_avoids_temp_ordering_tree(self, _languages):
         CatalogReadModel(self.db).rebuild(["en"])
-        plan = self.db.read_execute(
-            "EXPLAIN QUERY PLAN SELECT e.id FROM catalog_item_projection p "
-            "JOIN library_entities e ON e.id=p.entity_id "
-            "WHERE p.locale='en' AND p.library_id='library' AND p.parent_id IS 'season' "
-            "ORDER BY p.title_sort,p.entity_id LIMIT 40"
-        )
-        detail = " ".join(str(row[3]) for row in plan)
-        self.assertIn("idx_catalog_item_projection_title", detail)
-        self.assertNotIn("TEMP B-TREE", detail)
+        for direction in ("ASC", "DESC"):
+            plan = self.db.read_execute(
+                "EXPLAIN QUERY PLAN SELECT e.id FROM catalog_item_projection p "
+                "JOIN library_entities e ON e.id=p.entity_id "
+                "WHERE p.locale='en' AND p.library_id='library' AND p.parent_id IS 'season' "
+                f"ORDER BY p.title_sort {direction},p.entity_id {direction} LIMIT 40"
+            )
+            detail = " ".join(str(row[3]) for row in plan)
+            self.assertIn("idx_catalog_item_projection_title", detail)
+            self.assertNotIn("TEMP B-TREE", detail)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_detail_state_does_not_build_global_relationship_graph(self, _languages):

@@ -23,7 +23,7 @@ from app.models.metadata import (
     normalize_metadata_locale,
 )
 from app.metadata_domain import choose_artwork
-from app.metadata_services import MetadataReadService
+from app.metadata_services import MetadataIngestService, MetadataReadService
 from app.providers import (
     IMAGE_TYPES,
     PRIMARY_PROVIDER_BY_ENTITY,
@@ -215,6 +215,70 @@ def _metadata_for(
         item["type"], item.get("providerIds", []), requested
     )
     return value or None
+
+
+def _refresh_item_metadata_sync(entity_id: str) -> dict:
+    from app.catalog_read_model import CatalogReadModel
+
+    item = _entity(entity_id)
+    if item["type"] not in {"movie", "series", "season", "episode"}:
+        raise HTTPException(
+            400,
+            "Metadata refresh is available only for movies, series, seasons, and episodes.",
+        )
+    identities = [
+        identity
+        for identity in item.get("providerIds", [])
+        if identity.get("provider") in {"tmdb", "tvdb"} and identity.get("id")
+    ]
+    if not identities:
+        raise HTTPException(409, "This item has no supported provider identity.")
+    service = MetadataService()
+    ingest = MetadataIngestService(service, background_assets=False)
+    locales = ingest.locales()
+    refreshed = []
+    failures = []
+    for identity in identities:
+        provider = str(identity["provider"])
+        provider_id = str(identity["id"])
+        try:
+            ingest.ingest_locales(
+                provider,
+                item["type"],
+                provider_id,
+                locales,
+                force=True,
+            )
+            refreshed.append(provider)
+        except (ProviderError, ValueError, OSError) as error:
+            logger.exception(
+                "manual item metadata refresh failed entity_id=%s provider=%s provider_id=%s",
+                entity_id,
+                provider,
+                provider_id,
+            )
+            failures.append(
+                {
+                    "provider": provider,
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
+    CatalogReadModel(store.db).refresh_roots([entity_id])
+    if not refreshed:
+        raise HTTPException(
+            502,
+            {
+                "message": "Metadata and artwork could not be refreshed.",
+                "failures": failures,
+            },
+        )
+    return {
+        "itemId": entity_id,
+        "state": "completed_with_warnings" if failures else "completed",
+        "locales": locales,
+        "providers": refreshed,
+        "failures": failures,
+    }
 
 
 def _local_image_for_type(relative_path: str, image_type: str) -> bool:
@@ -803,6 +867,16 @@ async def get_item(
         _metadata_for, item, locale, False, False
     )
     return item
+
+
+@router.post("/library-items/{entity_id}/metadata/refresh")
+async def refresh_item_metadata(
+    entity_id: str,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    return await asyncio.to_thread(_refresh_item_metadata_sync, entity_id)
 
 
 @router.get("/library-items/{entity_id}/trickplay/{generation}/{sheet_index}.webp")

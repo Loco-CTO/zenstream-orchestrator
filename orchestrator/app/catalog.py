@@ -76,6 +76,7 @@ class _CatalogReadContext:
         self.playable_descendants: dict[str, list[str]] = {}
         self.resolved_states: dict[str, dict] = {}
         self.series_primary_images: dict[tuple[str, str], dict | None] = {}
+        self.series_metadata: dict[tuple[str, str], dict | None] = {}
         self.metadata_service = MetadataReadService(catalog.db)
         self.configured_languages: list[str] | None = None
         self.allowed_library_ids: set[str] | None = None
@@ -1093,6 +1094,11 @@ class Catalog:
             if row[3] == "episode" and series_id and language
             else None
         )
+        series_production_year = (
+            self._metadata_year(self._series_metadata(user_id, series_id, language))
+            if row[3] == "episode" and series_id and language
+            else None
+        )
         return {
             "id": row[0],
             "libraryId": row[1],
@@ -1100,6 +1106,7 @@ class Catalog:
             "type": row[3],
             "seriesId": series_id,
             "seriesName": series_name,
+            "seriesProductionYear": series_production_year,
             "seriesPrimaryImage": series_primary_image,
             "seasonId": season_id,
             "name": metadata.get("title") or Path(row[4] or "").stem or row[3].title(),
@@ -1126,21 +1133,38 @@ class Catalog:
         key = (series_id, language)
         if context and key in context.series_primary_images:
             return context.series_primary_images[key]
-        try:
-            series = self.metadata(user_id, series_id, language)["metadata"]
-        except HTTPException as error:
-            if error.status_code != 404:
-                raise
-            value = None
-            if context:
-                context.series_primary_images[key] = value
-            return value
+        series = self._series_metadata(user_id, series_id, language) or {}
         images = series.get("images")
         primary = images.get("Primary") if isinstance(images, dict) else None
         value = primary if isinstance(primary, dict) else None
         if context:
             context.series_primary_images[key] = value
         return value
+
+    def _series_metadata(
+        self, user_id: str, series_id: str, language: str
+    ) -> dict | None:
+        context = self._context(user_id)
+        key = (series_id, language)
+        if context and key in context.series_metadata:
+            return context.series_metadata[key]
+        try:
+            value = self.metadata(user_id, series_id, language)["metadata"]
+        except HTTPException as error:
+            if error.status_code != 404:
+                raise
+            value = None
+        if context:
+            context.series_metadata[key] = value
+        return value
+
+    @staticmethod
+    def _metadata_year(metadata: dict | None) -> int | None:
+        for value in ((metadata or {}).get("year"), (metadata or {}).get("date")):
+            candidate = str(value or "")[:4]
+            if len(candidate) == 4 and candidate.isdigit():
+                return int(candidate)
+        return None
 
     def _date_values(
         self,
@@ -1923,7 +1947,7 @@ class Catalog:
             return None
         if series_id not in names:
             series_row = self._entity_row(series_id)
-            series_metadata = self.metadata(user_id, series_id, language)["metadata"]
+            series_metadata = self._series_metadata(user_id, series_id, language) or {}
             names[series_id] = str(
                 series_metadata.get("title")
                 or Path(series_row[4] if series_row else "").stem

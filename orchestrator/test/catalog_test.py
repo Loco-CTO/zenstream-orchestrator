@@ -181,15 +181,16 @@ class CatalogTest(unittest.TestCase):
         user_id = self.seed_series_hierarchy()
         catalog = self.catalog()
         catalog.metadata = lambda _user_id, entity_id, _language: {
-            "metadata": {
-                "title": entity_id,
-                "images": (
-                    {"Primary": {"url": "/api/catalog/items/series-1/images/Primary?language=en"}}
-                    if entity_id == "series-1"
-                    else {}
-                ),
+                "metadata": {
+                    "title": entity_id,
+                    "images": (
+                        {"Primary": {"url": "/api/catalog/items/series-1/images/Primary?language=en"}}
+                        if entity_id == "series-1"
+                        else {}
+                    ),
+                    "date": "2026-04-01" if entity_id == "series-1" else None,
+                }
             }
-        }
 
         result = catalog.list_items(user_id, "allowed", "en", parent_id="season-1")
 
@@ -197,6 +198,7 @@ class CatalogTest(unittest.TestCase):
             "/api/catalog/items/series-1/images/Primary?language=en",
             result["items"][0]["seriesPrimaryImage"]["url"],
         )
+        self.assertEqual(2026, result["items"][0]["seriesProductionYear"])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_hierarchy_defaults_to_numeric_season_order(self, _languages):

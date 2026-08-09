@@ -200,6 +200,15 @@ class CatalogReadModelTest(unittest.TestCase):
         CatalogReadModel(self.db).rebuild(["en"])
         catalog = Catalog.__new__(Catalog)
         catalog.db = self.db
+        query_count = 0
+        original_read = self.db.read_execute
+
+        def counted_read(query, params=None):
+            nonlocal query_count
+            query_count += 1
+            return original_read(query, params)
+
+        self.db.read_execute = counted_read
         with patch.object(
             catalog,
             "_relationship_graph",
@@ -207,6 +216,16 @@ class CatalogReadModelTest(unittest.TestCase):
         ):
             response = catalog.item("user", "series", "en")
         self.assertEqual(response["id"], "series")
+
+        query_count = 0
+        with patch.object(
+            catalog,
+            "_relationship_graph",
+            side_effect=AssertionError("composite detail loaded global graph"),
+        ):
+            detail = catalog.detail("user", "series", "en")
+        self.assertEqual(detail["selectedSeasonId"], "season")
+        self.assertLessEqual(query_count, 12)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_short_search_uses_read_model_grams_before_hydration(self, _languages):

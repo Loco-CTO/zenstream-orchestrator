@@ -249,6 +249,35 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 1", store.updates[-1]["message"])
 
+    def test_job_does_not_refetch_complete_stale_cache_document(self):
+        document = {"title": "Example", "images": [], "_stale": True}
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("movie-1", "en", json.dumps({"title": "Example", "images": {}})),
+        )
+        ingest = MagicMock()
+        ingest.locales.return_value = ["en"]
+        ingest.metadata_service.cache.get.return_value = document
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=ingest):
+            MetadataMissingJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        ingest.ingest_locales.assert_not_called()
+        ingest.ingest_document.assert_not_called()
+        self.assertEqual(store.updates[-1]["state"], "completed")
+        self.assertIn("repaired 0", store.updates[-1]["message"])
+
 
 class JobMappingTest(unittest.TestCase):
     def test_definition_mapping_uses_all_persisted_columns(self):

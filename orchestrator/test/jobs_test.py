@@ -126,6 +126,48 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertIn("projection-artwork:Backdrop", gaps)
         self.assertNotIn("artwork:Primary", gaps)
 
+    def test_detects_projection_missing_a_cached_artwork_blurhash(self):
+        self.db.execute("ALTER TABLE metadata_images ADD COLUMN blur_hash TEXT")
+        primary_path = self._ready_file("primary-hash.webp")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie-1",
+                "en",
+                json.dumps(
+                    {
+                        "title": "Example",
+                        "images": {"Primary": {"url": "/primary"}},
+                    }
+                ),
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?)",
+            (
+                "tmdb",
+                "movie",
+                "42",
+                "",
+                "Primary",
+                "https://img/primary",
+                primary_path,
+                "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+            ),
+        )
+        gaps, _linked = _metadata_document_gaps(
+            self.db,
+            "tmdb",
+            "movie",
+            "42",
+            "en",
+            {
+                "title": "Example",
+                "images": [{"type": "Primary", "url": "https://img/primary"}],
+            },
+        )
+        self.assertIn("projection-artwork-blurhash:Primary", gaps)
+
     def test_detects_missing_credits_and_portraits(self):
         self.db.execute(
             "INSERT INTO catalog_item_projection VALUES(?,?,?)",

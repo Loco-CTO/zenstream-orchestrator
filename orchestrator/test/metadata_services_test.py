@@ -170,6 +170,24 @@ class MetadataServicesTest(unittest.TestCase):
                     "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))"
                 )
                 database.execute(
+                    "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,blur_hash TEXT,local_path TEXT,fetched_at TEXT,expires_at TEXT,PRIMARY KEY(provider,entity_type,provider_id,locale,image_type,image_url))"
+                )
+                database.execute(
+                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "tmdb",
+                        "movie",
+                        "1",
+                        "en",
+                        "Primary",
+                        "https://images.example/movie.jpg",
+                        "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+                        "/cache/movie.webp",
+                        "now",
+                        "later",
+                    ),
+                )
+                database.execute(
                     "INSERT INTO library_entities VALUES('movie','library',NULL,'movie')"
                 )
                 database.execute(
@@ -214,6 +232,89 @@ class MetadataServicesTest(unittest.TestCase):
                     value["images"]["Primary"]["url"],
                     "/api/catalog/items/movie/images/Primary?language=en",
                 )
+                self.assertEqual(
+                    value["images"]["Primary"]["blurHash"],
+                    "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+                )
+            finally:
+                database.close()
+
+    def test_image_ingest_reprojects_cached_hash_and_keeps_logo_hash_free(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
+            try:
+                database.execute(
+                    "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT,is_primary INTEGER NOT NULL DEFAULT 0)"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))"
+                )
+                database.execute(
+                    "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,blur_hash TEXT,local_path TEXT,fetched_at TEXT,expires_at TEXT,PRIMARY KEY(provider,entity_type,provider_id,locale,image_type,image_url))"
+                )
+                database.execute(
+                    "INSERT INTO library_entities VALUES('movie','library',NULL,'movie')"
+                )
+                database.execute(
+                    "INSERT INTO entity_provider_ids(entity_id,provider,provider_id,is_primary) VALUES('movie','tmdb','1',1)"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))"
+                )
+                database.execute(
+                    "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))"
+                )
+                database.execute(
+                    "INSERT INTO catalog_item_projection(entity_id,locale,payload) VALUES(?,?,?)",
+                    ("movie", "en", json.dumps({"images": {}})),
+                )
+                cache = MetadataCache.__new__(MetadataCache)
+                cache.db = database
+                image_ingest = MetadataImageIngestService(
+                    cache,
+                    directory,
+                    downloader=lambda url: b"image-data",
+                    encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
+                    hasher=lambda target: "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+                )
+                image_ingest.ingest(
+                    "tmdb",
+                    "movie",
+                    "1",
+                    "en",
+                    {
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "language": "en",
+                                "url": "https://images.example/movie.jpg",
+                            },
+                            {
+                                "type": "Logo",
+                                "language": "en",
+                                "url": "https://images.example/movie-logo.png",
+                            },
+                        ]
+                    },
+                )
+                value = json.loads(
+                    database.execute(
+                        "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
+                    )[0][0]
+                )
+                self.assertEqual(
+                    value["images"]["Primary"]["blurHash"],
+                    "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+                )
+                self.assertNotIn("blurHash", value["images"]["Logo"])
             finally:
                 database.close()
 

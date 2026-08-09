@@ -537,7 +537,7 @@ class MetadataMissingJob:
         force: bool = False,
     ) -> None:
         should_terminate = should_terminate or (lambda: False)
-        ingest = MetadataIngestService()
+        ingest = MetadataIngestService(background_assets=False)
         locales = ingest.locales()
         config = definition.get("config") or {}
         batch_size = max(1, min(500, int(config.get("batchSize") or 50)))
@@ -561,45 +561,104 @@ class MetadataMissingJob:
             progress_total=total,
             message="Finding missing provider metadata",
         )
+        def queue_failures(
+            provider: str,
+            entity_type: str,
+            provider_id: str,
+            item_failures: list[dict],
+        ) -> None:
+            if not item_failures or not has_enrichment_queue:
+                return
+            entity_rows = self.db.execute(
+                "SELECT ep.entity_id,e.library_id FROM entity_provider_ids ep "
+                "JOIN library_entities e ON e.id=ep.entity_id "
+                "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=?",
+                (provider, entity_type, provider_id),
+            )
+            timestamp = now()
+            failures_by_locale = {
+                locale: [
+                    failure
+                    for failure in item_failures
+                    if failure.get("locale") == locale
+                ]
+                for locale in {
+                    str(failure.get("locale") or "") for failure in item_failures
+                }
+            }
+            with self.db.transaction() as cursor:
+                for entity_id, library_id in entity_rows:
+                    for locale, locale_failures in failures_by_locale.items():
+                        cursor.execute(
+                            "INSERT INTO enrichment_queue(id,entity_id,library_id,kind,locale,priority,state,attempts,next_attempt_at,lease_owner,lease_expires_at,source_job_id,error,created_at,updated_at) "
+                            "VALUES(?,?,?,?,?,10,'retry',1,NULL,NULL,NULL,?,?,?,?) "
+                            "ON CONFLICT(entity_id,kind,locale) DO UPDATE SET state='retry',priority=MAX(enrichment_queue.priority,excluded.priority),attempts=enrichment_queue.attempts+1,next_attempt_at=NULL,lease_owner=NULL,lease_expires_at=NULL,source_job_id=excluded.source_job_id,error=excluded.error,updated_at=excluded.updated_at",
+                            (
+                                str(uuid.uuid4()),
+                                entity_id,
+                                library_id,
+                                "metadata",
+                                locale,
+                                run_id,
+                                json.dumps(locale_failures, ensure_ascii=False),
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
+
+        def complete_repair(entity_ids: set[str], locale: str) -> None:
+            if not entity_ids or not has_enrichment_queue:
+                return
+            placeholders = ",".join("?" for _ in entity_ids)
+            self.db.execute(
+                f"UPDATE enrichment_queue SET state='completed',next_attempt_at=NULL,lease_owner=NULL,lease_expires_at=NULL,error=NULL,updated_at=? "
+                f"WHERE kind='metadata' AND locale=? AND entity_id IN ({placeholders})",
+                (now(), locale, *sorted(entity_ids)),
+            )
+
         def process_item(item):
             provider, entity_type, provider_id = item
             item_failures = []
-            missing = []
+            fetch_locales = []
+            documents: dict[str, dict] = {}
+            worked_locales: set[str] = set()
             for locale in locales:
                 cached = ingest.metadata_service.cache.get(
                     provider, entity_type, provider_id, locale
                 )
-                if cached and not force:
-                    needs_projection = bool(
-                        self.db.execute(
-                            "SELECT 1 FROM entity_provider_ids ep "
-                            "JOIN library_entities e ON e.id=ep.entity_id "
-                            "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=? "
-                            "AND NOT EXISTS (SELECT 1 FROM catalog_item_projection cp WHERE cp.entity_id=e.id AND cp.locale=?) LIMIT 1",
-                            (provider, entity_type, provider_id, locale),
-                        )
+                if not cached:
+                    fetch_locales.append(locale)
+                    continue
+                cached = dict(cached)
+                stale = bool(cached.pop("_stale", False))
+                documents[locale] = cached
+                if force or stale:
+                    fetch_locales.append(locale)
+                    continue
+                gaps, _linked = _metadata_document_gaps(
+                    self.db,
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    cached,
+                )
+                if gaps:
+                    ingest.ingest_document(
+                        provider, entity_type, provider_id, locale, cached
                     )
-                    needs_assets = bool(
-                        self.db.execute(
-                            "SELECT 1 FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? AND local_path IS NULL LIMIT 1",
-                            (provider, entity_type, provider_id, locale),
-                        )
-                    )
-                    if needs_projection or needs_assets:
-                        ingest.ingest_document(
-                            provider, entity_type, provider_id, locale, cached
-                        )
-                else:
-                    missing.append(locale)
-            if missing:
+                    worked_locales.add(locale)
+            if fetch_locales:
                 try:
-                    ingest.ingest_locales(
+                    fetched = ingest.ingest_locales(
                         provider,
                         entity_type,
                         provider_id,
-                        missing,
+                        fetch_locales,
                         force=force,
                     )
+                    documents.update(fetched)
+                    worked_locales.update(fetch_locales)
                 except (ProviderError, ValueError, OSError) as error:
                     item_failures.extend(
                         {
@@ -609,44 +668,68 @@ class MetadataMissingJob:
                             "locale": locale,
                             "error": f"{type(error).__name__}: {error}",
                         }
-                        for locale in missing
+                        for locale in fetch_locales
                     )
                     logger.exception(
                         "scheduled missing metadata failed provider=%s entity_type=%s provider_id=%s locales=%s",
                         provider,
                         entity_type,
                         provider_id,
-                        missing,
+                        fetch_locales,
                     )
-            if item_failures and has_enrichment_queue:
-                entity_rows = self.db.execute(
-                    "SELECT ep.entity_id,e.library_id FROM entity_provider_ids ep "
-                    "JOIN library_entities e ON e.id=ep.entity_id "
-                    "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=?",
-                    (provider, entity_type, provider_id),
+            failed_locales = {
+                str(failure.get("locale")) for failure in item_failures
+            }
+            publish_ids: set[str] = set()
+            for locale in locales:
+                if locale in failed_locales:
+                    continue
+                document = documents.get(locale)
+                if not isinstance(document, dict):
+                    item_failures.append(
+                        {
+                            "provider": provider,
+                            "entityType": entity_type,
+                            "providerId": provider_id,
+                            "locale": locale,
+                            "error": "Metadata document is still missing after repair",
+                        }
+                    )
+                    continue
+                document = dict(document)
+                document.pop("_stale", None)
+                gaps, linked = _metadata_document_gaps(
+                    self.db,
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    document,
                 )
-                message = json.dumps(item_failures, ensure_ascii=False)
-                with self.db.transaction() as cursor:
-                    for entity_id, library_id in entity_rows:
-                        for locale in missing:
-                            cursor.execute(
-                                "INSERT INTO enrichment_queue(id,entity_id,library_id,kind,locale,priority,state,attempts,error,created_at,updated_at) "
-                                "VALUES(?,?,?,?,?,0,'retry',1,?,?,?) "
-                                "ON CONFLICT(entity_id,kind,locale) DO UPDATE SET state='retry',attempts=enrichment_queue.attempts+1,error=excluded.error,updated_at=excluded.updated_at",
-                                (
-                                    str(uuid.uuid4()),
-                                    entity_id,
-                                    library_id,
-                                    "metadata",
-                                    locale,
-                                    message,
-                                    now(),
-                                    now(),
-                                ),
-                            )
-            return len(locales), item_failures
+                linked_ids = {entity_id for entity_id, _library_id in linked}
+                publish_ids.update(linked_ids)
+                if gaps:
+                    item_failures.append(
+                        {
+                            "provider": provider,
+                            "entityType": entity_type,
+                            "providerId": provider_id,
+                            "locale": locale,
+                            "missing": sorted(gaps),
+                            "error": "Metadata materialization remains incomplete",
+                        }
+                    )
+                else:
+                    complete_repair(linked_ids, locale)
+            queue_failures(provider, entity_type, provider_id, item_failures)
+            if worked_locales and publish_ids:
+                from app.catalog_read_model import CatalogReadModel
+
+                CatalogReadModel(self.db).refresh_roots(sorted(publish_ids))
+            return len(locales), item_failures, len(worked_locales)
 
         completed = 0
+        repaired = 0
         failures = []
         next_update = 10
         for offset in range(0, len(items), batch_size):
@@ -656,9 +739,10 @@ class MetadataMissingJob:
             ):
                 if error is not None:
                     raise error
-                processed, item_failures = result
+                processed, item_failures, repaired_documents = result
                 failures.extend(item_failures)
                 completed += processed
+                repaired += repaired_documents
                 if completed >= next_update or completed == total:
                     self.store.update_run(
                         run_id,
@@ -668,9 +752,11 @@ class MetadataMissingJob:
                     next_update = completed + 10
         if should_terminate():
             raise JobTerminated()
-        asset_executor.drain(timeout=30.0)
         if failures:
-            summary = f"Checked {completed} metadata documents; {len(failures)} repairs failed"
+            summary = (
+                f"Checked {completed} metadata documents; repaired {repaired}; "
+                f"{len(failures)} repairs remain incomplete"
+            )
             self.store.update_run(
                 run_id,
                 state="failed",
@@ -693,7 +779,10 @@ class MetadataMissingJob:
                 progress_current=completed,
                 progress_total=total,
                 finished_at=now(),
-                message=f"Checked {completed} metadata documents for missing metadata",
+                message=(
+                    f"Checked {completed} metadata documents; repaired {repaired} "
+                    "missing or partial documents"
+                ),
             )
 
 

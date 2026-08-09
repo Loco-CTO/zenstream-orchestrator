@@ -84,11 +84,10 @@ def upgrade():
         "ON catalog_artwork_selection(entity_id, locale, image_type, version)"
     )
     op.execute(
-        "INSERT INTO catalog_library_summary(library_id,generation,supports_last_added,last_root_entity_id,updated_at) "
+        "INSERT OR IGNORE INTO catalog_library_summary(library_id,generation,supports_last_added,last_root_entity_id,updated_at) "
         "SELECT l.id,COALESCE((SELECT generation FROM catalog_read_model_status WHERE id=1),0),"
         "CASE WHEN EXISTS(SELECT 1 FROM catalog_entity_summary s WHERE s.library_id=l.id AND s.parent_id IS NOT NULL) THEN 1 ELSE 0 END,"
-        "NULL,CURRENT_TIMESTAMP FROM libraries l "
-        "ON CONFLICT(library_id) DO NOTHING"
+        "NULL,CURRENT_TIMESTAMP FROM libraries l"
     )
     op.execute("ANALYZE catalog_entity_summary")
     op.execute("ANALYZE catalog_item_projection")

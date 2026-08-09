@@ -2341,12 +2341,21 @@ class Catalog:
         }
 
     def _newly_added_rows(self, library_id: str, entity_type: str) -> list[tuple]:
+        if self._read_model_ready() and self._has_table("catalog_entity_summary"):
+            return self.db.execute(
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+                "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                "FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
+                "WHERE s.library_id=? AND s.entity_type=? AND s.media_file_count>0 "
+                "ORDER BY s.last_added_sort_ns DESC,s.entity_id LIMIT 18",
+                (library_id, entity_type),
+            )
         return self.db.execute(
             "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
             "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-            "FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
-            "WHERE s.library_id=? AND s.entity_type=? AND s.media_file_count>0 "
-            "ORDER BY s.last_added_sort_ns DESC,s.entity_id LIMIT 18",
+            "FROM media_files f JOIN library_entities e ON e.id=f.entity_id "
+            "WHERE f.role='media' AND e.library_id=? AND e.entity_type=? "
+            "GROUP BY e.id ORDER BY MAX(f.modified_ns) DESC,e.id LIMIT 18",
             (library_id, entity_type),
         )
 

@@ -20,9 +20,15 @@ class CatalogReadModelTest(unittest.TestCase):
             "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))",
             "CREATE TABLE catalog_user_summary(user_id TEXT,entity_id TEXT,played_leaf_count INTEGER,updated_at TEXT,PRIMARY KEY(user_id,entity_id))",
             "CREATE TABLE catalog_collection_summary(collection_entity_id TEXT,collection_library_id TEXT,source_library_id TEXT,playable_leaf_count INTEGER,media_file_count INTEGER,added_sort_ns INTEGER,last_added_sort_ns INTEGER,updated_at TEXT,PRIMARY KEY(collection_entity_id,source_library_id))",
-            "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))",
+            "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,library_id TEXT,entity_type TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))",
             "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))",
+            "CREATE TABLE catalog_root_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,title_sort TEXT,PRIMARY KEY(gram,entity_id,locale))",
+            "CREATE TABLE catalog_library_summary(library_id TEXT PRIMARY KEY,generation INTEGER,supports_last_added INTEGER,last_root_entity_id TEXT,updated_at TEXT)",
             "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT,generation INTEGER,updated_at TEXT,error TEXT)",
+            "CREATE INDEX idx_catalog_item_projection_title ON catalog_item_projection(library_id,parent_id,locale,title_sort,entity_id)",
+            "CREATE INDEX idx_catalog_entity_summary_parent_last ON catalog_entity_summary(library_id,parent_id,last_added_sort_ns DESC,entity_id)",
+            "CREATE INDEX idx_catalog_root_search_grams_lookup ON catalog_root_search_grams(gram,locale,library_id,entity_id)",
+            "CREATE INDEX idx_catalog_item_genres_covering ON catalog_item_genres(locale,library_id,entity_type,genre_key,entity_id)",
         ):
             self.db.execute(statement)
         self.db.execute("INSERT INTO libraries VALUES('library','Library','tv_series','scanning',NULL,'2026')")
@@ -68,6 +74,10 @@ class CatalogReadModelTest(unittest.TestCase):
         )[0]
         self.assertEqual(values, (5, 10))
         self.assertEqual(model.status()[1], initial_generation + 1)
+        library = self.db.read_execute(
+            "SELECT generation,last_root_entity_id FROM catalog_library_summary WHERE library_id='library'"
+        )[0]
+        self.assertEqual(library, (2, "series"))
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_refresh_root_admits_new_collection_entity(self, _languages):
@@ -171,6 +181,32 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(response["total"], 2)
         self.assertEqual(response["items"][0]["id"], "episode-2")
         self.assertEqual(response["items"][0]["lastAddedAt"], "1970-01-01T00:00:00+00:00")
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_projection_first_title_plan_avoids_temp_ordering_tree(self, _languages):
+        CatalogReadModel(self.db).rebuild(["en"])
+        plan = self.db.read_execute(
+            "EXPLAIN QUERY PLAN SELECT e.id FROM catalog_item_projection p "
+            "JOIN library_entities e ON e.id=p.entity_id "
+            "WHERE p.locale='en' AND p.library_id='library' AND p.parent_id IS 'season' "
+            "ORDER BY p.title_sort,p.entity_id LIMIT 40"
+        )
+        detail = " ".join(str(row[3]) for row in plan)
+        self.assertIn("idx_catalog_item_projection_title", detail)
+        self.assertNotIn("TEMP B-TREE", detail)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_detail_state_does_not_build_global_relationship_graph(self, _languages):
+        CatalogReadModel(self.db).rebuild(["en"])
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        with patch.object(
+            catalog,
+            "_relationship_graph",
+            side_effect=AssertionError("detail loaded global graph"),
+        ):
+            response = catalog.item("user", "series", "en")
+        self.assertEqual(response["id"], "series")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_short_search_uses_read_model_grams_before_hydration(self, _languages):

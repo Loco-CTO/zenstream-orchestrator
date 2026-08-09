@@ -278,6 +278,73 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 0", store.updates[-1]["message"])
 
+    def test_job_completes_when_metadata_is_legitimately_unavailable(self):
+        class Cache:
+            def get(self, *_args):
+                return None
+
+        class Ingest:
+            metadata_service = type("MetadataService", (), {"cache": Cache()})()
+
+            def locales(self):
+                return ["en"]
+
+            def ingest_locales(self, *_args, **_kwargs):
+                return {}
+
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=Ingest()):
+            MetadataMissingJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        final_update = store.updates[-1]
+        self.assertEqual(final_update["state"], "completed")
+        self.assertIsNone(final_update.get("error"))
+        self.assertIn("1 repairs remain incomplete", final_update["message"])
+
+    def test_job_fails_when_provider_repair_raises_an_error(self):
+        class Cache:
+            def get(self, *_args):
+                return None
+
+        class Ingest:
+            metadata_service = type("MetadataService", (), {"cache": Cache()})()
+
+            def locales(self):
+                return ["en"]
+
+            def ingest_locales(self, *_args, **_kwargs):
+                raise ValueError("provider response was invalid")
+
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=Ingest()):
+            MetadataMissingJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        final_update = store.updates[-1]
+        self.assertEqual(final_update["state"], "failed")
+        self.assertIn("1 repair errors", final_update["error"])
+
 
 class JobMappingTest(unittest.TestCase):
     def test_definition_mapping_uses_all_persisted_columns(self):

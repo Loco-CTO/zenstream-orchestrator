@@ -26,7 +26,6 @@ from app.foreground import active_requests
 
 
 logger = get_logger("jobs")
-analysis_slot = threading.Semaphore(1)
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
 ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
 
@@ -686,6 +685,7 @@ class MetadataMissingJob:
                 except (ProviderError, ValueError, OSError) as error:
                     item_failures.extend(
                         {
+                            "kind": "error",
                             "provider": provider,
                             "entityType": entity_type,
                             "providerId": provider_id,
@@ -712,6 +712,7 @@ class MetadataMissingJob:
                 if not isinstance(document, dict):
                     item_failures.append(
                         {
+                            "kind": "incomplete",
                             "provider": provider,
                             "entityType": entity_type,
                             "providerId": provider_id,
@@ -735,6 +736,7 @@ class MetadataMissingJob:
                 if gaps:
                     item_failures.append(
                         {
+                            "kind": "incomplete",
                             "provider": provider,
                             "entityType": entity_type,
                             "providerId": provider_id,
@@ -755,6 +757,7 @@ class MetadataMissingJob:
         completed = 0
         repaired = 0
         failures = []
+        incomplete_repairs = []
         for offset in range(0, len(items), batch_size):
             batch = items[offset : offset + batch_size]
             for item, result, error in metadata_task_results(
@@ -763,7 +766,16 @@ class MetadataMissingJob:
                 if error is not None:
                     raise error
                 processed, item_failures, repaired_documents = result
-                failures.extend(item_failures)
+                failures.extend(
+                    failure
+                    for failure in item_failures
+                    if failure.get("kind") != "incomplete"
+                )
+                incomplete_repairs.extend(
+                    failure
+                    for failure in item_failures
+                    if failure.get("kind") == "incomplete"
+                )
                 completed += processed
                 repaired += repaired_documents
                 provider, entity_type, provider_id = item
@@ -780,8 +792,10 @@ class MetadataMissingJob:
         if failures:
             summary = (
                 f"Checked {completed} metadata documents; repaired {repaired}; "
-                f"{len(failures)} repairs remain incomplete"
+                f"{len(failures)} repair errors"
             )
+            if incomplete_repairs:
+                summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
             self.store.update_run(
                 run_id,
                 state="failed",
@@ -794,20 +808,24 @@ class MetadataMissingJob:
                     {
                         "operation": "metadata_refresh" if force else "metadata_missing",
                         "failures": failures,
+                        "incompleteRepairs": incomplete_repairs,
                     }
                 ),
             )
         else:
+            summary = (
+                f"Checked {completed} metadata documents; repaired {repaired} "
+                "missing or partial documents"
+            )
+            if incomplete_repairs:
+                summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
             self.store.update_run(
                 run_id,
                 state="completed",
                 progress_current=completed,
                 progress_total=total,
                 finished_at=now(),
-                message=(
-                    f"Checked {completed} metadata documents; repaired {repaired} "
-                    "missing or partial documents"
-                ),
+                message=summary,
             )
 
 
@@ -1176,44 +1194,26 @@ class JobScheduler:
                     self.active_definitions.discard(row[0][0])
 
     def _run_analysis(self, run_id, kind, worker, should_terminate):
-        waited = False
-        while not analysis_slot.acquire(timeout=0.25):
+        pressure_logged = False
+        while active_requests():
             if should_terminate():
                 raise JobTerminated()
-            if not waited:
+            if not pressure_logged:
                 logger.info(
-                    "analysis job waiting for media-analysis capacity run_id=%s kind=%s",
+                    "analysis job yielding to foreground traffic run_id=%s kind=%s active_requests=%s",
                     run_id,
                     kind,
+                    active_requests(),
                 )
-                waited = True
-        try:
-            pressure_logged = False
-            while active_requests():
-                if should_terminate():
-                    raise JobTerminated()
-                if not pressure_logged:
-                    logger.info(
-                        "analysis job yielding to foreground traffic run_id=%s kind=%s active_requests=%s",
-                        run_id,
-                        kind,
-                        active_requests(),
-                    )
-                    pressure_logged = True
-                time.sleep(0.05)
-            logger.info(
-                "analysis job acquired media-analysis capacity run_id=%s kind=%s",
-                run_id,
-                kind,
-            )
-            worker.run(run_id, self.store, should_terminate)
-        finally:
-            analysis_slot.release()
-            logger.info(
-                "analysis job released media-analysis capacity run_id=%s kind=%s",
-                run_id,
-                kind,
-            )
+                pressure_logged = True
+            time.sleep(0.05)
+        logger.info(
+            "analysis job starting independent worker pool run_id=%s kind=%s",
+            run_id,
+            kind,
+        )
+        worker.run(run_id, self.store, should_terminate)
+        logger.info("analysis job completed worker pool run_id=%s kind=%s", run_id, kind)
 
 
 scheduler = JobScheduler(library_runtime)

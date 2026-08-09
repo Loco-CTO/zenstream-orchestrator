@@ -297,10 +297,14 @@ class ProviderClient:
                     break
                 retry_after = response.headers.get("retry-after")
                 try:
-                    delay = float(retry_after) if retry_after is not None else 0.25 * (2**attempt)
+                    delay = (
+                        float(retry_after)
+                        if retry_after is not None
+                        else 0.25 * (2**attempt) * random.uniform(0.8, 1.2)
+                    )
                 except ValueError:
-                    delay = 0.25 * (2**attempt)
-                delay = max(0.05, min(5.0, delay)) * random.uniform(0.8, 1.2)
+                    delay = 0.25 * (2**attempt) * random.uniform(0.8, 1.2)
+                delay = max(0.05, min(5.0, delay))
                 logger.warning(
                     "metadata provider request retry client=%s url=%s status=%s delay_seconds=%.2f attempt=%s",
                     client_name,

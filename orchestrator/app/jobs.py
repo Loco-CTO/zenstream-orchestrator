@@ -187,6 +187,137 @@ def _metadata_document_gaps(
     return gaps, entity_libraries
 
 
+def _repair_missing_tv_child_identities(db, metadata_service) -> int:
+    """Restore child provider IDs left behind by an interrupted TV scan.
+
+    A scan can persist the series identity before the process is restarted,
+    while the season/episode identity pass is still pending.  The missing
+    metadata job must repair that durable gap before selecting provider
+    documents; otherwise those children are invisible to the job forever.
+    """
+    child_identity_rows = db.execute(
+        "SELECT child.id,child.entity_type,child.season_number,child.episode_number,"
+        "CASE WHEN child.entity_type='season' THEN child.parent_id "
+        "ELSE season.parent_id END "
+        "FROM library_entities child "
+        "LEFT JOIN library_entities season ON season.id=child.parent_id "
+        "WHERE child.entity_type='season' AND child.parent_id IN "
+        "(SELECT id FROM library_entities WHERE entity_type='series') "
+        "OR child.entity_type='episode' AND season.entity_type='season' "
+        "AND season.parent_id IN "
+        "(SELECT id FROM library_entities WHERE entity_type='series') "
+        "ORDER BY child.parent_id,child.entity_type,child.season_number,child.episode_number"
+    )
+    if not child_identity_rows:
+        return 0
+
+    series_rows = db.execute(
+        "SELECT e.id,p.provider,p.provider_id "
+        "FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id "
+        "WHERE e.entity_type='series' AND p.identifier_type='series' "
+        "AND p.provider IN ('tmdb','tvdb') ORDER BY e.id,p.provider"
+    )
+    children_by_series: dict[str, list[tuple]] = {}
+    for row in child_identity_rows:
+        child_id, entity_type, season_number, episode_number, series_id = row
+        children_by_series.setdefault(series_id, []).append(
+            (child_id, entity_type, season_number, episode_number)
+        )
+
+    existing = {
+        (entity_id, provider, identifier_type)
+        for entity_id, provider, identifier_type in db.execute(
+            "SELECT entity_id,provider,identifier_type FROM entity_provider_ids "
+            "WHERE provider IN ('tmdb','tvdb')"
+        )
+    }
+    entity_columns = {
+        row[1] for row in db.execute("PRAGMA table_info(library_entities)")
+    }
+    repaired = 0
+    for series_id, provider, series_provider_id in series_rows:
+        children = children_by_series.get(series_id, [])
+        if not children:
+            continue
+        missing = [
+            child
+            for child in children
+            if (child[0], provider, child[1]) not in existing
+        ]
+        if not missing:
+            continue
+
+        provider_ids: dict[tuple[int, int | None], str] = {}
+        if provider == "tmdb":
+            for _child_id, entity_type, season_number, episode_number in missing:
+                if season_number is None:
+                    continue
+                key = (int(season_number), None)
+                provider_ids[key] = f"{series_provider_id}:{season_number}"
+                if entity_type == "episode" and episode_number is not None:
+                    provider_ids[
+                        (int(season_number), int(episode_number))
+                    ] = f"{series_provider_id}:{season_number}:{episode_number}"
+        else:
+            discover = getattr(metadata_service, "series_child_ids", None)
+            if not callable(discover):
+                continue
+            try:
+                hierarchy = discover("tvdb", str(series_provider_id)) or {}
+            except Exception as error:
+                logger.warning(
+                    "missing metadata child identity discovery failed series_id=%s provider_id=%s: %s",
+                    series_id,
+                    series_provider_id,
+                    error,
+                )
+                continue
+            for value in hierarchy.get("seasons", []) or []:
+                if value.get("seasonNumber") is not None and value.get("providerId"):
+                    provider_ids[(int(value["seasonNumber"]), None)] = str(
+                        value["providerId"]
+                    )
+            for value in hierarchy.get("episodes", []) or []:
+                if (
+                    value.get("seasonNumber") is not None
+                    and value.get("episodeNumber") is not None
+                    and value.get("providerId")
+                ):
+                    provider_ids[
+                        (int(value["seasonNumber"]), int(value["episodeNumber"]))
+                    ] = str(value["providerId"])
+
+        for child_id, entity_type, season_number, episode_number in missing:
+            if season_number is None:
+                continue
+            key = (
+                (int(season_number), int(episode_number))
+                if entity_type == "episode" and episode_number is not None
+                else (int(season_number), None)
+            )
+            provider_id = provider_ids.get(key)
+            if not provider_id:
+                continue
+            db.execute(
+                "INSERT OR IGNORE INTO entity_provider_ids "
+                "(entity_id,provider,identifier_type,provider_id,is_primary) "
+                "VALUES(?,?,?,?,?)",
+                (child_id, provider, entity_type, provider_id, int(provider == "tvdb")),
+            )
+            existing.add((child_id, provider, entity_type))
+            repaired += 1
+            if "match_status" in entity_columns:
+                db.execute(
+                    "UPDATE library_entities SET match_status='matched',"
+                    "match_confidence=1.0,match_method='parent_resolution',updated_at=? "
+                    "WHERE id=?",
+                    (now(), child_id),
+                )
+    if repaired:
+        logger.info("repaired missing TV child provider identities count=%s", repaired)
+    return repaired
+
+
 class JobStore:
     def __init__(self):
         self.db = Config().database
@@ -562,6 +693,7 @@ class MetadataMissingJob:
         should_terminate = should_terminate or (lambda: False)
         ingest = MetadataIngestService(background_assets=False)
         locales = ingest.locales()
+        _repair_missing_tv_child_identities(self.db, ingest.metadata_service)
         config = definition.get("config") or {}
         batch_size = max(1, min(500, int(config.get("batchSize") or 50)))
         has_enrichment_queue = bool(
@@ -570,7 +702,7 @@ class MetadataMissingJob:
             )
         )
         rows = self.db.execute(
-            "SELECT DISTINCT p.provider,e.entity_type,p.provider_id "
+            "SELECT DISTINCT p.provider,p.identifier_type,p.provider_id "
             "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
             "WHERE p.provider IN ('tmdb','tvdb','musicbrainz') ORDER BY p.provider,e.entity_type,p.provider_id"
         )

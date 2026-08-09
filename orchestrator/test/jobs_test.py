@@ -10,6 +10,7 @@ from app.jobs import (
     JobStore,
     MetadataMissingJob,
     _metadata_document_gaps,
+    _repair_missing_tv_child_identities,
 )
 
 
@@ -344,6 +345,89 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         final_update = store.updates[-1]
         self.assertEqual(final_update["state"], "failed")
         self.assertIn("1 repair errors", final_update["error"])
+
+
+class MissingTvChildIdentityRepairTest(unittest.TestCase):
+    def setUp(self):
+        self.db = DatabaseHandler("sqlite", {}, ":memory:")
+        self.db.execute(
+            "CREATE TABLE library_entities(" 
+            "id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT," 
+            "season_number INTEGER,episode_number INTEGER,match_status TEXT," 
+            "match_confidence REAL,match_method TEXT,updated_at TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE entity_provider_ids(" 
+            "entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT," 
+            "is_primary INTEGER,PRIMARY KEY(entity_id,provider,identifier_type))"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES"
+            "('series-1','library-1',NULL,'series',NULL,NULL,'matched',1.0,'scan', 'now'),"
+            "('season-1','library-1','series-1','season',1,NULL,'unresolved',NULL,NULL,'now'),"
+            "('episode-1','library-1','season-1','episode',1,1,'unresolved',NULL,NULL,'now'),"
+            "('episode-2','library-1','season-1','episode',1,2,'unresolved',NULL,NULL,'now')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES"
+            "('series-1','tvdb','series','458309',1)"
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_reconstructs_missing_season_and_episode_ids_from_tvdb_series(self):
+        class Service:
+            def __init__(self):
+                self.calls = []
+
+            def series_child_ids(self, provider, provider_id):
+                self.calls.append((provider, provider_id))
+                return {
+                    "seasons": [{"seasonNumber": 1, "providerId": "season-1"}],
+                    "episodes": [
+                        {
+                            "seasonNumber": 1,
+                            "episodeNumber": 1,
+                            "providerId": "episode-1",
+                        },
+                        {
+                            "seasonNumber": 1,
+                            "episodeNumber": 2,
+                            "providerId": "episode-2",
+                        },
+                    ],
+                }
+
+        service = Service()
+
+        repaired = _repair_missing_tv_child_identities(self.db, service)
+
+        self.assertEqual(repaired, 3)
+        self.assertEqual(service.calls, [("tvdb", "458309")])
+        self.assertEqual(
+            self.db.execute(
+                "SELECT entity_id,identifier_type,provider_id,is_primary "
+                "FROM entity_provider_ids WHERE entity_id<>'series-1' "
+                "ORDER BY identifier_type,entity_id"
+            ),
+            [
+                ("episode-1", "episode", "episode-1", 1),
+                ("episode-2", "episode", "episode-2", 1),
+                ("season-1", "season", "season-1", 1),
+            ],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT id,match_status,match_method FROM library_entities "
+                "WHERE id<>'series-1' ORDER BY id"
+            ),
+            [
+                ("episode-1", "matched", "parent_resolution"),
+                ("episode-2", "matched", "parent_resolution"),
+                ("season-1", "matched", "parent_resolution"),
+            ],
+        )
 
 
 class JobMappingTest(unittest.TestCase):

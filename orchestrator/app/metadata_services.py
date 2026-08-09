@@ -289,6 +289,16 @@ class MetadataSearchProjection:
         )
         has_root_grams = "catalog_root_search_grams" in tables
         has_artwork_selection = "catalog_artwork_selection" in tables
+        artwork_selection_has_provider = (
+            has_artwork_selection
+            and "provider"
+            in {
+                row[1]
+                for row in self.db.execute(
+                    "PRAGMA table_info(catalog_artwork_selection)"
+                )
+            }
+        )
         metadata_image_columns = (
             {row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")}
             if "metadata_images" in tables
@@ -344,6 +354,19 @@ class MetadataSearchProjection:
                     artwork_providers = merged.get("_catalogArtworkProviders")
                     if not isinstance(artwork_providers, dict):
                         artwork_providers = {}
+                    # Projections written before the provider provenance field
+                    # was introduced can still have valid images but no owner.
+                    # Seed missing ownership from the indexed selection rows so
+                    # a refresh by a secondary provider can replace its own
+                    # categories without disturbing primary-owned artwork.
+                    if artwork_selection_has_provider:
+                        selected_rows = self.db.execute(
+                            "SELECT image_type,provider FROM catalog_artwork_selection "
+                            "WHERE entity_id=? AND locale=? AND provider<>''",
+                            (entity_id, locale),
+                        )
+                        for selected_type, selected_provider in selected_rows:
+                            artwork_providers.setdefault(selected_type, selected_provider)
                     artwork_fallbacks = merged.get("_catalogArtworkFallbacks")
                     if not isinstance(artwork_fallbacks, dict):
                         artwork_fallbacks = {}

@@ -421,10 +421,17 @@ async def item_image(
 
     cached_image = await run_foreground(resolve_cached_image)
     if cached_image:
+        versioned = bool(request.query_params.get("v"))
         return FileResponse(
             cached_image,
             media_type="image/webp",
-            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            headers={
+                "Cache-Control": (
+                    "private, max-age=31536000, immutable"
+                    if versioned
+                    else "private, max-age=300"
+                )
+            },
         )
     return Response(
         status_code=202,

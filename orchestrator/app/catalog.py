@@ -2073,13 +2073,22 @@ class Catalog:
                     page_size=100,
                 )["items"]
         elif row[3] == "collection":
-            collection_items = self.list_items(
-                user_id,
-                row[1],
-                language,
-                parent_id=row[0],
-                page_size=100,
-            )["items"]
+            allowed = sorted(self.allowed_libraries(user_id))
+            placeholders = ",".join("?" for _ in allowed)
+            collection_rows = (
+                self.db.execute(
+                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                    "FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id "
+                    f"WHERE m.collection_entity_id=? AND e.library_id IN ({placeholders}) "
+                    "ORDER BY m.position,e.id LIMIT 100",
+                    [row[0], *allowed],
+                )
+                if allowed and self._has_table("collection_members")
+                else []
+            )
+            collection_items = self._hydrate_rows(
+                user_id, list(collection_rows), language
+            )
 
         generation_rows = (
             self.db.execute(
@@ -2091,7 +2100,11 @@ class Catalog:
         )
         return {
             "item": item,
-            "backgroundItem": None,
+            "backgroundItem": (
+                self._hydrate_rows(user_id, [root_row], language)[0]
+                if root_row[0] != row[0]
+                else None
+            ),
             "seasons": seasons,
             "selectedSeasonId": season_id,
             "episodes": episodes,

@@ -571,17 +571,17 @@ class Catalog:
             rank_params.extend([locale, index])
         rows = self.db.execute(
             "WITH ranked AS ("
-            "SELECT c.person_id,c.credit_type,COALESCE(l.name,''),c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,c.id,"
+            "SELECT c.person_id,c.credit_type,COALESCE(l.name,''),c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,p.updated_at,c.id,"
             f"DENSE_RANK() OVER (PARTITION BY c.credit_type ORDER BY {rank_sql}) AS locale_rank "
             "FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
             "LEFT JOIN person_localizations l ON l.person_id=p.id AND l.locale=c.locale "
             "WHERE c.entity_id=? AND c.locale IN (" + ",".join("?" for _ in locale_order) + ")"
-            ") SELECT person_id,credit_type,name,role,department,credit_order,local_path,image_blur_hash "
+            ") SELECT person_id,credit_type,name,role,department,credit_order,local_path,image_blur_hash,updated_at "
             "FROM ranked WHERE locale_rank=1 ORDER BY credit_type,credit_order,id",
             [*rank_params, entity_id, *locale_order],
         )
         result = {"cast": [], "crew": []}
-        for person_id, credit_type, name, role, department, order, local_path, blur_hash in rows:
+        for person_id, credit_type, name, role, department, order, local_path, blur_hash, updated_at in rows:
                 value = {"id": person_id, "name": name, "order": order}
                 if credit_type == "cast":
                     value["character"] = role
@@ -590,7 +590,7 @@ class Catalog:
                     value["department"] = department
                 if local_path:
                     version = hashlib.sha256(
-                        f"{local_path}:{blur_hash or ''}".encode("utf-8")
+                        f"{local_path}:{updated_at or ''}".encode("utf-8")
                     ).hexdigest()[:12]
                     value["image"] = {
                         "url": f"/api/catalog/items/{entity_id}/people/{person_id}/image?v={version}"
@@ -1121,12 +1121,6 @@ class Catalog:
                 order_column = "sort_added" if sort_by == "added" else "sort_last"
                 date_params = [*scope, *scope, *scope]
             order = f"{order_column} {direction},e.id {index_tie_direction}"
-            if projection_order.startswith("p.") and projection_order != "p.title_sort":
-                projection_order = (
-                    f"{projection_order} {direction},p.title_sort {index_tie_direction}"
-                )
-            else:
-                projection_order = f"{projection_order} {direction}"
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at," + select_dates + " "
@@ -1155,6 +1149,12 @@ class Catalog:
                         "e.season_number IS NOT NULL,e.season_number,e.episode_number IS NOT NULL,"
                         "e.episode_number,e.relative_path COLLATE NOCASE,e.id"
                     )
+            if projection_order.startswith("p.") and projection_order != "p.title_sort":
+                projection_order = (
+                    f"{projection_order} {direction},p.title_sort {index_tie_direction}"
+                )
+            else:
+                projection_order = f"{projection_order} {direction}"
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
@@ -2081,10 +2081,11 @@ class Catalog:
         collection_rows: list[tuple] = []
         if root_row[3] == "series":
             season_rows = self.db.execute(
-                "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at "
-                "FROM library_entities WHERE library_id=? AND parent_id=? "
-                "ORDER BY season_number IS NULL,season_number,relative_path COLLATE NOCASE,id LIMIT 100",
-                (root_row[1], root_row[0]),
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
+                "WHERE p.locale=? AND p.library_id=? AND p.parent_id=? "
+                "ORDER BY e.season_number IS NULL,e.season_number,e.relative_path COLLATE NOCASE,e.id",
+                (language, root_row[1], root_row[0]),
             )
             season_ids = {value[0] for value in season_rows}
             if season_id not in season_ids:
@@ -2095,21 +2096,29 @@ class Catalog:
                 season_id = preferred[0] if preferred else None
             if season_id:
                 episode_rows = self.db.execute(
-                    "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at "
-                    "FROM library_entities WHERE library_id=? AND parent_id=? "
-                    "ORDER BY episode_number IS NULL,episode_number,relative_path COLLATE NOCASE,id LIMIT 100",
-                    (root_row[1], season_id),
+                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                    "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
+                    "WHERE p.locale=? AND p.library_id=? AND p.parent_id=? "
+                    "ORDER BY e.episode_number IS NULL,e.episode_number,e.relative_path COLLATE NOCASE,e.id",
+                    (language, root_row[1], season_id),
                 )
         elif row[3] == "collection":
             allowed = sorted(self.allowed_libraries(user_id))
             placeholders = ",".join("?" for _ in allowed)
+            member_table = (
+                "catalog_collection_member_projection"
+                if self._has_table("catalog_collection_member_projection")
+                else "collection_members"
+            )
             collection_rows = list(
                 self.db.execute(
                     "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-                    "FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id "
-                    f"WHERE m.collection_entity_id=? AND e.library_id IN ({placeholders}) "
-                    "ORDER BY m.position,e.id LIMIT 100",
-                    [row[0], *allowed],
+                    f"FROM {member_table} m "
+                    "JOIN catalog_item_projection p ON p.entity_id=m.source_entity_id AND p.locale=? "
+                    "JOIN library_entities e ON e.id=p.entity_id "
+                    f"WHERE m.collection_entity_id=? AND p.library_id IN ({placeholders}) "
+                    "ORDER BY m.position,e.id",
+                    [language, row[0], *allowed],
                 )
                 if allowed and self._has_table("collection_members")
                 else []
@@ -2160,7 +2169,11 @@ class Catalog:
             "seasons": [hydrated[value[0]] for value in season_rows],
             "selectedSeasonId": season_id,
             "episodes": [hydrated[value[0]] for value in episode_rows],
-            "similar": self.similar(user_id, entity_id, language)["items"],
+            "similar": (
+                []
+                if row[3] == "episode"
+                else self.similar(user_id, entity_id, language)["items"]
+            ),
             "collectionItems": (
                 [hydrated[value[0]] for value in collection_rows]
                 if row[3] == "collection"
@@ -2452,47 +2465,78 @@ class Catalog:
             (library_id, entity_type),
         )
 
-    @_catalog_read
     def home(self, user_id: str, language: str) -> dict:
         if not hasattr(self, "_home_cache_lock"):
             self._home_cache_lock = threading.Lock()
             self._home_cache = {}
             self._home_inflight = {}
-        allowed = self.allowed_libraries(user_id)
-        generations: list[tuple] = []
-        if allowed and self._has_table("catalog_library_summary"):
-            placeholders = ",".join("?" for _ in allowed)
-            generations = self.db.execute(
-                f"SELECT library_id,generation FROM catalog_library_summary WHERE library_id IN ({placeholders}) ORDER BY library_id",
-                sorted(allowed),
-            )
-        key = (user_id, language, tuple(generations))
-        owner = False
-        with self._home_cache_lock:
-            cached = self._home_cache.get(key)
-            if cached and cached[0] > time.monotonic() - 5.0:
-                return cached[1]
-            event = self._home_inflight.get(key)
-            if event is None:
-                event = threading.Event()
-                self._home_inflight[key] = event
-                owner = True
-        if not owner:
-            event.wait(5.0)
+            self._home_cache_epoch = 0
+            self._home_user_epochs = {}
+        while True:
+            allowed = self.allowed_libraries(user_id)
+            generations: list[tuple] = []
+            if allowed and self._has_table("catalog_library_summary"):
+                placeholders = ",".join("?" for _ in allowed)
+                generations = self.db.execute(
+                    f"SELECT library_id,generation FROM catalog_library_summary WHERE library_id IN ({placeholders}) ORDER BY library_id",
+                    sorted(allowed),
+                )
             with self._home_cache_lock:
+                epoch = (
+                    self._home_cache_epoch,
+                    self._home_user_epochs.get(user_id, 0),
+                )
+                key = (user_id, language, tuple(generations), *epoch)
+                cutoff = time.monotonic() - 5.0
+                self._home_cache = {
+                    cache_key: cached_value
+                    for cache_key, cached_value in self._home_cache.items()
+                    if cached_value[0] > cutoff
+                }
                 cached = self._home_cache.get(key)
                 if cached:
                     return cached[1]
-        try:
-            value = self._home_uncached(user_id, language, allowed)
-            with self._home_cache_lock:
-                self._home_cache[key] = (time.monotonic(), value)
-            return value
-        finally:
-            with self._home_cache_lock:
-                pending = self._home_inflight.pop(key, None)
-                if pending:
-                    pending.set()
+                event = self._home_inflight.get(key)
+                owner = event is None
+                if owner:
+                    event = threading.Event()
+                    self._home_inflight[key] = event
+            if not owner:
+                event.wait(5.0)
+                continue
+            try:
+                value = self._home_build(user_id, language, allowed)
+                with self._home_cache_lock:
+                    current_epoch = (
+                        self._home_cache_epoch,
+                        self._home_user_epochs.get(user_id, 0),
+                    )
+                    if current_epoch == epoch:
+                        self._home_cache = {
+                            cache_key: cached_value
+                            for cache_key, cached_value in self._home_cache.items()
+                            if cache_key[:2] != (user_id, language)
+                        }
+                        self._home_cache[key] = (time.monotonic(), value)
+                        if len(self._home_cache) > 32:
+                            oldest = min(
+                                self._home_cache,
+                                key=lambda cache_key: self._home_cache[cache_key][0],
+                            )
+                            self._home_cache.pop(oldest, None)
+                return value
+            finally:
+                with self._home_cache_lock:
+                    pending = self._home_inflight.get(key)
+                    if pending is event:
+                        self._home_inflight.pop(key, None)
+                        event.set()
+
+    @_catalog_read
+    def _home_build(
+        self, user_id: str, language: str, allowed: set[str]
+    ) -> dict:
+        return self._home_uncached(user_id, language, allowed)
 
     def _home_uncached(
         self, user_id: str, language: str, allowed: set[str]

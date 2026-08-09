@@ -3130,7 +3130,7 @@ class LibraryScanner:
                     persist=False,
                     entityId=entity_id,
                 )
-            logger.info(
+            logger.debug(
                 "library scan probe start entity_id=%s files_added=%s files_updated=%s files_removed=%s",
                 entity_id,
                 result["added"],
@@ -3138,7 +3138,7 @@ class LibraryScanner:
                 result["removed"],
             )
             PlaybackManager().probe_entity(entity_id)
-            logger.info(
+            logger.debug(
                 "library scan probe complete entity_id=%s duration_seconds=%.1f",
                 entity_id,
                 time.monotonic() - probe_started,

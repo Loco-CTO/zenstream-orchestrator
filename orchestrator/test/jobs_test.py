@@ -1,8 +1,10 @@
+import json
 import threading
 import tempfile
 import unittest
+from pathlib import Path
 from app.database import DatabaseHandler
-from app.jobs import JobScheduler, JobStore
+from app.jobs import JobScheduler, JobStore, _metadata_document_gaps
 
 
 class DatabaseRollbackTest(unittest.TestCase):
@@ -41,6 +43,108 @@ class DatabaseRollbackTest(unittest.TestCase):
                 self.assertEqual(errors, [])
             finally:
                 db.close()
+
+
+class MetadataMissingInspectionTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.db = DatabaseHandler("sqlite", {}, ":memory:")
+        self.db.execute(
+            "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,is_primary INTEGER)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT,PRIMARY KEY(entity_id,locale))"
+        )
+        self.db.execute(
+            "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE entity_person_credits(entity_id TEXT,provider TEXT,locale TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE people(provider TEXT,provider_person_id TEXT,image_url TEXT,local_path TEXT)"
+        )
+        self.db.execute("INSERT INTO library_entities VALUES('movie-1','library-1','movie')")
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('movie-1','tmdb','movie','42',1)"
+        )
+
+    def tearDown(self):
+        self.db.close()
+        self.directory.cleanup()
+
+    def _ready_file(self, name: str) -> str:
+        path = Path(self.directory.name) / name
+        path.write_bytes(b"webp")
+        return str(path)
+
+    def test_finds_partial_fields_and_each_missing_artwork_type(self):
+        primary_path = self._ready_file("primary.webp")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie-1",
+                "en",
+                json.dumps(
+                    {
+                        "title": "Example",
+                        "images": {"Primary": {"url": "/primary"}},
+                    }
+                ),
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?)",
+            ("tmdb", "movie", "42", "", "Primary", "https://img/primary", primary_path),
+        )
+        document = {
+            "title": "Example",
+            "overview": "A complete overview",
+            "images": [
+                {"type": "Primary", "url": "https://img/primary"},
+                {"type": "Backdrop", "url": "https://img/backdrop"},
+            ],
+        }
+
+        gaps, linked = _metadata_document_gaps(
+            self.db, "tmdb", "movie", "42", "en", document
+        )
+
+        self.assertEqual(linked, [("movie-1", "library-1")])
+        self.assertIn("metadata:overview", gaps)
+        self.assertIn("artwork:Backdrop", gaps)
+        self.assertIn("projection-artwork:Backdrop", gaps)
+        self.assertNotIn("artwork:Primary", gaps)
+
+    def test_detects_missing_credits_and_portraits(self):
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("movie-1", "en", json.dumps({"title": "Example"})),
+        )
+        document = {
+            "title": "Example",
+            "images": [],
+            "credits": {
+                "cast": [
+                    {
+                        "id": "person-1",
+                        "name": "Actor",
+                        "imageUrl": "https://img/person",
+                    }
+                ],
+                "crew": [],
+            },
+        }
+
+        gaps, _linked = _metadata_document_gaps(
+            self.db, "tmdb", "movie", "42", "en", document
+        )
+
+        self.assertIn("credits", gaps)
+        self.assertIn("portrait", gaps)
 
 
 class JobMappingTest(unittest.TestCase):

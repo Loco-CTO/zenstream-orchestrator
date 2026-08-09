@@ -568,7 +568,7 @@ class MetadataMissingJob:
             started_at=now(),
             thread_name=threading.current_thread().name,
             progress_total=total,
-            message="Finding missing provider metadata",
+            message=f"Processing 0/{total} metadata documents",
         )
         def queue_failures(
             provider: str,
@@ -740,7 +740,6 @@ class MetadataMissingJob:
         completed = 0
         repaired = 0
         failures = []
-        next_update = 10
         for offset in range(0, len(items), batch_size):
             batch = items[offset : offset + batch_size]
             for item, result, error in metadata_task_results(
@@ -752,13 +751,15 @@ class MetadataMissingJob:
                 failures.extend(item_failures)
                 completed += processed
                 repaired += repaired_documents
-                if completed >= next_update or completed == total:
-                    self.store.update_run(
-                        run_id,
-                        progress_current=completed,
-                        message=f"Checked {completed} of {total} metadata documents",
-                    )
-                    next_update = completed + 10
+                provider, entity_type, provider_id = item
+                self.store.update_run(
+                    run_id,
+                    progress_current=completed,
+                    message=(
+                        f"Processing {completed}/{total}: "
+                        f"{entity_type} {provider}:{provider_id}"
+                    ),
+                )
         if should_terminate():
             raise JobTerminated()
         if failures:

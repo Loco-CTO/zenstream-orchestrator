@@ -24,3 +24,8 @@ services:
       # caches. Keep it separate from the media library and do not make it read-only.
       - "${METADATA_PATH:-./metadata}:/app/sqlite"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

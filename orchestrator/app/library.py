@@ -1885,6 +1885,42 @@ class LibraryScanner:
         )
         self._publish_root(row[0])
 
+    def _queue_metadata_repair(
+        self,
+        entity_id: str,
+        library_id: str,
+        source_job_id: str,
+        error: str,
+        locales: Iterable[str] | None = None,
+    ) -> None:
+        if not self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrichment_queue'"
+        ):
+            return
+        if locales is None:
+            from app.models.metadata import MetadataLanguageSettings
+
+            locales = MetadataLanguageSettings().get()
+        timestamp = now()
+        with self.db.transaction() as cursor:
+            for locale in dict.fromkeys(locales):
+                cursor.execute(
+                    "INSERT INTO enrichment_queue(id,entity_id,library_id,kind,locale,priority,state,attempts,next_attempt_at,lease_owner,lease_expires_at,source_job_id,error,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,10,'retry',1,NULL,NULL,NULL,?,?,?,?) "
+                    "ON CONFLICT(entity_id,kind,locale) DO UPDATE SET state='retry',priority=MAX(enrichment_queue.priority,excluded.priority),attempts=enrichment_queue.attempts+1,next_attempt_at=NULL,lease_owner=NULL,lease_expires_at=NULL,source_job_id=excluded.source_job_id,error=excluded.error,updated_at=excluded.updated_at",
+                    (
+                        str(uuid.uuid4()),
+                        entity_id,
+                        library_id,
+                        "metadata",
+                        locale,
+                        source_job_id,
+                        error,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
     def _resolve_movie_row(
         self,
         library_id: str,
@@ -1974,6 +2010,9 @@ class LibraryScanner:
                 query,
                 error,
             )
+            self._queue_metadata_repair(
+                entity_id, library_id, job_id, f"{type(error).__name__}: {error}"
+            )
             message = f"Metadata failed for {query}; continuing"
         except Exception as error:
             self.db.execute(
@@ -1986,6 +2025,9 @@ class LibraryScanner:
                 entity_id,
                 query,
                 error,
+            )
+            self._queue_metadata_repair(
+                entity_id, library_id, job_id, f"{type(error).__name__}: {error}"
             )
             message = f"Metadata failed for {query}; continuing"
         self.store.update_job(job_id, progress_current=index, message=message)
@@ -2440,9 +2482,19 @@ class LibraryScanner:
                         entity_type,
                         relative_path,
                     )
-                    raise ValueError(
-                        f"Metadata resolution failed for {entity_type} '{relative_path}': {type(error).__name__}: {error}"
-                    ) from error
+                    failure = (
+                        f"Metadata resolution failed for {entity_type} "
+                        f"'{relative_path}': {type(error).__name__}: {error}"
+                    )
+                    self._queue_metadata_repair(
+                        entity_id, library_id, job_id, failure
+                    )
+                    self.store.update_job(
+                        job_id,
+                        progress_current=index,
+                        message=f"Metadata failed for {entity_type} {relative_path}; continuing",
+                    )
+                    continue
             priorities = {
                 "season": ["tvdb", "tmdb"],
                 "episode": ["tvdb", "tmdb"],
@@ -2507,9 +2559,32 @@ class LibraryScanner:
                         error,
                     )
             if not fetched or (required and not required_succeeded):
-                raise ValueError(
-                    f"Metadata resolution failed for {entity_type} '{relative_path}': required provider {required or 'provider'} could not be seeded; {'; '.join(errors) or 'no usable provider metadata'}"
+                failure = (
+                    f"Metadata resolution failed for {entity_type} "
+                    f"'{relative_path}': required provider {required or 'provider'} "
+                    f"could not be seeded; {'; '.join(errors) or 'no usable provider metadata'}"
                 )
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_child_resolution',updated_at=? WHERE id=?",
+                    (now(), entity_id),
+                )
+                self._queue_metadata_repair(
+                    entity_id, library_id, job_id, failure, ingest.locales()
+                )
+                logger.warning(
+                    "metadata child failed; continuing entity_id=%s type=%s index=%s/%s error=%s",
+                    entity_id,
+                    entity_type,
+                    index,
+                    len(rows),
+                    failure,
+                )
+                self.store.update_job(
+                    job_id,
+                    progress_current=index,
+                    message=f"Metadata failed for {entity_type} {relative_path}; continuing",
+                )
+                continue
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?",
                 (now(), entity_id),
@@ -3347,7 +3422,9 @@ class LibraryScanner:
                     entityId=entity,
                     path=str(entry),
                 )
-                self._resolve_movie_and_publish(
+                future = metadata_root_executor.submit(
+                    library_id,
+                    self._resolve_movie_and_publish,
                     library_id,
                     (entity, "movie", relative(str(root), str(entry)), None, None),
                     job_id,
@@ -3355,6 +3432,7 @@ class LibraryScanner:
                     count + 1,
                     len(entries),
                 )
+                self._await_metadata_futures([future], should_terminate)
             else:
                 self._publish_root(entity)
             count += 1

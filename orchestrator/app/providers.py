@@ -614,6 +614,7 @@ class TMDBClient(ProviderClient):
             "year": (dates or "")[:4] or None,
             "tags": _names(genres),
             "originalLanguage": payload.get("original_language"),
+            "communityRating": payload.get("vote_average"),
             "trailers": videos,
             "people": people,
             "credits": normalized_credits,
@@ -1086,6 +1087,9 @@ class TVDBClient(ProviderClient):
                 str(data.get("originalLanguage") or "")
             )
             or data.get("originalLanguage"),
+            "communityRating": data.get("score")
+            if data.get("score") is not None
+            else data.get("rating"),
             "trailers": trailers,
             "people": people,
             "credits": normalized_credits,

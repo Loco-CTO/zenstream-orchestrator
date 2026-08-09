@@ -79,6 +79,7 @@ class DatabaseHandler:
         self.read_connections = []
         self.read_connections_lock = threading.RLock()
         self._wal_maintenance_lock = threading.Lock()
+        self._scheduled_maintenance_lock = threading.Lock()
         self._last_passive_checkpoint_at = 0.0
         self._last_passive_checkpoint_clean = False
         self.connect()
@@ -330,12 +331,44 @@ class DatabaseHandler:
                     log_frames,
                     checkpointed_frames,
                 )
+            elif checkpointed_frames < log_frames:
+                logger.warning(
+                    "sqlite wal passive checkpoint incomplete log_frames=%s checkpointed_frames=%s",
+                    log_frames,
+                    checkpointed_frames,
+                )
             return result
         finally:
             self._wal_maintenance_lock.release()
 
     def optimize(self) -> None:
         self.write("PRAGMA optimize")
+
+    def schedule_maintenance(self, *, scan_complete: bool = False) -> bool:
+        """Run planner/WAL maintenance asynchronously and at most once."""
+        if not self._scheduled_maintenance_lock.acquire(blocking=False):
+            return False
+
+        def maintain() -> None:
+            try:
+                self.optimize()
+                result = self.maintain_wal(scan_complete=scan_complete)
+                retries = 0
+                while scan_complete and result and result[0] and retries < 5:
+                    retries += 1
+                    time.sleep(min(60.0, 15.0 * retries))
+                    result = self.maintain_wal(scan_complete=True)
+            except Exception:
+                logger.exception("sqlite scheduled maintenance failed")
+            finally:
+                self._scheduled_maintenance_lock.release()
+
+        threading.Thread(
+            target=maintain,
+            name="sqlite-maintenance",
+            daemon=True,
+        ).start()
+        return True
 
     @staticmethod
     def _log_writer_timing(

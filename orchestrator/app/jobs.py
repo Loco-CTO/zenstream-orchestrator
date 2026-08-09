@@ -154,19 +154,34 @@ def _metadata_document_gaps(
                 gaps.add("credits")
 
     if expected_credit_records and any(bool(row[2]) for row in linked):
-        for _credit_type, record in expected_credit_records:
-            person_id = str(record.get("id") or "").strip()
-            image_url = record.get("imageUrl")
-            if not person_id or not isinstance(image_url, str) or not image_url:
-                continue
-            people = db.execute(
-                "SELECT image_url,local_path FROM people WHERE provider=? AND provider_person_id=?",
-                (provider, person_id),
+        expected_portraits = {
+            str(record.get("id")): record.get("imageUrl")
+            for _credit_type, record in expected_credit_records
+            if str(record.get("id") or "").strip()
+            and isinstance(record.get("imageUrl"), str)
+            and record.get("imageUrl")
+        }
+        people_by_id = {}
+        person_ids = sorted(expected_portraits)
+        for offset in range(0, len(person_ids), 400):
+            batch = person_ids[offset : offset + 400]
+            placeholders = ",".join("?" for _ in batch)
+            people_by_id.update(
+                {
+                    person_id: (image_url, local_path)
+                    for person_id, image_url, local_path in db.execute(
+                        f"SELECT provider_person_id,image_url,local_path FROM people "
+                        f"WHERE provider=? AND provider_person_id IN ({placeholders})",
+                        (provider, *batch),
+                    )
+                }
             )
+        for person_id, image_url in expected_portraits.items():
+            person = people_by_id.get(person_id)
             if (
-                not people
-                or people[0][0] != image_url
-                or not _ready_cache_path(people[0][1])
+                person is None
+                or person[0] != image_url
+                or not _ready_cache_path(person[1])
             ):
                 gaps.add("portrait")
                 break
@@ -639,9 +654,9 @@ class MetadataMissingJob:
                     fetch_locales.append(locale)
                     continue
                 cached = dict(cached)
-                stale = bool(cached.pop("_stale", False))
+                cached.pop("_stale", None)
                 documents[locale] = cached
-                if force or stale:
+                if force:
                     fetch_locales.append(locale)
                     continue
                 gaps, _linked = _metadata_document_gaps(

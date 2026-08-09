@@ -1159,13 +1159,19 @@ class Catalog:
                 projection_order = (
                     f"{projection_order} {direction},p.title_sort {index_tie_direction}"
                 )
+                projection_tie_direction = index_tie_direction
             else:
                 projection_order = f"{projection_order} {direction}"
+                projection_tie_direction = (
+                    direction
+                    if projection_order.startswith("p.title_sort")
+                    else index_tie_direction
+                )
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                 "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
-                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY " + projection_order + ",p.entity_id " + index_tie_direction + " LIMIT ? OFFSET ?"
+                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY " + projection_order + ",p.entity_id " + projection_tie_direction + " LIMIT ? OFFSET ?"
             )
             params.extend([page_size, offset])
         else:

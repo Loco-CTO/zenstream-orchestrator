@@ -166,6 +166,34 @@ class DatabaseHandler:
                 "transaction", wait_seconds, hold_seconds, wait_started
             )
 
+    @contextmanager
+    def read_session(self):
+        """Reuse one query-only SQLAlchemy session for a top-level read."""
+        if self.db_file == ":memory:":
+            yield
+            return
+        if self.persistence is None or self.persistence.read_sessions is None:
+            raise RuntimeError("SQLite read sessions are not available")
+        active = getattr(self.read_local, "session", None)
+        if active is not None:
+            self.read_local.depth = getattr(self.read_local, "depth", 1) + 1
+            try:
+                yield
+            finally:
+                self.read_local.depth -= 1
+            return
+        with self.persistence.read_sessions() as session:
+            self.read_local.session = session
+            self.read_local.depth = 1
+            try:
+                yield
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                self.read_local.session = None
+                self.read_local.depth = 0
+
     def read_execute(self, query, params=None):
         """Execute a read without waiting on writer or unrelated reader locks."""
         if self.db_file == ":memory:":
@@ -174,9 +202,19 @@ class DatabaseHandler:
         else:
             if self.persistence is None or self.persistence.read_sessions is None:
                 raise RuntimeError("SQLite read sessions are not available")
+            active = getattr(self.read_local, "session", None)
+            if active is not None:
+                try:
+                    result = active.connection().exec_driver_sql(
+                        query, tuple(params or ())
+                    )
+                    return [tuple(row) for row in result.fetchall()]
+                except SQLAlchemyError as e:
+                    active.rollback()
+                    print(f"Database read error: {e}")
+                    raise
             with self.persistence.read_sessions() as session:
                 connection = session.connection()
-                self.read_local.connection = connection
                 try:
                     result = connection.exec_driver_sql(query, tuple(params or ()))
                     return [tuple(row) for row in result.fetchall()]

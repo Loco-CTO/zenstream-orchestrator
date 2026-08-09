@@ -490,6 +490,9 @@ class CatalogReadModel:
             len(projections),
             len(users),
         )
+        optimize = getattr(self.db, "optimize", None)
+        if callable(optimize):
+            optimize()
         return len(entities)
 
     def _collection_values_from_db(self, entities, summaries, progress=None):

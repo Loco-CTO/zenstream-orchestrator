@@ -125,13 +125,27 @@ def _normalize_trailers(values: object, provider: str) -> list[dict]:
                 "name": trailer.get("name") or trailer.get("title"),
                 "type": trailer.get("type") or "Trailer",
                 "official": trailer.get("official"),
-                "language": trailer.get("language")
-                or trailer.get("iso_639_1")
-                or trailer.get("languageCode"),
+                "language": _trailer_language_tag(trailer),
                 "provider": provider,
             }
         )
     return result
+
+
+def _trailer_language_tag(trailer: dict) -> str | None:
+    """Return a canonical language/region tag for a provider video record."""
+    explicit = (
+        trailer.get("language")
+        or trailer.get("languageCode")
+        or trailer.get("iso_639_1")
+    )
+    if not explicit:
+        return None
+    tag = _normalize_language_tag(str(explicit))
+    country = str(trailer.get("iso_3166_1") or trailer.get("country") or "").strip()
+    if "-" not in tag and country:
+        tag = f"{tag}-{country.upper()}"
+    return tag or None
 
 
 def _name(value: Any) -> str | None:
@@ -485,6 +499,9 @@ class TMDBClient(ProviderClient):
                 for value in self._include_image_language(current).split(",")
             )
         )
+        video_language = ",".join(
+            dict.fromkeys(_language_family(current) for current in languages)
+        )
         if entity_type == "season":
             series_id, season = provider_id.split(":", 1)
             payload = self._request(
@@ -492,6 +509,7 @@ class TMDBClient(ProviderClient):
                 params={
                     "language": language,
                     "include_image_language": image_language,
+                    "include_video_language": video_language,
                     "append_to_response": "images,external_ids,videos,translations",
                 },
             )
@@ -502,6 +520,7 @@ class TMDBClient(ProviderClient):
                 params={
                     "language": language,
                     "include_image_language": image_language,
+                    "include_video_language": video_language,
                     "append_to_response": "images,external_ids,videos,translations",
                 },
             )
@@ -512,9 +531,69 @@ class TMDBClient(ProviderClient):
                 params={
                     "language": language,
                     "include_image_language": image_language,
+                    **({"include_video_language": video_language} if kind == "tv" else {}),
                     "append_to_response": "images,external_ids,credits,videos,translations",
                 },
             )
+            if kind == "movie" and len(languages) > 1:
+                primary_results = list(
+                    ((payload.get("videos") or {}).get("results") or [])
+                )
+                requested_languages = []
+                seen_languages = {language}
+                for current in languages[1:]:
+                    if current in seen_languages:
+                        continue
+                    seen_languages.add(current)
+                    requested_languages.append(current)
+
+                def fetch_videos(current: str) -> list[dict]:
+                    try:
+                        response = self._request(
+                            f"/movie/{quote(provider_id)}/videos",
+                            params={"language": current},
+                        )
+                        return list((response or {}).get("results") or [])
+                    except ProviderError as error:
+                        logger.warning(
+                            "TMDB localized video request failed provider_id=%s language=%s error=%s",
+                            provider_id,
+                            current,
+                            error,
+                        )
+                        return []
+
+                localized_results = []
+                with ThreadPoolExecutor(
+                    max_workers=max(1, min(8, len(requested_languages)))
+                ) as executor:
+                    futures = [
+                        executor.submit(fetch_videos, current)
+                        for current in requested_languages
+                    ]
+                    for future in as_completed(futures):
+                        localized_results.extend(future.result())
+                merged_results = []
+                seen_results = set()
+                for record in [*primary_results, *localized_results]:
+                    if not isinstance(record, dict):
+                        continue
+                    identity = (
+                        str(
+                            record.get("id")
+                            or record.get("key")
+                            or record.get("videoId")
+                            or record.get("url")
+                            or ""
+                        ),
+                        str(record.get("iso_639_1") or record.get("language") or ""),
+                        str(record.get("iso_3166_1") or ""),
+                    )
+                    if identity in seen_results:
+                        continue
+                    seen_results.add(identity)
+                    merged_results.append(record)
+                payload["videos"] = {"results": merged_results}
         values = {}
         for locale in locales:
             localized = copy.deepcopy(payload)

@@ -47,6 +47,8 @@ class DockerLayoutTest(unittest.TestCase):
         self.assertNotIn("USER zenstream", dockerfile)
         self.assertIn("- CHOWN", compose)
         self.assertIn("- DAC_OVERRIDE", compose)
+        self.assertIn("- SETGID", compose)
+        self.assertIn("- SETUID", compose)
 
         entrypoint = (PROJECT_ROOT / "docker-entrypoint.sh").read_text(
             encoding="utf-8"

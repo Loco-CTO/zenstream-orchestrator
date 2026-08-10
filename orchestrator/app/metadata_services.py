@@ -33,7 +33,7 @@ from app.worker_config import configured_worker_limit
 
 logger = get_logger("metadata")
 
-CATALOG_ITEM_PROJECTION_SCHEMA = 1
+CATALOG_ITEM_PROJECTION_SCHEMA = 2
 
 LOCAL_ARTWORK_NAMES = {
     "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
@@ -74,6 +74,7 @@ FACT_FIELDS = {
     "providerId",
     "ids",
     "children",
+    "trailers",
 }
 
 PROVIDER_PRIORITIES = {

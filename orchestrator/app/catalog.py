@@ -2491,17 +2491,15 @@ class Catalog:
         context = self._context(user_id)
         if self._read_model_ready():
             select_rows = lambda: self.db.execute(
-                f"WITH candidates AS ("
+                f"WITH candidates AS (SELECT * FROM ("
                 f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,s.added_sort_ns,s.last_added_sort_ns "
                 f"FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
                 f"WHERE s.library_id IN ({placeholders}) AND s.entity_type='series' "
-                "ORDER BY s.added_sort_ns DESC,s.entity_id LIMIT 36) "
-                "UNION ALL SELECT * FROM ("
+                "ORDER BY s.added_sort_ns DESC,s.entity_id LIMIT 36) UNION ALL SELECT * FROM ("
                 f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,s.added_sort_ns,s.last_added_sort_ns "
                 f"FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
                 f"WHERE s.library_id IN ({placeholders}) AND s.entity_type IN ('movie','collection') "
-                "ORDER BY s.last_added_sort_ns DESC,s.entity_id LIMIT 36) "
-                ") SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at,added_sort_ns,last_added_sort_ns "
+                "ORDER BY s.last_added_sort_ns DESC,s.entity_id LIMIT 36) ) SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at,added_sort_ns,last_added_sort_ns "
                 "FROM candidates ORDER BY CASE WHEN entity_type='series' THEN added_sort_ns ELSE last_added_sort_ns END DESC,id LIMIT 36",
                 [*sorted(allowed), *sorted(allowed)],
             )

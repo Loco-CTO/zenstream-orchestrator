@@ -2079,19 +2079,46 @@ class LibraryMetadataTest(unittest.TestCase):
                 ]
             },
         }
+        def request(path, params=None):
+            if path == "/movie/10":
+                return payload
+            return {
+                "results": [
+                    {
+                        "id": "ja-video",
+                        "site": "YouTube",
+                        "key": "ja-video",
+                        "iso_639_1": "ja",
+                        "iso_3166_1": "JP",
+                    }
+                ]
+            }
+
         with (
             patch.object(client, "_language_code", side_effect=lambda value: value),
-            patch.object(client, "_request", return_value=payload) as provider_request,
+            patch.object(client, "_request", side_effect=request) as provider_request,
         ):
             values = client.details_all_locales("movie", "10", ["en-US", "ja-JP"])
 
-        self.assertEqual(provider_request.call_count, 1)
+        self.assertEqual(provider_request.call_count, 2)
         self.assertEqual(values["en-US"]["title"], "English")
         self.assertEqual(values["ja-JP"]["title"], "Japanese")
+        self.assertEqual(values["ja-JP"]["videos"]["results"][0]["iso_639_1"], "ja")
         self.assertIn(
             "translations",
             provider_request.call_args.kwargs["params"]["append_to_response"],
         )
+
+    def test_tmdb_tv_details_requests_all_configured_video_languages(self):
+        client = TMDBClient({"value": "test"})
+        with (
+            patch.object(client, "_language_code", side_effect=lambda value: value),
+            patch.object(client, "_request", return_value={}) as provider_request,
+        ):
+            client.details_all_locales("series", "10", ["en-US", "ja-JP"])
+
+        params = provider_request.call_args.kwargs["params"]
+        self.assertEqual(params["include_video_language"], "en,ja")
 
     def test_provider_language_catalogs_pass_unknown_locale_through(self):
         tvdb = TVDBClient({"apiKey": "test"})

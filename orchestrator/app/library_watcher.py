@@ -321,6 +321,7 @@ class LibraryWatcherManager:
                 for library_id, (observer, status, root) in self._native.items()
                 if not observer.is_alive()
             ]
+        fallback_events: list[tuple[str, Path]] = []
         for library_id, observer, status, root in dead:
             try:
                 observer.stop()
@@ -355,10 +356,34 @@ class LibraryWatcherManager:
                             daemon=True,
                         )
                         self._poll_thread.start()
+                fallback_events.append((library_id, root))
             logger.warning(
                 "library_watcher_fallback library_id=%s reason=native_observer_stopped",
                 library_id,
             )
+        with self._lock:
+            # A coordinator failure must not leave polling registrations inert.
+            # Recreate it here; the next health pass will continue normal polling.
+            if (
+                self._polls
+                and not self._stop.is_set()
+                and (self._poll_thread is None or not self._poll_thread.is_alive())
+            ):
+                if self._poll_executor is None:
+                    self._poll_executor = ThreadPoolExecutor(
+                        max_workers=MAX_POLL_WORKERS,
+                        thread_name_prefix="zenstream-library-poll",
+                    )
+                self._poll_thread = threading.Thread(
+                    target=self._poll_loop,
+                    name="zenstream-library-poll-coordinator",
+                    daemon=True,
+                )
+                self._poll_thread.start()
+        # Preserve the safety net after a confirmed native outage.  The callback
+        # only mutates in-memory debounce state and never performs SQLite work.
+        for library_id, root in fallback_events:
+            self.emit(library_id, root, (), full_scan=True)
 
     def emit(
         self,
@@ -488,12 +513,12 @@ class LibraryWatcherManager:
         try:
             snapshot = future.result()
             old = registration.snapshot
-            registration.snapshot = snapshot
-            registration.failures = 0
-            registration.next_due = finished + self.poll_interval
-            registration.status.last_poll_finished_at = _now_iso()
-            registration.status.state = "active"
             if old is None:
+                registration.snapshot = snapshot
+                registration.failures = 0
+                registration.next_due = finished + self.poll_interval
+                registration.status.last_poll_finished_at = _now_iso()
+                registration.status.state = "active"
                 self.emit(
                     registration.library_id, registration.root, (), full_scan=True
                 )
@@ -503,6 +528,14 @@ class LibraryWatcherManager:
                 )
                 return
             diff = DirectorySnapshotDiff(old, snapshot)
+            # Only publish a complete traversal after the diff succeeds.  A
+            # partial or unreadable snapshot must retain the last good baseline
+            # and can never manufacture deletions.
+            registration.snapshot = snapshot
+            registration.failures = 0
+            registration.next_due = finished + self.poll_interval
+            registration.status.last_poll_finished_at = _now_iso()
+            registration.status.state = "active"
             paths: list[str | None] = []
             paths.extend(diff.files_created)
             paths.extend(diff.files_modified)

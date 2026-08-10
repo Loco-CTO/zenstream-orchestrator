@@ -1170,7 +1170,7 @@ class MusicBrainzClient(ProviderClient):
             f"{self.base_url}{path}",
             params=params,
             headers={
-                "User-Agent": f"ZenStream/{__version__} (https://zenstream.amai.space)",
+                "User-Agent": f"ZenStream/{__version__}",
                 "Accept": "application/json",
             },
         )

@@ -524,7 +524,7 @@ class JobStore:
             "library_scan",
             library.get("scanIntervalMinutes") or 1440,
             {"libraryId": library["id"]},
-            library.get("watchEnabled", True),
+            library.get("safetyScanEnabled", True),
         )
         # Repair older definitions whose config was lost by the former row mapper,
         # while preserving task-level interval and enabled settings.
@@ -1123,7 +1123,6 @@ class JobScheduler:
         definition = self.store.ensure_library(library)
         values = {
             "intervalMinutes": library.get("scanIntervalMinutes"),
-            "enabled": library.get("watchEnabled", True),
             "config": {"libraryId": library["id"]},
         }
         return self.store.update_definition(definition["id"], values)

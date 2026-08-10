@@ -36,13 +36,6 @@ services:
       - /tmp:rw,noexec,nosuid,nodev
     cap_drop:
       - ALL
-    # The entrypoint uses these only to repair ownership on metadata created by
-    # older root-running images, then launches Python as the unprivileged user.
-    cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - SETGID
-      - SETUID
     security_opt:
       - no-new-privileges:true
     pids_limit: 512

@@ -107,7 +107,7 @@ def _normalize_trailers(values: object, provider: str) -> list[dict]:
     if isinstance(values, dict):
         values = values.get("results") or values.get("data") or []
     result = []
-    seen_urls = set()
+    seen_records = set()
     for trailer in values if isinstance(values, list) else []:
         if isinstance(trailer, str):
             trailer = {"url": trailer}
@@ -118,9 +118,11 @@ def _normalize_trailers(values: object, provider: str) -> list[dict]:
         url = _trailer_url(site, str(key) if key is not None else None, trailer)
         if not url:
             continue
-        if url in seen_urls:
+        language_tag = _trailer_language_tag(trailer)
+        identity = (url, language_tag)
+        if identity in seen_records:
             continue
-        seen_urls.add(url)
+        seen_records.add(identity)
         result.append(
             {
                 "url": url,
@@ -129,7 +131,7 @@ def _normalize_trailers(values: object, provider: str) -> list[dict]:
                 "name": trailer.get("name") or trailer.get("title"),
                 "type": trailer.get("type") or "Trailer",
                 "official": trailer.get("official"),
-                "language": _trailer_language_tag(trailer),
+                "language": language_tag,
                 "provider": provider,
             }
         )

@@ -23,6 +23,13 @@ type Library = {
 	type: string;
 	directory?: string | null;
 	watchEnabled: boolean;
+	watchMode: "auto" | "native" | "polling";
+	safetyScanEnabled: boolean;
+	watcherStatus?: {
+		state: string;
+		backend?: string | null;
+		pollIntervalSeconds?: number;
+	};
 	scanIntervalMinutes: number;
 	scanState: string;
 	scanError?: string | null;
@@ -43,6 +50,8 @@ export default function LibrariesPage() {
 	const [directory, setDirectory] = useState("");
 	const [sources, setSources] = useState<string[]>([]);
 	const [watch, setWatch] = useState(true);
+	const [watchMode, setWatchMode] = useState<"auto" | "native" | "polling">("auto");
+	const [safetyScan, setSafetyScan] = useState(true);
 	const [interval, setIntervalValue] = useState(1440);
 	const [message, setMessage] = useState("");
 	const [libraryToRemove, setLibraryToRemove] = useState<Library | null>(null);
@@ -69,8 +78,10 @@ export default function LibrariesPage() {
 				type,
 				directory: type === "collection" ? null : directory,
 				sourceLibraryIds: type === "collection" ? sources : [],
-				watchEnabled: watch,
-				scanIntervalMinutes: interval,
+					watchEnabled: watch,
+					watchMode,
+					safetyScanEnabled: safetyScan,
+					scanIntervalMinutes: interval,
 			}),
 		});
 		setMessage(
@@ -175,7 +186,13 @@ export default function LibrariesPage() {
 												: library.scanState === "scanning"
 													? "Scanning…"
 													: "Waiting for first scan"}{" "}
-										· {library.watchEnabled ? "watching" : "watch disabled"}
+										· {library.watcherStatus?.state === "active"
+											? library.watcherStatus.backend === "polling"
+												? `polling (${library.watcherStatus.pollIntervalSeconds || 60}s)`
+												: "native watcher"
+											: library.watchEnabled
+												? library.watcherStatus?.state || "starting"
+												: "watch disabled"}
 									</p>
 								</div>
 							</div>
@@ -273,6 +290,30 @@ export default function LibrariesPage() {
 							type="checkbox"
 							checked={watch}
 							onChange={(event) => setWatch(event.target.checked)}
+						/>
+					</label>
+					{type !== "collection" && watch && (
+						<label className="mt-4 block text-sm">
+							<span className="console-muted">Watcher backend</span>
+							<select
+								value={watchMode}
+								onChange={(event) =>
+									setWatchMode(event.target.value as "auto" | "native" | "polling")
+								}
+								className="console-input mt-2 h-11 w-full rounded-lg px-3 outline-none"
+							>
+								<option value="auto">Automatic (recommended)</option>
+								<option value="native">Native events</option>
+								<option value="polling">Poll every 60 seconds</option>
+							</select>
+						</label>
+					)}
+					<label className="mt-4 flex items-center justify-between text-sm">
+						<span className="console-muted">Periodic safety scan</span>
+						<input
+							type="checkbox"
+							checked={safetyScan}
+							onChange={(event) => setSafetyScan(event.target.checked)}
 						/>
 					</label>
 					{type !== "collection" && (

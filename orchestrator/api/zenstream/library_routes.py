@@ -33,6 +33,11 @@ from fastapi.responses import FileResponse, Response
 
 logger = get_logger("library_api")
 store = LibraryStore()
+
+
+def _with_watcher_status(library: dict) -> dict:
+    library["watcherStatus"] = runtime.watcher.status(library)
+    return library
 credentials = MetadataCredentials()
 _admin_hydration: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "admin_catalog_hydration", default=None
@@ -522,7 +527,7 @@ async def list_libraries(
     values = []
     for library in store.list():
         library["sourceLibraryIds"] = store.sources(library["id"])
-        values.append(library)
+        values.append(_with_watcher_status(library))
     return values
 
 
@@ -542,6 +547,8 @@ async def create_library(
             bool(data.get("watchEnabled", True)),
             int(data.get("scanIntervalMinutes") or 1440),
             data.get("sourceLibraryIds") or [],
+            str(data.get("watchMode") or "auto"),
+            bool(data.get("safetyScanEnabled", True)),
         )
     except (ValueError, TypeError) as error:
         raise HTTPException(400, str(error)) from error
@@ -556,7 +563,7 @@ async def create_library(
     await asyncio.to_thread(runtime.refresh_watchers)
     library["sourceLibraryIds"] = store.sources(library["id"])
     library["jobId"] = job["id"]
-    return library
+    return _with_watcher_status(library)
 
 
 @router.get("/libraries/{library_id}")
@@ -571,7 +578,7 @@ async def get_library(
         raise HTTPException(404, "Library not found.")
     library["sourceLibraryIds"] = store.sources(library_id)
     library["jobs"] = store.jobs(library_id)
-    return library
+    return _with_watcher_status(library)
 
 
 @router.patch("/libraries/{library_id}")
@@ -594,7 +601,7 @@ async def update_library(
     scheduler.refresh_library_definition(library)
     await asyncio.to_thread(runtime.refresh_watchers)
     library["sourceLibraryIds"] = store.sources(library_id)
-    return library
+    return _with_watcher_status(library)
 
 
 @router.delete("/libraries/{library_id}", status_code=204)

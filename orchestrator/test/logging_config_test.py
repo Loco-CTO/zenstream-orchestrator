@@ -1,9 +1,11 @@
+import logging
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from app import logging_config
 from app.logging_config import log_directory
 from app.paths import PROJECT_ROOT, metadata_directory
 
@@ -24,6 +26,28 @@ class MetadataPathTest(unittest.TestCase):
             self.assertEqual(
                 metadata_directory(), PROJECT_ROOT / "persistent-data"
             )
+
+
+class LoggingConfigurationTest(unittest.TestCase):
+    def test_rotating_log_is_created_under_metadata_path(self):
+        root = logging.getLogger("zenstream")
+        existing_handlers = list(root.handlers)
+        root.handlers.clear()
+        try:
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                patch.dict(os.environ, {"METADATA_PATH": directory}),
+                patch.object(logging_config, "_configured", False),
+            ):
+                logging_config.configure_logging()
+
+                self.assertTrue(
+                    (Path(directory) / "logs" / "orchestrator.log").is_file()
+                )
+        finally:
+            for handler in root.handlers:
+                handler.close()
+            root.handlers[:] = existing_handlers
 
 
 if __name__ == "__main__":

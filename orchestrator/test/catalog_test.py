@@ -1036,6 +1036,72 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("hidden", rows)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_featured_uses_series_added_date(self, _languages):
+        user_id = self.account().create("featured-order", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (user_id, "allowed", "now"),
+        )
+        for row in (
+            ("series", "allowed", None, "series", "Series", None, None, None, None, "2026", "2026"),
+            ("season", "allowed", "series", "season", "Series/Season 1", 1, None, None, None, "2026", "2026"),
+            ("episode-1", "allowed", "season", "episode", "Series/Season 1/Episode 1", 1, 1, None, None, "2026", "2026"),
+            ("episode-2", "allowed", "season", "episode", "Series/Season 1/Episode 2", 1, 2, None, None, "2026", "2026"),
+            ("movie", "allowed", None, "movie", "Movie", None, None, None, None, "2026", "2026"),
+        ):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)", row
+            )
+        self.db.execute(
+            "CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT,playable_leaf_count INTEGER,media_file_count INTEGER,media_added_ns INTEGER,media_last_added_ns INTEGER,added_sort_ns INTEGER,last_added_sort_ns INTEGER,generation INTEGER,updated_at TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT,PRIMARY KEY(entity_id,locale))"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        for entity_id, entity_type, added_ns, last_added_ns in (
+            ("series", "series", 100, 300),
+            ("movie", "movie", 250, 250),
+        ):
+            self.db.execute(
+                "INSERT INTO catalog_entity_summary VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    "allowed",
+                    None,
+                    entity_type,
+                    1,
+                    1,
+                    added_ns,
+                    last_added_ns,
+                    added_ns,
+                    last_added_ns,
+                    1,
+                    "2026",
+                ),
+            )
+            self.db.execute(
+                "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+                (entity_id, "en", json.dumps({"title": entity_id})),
+            )
+        catalog = self.catalog()
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {"title": entity_id}
+        }
+
+        featured = catalog.home_featured(user_id, "en")
+        aggregate = catalog.home(user_id, "en")
+
+        self.assertEqual([item["id"] for item in featured], ["movie", "series"])
+        self.assertEqual(
+            [item["id"] for item in aggregate["latestItems"][:2]],
+            ["movie", "series"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_newly_added_serializes_only_selected_items(self, _languages):
         user_id = self.account().create("home-limit", "password-123")["id"]
         self.db.execute("UPDATE libraries SET type='movies' WHERE id='allowed'")

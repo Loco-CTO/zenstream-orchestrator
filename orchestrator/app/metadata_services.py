@@ -928,7 +928,7 @@ class MetadataReadService:
         tiers = fallback_tiers(
             requested,
             original,
-            media=False,
+            media=True,
             include_english=any(
                 language_family(value) == "en" for value in configured
             ),
@@ -941,12 +941,7 @@ class MetadataReadService:
             for trailer in payload.get("trailers", []) or []:
                 if not isinstance(trailer, dict) or not trailer.get("url"):
                     continue
-                trailer_language = trailer.get("language")
-                if not trailer_language:
-                    # A language-neutral video is not eligible for localized
-                    # trailer fallback.  It must never inherit the cache
-                    # document locale or become an arbitrary-language match.
-                    continue
+                trailer_language = trailer.get("language") or ""
                 rank = 99
                 for index, tier in enumerate(tiers):
                     trailer_tag = str(trailer_language).lower().replace("_", "-")
@@ -982,12 +977,16 @@ class MetadataReadService:
             return []
         best_rank = min(value[0] for value in candidates)
         result = []
+        seen_urls = set()
         for _, _, trailer in sorted(
             (value for value in candidates if value[0] == best_rank),
             key=lambda value: (value[1], value[2].get("url", "")),
         ):
-            if trailer not in result:
-                result.append(trailer)
+            url = trailer.get("url")
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            result.append(trailer)
         return result
 
 

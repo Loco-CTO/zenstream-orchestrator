@@ -421,15 +421,20 @@ class LibraryWatcherManager:
                     if registration.future and registration.future.done():
                         completed.append((registration, registration.future))
                         registration.future = None
+                completed_ids = {id(registration) for registration, _future in completed}
+                active_count = sum(1 for value in self._polls.values() if value.future)
+                for registration in self._polls.values():
                     if (
-                        registration.future is None
+                        id(registration) not in completed_ids
+                        and registration.future is None
                         and registration.next_due <= now
                         and self._poll_executor
-                        and sum(1 for value in self._polls.values() if value.future) < MAX_POLL_WORKERS
+                        and active_count < MAX_POLL_WORKERS
                     ):
                         registration.poll_started = time.monotonic()
                         registration.status.last_poll_started_at = _now_iso()
                         registration.future = self._poll_executor.submit(self._take_snapshot, registration.root)
+                        active_count += 1
             for registration, future in completed:
                 self._finish_poll(registration, future)
             self._stop.wait(0.25)

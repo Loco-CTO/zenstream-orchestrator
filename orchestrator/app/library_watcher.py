@@ -6,11 +6,11 @@ import platform
 import random
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -41,7 +41,6 @@ REMOTE_FILESYSTEMS = {
     "fuse.sshfs",
     "fuseblk",
     "fuse.smb",
-    "fuse.sshfs",
     "nfs",
     "nfs4",
     "smb3",
@@ -60,7 +59,9 @@ def _configured_backend() -> str:
 
 def _poll_interval() -> float:
     try:
-        value = float(os.getenv("LIBRARY_WATCH_POLL_SECONDS", str(POLL_INTERVAL_SECONDS)))
+        value = float(
+            os.getenv("LIBRARY_WATCH_POLL_SECONDS", str(POLL_INTERVAL_SECONDS))
+        )
     except (TypeError, ValueError):
         value = POLL_INTERVAL_SECONDS
     return max(POLL_MIN_SECONDS, min(POLL_MAX_SECONDS, value))
@@ -97,7 +98,9 @@ def _linux_mount_type(path: Path) -> str | None:
         if len(fields) < 5:
             continue
         mountpoint = os.path.abspath(_decode_mount_component(fields[4]))
-        if candidate != mountpoint and not candidate.startswith(mountpoint.rstrip(os.sep) + os.sep):
+        if candidate != mountpoint and not candidate.startswith(
+            mountpoint.rstrip(os.sep) + os.sep
+        ):
             continue
         fstype = right.split()[0].lower() if right.split() else ""
         if best is None or len(mountpoint) > best[0]:
@@ -131,7 +134,15 @@ def choose_backend(path: str | Path, requested: str = "auto") -> tuple[str, str]
     mount_type = _linux_mount_type(root)
     if mount_type in REMOTE_FILESYSTEMS:
         return "polling", f"filesystem_{mount_type}"
-    if _in_container() and mount_type not in {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "tmpfs"}:
+    if _in_container() and mount_type not in {
+        "ext2",
+        "ext3",
+        "ext4",
+        "xfs",
+        "btrfs",
+        "zfs",
+        "tmpfs",
+    }:
         return "polling", "unknown_container_mount"
     return "native", "local_filesystem"
 
@@ -181,7 +192,7 @@ class _PollRegistration:
 
 
 class _NativeHandler(FileSystemEventHandler):
-    def __init__(self, manager: "LibraryWatcherManager", library_id: str, root: Path):
+    def __init__(self, manager: LibraryWatcherManager, library_id: str, root: Path):
         self.manager = manager
         self.library_id = library_id
         self.root = root
@@ -214,7 +225,9 @@ class LibraryWatcherManager:
     It must be quick and must not perform database or filesystem traversal work.
     """
 
-    def __init__(self, callback: Callable[[str, Path, tuple[str | None, ...], bool], None]):
+    def __init__(
+        self, callback: Callable[[str, Path, tuple[str | None, ...], bool], None]
+    ):
         self.callback = callback
         self.poll_interval = _poll_interval()
         self._lock = threading.RLock()
@@ -231,20 +244,26 @@ class LibraryWatcherManager:
             return {"state": "not_applicable", "backend": None}
         with self._lock:
             value = self._statuses.get(library["id"])
-            return value.payload() if value else {
-                "requestedMode": library.get("watchMode", "auto"),
-                "backend": None,
-                "state": "disabled" if not library.get("watchEnabled") else "starting",
-                "reason": "not_registered",
-                "pollIntervalSeconds": int(self.poll_interval),
-                "lastEventAt": None,
-                "lastPollStartedAt": None,
-                "lastPollFinishedAt": None,
-                "lastReconcileQueuedAt": None,
-                "pendingRootCount": 0,
-                "restartCount": 0,
-                "lastErrorCode": None,
-            }
+            return (
+                value.payload()
+                if value
+                else {
+                    "requestedMode": library.get("watchMode", "auto"),
+                    "backend": None,
+                    "state": "disabled"
+                    if not library.get("watchEnabled")
+                    else "starting",
+                    "reason": "not_registered",
+                    "pollIntervalSeconds": int(self.poll_interval),
+                    "lastEventAt": None,
+                    "lastPollStartedAt": None,
+                    "lastPollFinishedAt": None,
+                    "lastReconcileQueuedAt": None,
+                    "pendingRootCount": 0,
+                    "restartCount": 0,
+                    "lastErrorCode": None,
+                }
+            )
 
     def configure(self, libraries: list[dict]) -> None:
         self.stop()
@@ -336,7 +355,10 @@ class LibraryWatcherManager:
                             daemon=True,
                         )
                         self._poll_thread.start()
-            logger.warning("library_watcher_fallback library_id=%s reason=native_observer_stopped", library_id)
+            logger.warning(
+                "library_watcher_fallback library_id=%s reason=native_observer_stopped",
+                library_id,
+            )
 
     def emit(
         self,
@@ -381,15 +403,25 @@ class LibraryWatcherManager:
         if backend == "native" and Observer is not None:
             try:
                 observer = Observer()
-                observer.schedule(_NativeHandler(self, library_id, root), os.fspath(root), recursive=True)
+                observer.schedule(
+                    _NativeHandler(self, library_id, root),
+                    os.fspath(root),
+                    recursive=True,
+                )
                 observer.start()
                 with self._lock:
                     self._native[library_id] = (observer, status, root)
                 status.state = "active"
-                logger.info("library_watcher_configured library_id=%s backend=native reason=%s", library_id, reason)
+                logger.info(
+                    "library_watcher_configured library_id=%s backend=native reason=%s",
+                    library_id,
+                    reason,
+                )
                 return
             except Exception:
-                logger.exception("library_watcher_native_failed library_id=%s", library_id)
+                logger.exception(
+                    "library_watcher_native_failed library_id=%s", library_id
+                )
                 status.restart_count += 1
                 status.last_error_code = "native_start_failed"
                 backend = "polling"
@@ -410,7 +442,11 @@ class LibraryWatcherManager:
             self._polls[library_id] = registration
         status.backend = "polling"
         status.state = "active"
-        logger.info("library_watcher_configured library_id=%s backend=polling reason=%s", library_id, status.reason)
+        logger.info(
+            "library_watcher_configured library_id=%s backend=polling reason=%s",
+            library_id,
+            status.reason,
+        )
 
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
@@ -421,7 +457,9 @@ class LibraryWatcherManager:
                     if registration.future and registration.future.done():
                         completed.append((registration, registration.future))
                         registration.future = None
-                completed_ids = {id(registration) for registration, _future in completed}
+                completed_ids = {
+                    id(registration) for registration, _future in completed
+                }
                 active_count = sum(1 for value in self._polls.values() if value.future)
                 for registration in self._polls.values():
                     if (
@@ -433,7 +471,9 @@ class LibraryWatcherManager:
                     ):
                         registration.poll_started = time.monotonic()
                         registration.status.last_poll_started_at = _now_iso()
-                        registration.future = self._poll_executor.submit(self._take_snapshot, registration.root)
+                        registration.future = self._poll_executor.submit(
+                            self._take_snapshot, registration.root
+                        )
                         active_count += 1
             for registration, future in completed:
                 self._finish_poll(registration, future)
@@ -454,8 +494,13 @@ class LibraryWatcherManager:
             registration.status.last_poll_finished_at = _now_iso()
             registration.status.state = "active"
             if old is None:
-                self.emit(registration.library_id, registration.root, (), full_scan=True)
-                logger.info("library_watcher_poll_baseline library_id=%s", registration.library_id)
+                self.emit(
+                    registration.library_id, registration.root, (), full_scan=True
+                )
+                logger.info(
+                    "library_watcher_poll_baseline library_id=%s",
+                    registration.library_id,
+                )
                 return
             diff = DirectorySnapshotDiff(old, snapshot)
             paths: list[str | None] = []
@@ -478,5 +523,9 @@ class LibraryWatcherManager:
             registration.failures += 1
             registration.status.state = "degraded"
             registration.status.last_error_code = "poll_failed"
-            registration.next_due = finished + min(300.0, RESTART_BACKOFF_SECONDS[min(registration.failures - 1, 3)])
-            logger.exception("library_watcher_poll_failed library_id=%s", registration.library_id)
+            registration.next_due = finished + min(
+                300.0, RESTART_BACKOFF_SECONDS[min(registration.failures - 1, 3)]
+            )
+            logger.exception(
+                "library_watcher_poll_failed library_id=%s", registration.library_id
+            )

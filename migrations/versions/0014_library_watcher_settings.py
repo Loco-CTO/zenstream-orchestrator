@@ -18,7 +18,9 @@ def upgrade():
     if "safety_scan_enabled" not in columns:
         op.add_column(
             "libraries",
-            sa.Column("safety_scan_enabled", sa.Integer(), nullable=False, server_default="1"),
+            sa.Column(
+                "safety_scan_enabled", sa.Integer(), nullable=False, server_default="1"
+            ),
         )
     op.execute(
         "UPDATE libraries SET watch_mode='auto' WHERE watch_mode IS NULL OR watch_mode=''"

@@ -20,6 +20,7 @@ from queue import Empty
 from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
 from app.logging_config import get_logger
+from app.library_watcher import LibraryWatcherManager
 from app.worker_config import configured_worker_limit
 
 try:
@@ -549,7 +550,7 @@ class LibraryStore:
 
     def list(self) -> list[dict]:
         rows = self.db.execute(
-            "SELECT id,name,type,directory,watch_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries ORDER BY name COLLATE NOCASE"
+            "SELECT id,name,type,directory,watch_enabled,watch_mode,safety_scan_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries ORDER BY name COLLATE NOCASE"
         )
         return [self._row(row) for row in rows]
 
@@ -561,18 +562,20 @@ class LibraryStore:
             "type": row[2],
             "directory": row[3],
             "watchEnabled": bool(row[4]),
-            "scanIntervalMinutes": row[5],
-            "scanState": row[6],
-            "scanError": row[7],
-            "lastScanStartedAt": row[8],
-            "lastScanFinishedAt": row[9],
-            "createdAt": row[10],
-            "updatedAt": row[11],
+            "watchMode": row[5] or "auto",
+            "safetyScanEnabled": bool(row[6]),
+            "scanIntervalMinutes": row[7],
+            "scanState": row[8],
+            "scanError": row[9],
+            "lastScanStartedAt": row[10],
+            "lastScanFinishedAt": row[11],
+            "createdAt": row[12],
+            "updatedAt": row[13],
         }
 
     def get(self, library_id: str) -> dict | None:
         rows = self.db.execute(
-            "SELECT id,name,type,directory,watch_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries WHERE id=?",
+            "SELECT id,name,type,directory,watch_enabled,watch_mode,safety_scan_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries WHERE id=?",
             (library_id,),
         )
         return self._row(rows[0]) if rows else None
@@ -594,6 +597,8 @@ class LibraryStore:
         watch_enabled: bool = True,
         interval: int = 1440,
         source_ids: Iterable[str] = (),
+        watch_mode: str = "auto",
+        safety_scan_enabled: bool = True,
     ) -> dict:
         name = name.strip()
         if not name or library_type not in LIBRARY_TYPES:
@@ -610,6 +615,9 @@ class LibraryStore:
                 raise ValueError("A directory is required for physical libraries.")
             directory = normalized_path(directory)
         interval = max(15, min(43200, int(interval or 1440)))
+        watch_mode = str(watch_mode or "auto").lower()
+        if watch_mode not in {"auto", "native", "polling"}:
+            raise ValueError("watchMode must be auto, native, or polling.")
         library_id = new_id()
         timestamp = now()
         with self.db.transaction() as cursor:
@@ -625,13 +633,15 @@ class LibraryStore:
                 if cursor.fetchone():
                     raise ValueError("A library already uses that directory.")
             cursor.execute(
-                "INSERT INTO libraries(id,name,type,directory,watch_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO libraries(id,name,type,directory,watch_enabled,watch_mode,safety_scan_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     library_id,
                     name,
                     library_type,
                     directory,
                     int(watch_enabled),
+                    watch_mode,
+                    int(bool(safety_scan_enabled)),
                     interval,
                     timestamp,
                     timestamp,
@@ -669,9 +679,13 @@ class LibraryStore:
         if current["type"] != "collection" and "directory" in values:
             directory = normalized_path(str(values["directory"]))
         watch_enabled = int(bool(values.get("watchEnabled", current["watchEnabled"])))
+        watch_mode = str(values.get("watchMode", current.get("watchMode", "auto")) or "auto").lower()
+        if watch_mode not in {"auto", "native", "polling"}:
+            raise ValueError("watchMode must be auto, native, or polling.")
+        safety_scan_enabled = int(bool(values.get("safetyScanEnabled", current.get("safetyScanEnabled", True))))
         self.db.execute(
-            "UPDATE libraries SET name=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
-            (name, directory, watch_enabled, interval, now(), library_id),
+            "UPDATE libraries SET name=?,directory=?,watch_enabled=?,watch_mode=?,safety_scan_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
+            (name, directory, watch_enabled, watch_mode, safety_scan_enabled, interval, now(), library_id),
         )
         if current["type"] == "collection" and "sourceLibraryIds" in values:
             source_ids = list(dict.fromkeys(values["sourceLibraryIds"]))

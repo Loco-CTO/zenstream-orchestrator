@@ -34,19 +34,22 @@ class LoggingConfigurationTest(unittest.TestCase):
         existing_handlers = list(root.handlers)
         root.handlers.clear()
         try:
-            with (
-                tempfile.TemporaryDirectory() as directory,
-                patch.dict(os.environ, {"METADATA_PATH": directory}),
-                patch.object(logging_config, "_configured", False),
-            ):
-                logging_config.configure_logging()
+            with tempfile.TemporaryDirectory() as directory:
+                try:
+                    with (
+                        patch.dict(os.environ, {"METADATA_PATH": directory}),
+                        patch.object(logging_config, "_configured", False),
+                    ):
+                        logging_config.configure_logging()
 
-                self.assertTrue(
-                    (Path(directory) / "logs" / "orchestrator.log").is_file()
-                )
+                        self.assertTrue(
+                            (Path(directory) / "logs" / "orchestrator.log").is_file()
+                        )
+                finally:
+                    for handler in root.handlers:
+                        handler.close()
+                    root.handlers.clear()
         finally:
-            for handler in root.handlers:
-                handler.close()
             root.handlers[:] = existing_handlers
 
 

@@ -36,10 +36,23 @@ class DockerLayoutTest(unittest.TestCase):
         self.assertIn("ORCHESTRATOR_PORT: 9088", compose)
 
     def test_container_maps_the_configured_metadata_root_to_the_writable_path(self):
+        dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
         compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
         self.assertIn("METADATA_PATH: /app/sqlite", compose)
         self.assertIn("${METADATA_PATH:-./metadata}:/app/sqlite", compose)
+        self.assertIn("COPY --chmod=755 docker-entrypoint.sh", dockerfile)
+        self.assertIn('ENTRYPOINT ["zenstream-entrypoint"]', dockerfile)
+        self.assertIn("gosu", dockerfile)
+        self.assertNotIn("USER zenstream", dockerfile)
+        self.assertIn("- CHOWN", compose)
+        self.assertIn("- DAC_OVERRIDE", compose)
+
+        entrypoint = (PROJECT_ROOT / "docker-entrypoint.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('chown -R zenstream:zenstream "$metadata_path"', entrypoint)
+        self.assertIn('exec gosu zenstream "$@"', entrypoint)
 
     def test_docker_context_keeps_dashboard_assets(self):
         dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")

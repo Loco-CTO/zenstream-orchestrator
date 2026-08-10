@@ -42,6 +42,12 @@ no Docker named volume is required. Docker calls this a volume mount, but the
 media itself stays in the directory you choose. Keep the metadata directory
 separate from the media library and include it in your backups.
 
+The container starts only long enough as root to make an existing metadata
+mount writable by its dedicated user, which supports upgrades from older
+root-running images. Python and FFmpeg always run as the unprivileged
+`zenstream` user. The metadata mount must be read-write; the media mount stays
+read-only.
+
 The image includes `ffmpeg` and `ffprobe`, so host media tools are not required.
 `FFMPEG_PATH` and `FFPROBE_PATH` are optional overrides for custom builds.
 

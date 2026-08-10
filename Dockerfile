@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ORCHESTRATOR_HOST=0.0.0.0 \
     ORCHESTRATOR_PORT=9088
 COPY requirements.txt ./
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/* && \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg gosu && rm -rf /var/lib/apt/lists/* && \
     ffmpeg -hide_banner -muxers 2>&1 | grep -q chromaprint && \
     pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini ./
@@ -28,10 +28,11 @@ RUN mkdir -p ./assets/ffmpeg/linux && \
     ./assets/ffmpeg/linux/ffmpeg -hide_banner -h muxer=chromaprint 2>&1 | grep -q fp_format
 COPY orchestrator/ ./orchestrator/
 COPY --from=dashboard-build /frontend/out/ ./orchestrator/web/
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/zenstream-entrypoint
 RUN addgroup --system --gid 10001 zenstream && \
     adduser --system --uid 10001 --ingroup zenstream --home /nonexistent --no-create-home zenstream && \
     mkdir -p /app/sqlite /tmp && \
     chown -R zenstream:zenstream /app/sqlite /app/orchestrator /app/assets /tmp
-USER zenstream
 EXPOSE 9088
+ENTRYPOINT ["zenstream-entrypoint"]
 CMD ["python", "orchestrator/init.py"]

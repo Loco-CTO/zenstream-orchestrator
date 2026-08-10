@@ -23,14 +23,6 @@ from app.logging_config import get_logger
 from app.library_watcher import LibraryWatcherManager
 from app.worker_config import configured_worker_limit
 
-try:
-    from watchdog.events import FileSystemEventHandler
-    from watchdog.observers import Observer
-except ImportError:  # pragma: no cover - optional in minimal installations
-    FileSystemEventHandler = object  # type: ignore[assignment,misc]
-    Observer = None  # type: ignore[assignment,misc]
-
-
 LIBRARY_TYPES = {"tv_series", "movies", "music", "collection"}
 VIDEO_EXTENSIONS = {
     ".mkv",
@@ -4160,24 +4152,8 @@ def _music_ids(tags: dict[str, str]) -> list[tuple[str, str, str]]:
     return ids
 
 
-class _LibraryChangeHandler(FileSystemEventHandler):
-    def __init__(self, runtime: LibraryRuntime, library_id: str):
-        self.runtime = runtime
-        self.library_id = library_id
-
-    def on_any_event(
-        self, event
-    ):  # watchdog emits separate create/modify/delete/move events
-        if not getattr(event, "is_directory", False):
-            self.runtime.request_reconcile(
-                self.library_id,
-                getattr(event, "src_path", None),
-                getattr(event, "dest_path", None),
-            )
-
-
 class LibraryRuntime:
-    """Durable scan worker with daily repair scheduling and optional filesystem watching."""
+    """Durable scan worker with targeted, cross-platform filesystem watching."""
 
     def __init__(self):
         self.store = LibraryStore()
@@ -4185,11 +4161,14 @@ class LibraryRuntime:
         self.condition = threading.Condition()
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
-        self.observer = None
-        self._watch_paths: set[str] = set()
+        self.watcher = LibraryWatcherManager(self._on_watcher_event)
         self._reconcile_due: dict[str, float] = {}
         self._reconcile_targets: dict[str, set[str]] = {}
+        self._reconcile_deadlines: dict[str, dict[str, float]] = {}
+        self._reconcile_full_scan: set[str] = set()
+        self._reconcile_full_deadline: dict[str, float] = {}
         self._job_targets: dict[str, set[str]] = {}
+        self._job_full_scan: set[str] = set()
         self._active_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_lock = threading.RLock()
@@ -4199,7 +4178,7 @@ class LibraryRuntime:
             return
         self._recover_active_jobs()
         self.stop_event.clear()
-        self._configure_watchers()
+        self.watcher.configure(self.store.list())
         self.thread = threading.Thread(
             target=self._run, name="zenstream-library-jobs", daemon=True
         )
@@ -4211,21 +4190,12 @@ class LibraryRuntime:
             self.condition.notify_all()
         if self.thread:
             self.thread.join(timeout=5)
-        if self.observer:
-            self.observer.stop()
-            self.observer.join(timeout=5)
-            self.observer = None
-        self._watch_paths.clear()
+        self.watcher.stop()
 
     def refresh_watchers(self) -> None:
         if not (self.thread and self.thread.is_alive()):
             return
-        if self.observer:
-            self.observer.stop()
-            self.observer.join(timeout=5)
-            self.observer = None
-        self._watch_paths.clear()
-        self._configure_watchers()
+        self.watcher.configure(self.store.list())
 
     def enqueue(
         self,
@@ -4360,122 +4330,145 @@ class LibraryRuntime:
                 )
 
     def request_reconcile(self, library_id: str, *paths: str | None) -> None:
-        """Debounce watcher changes into top-level, path-scoped reconciles."""
+        """Debounce watcher changes into quiet top-level, path-scoped reconciles."""
         library = self.store.get(library_id)
         if not library:
             return
         root = Path(library["directory"])
-        targets = self._reconcile_targets.setdefault(library_id, set())
-        for value in paths:
-            if not value:
-                continue
-            try:
-                relative_path = Path(value).relative_to(root)
-            except ValueError:
-                continue
-            if relative_path.parts:
-                targets.add(relative_path.parts[0])
-        if not targets:
-            return
-        self._reconcile_due[library_id] = time.monotonic() + 5
+        now_monotonic = time.monotonic()
         with self.condition:
+            targets = self._reconcile_targets.setdefault(library_id, set())
+            deadlines = self._reconcile_deadlines.setdefault(library_id, {})
+            valid = 0
+            for value in paths:
+                if not value:
+                    continue
+                try:
+                    relative_path = Path(value).relative_to(root)
+                except ValueError:
+                    continue
+                if not relative_path.parts:
+                    self._reconcile_full_scan.add(library_id)
+                    self._reconcile_full_deadline[library_id] = now_monotonic + 5
+                    continue
+                target = relative_path.parts[0]
+                targets.add(target)
+                deadlines[target] = now_monotonic + 5
+                valid += 1
+            if not valid and paths:
+                self._reconcile_full_scan.add(library_id)
+                self._reconcile_full_deadline[library_id] = now_monotonic + 5
+            if len(targets) > 256:
+                self._reconcile_full_scan.add(library_id)
+                self._reconcile_full_deadline[library_id] = now_monotonic + 5
+                targets.clear()
+                deadlines.clear()
+            if self._reconcile_full_scan.__contains__(library_id):
+                self._reconcile_due[library_id] = self._reconcile_full_deadline[library_id]
+            elif deadlines:
+                self._reconcile_due[library_id] = min(deadlines.values())
+            else:
+                return
+            self.watcher.mark_reconcile_queued(library_id, len(targets))
             self.condition.notify_all()
 
-    def _configure_watchers(self) -> None:
-        if Observer is None:
+    def _on_watcher_event(
+        self,
+        library_id: str,
+        root: Path,
+        paths: tuple[str | None, ...],
+        full_scan: bool,
+    ) -> None:
+        if full_scan:
+            with self.condition:
+                deadline = time.monotonic() + 5
+                self._reconcile_full_scan.add(library_id)
+                self._reconcile_full_deadline[library_id] = deadline
+                self._reconcile_targets.pop(library_id, None)
+                self._reconcile_deadlines.pop(library_id, None)
+                self._reconcile_due[library_id] = deadline
+                self.watcher.mark_reconcile_queued(library_id, 0)
+                self.condition.notify_all()
             return
-        observer = Observer()
-        for library in self.store.list():
-            directory = library.get("directory")
-            if (
-                not library.get("watchEnabled")
-                or not directory
-                or not os.path.isdir(directory)
-            ):
-                continue
-            try:
-                observer.schedule(
-                    _LibraryChangeHandler(self, library["id"]),
-                    directory,
-                    recursive=True,
-                )
-                self._watch_paths.add(directory)
-            except OSError:
-                continue
-        if self._watch_paths:
-            observer.start()
-            self.observer = observer
-
-    def _schedule_repairs(self) -> None:
-        now_epoch = time.time()
-        for library in self.store.list():
-            if library["type"] == "collection" or not library.get(
-                "scanIntervalMinutes"
-            ):
-                continue
-            finished = library.get("lastScanFinishedAt")
-            try:
-                due = (
-                    not finished
-                    or datetime.fromisoformat(finished).timestamp()
-                    + library["scanIntervalMinutes"] * 60
-                    <= now_epoch
-                )
-            except (TypeError, ValueError, OSError):
-                due = True
-            unresolved = self.store.db.execute(
-                "SELECT COUNT(*) FROM library_entities WHERE library_id=? AND match_status IN ('unresolved','failed')",
-                (library["id"],),
-            )[0][0]
-            due = due or (bool(unresolved) and not finished)
-            if due:
-                self.enqueue(library["id"], "scan")
+        self.request_reconcile(library_id, *paths)
 
     def _run(self):
         while not self.stop_event.is_set():
-            due = [
-                library_id
-                for library_id, deadline in self._reconcile_due.items()
-                if time.monotonic() >= deadline
-            ]
-            for library_id in due:
-                self.enqueue(
-                    library_id,
-                    "reconcile",
-                    self._reconcile_targets.get(library_id, set()).copy(),
+            try:
+                self.watcher.health_check()
+                due_jobs = []
+                now_monotonic = time.monotonic()
+                with self.condition:
+                    for library_id, deadline in list(self._reconcile_due.items()):
+                        if now_monotonic < deadline:
+                            continue
+                        full_scan = library_id in self._reconcile_full_scan
+                        targets = set()
+                        if full_scan:
+                            self._reconcile_full_scan.discard(library_id)
+                            self._reconcile_full_deadline.pop(library_id, None)
+                            self._reconcile_targets.pop(library_id, None)
+                            self._reconcile_deadlines.pop(library_id, None)
+                        else:
+                            deadlines = self._reconcile_deadlines.get(library_id, {})
+                            targets = {
+                                target for target, target_deadline in deadlines.items()
+                                if target_deadline <= now_monotonic
+                            }
+                            for target in targets:
+                                deadlines.pop(target, None)
+                            pending = self._reconcile_targets.get(library_id, set())
+                            pending.difference_update(targets)
+                            if not pending:
+                                self._reconcile_targets.pop(library_id, None)
+                            if not deadlines:
+                                self._reconcile_deadlines.pop(library_id, None)
+                        remaining = []
+                        if library_id in self._reconcile_full_scan:
+                            remaining.append(self._reconcile_full_deadline[library_id])
+                        remaining.extend(self._reconcile_deadlines.get(library_id, {}).values())
+                        if remaining:
+                            self._reconcile_due[library_id] = min(remaining)
+                        else:
+                            self._reconcile_due.pop(library_id, None)
+                        due_jobs.append((library_id, targets, full_scan))
+                for library_id, targets, full_scan in due_jobs:
+                    self.enqueue(library_id, "reconcile", targets, full_scan=full_scan)
+                rows = self.store.db.execute(
+                    "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
                 )
-                self._reconcile_due.pop(library_id, None)
-            rows = self.store.db.execute(
-                "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
-            )
-            if not rows:
+                if not rows:
+                    with self.condition:
+                        self.condition.wait(timeout=1)
+                    continue
+                job_id, library_id, kind = rows[0]
+                with self._active_lock:
+                    if job_id in self._active_jobs:
+                        with self.condition:
+                            self.condition.wait(timeout=0.2)
+                        continue
+                    self._active_jobs.add(job_id)
+                    self._cancel_events[job_id] = threading.Event()
+                    with self.store.db.transaction() as cursor:
+                        cursor.execute(
+                            "UPDATE library_jobs SET state='running',started_at=?,message='Starting scan' WHERE id=? AND state='queued'",
+                            (now(), job_id),
+                        )
+                        claimed = cursor.rowcount == 1
+                    if not claimed:
+                        self._active_jobs.discard(job_id)
+                        self._cancel_events.pop(job_id, None)
+                        continue
+                threading.Thread(
+                    target=self._execute_job,
+                    args=(job_id, library_id, kind),
+                    name=f"zenstream-library-{job_id[:8]}",
+                    daemon=True,
+                ).start()
+            except Exception:
+                logger.exception("library_dispatcher_failed")
                 with self.condition:
                     self.condition.wait(timeout=1)
-                continue
-            job_id, library_id, kind = rows[0]
-            with self._active_lock:
-                if job_id in self._active_jobs:
-                    with self.condition:
-                        self.condition.wait(timeout=0.2)
-                    continue
-                self._active_jobs.add(job_id)
-                self._cancel_events[job_id] = threading.Event()
-                with self.store.db.transaction() as cursor:
-                    cursor.execute(
-                        "UPDATE library_jobs SET state='running',started_at=?,message='Starting scan' WHERE id=? AND state='queued'",
-                        (now(), job_id),
-                    )
-                    claimed = cursor.rowcount == 1
-                if not claimed:
-                    self._active_jobs.discard(job_id)
-                    self._cancel_events.pop(job_id, None)
-                    continue
-            threading.Thread(
-                target=self._execute_job,
-                args=(job_id, library_id, kind),
-                name=f"zenstream-library-{job_id[:8]}",
-                daemon=True,
-            ).start()
 
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
         try:

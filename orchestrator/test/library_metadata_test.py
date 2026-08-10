@@ -2079,6 +2079,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 ]
             },
         }
+
         def request(path, params=None):
             if path == "/movie/10":
                 return payload

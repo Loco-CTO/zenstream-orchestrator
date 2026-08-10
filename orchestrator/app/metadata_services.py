@@ -358,9 +358,7 @@ class MetadataSearchProjection:
                     trailer_payloads[(provider, locale)] = payload
                     trailer_original = next(
                         (
-                            _canonical_metadata_language(
-                                value.get("originalLanguage")
-                            )
+                            _canonical_metadata_language(value.get("originalLanguage"))
                             for value in trailer_payloads.values()
                             if value.get("originalLanguage")
                         ),
@@ -760,9 +758,7 @@ class MetadataReadService:
             requested,
             original,
             media=False,
-            include_english=any(
-                language_family(value) == "en" for value in configured
-            ),
+            include_english=any(language_family(value) == "en" for value in configured),
         )
         providers = self.providers(entity_type)
         result: dict = {}
@@ -929,9 +925,7 @@ class MetadataReadService:
             requested,
             original,
             media=True,
-            include_english=any(
-                language_family(value) == "en" for value in configured
-            ),
+            include_english=any(language_family(value) == "en" for value in configured),
         )
         provider_rank = {value: index for index, value in enumerate(providers)}
         candidates = []

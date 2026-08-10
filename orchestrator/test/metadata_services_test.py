@@ -76,14 +76,10 @@ class MetadataServicesTest(unittest.TestCase):
                 ]
             },
             ("tmdb", "en-US"): {
-                "trailers": [
-                    {"url": "https://youtube.com/en", "language": "en-US"}
-                ]
+                "trailers": [{"url": "https://youtube.com/en", "language": "en-US"}]
             },
             ("tmdb", "fr-FR"): {
-                "trailers": [
-                    {"url": "https://youtube.com/fr", "language": "fr-FR"}
-                ]
+                "trailers": [{"url": "https://youtube.com/fr", "language": "fr-FR"}]
             },
         }
         with patch(
@@ -100,13 +96,9 @@ class MetadataServicesTest(unittest.TestCase):
 
     def test_trailer_resolution_allows_neutral_media_metadata(self):
         payloads = {
-            ("tmdb", "ja"): {
-                "trailers": [{"url": "https://youtube.com/neutral"}]
-            },
+            ("tmdb", "ja"): {"trailers": [{"url": "https://youtube.com/neutral"}]},
             ("tmdb", "fr-FR"): {
-                "trailers": [
-                    {"url": "https://youtube.com/fr", "language": "fr-FR"}
-                ]
+                "trailers": [{"url": "https://youtube.com/fr", "language": "fr-FR"}]
             },
         }
         with patch(

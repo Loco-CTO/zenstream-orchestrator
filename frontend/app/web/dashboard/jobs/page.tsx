@@ -286,7 +286,8 @@ export default function JobsPage() {
 											Preserve cached artwork and portraits
 										</span>
 										<span className="mt-1 block text-xs leading-5 console-muted">
-											Reuse valid files during metadata refreshes; missing or changed assets are still downloaded.
+											Reuse valid files during metadata refreshes; missing or changed
+											assets are still downloaded.
 										</span>
 									</span>
 									<input
@@ -302,7 +303,7 @@ export default function JobsPage() {
 																	...(job.config || {}),
 																	preserveCachedAssets: event.target.checked,
 																},
-																}
+															}
 														: job,
 												),
 											)

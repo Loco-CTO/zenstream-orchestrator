@@ -537,13 +537,17 @@ class TMDBClient(ProviderClient):
                 params={
                     "language": language,
                     "include_image_language": image_language,
-                    **({"include_video_language": video_language} if kind == "tv" else {}),
+                    **(
+                        {"include_video_language": video_language}
+                        if kind == "tv"
+                        else {}
+                    ),
                     "append_to_response": "images,external_ids,credits,videos,translations",
                 },
             )
             if kind == "movie" and len(languages) > 1:
                 primary_results = list(
-                    ((payload.get("videos") or {}).get("results") or [])
+                    (payload.get("videos") or {}).get("results") or []
                 )
                 requested_languages = []
                 seen_languages = {language}

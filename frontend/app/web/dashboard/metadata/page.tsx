@@ -226,7 +226,7 @@ export default function MetadataPage() {
 							className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm font-semibold"
 						>
 							<IconRefresh size={16} />
-								Refresh metadata
+							Refresh metadata
 						</button>
 					</div>
 				</section>

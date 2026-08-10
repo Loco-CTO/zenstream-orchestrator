@@ -190,7 +190,7 @@ class CatalogReadModel:
             "title": title,
             "images": {},
             "_imageLanguageSchema": IMAGE_LANGUAGE_SCHEMA,
-            "_catalogItemProjectionSchema": 1,
+            "_catalogItemProjectionSchema": 2,
         }
 
     def _projection_values(self, entities, locales: list[str], progress=None):

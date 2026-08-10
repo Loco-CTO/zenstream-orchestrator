@@ -2,8 +2,8 @@ name: Ruff auto-fix
 
 "on":
   push:
-    branches:
-      - "**"
+    branches-ignore:
+      - main
     paths:
       - "**/*.py"
       - "**/*.pyi"
@@ -11,8 +11,6 @@ name: Ruff auto-fix
       - "ruff.toml"
       - ".ruff.toml"
       - ".github/workflows/ruff.yml"
-  workflow_dispatch:
-
 permissions:
   contents: write
 

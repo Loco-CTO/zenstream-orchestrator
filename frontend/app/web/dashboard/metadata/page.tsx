@@ -55,15 +55,11 @@ export default function MetadataPage() {
 
 	async function saveLanguages() {
 		if (!session) return;
-		const response = await adminFetch(
-			"/api/admin/metadata/languages",
-			session,
-			{
-				method: "PUT",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ locales }),
-			},
-		);
+		const response = await adminFetch("/api/admin/metadata/languages", session, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ locales }),
+		});
 		const data = await response.json().catch(() => null);
 		setMessage(
 			response.ok
@@ -165,9 +161,9 @@ export default function MetadataPage() {
 							<p className="console-kicker">Scan-time translations</p>
 							<h2 className="mt-2 text-xl font-bold">Metadata languages</h2>
 							<p className="mt-3 max-w-3xl text-sm leading-6 console-muted">
-								Choose the languages the Orchestrator should collect during
-								library scans. Saving queues a backfill for existing indexed
-								items; unavailable provider translations are skipped.
+								Choose the languages the Orchestrator should collect during library
+								scans. Saving queues a backfill for existing indexed items; unavailable
+								provider translations are skipped.
 							</p>
 						</div>
 						<IconMusic className="text-[#aeb9ff]" size={22} />
@@ -183,9 +179,7 @@ export default function MetadataPage() {
 									type="button"
 									disabled={locales.length === 1}
 									onClick={() =>
-										setLocales((current) =>
-											current.filter((value) => value !== locale),
-										)
+										setLocales((current) => current.filter((value) => value !== locale))
 									}
 									className="console-muted hover:text-white disabled:opacity-30"
 									aria-label={`Remove ${locale}`}
@@ -344,9 +338,9 @@ export default function MetadataPage() {
 								MusicBrainz and Cover Art Archive
 							</h2>
 							<p className="mt-2 text-sm leading-6 console-muted">
-								MusicBrainz does not require an API key. ZenStream identifies
-								requests with its application user agent and uses local artwork
-								before querying the Cover Art Archive.
+								MusicBrainz does not require an API key. ZenStream identifies requests
+								with its application user agent and uses local artwork before querying
+								the Cover Art Archive.
 							</p>
 							<p className="mt-4 text-xs console-muted">
 								Metadata provided by{" "}

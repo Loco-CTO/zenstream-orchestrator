@@ -67,7 +67,11 @@ type IntroOutroInspection = {
 	state: string;
 	error?: string | null;
 	updatedAt?: string | null;
-	segments: { type: "intro" | "outro"; startSeconds: number; endSeconds: number }[];
+	segments: {
+		type: "intro" | "outro";
+		startSeconds: number;
+		endSeconds: number;
+	}[];
 	fingerprints: {
 		type: "intro" | "outro";
 		startSeconds: number;
@@ -79,7 +83,12 @@ type IntroOutroInspection = {
 };
 
 type MetadataPerson = { name?: string; role?: string };
-type MetadataTrailer = { url?: string; name?: string; key?: string; language?: string };
+type MetadataTrailer = {
+	url?: string;
+	name?: string;
+	key?: string;
+	language?: string;
+};
 type MetadataTrack = { title?: string };
 type Metadata = {
 	title?: string;
@@ -234,11 +243,12 @@ function LibraryViewPage() {
 						: storedLocale && configured.includes(storedLocale)
 							? storedLocale
 							: "";
-				setLocale((currentLocale) =>
-					preferredLocale ||
-					(currentLocale && configured.includes(currentLocale)
-						? currentLocale
-						: configured[0] || ""),
+				setLocale(
+					(currentLocale) =>
+						preferredLocale ||
+						(currentLocale && configured.includes(currentLocale)
+							? currentLocale
+							: configured[0] || ""),
 				);
 			})
 			.catch((caught) => {
@@ -273,8 +283,7 @@ function LibraryViewPage() {
 	}, [libraryId]);
 
 	useEffect(() => {
-		if (session && locale && navigation.length === 0)
-			void load(session, null, 1);
+		if (session && locale && navigation.length === 0) void load(session, null, 1);
 	}, [locale, load, navigation.length, session]);
 
 	useEffect(() => {
@@ -341,9 +350,7 @@ function LibraryViewPage() {
 			next.delete("entityId");
 			next.delete("entityPath");
 		}
-		router.replace(
-			`${pathname}${next.toString() ? `?${next.toString()}` : ""}`,
-		);
+		router.replace(`${pathname}${next.toString() ? `?${next.toString()}` : ""}`);
 	}
 
 	const pageCount = Math.max(1, Math.ceil(total / pageSize));
@@ -377,8 +384,7 @@ function LibraryViewPage() {
 								</button>
 							</div>
 							<p className="mt-2 text-sm material-muted">
-								{total.toLocaleString()} {searchQuery ? "matching" : "indexed"}{" "}
-								entries
+								{total.toLocaleString()} {searchQuery ? "matching" : "indexed"} entries
 							</p>
 						</div>
 						<div className="dashboard-toolbar flex items-center gap-3">
@@ -425,8 +431,8 @@ function LibraryViewPage() {
 								</option>
 								{locales.map((value) => (
 									<option key={value} value={value}>
-										{languageOptions.find((option) => option.value === value)
-											?.label || value}
+										{languageOptions.find((option) => option.value === value)?.label ||
+											value}
 									</option>
 								))}
 							</select>
@@ -467,8 +473,7 @@ function LibraryViewPage() {
 							<div
 								className="mt-7 grid w-full gap-4"
 								style={{
-									gridTemplateColumns:
-										"repeat(auto-fill, minmax(150px, 220px))",
+									gridTemplateColumns: "repeat(auto-fill, minmax(150px, 220px))",
 								}}
 							>
 								{items.map((item) => (
@@ -482,9 +487,7 @@ function LibraryViewPage() {
 								))}
 								{!items.length && (
 									<div className="dashboard-card col-span-full p-8 text-sm material-muted">
-										{searchQuery
-											? "No matching entries."
-											: "No entries on this page."}
+										{searchQuery ? "No matching entries." : "No entries on this page."}
 									</div>
 								)}
 							</div>
@@ -631,9 +634,7 @@ function EntityPoster({
 	landscape?: boolean;
 }) {
 	const [url, setUrl] = useState<string | null>(null);
-	const [state, setState] = useState<"loading" | "ready" | "missing">(
-		"loading",
-	);
+	const [state, setState] = useState<"loading" | "ready" | "missing">("loading");
 	useEffect(() => {
 		if (!session) return;
 		// Do not display the previous locale's artwork while the new request is pending.
@@ -788,13 +789,11 @@ function EntityDetailView({
 				session,
 				{ method: "POST" },
 			);
-			const payload = (await response.json().catch(() => null)) as
-				| {
-						state?: string;
-						failures?: { provider?: string }[];
-						detail?: string | { message?: string };
-				  }
-				| null;
+			const payload = (await response.json().catch(() => null)) as {
+				state?: string;
+				failures?: { provider?: string }[];
+				detail?: string | { message?: string };
+			} | null;
 			if (!response.ok) {
 				const message =
 					typeof payload?.detail === "string"
@@ -853,9 +852,7 @@ function EntityDetailView({
 								size={16}
 								className={refreshingMetadata ? "animate-spin" : ""}
 							/>
-							{refreshingMetadata
-								? "Refreshing…"
-								: "Refresh metadata & artwork"}
+							{refreshingMetadata ? "Refreshing…" : "Refresh metadata & artwork"}
 						</button>
 					)}
 					<button
@@ -924,40 +921,37 @@ function EntityDetailView({
 										</p>
 									</div>
 								)}
-							<div
-								className={
-									episodeView
-										? "grid gap-3 sm:grid-cols-2"
-										: "grid justify-start gap-4"
-								}
-								style={
-									episodeView
-										? undefined
-										: {
-												gridTemplateColumns:
-													"repeat(auto-fill, minmax(180px, 220px))",
-											}
-								}
-							>
-								{children.map((child) =>
-									episodeView ? (
-										<EpisodeCard
-											key={child.id}
-											item={child}
-											session={session}
-											locale={locale}
-											onOpen={() => onOpen(child)}
-										/>
-									) : (
-										<EntityCard
-											key={child.id}
-											item={child}
-											session={session}
-											locale={locale}
-											onOpen={() => onOpen(child)}
-										/>
-									),
-								)}
+								<div
+									className={
+										episodeView ? "grid gap-3 sm:grid-cols-2" : "grid justify-start gap-4"
+									}
+									style={
+										episodeView
+											? undefined
+											: {
+													gridTemplateColumns: "repeat(auto-fill, minmax(180px, 220px))",
+												}
+									}
+								>
+									{children.map((child) =>
+										episodeView ? (
+											<EpisodeCard
+												key={child.id}
+												item={child}
+												session={session}
+												locale={locale}
+												onOpen={() => onOpen(child)}
+											/>
+										) : (
+											<EntityCard
+												key={child.id}
+												item={child}
+												session={session}
+												locale={locale}
+												onOpen={() => onOpen(child)}
+											/>
+										),
+									)}
 								</div>
 							</>
 						) : (
@@ -996,11 +990,15 @@ function IntroOutroInspectionPanel({
 	entityId: string;
 	session: Session;
 }) {
-	const [inspection, setInspection] = useState<IntroOutroInspection | null>(null);
+	const [inspection, setInspection] = useState<IntroOutroInspection | null>(
+		null,
+	);
 	const [error, setError] = useState("");
 	const [audioUrl, setAudioUrl] = useState("");
 	const [audioKind, setAudioKind] = useState<"intro" | "outro" | null>(null);
-	const [loadingAudio, setLoadingAudio] = useState<"intro" | "outro" | null>(null);
+	const [loadingAudio, setLoadingAudio] = useState<"intro" | "outro" | null>(
+		null,
+	);
 	const audioUrlRef = useRef("");
 	useEffect(() => {
 		const controller = new AbortController();
@@ -1010,12 +1008,17 @@ function IntroOutroInspectionPanel({
 			signal: controller.signal,
 		})
 			.then(async (response) => {
-				if (!response.ok) throw new Error("Intro and outro inspection could not be loaded.");
+				if (!response.ok)
+					throw new Error("Intro and outro inspection could not be loaded.");
 				setInspection((await response.json()) as IntroOutroInspection);
 			})
 			.catch((caught) => {
 				if ((caught as Error).name !== "AbortError")
-					setError(caught instanceof Error ? caught.message : "Intro and outro inspection could not be loaded.");
+					setError(
+						caught instanceof Error
+							? caught.message
+							: "Intro and outro inspection could not be loaded.",
+					);
 			});
 		return () => controller.abort();
 	}, [entityId, session]);
@@ -1033,26 +1036,37 @@ function IntroOutroInspectionPanel({
 				`/api/admin/library-items/${entityId}/intro-outro/${kind}.mp3`,
 				session,
 			);
-			if (!response.ok) throw new Error("The detected audio clip could not be loaded.");
+			if (!response.ok)
+				throw new Error("The detected audio clip could not be loaded.");
 			const nextUrl = URL.createObjectURL(await response.blob());
 			if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
 			audioUrlRef.current = nextUrl;
 			setAudioUrl(nextUrl);
 			setAudioKind(kind);
 		} catch (caught) {
-			setError(caught instanceof Error ? caught.message : "The detected audio clip could not be loaded.");
+			setError(
+				caught instanceof Error
+					? caught.message
+					: "The detected audio clip could not be loaded.",
+			);
 		} finally {
 			setLoadingAudio(null);
 		}
 	};
-	const state = inspection?.state === "scanned" ? "Ready" : inspection?.state === "failed" ? "Failed" : "Pending";
+	const state =
+		inspection?.state === "scanned"
+			? "Ready"
+			: inspection?.state === "failed"
+				? "Failed"
+				: "Pending";
 	return (
 		<section className="dashboard-card space-y-4 p-5">
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<div>
 					<p className="console-kicker">Intro & outro inspection</p>
 					<p className="mt-1 text-sm material-muted">
-						Detected ranges and a downsampled Chromaprint bit-density preview. This is not an audio waveform.
+						Detected ranges and a downsampled Chromaprint bit-density preview. This is
+						not an audio waveform.
 					</p>
 				</div>
 				<span className="rounded-full border border-[#aeb9ff]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#aeb9ff]">
@@ -1063,7 +1077,9 @@ function IntroOutroInspectionPanel({
 			{inspection ? (
 				<div className="grid gap-4 lg:grid-cols-2">
 					{(["intro", "outro"] as const).map((kind) => {
-						const fingerprint = inspection.fingerprints.find((item) => item.type === kind);
+						const fingerprint = inspection.fingerprints.find(
+							(item) => item.type === kind,
+						);
 						const segment = inspection.segments.find((item) => item.type === kind);
 						return (
 							<FingerprintPreview
@@ -1083,7 +1099,9 @@ function IntroOutroInspectionPanel({
 			) : null}
 			{audioUrl && audioKind && (
 				<div className="rounded-lg border border-white/10 bg-black/20 p-3">
-					<p className="mb-2 text-xs font-medium capitalize text-white/80">{audioKind} audio preview (first 30 seconds)</p>
+					<p className="mb-2 text-xs font-medium capitalize text-white/80">
+						{audioKind} audio preview (first 30 seconds)
+					</p>
 					<audio controls autoPlay src={audioUrl} className="w-full" />
 				</div>
 			)}
@@ -1108,39 +1126,68 @@ function FingerprintPreview({
 }) {
 	const values = fingerprint?.values || [];
 	const points = values
-		.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 320},${64 - (value / 32) * 56 - 4}`)
+		.map(
+			(value, index) =>
+				`${(index / Math.max(1, values.length - 1)) * 320},${64 - (value / 32) * 56 - 4}`,
+		)
 		.join(" ");
 	const start = segment?.startSeconds ?? fingerprint?.startSeconds ?? 0;
 	const end = segment?.endSeconds ?? fingerprint?.endSeconds ?? 0;
-	const left = durationSeconds > 0 ? Math.min(100, (start / durationSeconds) * 100) : 0;
-	const width = durationSeconds > 0 ? Math.max(1, Math.min(100 - left, ((end - start) / durationSeconds) * 100)) : 0;
+	const left =
+		durationSeconds > 0 ? Math.min(100, (start / durationSeconds) * 100) : 0;
+	const width =
+		durationSeconds > 0
+			? Math.max(1, Math.min(100 - left, ((end - start) / durationSeconds) * 100))
+			: 0;
 	return (
 		<div className="rounded-xl border border-white/10 bg-black/15 p-4">
 			<div className="flex items-center justify-between gap-3">
 				<p className="text-sm font-semibold capitalize">{kind}</p>
 				{segment ? (
-					<button onClick={onListen} disabled={loading} className="material-text-button inline-flex items-center gap-1 disabled:opacity-50">
+					<button
+						onClick={onListen}
+						disabled={loading}
+						className="material-text-button inline-flex items-center gap-1 disabled:opacity-50"
+					>
 						<IconPlayerPlay size={14} />
 						{loading ? "Preparing…" : "Listen"}
 					</button>
 				) : null}
 			</div>
 			<p className="mt-1 text-xs material-muted">
-				{fingerprint?.pointCount ? `${fingerprint.pointCount.toLocaleString()} fingerprint points` : "No fingerprint data yet"}
+				{fingerprint?.pointCount
+					? `${fingerprint.pointCount.toLocaleString()} fingerprint points`
+					: "No fingerprint data yet"}
 			</p>
 			{values.length > 1 ? (
-				<svg viewBox="0 0 320 64" role="img" aria-label={`${kind} Chromaprint bit-density preview`} className="mt-3 h-20 w-full rounded bg-black/35">
+				<svg
+					viewBox="0 0 320 64"
+					role="img"
+					aria-label={`${kind} Chromaprint bit-density preview`}
+					className="mt-3 h-20 w-full rounded bg-black/35"
+				>
 					<polyline fill="none" stroke="#aeb9ff" strokeWidth="2" points={points} />
 				</svg>
 			) : (
-				<div className="mt-3 flex h-20 items-center justify-center rounded bg-black/35 text-xs material-muted">Waiting for audio fingerprinting</div>
+				<div className="mt-3 flex h-20 items-center justify-center rounded bg-black/35 text-xs material-muted">
+					Waiting for audio fingerprinting
+				</div>
 			)}
 			<div className="mt-3">
 				<div className="h-1.5 overflow-hidden rounded-full bg-white/10">
-					<div className={segment ? "h-full rounded-full bg-[#aeb9ff]" : "h-full rounded-full bg-white/20"} style={{ marginLeft: `${left}%`, width: `${width}%` }} />
+					<div
+						className={
+							segment
+								? "h-full rounded-full bg-[#aeb9ff]"
+								: "h-full rounded-full bg-white/20"
+						}
+						style={{ marginLeft: `${left}%`, width: `${width}%` }}
+					/>
 				</div>
 				<p className="mt-2 text-xs material-muted">
-					{segment ? `Detected ${formatDuration(segment.startSeconds)}–${formatDuration(segment.endSeconds)}` : `Fingerprint window ${formatDuration(start)}–${formatDuration(end)}`}
+					{segment
+						? `Detected ${formatDuration(segment.startSeconds)}–${formatDuration(segment.endSeconds)}`
+						: `Fingerprint window ${formatDuration(start)}–${formatDuration(end)}`}
 				</p>
 			</div>
 		</div>
@@ -1164,7 +1211,9 @@ function TrickplayAssetPanel({
 	const [selectedSheet, setSelectedSheet] = useState(0);
 	const [url, setUrl] = useState("");
 	const [loadError, setLoadError] = useState("");
-	const sheet = asset.sheets.find((entry) => entry.index === selectedSheet) || asset.sheets[0];
+	const sheet =
+		asset.sheets.find((entry) => entry.index === selectedSheet) ||
+		asset.sheets[0];
 	useEffect(() => {
 		if (asset.state !== "ready" || !asset.generation || !sheet) {
 			setUrl("");
@@ -1179,7 +1228,8 @@ function TrickplayAssetPanel({
 			{ signal: controller.signal },
 		)
 			.then(async (response) => {
-				if (!response.ok) throw new Error("The trickplay sheet could not be loaded.");
+				if (!response.ok)
+					throw new Error("The trickplay sheet could not be loaded.");
 				objectUrl = URL.createObjectURL(await response.blob());
 				setUrl(objectUrl);
 			})
@@ -1192,18 +1242,27 @@ function TrickplayAssetPanel({
 			if (objectUrl) URL.revokeObjectURL(objectUrl);
 		};
 	}, [asset.generation, asset.state, entityId, session, sheet]);
-	const status = asset.state === "ready" ? "Ready" : asset.state === "failed" ? "Failed" : "Pending";
+	const status =
+		asset.state === "ready"
+			? "Ready"
+			: asset.state === "failed"
+				? "Failed"
+				: "Pending";
 	return (
 		<section className="space-y-3">
 			<div className="flex items-center justify-between gap-3">
-				<p className="text-xs uppercase tracking-[.18em] material-muted">Trickplay assets</p>
+				<p className="text-xs uppercase tracking-[.18em] material-muted">
+					Trickplay assets
+				</p>
 				<span className="rounded-full border border-[#aeb9ff]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#aeb9ff]">
 					{status}
 				</span>
 			</div>
 			<div className="material-surface overflow-hidden rounded-xl border border-white/10">
 				<div className="grid grid-cols-3 gap-3 border-b border-white/10 px-3 py-3 text-xs material-muted">
-					<span>{asset.frameWidth} × {asset.frameHeight} px</span>
+					<span>
+						{asset.frameWidth} × {asset.frameHeight} px
+					</span>
 					<span>{asset.intervalSeconds}s interval</span>
 					<span>{asset.frameCount} frames</span>
 				</div>
@@ -1226,7 +1285,11 @@ function TrickplayAssetPanel({
 							</label>
 						)}
 						{url ? (
-							<img src={url} alt={`Trickplay sprite sheet ${sheet.index + 1}`} className="max-h-[360px] w-full rounded-lg bg-black object-contain" />
+							<img
+								src={url}
+								alt={`Trickplay sprite sheet ${sheet.index + 1}`}
+								className="max-h-[360px] w-full rounded-lg bg-black object-contain"
+							/>
 						) : (
 							<div className="flex aspect-video items-center justify-center rounded-lg bg-black text-xs material-muted">
 								{loadError || "Loading sprite sheet…"}
@@ -1235,7 +1298,8 @@ function TrickplayAssetPanel({
 					</div>
 				) : (
 					<p className="px-3 py-4 text-xs material-muted">
-						{asset.error || "No ready sprite sheets yet. The scheduled trickplay task will generate them."}
+						{asset.error ||
+							"No ready sprite sheets yet. The scheduled trickplay task will generate them."}
 					</p>
 				)}
 			</div>
@@ -1256,9 +1320,7 @@ function ArtworkGallery({
 }) {
 	return (
 		<div className="space-y-3">
-			<p className="text-xs uppercase tracking-[.18em] material-muted">
-				Artwork
-			</p>
+			<p className="text-xs uppercase tracking-[.18em] material-muted">Artwork</p>
 			<div className="grid grid-cols-2 gap-3">
 				{artworkTypes.map((imageType) => (
 					<div
@@ -1304,8 +1366,8 @@ function MetadataSummary({ detail }: { detail: Item }) {
 					"No description cached for this language."}
 			</p>
 			<p>
-				<span className="material-muted">Status:</span> {metadata.status || "—"}{" "}
-				· <span className="material-muted">Date:</span>{" "}
+				<span className="material-muted">Status:</span> {metadata.status || "—"} ·{" "}
+				<span className="material-muted">Date:</span>{" "}
 				{metadata.date || metadata.releaseDate || "—"}
 			</p>
 			<p>
@@ -1317,8 +1379,7 @@ function MetadataSummary({ detail }: { detail: Item }) {
 				{list(metadata.tags || metadata.genres)}
 			</p>
 			<p>
-				<span className="material-muted">Studios:</span>{" "}
-				{list(metadata.studios)}
+				<span className="material-muted">Studios:</span> {list(metadata.studios)}
 			</p>
 			{metadata.trailers?.length ? (
 				<p>

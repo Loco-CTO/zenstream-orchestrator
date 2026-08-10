@@ -3,7 +3,11 @@
 import { FormEvent, useEffect, useState } from "react";
 import { IconPhoto, IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import { PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
+import {
+	PageHeader,
+	StatusMessage,
+	SurfaceCard,
+} from "../components/dashboard-surface";
 
 type PlaybackSettings = {
 	maxTranscodes: number;
@@ -21,7 +25,11 @@ const DEFAULTS: PlaybackSettings = {
 	trickplayWorkers: 1,
 };
 
-function validTrickplaySettings(width: number, intervalSeconds: number, workers: number) {
+function validTrickplaySettings(
+	width: number,
+	intervalSeconds: number,
+	workers: number,
+) {
 	return (
 		Number.isInteger(width) &&
 		width >= 160 &&
@@ -90,8 +98,16 @@ export default function PlaybackPage() {
 	async function save(event: FormEvent) {
 		event.preventDefault();
 		if (!session) return;
-		if (!validTrickplaySettings(settings.trickplayFrameWidth, settings.trickplayIntervalSeconds, settings.trickplayWorkers)) {
-			setMessage("Choose a frame width from 160 to 640 in 16 px steps, an interval from 1 to 60 seconds, and 1 to 64 workers.");
+		if (
+			!validTrickplaySettings(
+				settings.trickplayFrameWidth,
+				settings.trickplayIntervalSeconds,
+				settings.trickplayWorkers,
+			)
+		) {
+			setMessage(
+				"Choose a frame width from 160 to 640 in 16 px steps, an interval from 1 to 60 seconds, and 1 to 64 workers.",
+			);
 			return;
 		}
 		setSaving(true);
@@ -128,7 +144,8 @@ export default function PlaybackPage() {
 						? Number(data.trickplayIntervalSeconds)
 						: current.trickplayIntervalSeconds,
 				trickplayWorkers:
-					Number.isFinite(Number(data?.trickplayWorkers)) && Number(data.trickplayWorkers) >= 1
+					Number.isFinite(Number(data?.trickplayWorkers)) &&
+					Number(data.trickplayWorkers) >= 1
 						? Number(data.trickplayWorkers)
 						: current.trickplayWorkers,
 			}));
@@ -150,14 +167,14 @@ export default function PlaybackPage() {
 				title="Playback"
 				description="Set the server capacity available to HLS transcodes and timeline preview extraction."
 				actions={
-				<button
-					onClick={() => session && void load(session)}
-					className="material-icon-button"
-					aria-label="Refresh playback settings"
-					title="Refresh playback settings"
-				>
-					<IconRefresh size={17} />
-				</button>
+					<button
+						onClick={() => session && void load(session)}
+						className="material-icon-button"
+						aria-label="Refresh playback settings"
+						title="Refresh playback settings"
+					>
+						<IconRefresh size={17} />
+					</button>
 				}
 			/>
 			{message && <StatusMessage>{message}</StatusMessage>}
@@ -166,9 +183,9 @@ export default function PlaybackPage() {
 					<div>
 						<h2 className="text-xl font-bold">Transcoding limits</h2>
 						<p className="mt-3 text-sm leading-6 console-muted">
-							Limit concurrent FFmpeg sessions to keep the server responsive.
-							Enter 0 for unlimited. Direct play and remux sessions do not count
-							against these limits.
+							Limit concurrent FFmpeg sessions to keep the server responsive. Enter 0
+							for unlimited. Direct play and remux sessions do not count against these
+							limits.
 						</p>
 					</div>
 					<IconPlayerPlay className="text-[#aeb9ff]" size={22} />
@@ -177,7 +194,8 @@ export default function PlaybackPage() {
 					<label className="block">
 						<span className="text-sm font-semibold">Maximum global transcodes</span>
 						<span className="mt-1 block text-xs console-muted">
-							Maximum number of active FFmpeg playback sessions across all users; 0 is unlimited.
+							Maximum number of active FFmpeg playback sessions across all users; 0 is
+							unlimited.
 						</span>
 						<input
 							type="number"
@@ -217,7 +235,8 @@ export default function PlaybackPage() {
 					<label className="block">
 						<span className="text-sm font-semibold">Maximum transcodes per user</span>
 						<span className="mt-1 block text-xs console-muted">
-							Prevents one account from using all global transcoding capacity; 0 is unlimited.
+							Prevents one account from using all global transcoding capacity; 0 is
+							unlimited.
 						</span>
 						<input
 							type="number"
@@ -250,9 +269,8 @@ export default function PlaybackPage() {
 					<div>
 						<h2 className="text-xl font-bold">Timeline previews</h2>
 						<p className="mt-3 text-sm leading-6 console-muted">
-							Choose the size of each extracted timeline-preview frame. Frames
-							are always 16:9; narrower source media is fitted fully inside a
-							black frame.
+							Choose the size of each extracted timeline-preview frame. Frames are
+							always 16:9; narrower source media is fitted fully inside a black frame.
 						</p>
 					</div>
 					<IconPhoto className="text-[#aeb9ff]" size={22} />
@@ -261,7 +279,8 @@ export default function PlaybackPage() {
 					<label className="block">
 						<span className="text-sm font-semibold">Frame width</span>
 						<span className="mt-1 block text-xs console-muted">
-							Frame height is locked to 16:9: {trickplayFrameWidth} × {trickplayFrameHeight} px.
+							Frame height is locked to 16:9: {trickplayFrameWidth} ×{" "}
+							{trickplayFrameHeight} px.
 						</span>
 						<input
 							type="number"
@@ -301,7 +320,8 @@ export default function PlaybackPage() {
 					<label className="block">
 						<span className="text-sm font-semibold">Frame interval</span>
 						<span className="mt-1 block text-xs console-muted">
-							Seconds between extracted frames. Shorter intervals make seeking previews more precise and use more storage.
+							Seconds between extracted frames. Shorter intervals make seeking previews
+							more precise and use more storage.
 						</span>
 						<input
 							type="number"
@@ -321,11 +341,7 @@ export default function PlaybackPage() {
 					<div className="flex items-center gap-3">
 						<button
 							type="submit"
-							disabled={
-								loading ||
-								saving ||
-								!trickplaySettingsAreValid
-							}
+							disabled={loading || saving || !trickplaySettingsAreValid}
 							className="console-button rounded-xl px-4 py-3 text-sm font-semibold disabled:opacity-40"
 						>
 							{saving ? "Saving…" : "Save timeline preview settings"}

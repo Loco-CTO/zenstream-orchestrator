@@ -19,10 +19,7 @@ export default function AdminLogin() {
 		});
 		const token = response.headers.get("TOKEN");
 		if (response.ok && token) {
-			localStorage.setItem(
-				"zenstream.admin",
-				JSON.stringify({ username, token }),
-			);
+			localStorage.setItem("zenstream.admin", JSON.stringify({ username, token }));
 			router.push("/web/dashboard");
 		} else setError("Invalid administrator credentials.");
 		setBusy(false);
@@ -42,9 +39,7 @@ export default function AdminLogin() {
 					/>
 					<p className="console-wordmark text-xs font-black">ZENSTREAM</p>
 					<h1 className="mt-3 text-3xl font-black">Orchestrator console</h1>
-					<p className="mt-2 text-sm console-muted">
-						Administrator access only.
-					</p>
+					<p className="mt-2 text-sm console-muted">Administrator access only.</p>
 				</div>
 				<div className="space-y-4">
 					<input

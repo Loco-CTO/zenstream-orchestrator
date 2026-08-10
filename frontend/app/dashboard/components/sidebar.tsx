@@ -29,14 +29,7 @@ type TabParams = {
 function Logo({ icon }: { icon: string }) {
 	return (
 		<div className="items-center bg-opacity-0 p-3 order-first m-1">
-			<Image
-				src={icon}
-				alt="icon"
-				height={48}
-				width={48}
-				unoptimized
-				priority
-			/>
+			<Image src={icon} alt="icon" height={48} width={48} unoptimized priority />
 		</div>
 	);
 }

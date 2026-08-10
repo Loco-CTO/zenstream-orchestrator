@@ -34,12 +34,16 @@ const links = [
 ] as const;
 
 function isCurrentPath(pathname: string | null, href: string) {
-	return pathname === href ||
-		(href !== "/web/dashboard" && pathname?.startsWith(`${href}/`));
+	return (
+		pathname === href ||
+		(href !== "/web/dashboard" && pathname?.startsWith(`${href}/`))
+	);
 }
 
 function currentLabel(pathname: string | null) {
-	return links.find(([, href]) => isCurrentPath(pathname, href))?.[0] ?? "Dashboard";
+	return (
+		links.find(([, href]) => isCurrentPath(pathname, href))?.[0] ?? "Dashboard"
+	);
 }
 
 export default function AdminShell({
@@ -166,7 +170,11 @@ export default function AdminShell({
 					<p className="console-wordmark text-[10px] font-black">ZENSTREAM</p>
 					<p className="mt-0.5 text-xs font-semibold">{pageLabel}</p>
 				</div>
-				<button onClick={logout} aria-label="Sign out" className="material-icon-button">
+				<button
+					onClick={logout}
+					aria-label="Sign out"
+					className="material-icon-button"
+				>
 					<IconLogout size={19} />
 				</button>
 			</header>
@@ -211,7 +219,10 @@ export default function AdminShell({
 							))}
 						</nav>
 						<div className="mt-auto border-t console-divider p-3">
-							<button onClick={logout} className="dashboard-drawer-link w-full console-muted">
+							<button
+								onClick={logout}
+								className="dashboard-drawer-link w-full console-muted"
+							>
 								<IconLogout size={20} stroke={1.8} />
 								<span>Sign out</span>
 							</button>
@@ -229,7 +240,11 @@ export default function AdminShell({
 
 function Brand({ compact = false }: { compact?: boolean }) {
 	return (
-		<Link href="/web/dashboard" aria-label="ZenStream dashboard" className="flex items-center gap-3">
+		<Link
+			href="/web/dashboard"
+			aria-label="ZenStream dashboard"
+			className="flex items-center gap-3"
+		>
 			<img
 				src="/icons/icon.png"
 				alt=""

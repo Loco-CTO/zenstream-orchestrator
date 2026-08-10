@@ -173,7 +173,9 @@
 		border: 1px solid var(--md-sys-color-outline);
 		background: var(--md-sys-color-surface-container-high);
 		color: var(--md-sys-color-on-surface);
-		transition: border-color 120ms ease, box-shadow 120ms ease;
+		transition:
+			border-color 120ms ease,
+			box-shadow 120ms ease;
 	}
 
 	.console-input:focus,
@@ -186,7 +188,9 @@
 	.console-button {
 		background: var(--md-sys-color-primary);
 		color: var(--md-sys-color-on-primary);
-		transition: background 120ms ease, box-shadow 120ms ease;
+		transition:
+			background 120ms ease,
+			box-shadow 120ms ease;
 	}
 
 	.console-button:hover:not(:disabled) {
@@ -203,7 +207,9 @@
 		border: 1px solid var(--md-sys-color-outline-variant);
 		border-radius: 0.75rem;
 		color: var(--md-sys-color-on-surface-variant);
-		transition: background 120ms ease, color 120ms ease;
+		transition:
+			background 120ms ease,
+			color 120ms ease;
 	}
 
 	.material-icon-button:hover {
@@ -319,7 +325,9 @@
 		font-weight: 550;
 		opacity: 0;
 		box-shadow: 0 4px 12px rgb(0 0 0 / 0.26);
-		transition: opacity 120ms ease, transform 120ms ease;
+		transition:
+			opacity 120ms ease,
+			transform 120ms ease;
 	}
 
 	.admin-nav-item:hover .admin-tooltip,
@@ -390,7 +398,9 @@
 	.dashboard-danger-button {
 		background: var(--md-sys-color-error);
 		color: var(--md-sys-color-on-error);
-		transition: filter 120ms ease, box-shadow 120ms ease;
+		transition:
+			filter 120ms ease,
+			box-shadow 120ms ease;
 	}
 
 	.dashboard-danger-button:hover:not(:disabled) {

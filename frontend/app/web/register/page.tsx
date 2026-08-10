@@ -10,9 +10,7 @@ export default function RegisterPage() {
 	const [message, setMessage] = useState("");
 	useEffect(
 		() =>
-			setInvite(
-				new URLSearchParams(window.location.search).get("invite") || "",
-			),
+			setInvite(new URLSearchParams(window.location.search).get("invite") || ""),
 		[],
 	);
 	async function submit(event: FormEvent) {

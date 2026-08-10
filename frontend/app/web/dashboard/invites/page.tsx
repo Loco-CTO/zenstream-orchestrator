@@ -1,7 +1,11 @@
 "use client";
 import { useState } from "react";
 import { adminFetch, readSession } from "../components/admin-client";
-import { PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
+import {
+	PageHeader,
+	StatusMessage,
+	SurfaceCard,
+} from "../components/dashboard-surface";
 export default function InvitesPage() {
 	const [invite, setInvite] = useState("");
 	const [message, setMessage] = useState("");

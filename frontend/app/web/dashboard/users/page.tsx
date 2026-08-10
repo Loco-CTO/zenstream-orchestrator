@@ -9,7 +9,13 @@ import {
 	IconTrash,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import { ConfirmDialog, EmptyState, PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
+import {
+	ConfirmDialog,
+	EmptyState,
+	PageHeader,
+	StatusMessage,
+	SurfaceCard,
+} from "../components/dashboard-surface";
 
 type User = {
 	id: string;
@@ -25,7 +31,9 @@ export default function UsersPage() {
 	const [libraries, setLibraries] = useState<Library[]>([]);
 	const [query, setQuery] = useState("");
 	const [message, setMessage] = useState("");
-	const [accountDialog, setAccountDialog] = useState<"create" | "reset" | null>(null);
+	const [accountDialog, setAccountDialog] = useState<"create" | "reset" | null>(
+		null,
+	);
 	const [targetUser, setTargetUser] = useState<User | null>(null);
 	const [draftUsername, setDraftUsername] = useState("");
 	const [draftPassword, setDraftPassword] = useState("");
@@ -73,28 +81,34 @@ export default function UsersPage() {
 		event.preventDefault();
 		if (!session || !accountDialog) return;
 		setAccountBusy(true);
-		const response = accountDialog === "create"
-			? await adminFetch("/api/admin/users", session, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ username: draftUsername.trim(), password: draftPassword }),
-				})
-			: await adminFetch(
-					`/api/admin/users/${encodeURIComponent(targetUser?.id || "")}/reset-password`,
-					session,
-					{
+		const response =
+			accountDialog === "create"
+				? await adminFetch("/api/admin/users", session, {
 						method: "POST",
 						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ password: draftPassword }),
-					},
-				);
+						body: JSON.stringify({
+							username: draftUsername.trim(),
+							password: draftPassword,
+						}),
+					})
+				: await adminFetch(
+						`/api/admin/users/${encodeURIComponent(targetUser?.id || "")}/reset-password`,
+						session,
+						{
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({ password: draftPassword }),
+						},
+					);
 		setMessage(
 			response.ok
 				? accountDialog === "create"
 					? "User created with no library access."
 					: "Password reset and existing sessions revoked."
 				: (await response.json().catch(() => null))?.detail ||
-						(accountDialog === "create" ? "Could not create user." : "Could not reset password."),
+						(accountDialog === "create"
+							? "Could not create user."
+							: "Could not reset password."),
 		);
 		if (response.ok) {
 			setAccountDialog(null);
@@ -174,14 +188,76 @@ export default function UsersPage() {
 			/>
 			{accountDialog && (
 				<div className="dashboard-dialog-layer" role="presentation">
-					<button type="button" className="dashboard-dialog-backdrop" aria-label="Close dialog" disabled={accountBusy} onClick={() => setAccountDialog(null)} />
-					<form onSubmit={submitAccount} className="dashboard-dialog" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title">
+					<button
+						type="button"
+						className="dashboard-dialog-backdrop"
+						aria-label="Close dialog"
+						disabled={accountBusy}
+						onClick={() => setAccountDialog(null)}
+					/>
+					<form
+						onSubmit={submitAccount}
+						className="dashboard-dialog"
+						role="dialog"
+						aria-modal="true"
+						aria-labelledby="account-dialog-title"
+					>
 						<p className="console-kicker">Account access</p>
-						<h2 id="account-dialog-title" className="mt-2 text-xl font-semibold">{accountDialog === "create" ? "Create user" : `Reset ${targetUser?.username || "user"} password`}</h2>
-						<p className="mt-3 text-sm leading-6 console-muted">{accountDialog === "create" ? "New accounts start with no library access." : "Existing sessions will be revoked after the password is reset."}</p>
-						{accountDialog === "create" && <label className="mt-6 block text-sm"><span className="console-muted">Username</span><input autoFocus required value={draftUsername} onChange={(event) => setDraftUsername(event.target.value)} className="console-input mt-2 h-11 w-full rounded-xl px-3 outline-none" /></label>}
-						<label className="mt-5 block text-sm"><span className="console-muted">{accountDialog === "create" ? "Temporary password" : "New password"}</span><input required minLength={8} type="password" value={draftPassword} onChange={(event) => setDraftPassword(event.target.value)} className="console-input mt-2 h-11 w-full rounded-xl px-3 outline-none" /></label>
-						<div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" disabled={accountBusy} onClick={() => setAccountDialog(null)} className="material-icon-button h-11 px-4 text-sm font-semibold">Cancel</button><button disabled={accountBusy} className="console-button h-11 rounded-xl px-4 text-sm font-semibold disabled:opacity-60">{accountBusy ? "Saving…" : accountDialog === "create" ? "Create user" : "Reset password"}</button></div>
+						<h2 id="account-dialog-title" className="mt-2 text-xl font-semibold">
+							{accountDialog === "create"
+								? "Create user"
+								: `Reset ${targetUser?.username || "user"} password`}
+						</h2>
+						<p className="mt-3 text-sm leading-6 console-muted">
+							{accountDialog === "create"
+								? "New accounts start with no library access."
+								: "Existing sessions will be revoked after the password is reset."}
+						</p>
+						{accountDialog === "create" && (
+							<label className="mt-6 block text-sm">
+								<span className="console-muted">Username</span>
+								<input
+									autoFocus
+									required
+									value={draftUsername}
+									onChange={(event) => setDraftUsername(event.target.value)}
+									className="console-input mt-2 h-11 w-full rounded-xl px-3 outline-none"
+								/>
+							</label>
+						)}
+						<label className="mt-5 block text-sm">
+							<span className="console-muted">
+								{accountDialog === "create" ? "Temporary password" : "New password"}
+							</span>
+							<input
+								required
+								minLength={8}
+								type="password"
+								value={draftPassword}
+								onChange={(event) => setDraftPassword(event.target.value)}
+								className="console-input mt-2 h-11 w-full rounded-xl px-3 outline-none"
+							/>
+						</label>
+						<div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+							<button
+								type="button"
+								disabled={accountBusy}
+								onClick={() => setAccountDialog(null)}
+								className="material-icon-button h-11 px-4 text-sm font-semibold"
+							>
+								Cancel
+							</button>
+							<button
+								disabled={accountBusy}
+								className="console-button h-11 rounded-xl px-4 text-sm font-semibold disabled:opacity-60"
+							>
+								{accountBusy
+									? "Saving…"
+									: accountDialog === "create"
+										? "Create user"
+										: "Reset password"}
+							</button>
+						</div>
 					</form>
 				</div>
 			)}
@@ -189,30 +265,30 @@ export default function UsersPage() {
 				title="Users"
 				description="Create accounts, manage access to libraries, and control user sessions."
 				actions={
-				<>
-					<button
-						onClick={() => void load()}
-						className="material-icon-button"
-						aria-label="Refresh users"
-					>
-						<IconRefresh size={17} />
-					</button>
-					<div className="flex min-w-0 flex-1 gap-3 sm:flex-none">
-					<input
-						value={query}
-						onChange={(event) => setQuery(event.target.value)}
-						placeholder="Search users"
-						className="console-input h-11 rounded-xl px-4 text-sm outline-none placeholder:text-white/30"
-					/>
-					<button
-						onClick={openCreateUser}
-						className="console-button flex items-center gap-2 rounded-xl px-4 text-sm font-semibold"
-					>
-						<IconPlus size={16} />
-						Create user
-					</button>
-					</div>
-				</>
+					<>
+						<button
+							onClick={() => void load()}
+							className="material-icon-button"
+							aria-label="Refresh users"
+						>
+							<IconRefresh size={17} />
+						</button>
+						<div className="flex min-w-0 flex-1 gap-3 sm:flex-none">
+							<input
+								value={query}
+								onChange={(event) => setQuery(event.target.value)}
+								placeholder="Search users"
+								className="console-input h-11 rounded-xl px-4 text-sm outline-none placeholder:text-white/30"
+							/>
+							<button
+								onClick={openCreateUser}
+								className="console-button flex items-center gap-2 rounded-xl px-4 text-sm font-semibold"
+							>
+								<IconPlus size={16} />
+								Create user
+							</button>
+						</div>
+					</>
 				}
 			/>
 			{message && <StatusMessage>{message}</StatusMessage>}
@@ -231,7 +307,7 @@ export default function UsersPage() {
 									{user.libraryIds.length} libraries
 								</span>
 								<button
-								onClick={() => openPasswordReset(user)}
+									onClick={() => openPasswordReset(user)}
 									className="material-icon-button"
 									aria-label={`Reset ${user.username} password`}
 									title="Reset password"
@@ -247,8 +323,8 @@ export default function UsersPage() {
 									<IconBan size={16} />
 								</button>
 								<button
-								onClick={() => setUserToDelete(user)}
-								className="material-icon-button text-[#aeb9ff]"
+									onClick={() => setUserToDelete(user)}
+									className="material-icon-button text-[#aeb9ff]"
 									aria-label={`Delete ${user.username}`}
 									title="Delete user"
 								>
@@ -270,15 +346,11 @@ export default function UsersPage() {
 											onChange={(event) =>
 												void setAccess(user, library.id, event.target.checked)
 											}
-									className="accent-[#aeb9ff]"
+											className="accent-[#aeb9ff]"
 										/>
 										<span className="min-w-0">
-											<span className="block truncate font-medium">
-												{library.name}
-											</span>
-											<span className="text-[11px] console-muted">
-												{library.type}
-											</span>
+											<span className="block truncate font-medium">{library.name}</span>
+											<span className="text-[11px] console-muted">{library.type}</span>
 										</span>
 									</label>
 								);
@@ -287,7 +359,9 @@ export default function UsersPage() {
 					</SurfaceCard>
 				))}
 				{filtered.length === 0 && (
-					<SurfaceCard><EmptyState>No users found.</EmptyState></SurfaceCard>
+					<SurfaceCard>
+						<EmptyState>No users found.</EmptyState>
+					</SurfaceCard>
 				)}
 			</div>
 		</div>

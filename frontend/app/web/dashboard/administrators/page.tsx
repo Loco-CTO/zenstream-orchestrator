@@ -2,7 +2,11 @@
 import { FormEvent, useEffect, useState } from "react";
 import { IconRefresh } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import { PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
+import {
+	PageHeader,
+	StatusMessage,
+	SurfaceCard,
+} from "../components/dashboard-surface";
 type Admin = { username: string; is_root: boolean; disabled: boolean };
 export default function AdministratorsPage() {
 	const [session, setSession] = useState<Session | null>(null);
@@ -54,14 +58,14 @@ export default function AdministratorsPage() {
 				title="Administrators"
 				description="Manage the local accounts that can configure this ZenStream server."
 				actions={
-				<button
-					onClick={() => load()}
-					className="material-icon-button"
-					aria-label="Refresh administrators"
-					title="Refresh administrators"
-				>
-					<IconRefresh size={17} />
-				</button>
+					<button
+						onClick={() => load()}
+						className="material-icon-button"
+						aria-label="Refresh administrators"
+						title="Refresh administrators"
+					>
+						<IconRefresh size={17} />
+					</button>
 				}
 			/>
 			<div className="mt-7 grid gap-6 lg:grid-cols-[1.4fr_1fr]">

@@ -10,16 +10,13 @@ async function generateInvite(): Promise<string | undefined> {
 		const user = getCookie("Username");
 		const token = getCookie("TOKEN");
 
-		const response = await fetch(
-			`${appConfig.apiUrl}/api/user/generate_invite`,
-			{
-				method: "POST",
-				headers: {
-					Username: String(user) || "",
-					TOKEN: String(token) || "",
-				},
+		const response = await fetch(`${appConfig.apiUrl}/api/user/generate_invite`, {
+			method: "POST",
+			headers: {
+				Username: String(user) || "",
+				TOKEN: String(token) || "",
 			},
-		);
+		});
 
 		if (response.ok) {
 			const data = await response.json();

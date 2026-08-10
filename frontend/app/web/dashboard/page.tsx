@@ -11,7 +11,11 @@ import {
 	IconUsers,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "./components/admin-client";
-import { PageHeader, SectionHeader, SurfaceCard } from "./components/dashboard-surface";
+import {
+	PageHeader,
+	SectionHeader,
+	SurfaceCard,
+} from "./components/dashboard-surface";
 
 type Overview = {
 	users: number;
@@ -72,20 +76,20 @@ export default function DashboardOverview() {
 				title="Dashboard"
 				description="A concise view of people, background work, and server configuration."
 				actions={
-				<button
-					onClick={() => {
-						const current = readSession();
-						if (current) {
-							setSession(current);
-							load(current);
-						}
-					}}
-					className="material-icon-button"
-					aria-label="Refresh dashboard"
-					title="Refresh dashboard"
-				>
-					<IconRefresh size={17} />
-				</button>
+					<button
+						onClick={() => {
+							const current = readSession();
+							if (current) {
+								setSession(current);
+								load(current);
+							}
+						}}
+						className="material-icon-button"
+						aria-label="Refresh dashboard"
+						title="Refresh dashboard"
+					>
+						<IconRefresh size={17} />
+					</button>
 				}
 			/>
 			<section className="mt-7 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -105,9 +109,15 @@ export default function DashboardOverview() {
 			</section>
 			<div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
 				<SurfaceCard>
-					<SectionHeader kicker="Scheduler" title="Background tasks" action={<Link href="/web/dashboard/jobs" className="text-xs text-[#aeb9ff]">
-							Manage all
-						</Link>} />
+					<SectionHeader
+						kicker="Scheduler"
+						title="Background tasks"
+						action={
+							<Link href="/web/dashboard/jobs" className="text-xs text-[#aeb9ff]">
+								Manage all
+							</Link>
+						}
+					/>
 					{tasks.map((task) => (
 						<Link
 							href={"/web/dashboard/jobs?jobId=" + task.id}
@@ -128,9 +138,7 @@ export default function DashboardOverview() {
 						</Link>
 					))}
 					{!tasks.length && (
-						<p className="px-5 py-8 text-sm console-muted">
-							No scheduled work yet.
-						</p>
+						<p className="px-5 py-8 text-sm console-muted">No scheduled work yet.</p>
 					)}
 				</SurfaceCard>
 				<SurfaceCard className="p-5">

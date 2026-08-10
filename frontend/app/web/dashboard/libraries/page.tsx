@@ -9,7 +9,13 @@ import {
 	IconTrash,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import { ConfirmDialog, EmptyState, PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
+import {
+	ConfirmDialog,
+	EmptyState,
+	PageHeader,
+	StatusMessage,
+	SurfaceCard,
+} from "../components/dashboard-surface";
 
 type Library = {
 	id: string;
@@ -125,14 +131,14 @@ export default function LibrariesPage() {
 				title="Media sources"
 				description="Connect media roots, monitor scans, and assemble collection libraries."
 				actions={
-				<button
-					onClick={() => load()}
-					aria-label="Refresh libraries"
-					className="material-icon-button"
-					title="Refresh libraries"
-				>
-					<IconRefresh size={17} />
-				</button>
+					<button
+						onClick={() => load()}
+						aria-label="Refresh libraries"
+						className="material-icon-button"
+						title="Refresh libraries"
+					>
+						<IconRefresh size={17} />
+					</button>
 				}
 			/>
 			{message && <StatusMessage>{message}</StatusMessage>}
@@ -191,7 +197,7 @@ export default function LibrariesPage() {
 									<IconRefresh size={16} />
 								</button>
 								<button
-								onClick={() => setLibraryToRemove(library)}
+									onClick={() => setLibraryToRemove(library)}
 									aria-label="Remove"
 									className="rounded-lg border console-divider p-2 console-muted hover:bg-[#aeb9ff]/10 hover:text-[#aeb9ff]"
 								>
@@ -241,14 +247,10 @@ export default function LibrariesPage() {
 						<div className="mt-3 space-y-2">
 							{libraries
 								.filter(
-									(library) =>
-										library.type === "movies" || library.type === "tv_series",
+									(library) => library.type === "movies" || library.type === "tv_series",
 								)
 								.map((library) => (
-									<label
-										key={library.id}
-										className="flex items-center gap-2 text-sm"
-									>
+									<label key={library.id} className="flex items-center gap-2 text-sm">
 										<input
 											type="checkbox"
 											checked={sources.includes(library.id)}
@@ -281,9 +283,7 @@ export default function LibrariesPage() {
 								min={15}
 								max={43200}
 								value={interval}
-								onChange={(event) =>
-									setIntervalValue(Number(event.target.value))
-								}
+								onChange={(event) => setIntervalValue(Number(event.target.value))}
 								className="console-input mt-2 h-11 w-full rounded-lg px-3 outline-none"
 							/>
 						</label>

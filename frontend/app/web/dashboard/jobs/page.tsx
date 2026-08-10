@@ -12,7 +12,13 @@ import {
 	IconSettings,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import { ConfirmDialog, EmptyState, PageHeader, StatusMessage, SurfaceCard } from "../components/dashboard-surface";
+import {
+	ConfirmDialog,
+	EmptyState,
+	PageHeader,
+	StatusMessage,
+	SurfaceCard,
+} from "../components/dashboard-surface";
 
 type Run = {
 	id: string;
@@ -103,18 +109,14 @@ export default function JobsPage() {
 	async function save() {
 		if (!session || !selected) return;
 		setSaving(true);
-		const response = await adminFetch(
-			"/api/admin/jobs/" + selected.id,
-			session,
-			{
-				method: "PATCH",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					intervalMinutes: selected.intervalMinutes,
-					enabled: selected.enabled,
-				}),
-			},
-		);
+		const response = await adminFetch("/api/admin/jobs/" + selected.id, session, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				intervalMinutes: selected.intervalMinutes,
+				enabled: selected.enabled,
+			}),
+		});
 		setMessage(
 			response.ok ? "Task settings saved." : "Could not save task settings.",
 		);
@@ -143,9 +145,7 @@ export default function JobsPage() {
 			{ method: "POST" },
 		);
 		setMessage(
-			response.ok
-				? "Termination requested."
-				: "Could not terminate the task run.",
+			response.ok ? "Termination requested." : "Could not terminate the task run.",
 		);
 		setConfirmTerminate(false);
 		load();
@@ -166,14 +166,14 @@ export default function JobsPage() {
 				title="Tasks"
 				description="Review scheduled work, tune its cadence, and manage active runs."
 				actions={
-				<button
-					onClick={() => load()}
-					className="material-icon-button"
-					aria-label="Refresh tasks"
-					title="Refresh tasks"
-				>
-					<IconRefresh size={17} />
-				</button>
+					<button
+						onClick={() => load()}
+						className="material-icon-button"
+						aria-label="Refresh tasks"
+						title="Refresh tasks"
+					>
+						<IconRefresh size={17} />
+					</button>
 				}
 			/>
 			{message && <StatusMessage>{message}</StatusMessage>}
@@ -181,9 +181,7 @@ export default function JobsPage() {
 				<SurfaceCard className="overflow-hidden">
 					<div className="border-b console-divider px-5 py-4 text-xs uppercase tracking-[.16em] console-muted">
 						All tasks{" "}
-						<span className="ml-2 normal-case tracking-normal">
-							{jobs.length}
-						</span>
+						<span className="ml-2 normal-case tracking-normal">{jobs.length}</span>
 					</div>
 					{loading ? (
 						<div className="p-8 text-sm console-muted">Loading tasks…</div>
@@ -208,17 +206,14 @@ export default function JobsPage() {
 									<IconClock size={16} />
 								</span>
 								<span className="min-w-0 flex-1">
-									<span className="block truncate text-sm font-medium">
-										{job.name}
-									</span>
+									<span className="block truncate text-sm font-medium">{job.name}</span>
 									<span className="mt-1 block truncate text-xs console-muted">
 										{job.description || job.kind}
 									</span>
 								</span>
 								<span
 									className={
-										"text-xs capitalize " +
-										(stateColor[job.lastState] || "console-muted")
+										"text-xs capitalize " + (stateColor[job.lastState] || "console-muted")
 									}
 								>
 									{job.enabled ? job.lastState : "paused"}
@@ -299,7 +294,7 @@ export default function JobsPage() {
 							</button>
 							{activeRun && (
 								<button
-								onClick={() => setConfirmTerminate(true)}
+									onClick={() => setConfirmTerminate(true)}
 									disabled={activeRun.state === "terminating"}
 									className="col-span-2 flex items-center justify-center gap-2 rounded-lg border border-[#aeb9ff]/30 px-3 py-2.5 text-sm text-[#aeb9ff] hover:bg-[#aeb9ff]/10 disabled:opacity-50"
 								>
@@ -323,8 +318,7 @@ export default function JobsPage() {
 										<span>
 											<span
 												className={
-													"block capitalize " +
-													(stateColor[run.state] || "console-muted")
+													"block capitalize " + (stateColor[run.state] || "console-muted")
 												}
 											>
 												{run.state}

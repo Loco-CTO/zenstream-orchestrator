@@ -19,7 +19,9 @@ export function PageHeader({
 					<p className="mt-2 text-sm leading-6 console-muted">{description}</p>
 				)}
 			</div>
-			{actions && <div className="flex flex-wrap items-center gap-3">{actions}</div>}
+			{actions && (
+				<div className="flex flex-wrap items-center gap-3">{actions}</div>
+			)}
 		</header>
 	);
 }
@@ -31,7 +33,11 @@ export function SurfaceCard({
 	children: ReactNode;
 	className?: string;
 }) {
-	return <section className={`console-card rounded-2xl ${className}`}>{children}</section>;
+	return (
+		<section className={`console-card rounded-2xl ${className}`}>
+			{children}
+		</section>
+	);
 }
 
 export function SectionHeader({
@@ -47,7 +53,9 @@ export function SectionHeader({
 		<div className="flex items-start justify-between gap-4 border-b console-divider px-5 py-4">
 			<div>
 				{kicker && <p className="console-kicker">{kicker}</p>}
-				<h2 className={kicker ? "mt-1 text-lg font-semibold" : "text-sm font-semibold"}>
+				<h2
+					className={kicker ? "mt-1 text-lg font-semibold" : "text-sm font-semibold"}
+				>
 					{title}
 				</h2>
 			</div>
@@ -65,7 +73,9 @@ export function StatusMessage({ children }: { children: ReactNode }) {
 }
 
 export function EmptyState({ children }: { children: ReactNode }) {
-	return <div className="px-5 py-12 text-center text-sm console-muted">{children}</div>;
+	return (
+		<div className="px-5 py-12 text-center text-sm console-muted">{children}</div>
+	);
 }
 
 export function ConfirmDialog({
@@ -120,7 +130,10 @@ export function ConfirmDialog({
 				<h2 id="dashboard-dialog-title" className="mt-2 text-xl font-semibold">
 					{title}
 				</h2>
-				<p id="dashboard-dialog-description" className="mt-3 text-sm leading-6 console-muted">
+				<p
+					id="dashboard-dialog-description"
+					className="mt-3 text-sm leading-6 console-muted"
+				>
 					{description}
 				</p>
 				<div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">

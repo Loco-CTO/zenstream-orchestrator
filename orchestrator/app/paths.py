@@ -8,7 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def metadata_directory() -> Path:
     """Return the persistent root for SQLite, caches, and logs."""
-    configured = os.getenv("METADATA_PATH", "").strip()
+    configured = os.getenv("METADATA_PATH")
     if not configured:
         return PROJECT_ROOT / "sqlite"
     directory = Path(configured).expanduser()

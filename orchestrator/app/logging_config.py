@@ -32,6 +32,10 @@ class RedactingFormatter(logging.Formatter):
         return redact(super().format(record))
 
 
+def log_directory():
+    return metadata_directory() / "logs"
+
+
 def configure_logging() -> None:
     global _configured
     if _configured:
@@ -52,10 +56,10 @@ def configure_logging() -> None:
         console.setFormatter(formatter)
         console.setLevel(level)
         root.addHandler(console)
-        log_directory = metadata_directory() / "logs"
-        log_directory.mkdir(parents=True, exist_ok=True)
+        directory = log_directory()
+        directory.mkdir(parents=True, exist_ok=True)
         file_handler = RotatingFileHandler(
-            log_directory / "orchestrator.log",
+            directory / "orchestrator.log",
             maxBytes=10 * 1024 * 1024,
             backupCount=5,
             encoding="utf-8",

@@ -18,6 +18,7 @@ from app.metadata_domain import (
     ARTWORK_CATEGORY_SET,
     choose_artwork,
     fallback_tiers,
+    language_family,
     locale_variants,
     nonempty,
     usable_text,
@@ -756,7 +757,12 @@ class MetadataReadService:
         )
         configured = MetadataLanguageSettings().get()
         tiers = fallback_tiers(
-            requested, original, media=False, include_english="en" in configured
+            requested,
+            original,
+            media=False,
+            include_english=any(
+                language_family(value) == "en" for value in configured
+            ),
         )
         providers = self.providers(entity_type)
         result: dict = {}
@@ -920,7 +926,12 @@ class MetadataReadService:
     ) -> list[dict]:
         configured = MetadataLanguageSettings().get()
         tiers = fallback_tiers(
-            requested, original, media=False, include_english="en" in configured
+            requested,
+            original,
+            media=False,
+            include_english=any(
+                language_family(value) == "en" for value in configured
+            ),
         )
         provider_rank = {value: index for index, value in enumerate(providers)}
         candidates = []
@@ -938,16 +949,15 @@ class MetadataReadService:
                     continue
                 rank = 99
                 for index, tier in enumerate(tiers):
-                    trailer_tag = str(trailer_language).lower()
-                    tier_tag = str(tier).lower()
+                    trailer_tag = str(trailer_language).lower().replace("_", "-")
+                    tier_tag = str(tier).lower().replace("_", "-")
                     if trailer_tag == tier_tag:
                         rank = index * 2
                         break
                     if (
                         trailer_tag
                         and tier_tag
-                        and trailer_tag.split("-", 1)[0].split("_", 1)[0]
-                        == tier_tag.split("-", 1)[0].split("_", 1)[0]
+                        and language_family(trailer_tag) == language_family(tier_tag)
                     ):
                         rank = index * 2 + 1
                         break

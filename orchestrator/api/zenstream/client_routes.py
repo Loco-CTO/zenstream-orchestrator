@@ -310,22 +310,23 @@ async def catalog_socket(websocket: WebSocket):
 @router.get("/api/metadata/languages")
 async def metadata_languages(request: Request):
     require_account(request)
-    return {"languages": MetadataLanguageSettings().get()}
+    return {"languages": await run_foreground(MetadataLanguageSettings().get)}
 
 
 @router.get("/api/preferences/locale")
 async def get_locale(request: Request):
     account, _ = require_account(request)
-    return {"locale": AccountPreference(account["id"]).locale()}
+    return {"locale": await run_foreground(AccountPreference(account["id"]).locale)}
 
 
 @router.patch("/api/preferences/locale")
 async def set_locale(request: Request):
     account, _ = require_account(request)
     try:
+        value = (await request.json()).get("locale")
         return {
-            "locale": AccountPreference(account["id"]).set_locale(
-                (await request.json()).get("locale")
+            "locale": await run_foreground(
+                AccountPreference(account["id"]).set_locale, value
             )
         }
     except ValueError as error:
@@ -335,15 +336,16 @@ async def set_locale(request: Request):
 @router.get("/api/preferences/metadata-language")
 async def get_metadata_language(request: Request):
     account, _ = require_account(request)
-    return AccountPreference(account["id"]).metadata_language()
+    return await run_foreground(AccountPreference(account["id"]).metadata_language)
 
 
 @router.patch("/api/preferences/metadata-language")
 async def set_metadata_language(request: Request):
     account, _ = require_account(request)
     try:
-        return AccountPreference(account["id"]).set_metadata_language(
-            (await request.json()).get("language")
+        value = (await request.json()).get("language")
+        return await run_foreground(
+            AccountPreference(account["id"]).set_metadata_language, value
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -352,14 +354,17 @@ async def set_metadata_language(request: Request):
 @router.get("/api/preferences/subtitles")
 async def get_subtitles(request: Request):
     account, _ = require_account(request)
-    return AccountPreference(account["id"]).subtitle_style()
+    return await run_foreground(AccountPreference(account["id"]).subtitle_style)
 
 
 @router.patch("/api/preferences/subtitles")
 async def set_subtitles(request: Request):
     account, _ = require_account(request)
     try:
-        return AccountPreference(account["id"]).set_subtitle_style(await request.json())
+        value = await request.json()
+        return await run_foreground(
+            AccountPreference(account["id"]).set_subtitle_style, value
+        )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 

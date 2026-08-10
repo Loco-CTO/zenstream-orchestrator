@@ -2524,9 +2524,13 @@ class Catalog:
         dates = self._date_values("", allowed, {row[0] for row in rows})
         rows.sort(key=lambda row: row[0])
         rows.sort(
-            key=lambda row: dates.get(row[0], {}).get(
-                "addedAt" if row[3] == "series" else "lastAddedAt"
-            ) or row[8] or "",
+            key=lambda row: (
+                dates.get(row[0], {}).get(
+                    "addedAt" if row[3] == "series" else "lastAddedAt"
+                )
+                or row[8]
+                or ""
+            ),
             reverse=True,
         )
         rows = rows[:36]

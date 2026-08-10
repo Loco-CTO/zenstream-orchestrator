@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app import library_watcher
 from app.library_watcher import (
@@ -50,10 +50,10 @@ class BackendSelectionTest(unittest.TestCase):
 
 class NativeHandlerTest(unittest.TestCase):
     def test_directory_and_file_events_are_forwarded_but_directory_modify_is_ignored(self):
-        manager = unittest.mock.Mock()
+        manager = Mock()
         handler = _NativeHandler(manager, "library-1", Path("/media"))
 
-        handler.on_created(_Event("/media/Show" , is_directory=True))
+        handler.on_created(_Event("/media/Show", is_directory=True))
         handler.on_modified(_Event("/media/Show", is_directory=True))
         handler.on_modified(_Event("/media/Show/Episode.mkv"))
         handler.on_moved(_Event("/media/Old", "/media/New", is_directory=True))

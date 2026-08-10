@@ -233,6 +233,7 @@ class LibraryWatcherManager:
         self._lock = threading.RLock()
         self._native: dict[str, tuple[object, WatchStatus, Path]] = {}
         self._polls: dict[str, _PollRegistration] = {}
+        self._retained_snapshots: dict[str, tuple[Path, object]] = {}
         self._statuses: dict[str, WatchStatus] = {}
         self._poll_executor: ThreadPoolExecutor | None = None
         self._poll_thread: threading.Thread | None = None
@@ -266,10 +267,17 @@ class LibraryWatcherManager:
             )
 
     def configure(self, libraries: list[dict]) -> None:
+        with self._lock:
+            retained = {
+                library_id: (registration.root, registration.snapshot)
+                for library_id, registration in self._polls.items()
+                if registration.snapshot is not None
+            }
         self.stop()
         self._stop.clear()
         with self._lock:
             self._statuses.clear()
+            self._retained_snapshots = retained
         for library in libraries:
             if not library.get("watchEnabled") or library.get("type") == "collection":
                 continue
@@ -457,10 +465,13 @@ class LibraryWatcherManager:
             status.last_error_code = "watchdog_unavailable"
             status.reason = "watchdog_unavailable"
             return
+        retained = self._retained_snapshots.get(library_id)
+        baseline = retained[1] if retained and retained[0] == root else None
         registration = _PollRegistration(
             library_id,
             root,
             status,
+            snapshot=baseline,
             next_due=time.monotonic() + random.uniform(0, 15),
         )
         with self._lock:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 import pycountry
-
 
 ARTWORK_CATEGORIES = ("Primary", "Backdrop", "Logo", "Banner")
 ARTWORK_CATEGORY_SET = frozenset(ARTWORK_CATEGORIES)
@@ -25,7 +25,9 @@ def locale_variants(language: str, available: Iterable[str]) -> list[str]:
     return exact + sorted(family, key=lambda value: str(value).lower())
 
 
-def fallback_tiers(requested: str, original: str | None, *, media: bool, include_english: bool = True) -> list[str]:
+def fallback_tiers(
+    requested: str, original: str | None, *, media: bool, include_english: bool = True
+) -> list[str]:
     values: list[str] = [requested]
     if media:
         values.append("")
@@ -68,8 +70,7 @@ def is_language_code_placeholder(value: Any) -> bool:
 
 def usable_text(field: str, value: Any) -> bool:
     return nonempty(value) and not (
-        field in {"overview", "description"}
-        and is_language_code_placeholder(value)
+        field in {"overview", "description"} and is_language_code_placeholder(value)
     )
 
 

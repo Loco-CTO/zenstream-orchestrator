@@ -1,6 +1,7 @@
-from app.config import Config
 from random import choice
 from string import ascii_letters, digits
+
+from app.config import Config
 
 
 class Invite:

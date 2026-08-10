@@ -6,7 +6,6 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -57,14 +56,20 @@ class PersistenceMigrationTest(unittest.TestCase):
                 )
                 playback_columns = {
                     row[1]: row
-                    for row in connection.execute("PRAGMA table_info(playback_settings)")
+                    for row in connection.execute(
+                        "PRAGMA table_info(playback_settings)"
+                    )
                 }
                 intro_outro_columns = {
                     row[1]: row
-                    for row in connection.execute("PRAGMA table_info(intro_outro_settings)")
+                    for row in connection.execute(
+                        "PRAGMA table_info(intro_outro_settings)"
+                    )
                 }
                 self.assertIn(playback_columns["trickplay_workers"][4], {"1", "'1'"})
-                self.assertIn(intro_outro_columns["intro_outro_workers"][4], {"1", "'1'"})
+                self.assertIn(
+                    intro_outro_columns["intro_outro_workers"][4], {"1", "'1'"}
+                )
                 tables = {
                     row[0]
                     for row in connection.execute(

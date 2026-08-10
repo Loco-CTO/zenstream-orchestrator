@@ -11,25 +11,25 @@ from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import (
     EPISODE_RE,
-    FairMetadataExecutor,
     QUICK_FINGERPRINT_SAMPLE_SIZE,
+    FairMetadataExecutor,
     LibraryRuntime,
     LibraryScanner,
     LibraryStore,
+    _quick_fingerprint,
     _SidecarStatWorker,
     guess_media,
     normalized_path,
     provider_ids,
     sidecar_display_title,
-    _quick_fingerprint,
 )
 from app.library_cleanup import cleanup_entities, cleanup_library, cleanup_orphans
+from app.metadata_services import MetadataSearchProjection
 from app.models.metadata import (
     IMAGE_LANGUAGE_SCHEMA,
     MetadataCache,
     MetadataLanguageSettings,
 )
-from app.metadata_services import MetadataSearchProjection
 from app.providers import (
     BANNER,
     PRIMARY,
@@ -39,9 +39,9 @@ from app.providers import (
     TMDBClient,
     TVDBClient,
     _select_match,
-    choose_image,
     _tvdb_children,
     _tvdb_images,
+    choose_image,
 )
 
 
@@ -137,9 +137,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     ) as resolve,
                     patch.object(scanner, "_publish_root") as publish,
                 ):
-                    scanner._scan_movies(
-                        "library-1", root, "job-1", lambda: False
-                    )
+                    scanner._scan_movies("library-1", root, "job-1", lambda: False)
 
                 self.assertEqual(order, ["A [tmdbid-1]", "B [tmdbid-2]"])
                 self.assertEqual(resolve.call_count, 2)
@@ -182,8 +180,14 @@ class LibraryMetadataTest(unittest.TestCase):
             ]
 
             with (
-                patch.object(scanner, "_metadata_candidates", return_value={"episode-1", "episode-2"}),
-                patch("app.metadata_services.MetadataIngestService", return_value=ingest),
+                patch.object(
+                    scanner,
+                    "_metadata_candidates",
+                    return_value={"episode-1", "episode-2"},
+                ),
+                patch(
+                    "app.metadata_services.MetadataIngestService", return_value=ingest
+                ),
                 patch.object(scanner, "_persist_normalized_ids"),
                 patch.object(scanner, "_persist_child_ids"),
             ):
@@ -399,7 +403,9 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
-    def test_media_file_quick_fingerprint_reuses_row_and_only_content_changes_probe(self):
+    def test_media_file_quick_fingerprint_reuses_row_and_only_content_changes_probe(
+        self,
+    ):
         db, scanner = self._scanner_db()
         try:
             with tempfile.TemporaryDirectory() as directory:
@@ -418,14 +424,20 @@ class LibraryMetadataTest(unittest.TestCase):
                     "SELECT updated_at FROM library_entities"
                 )[0][0]
 
-                with patch("app.playback.PlaybackManager") as playback, patch(
-                    "app.library._quick_fingerprint", wraps=_quick_fingerprint
-                ) as fingerprint:
+                with (
+                    patch("app.playback.PlaybackManager") as playback,
+                    patch(
+                        "app.library._quick_fingerprint", wraps=_quick_fingerprint
+                    ) as fingerprint,
+                ):
                     self._prepare_incremental_scan(scanner)
                     scanner._scan_movies("library-1", root, "job-1", lambda: False)
                     fingerprint.assert_not_called()
 
-                    os.utime(video, ns=(first_mtime + 2_000_000_000, first_mtime + 2_000_000_000))
+                    os.utime(
+                        video,
+                        ns=(first_mtime + 2_000_000_000, first_mtime + 2_000_000_000),
+                    )
                     self._prepare_incremental_scan(scanner)
                     scanner._scan_movies("library-1", root, "job-1", lambda: False)
                     self.assertEqual(fingerprint.call_count, 1)
@@ -505,7 +517,9 @@ class LibraryMetadataTest(unittest.TestCase):
             "Japanese",
         )
 
-    def test_sidecar_display_title_does_not_use_unmatched_movie_title_as_descriptor(self):
+    def test_sidecar_display_title_does_not_use_unmatched_movie_title_as_descriptor(
+        self,
+    ):
         self.assertEqual(
             sidecar_display_title(
                 "Mr.Robot.en.srt",
@@ -526,7 +540,17 @@ class LibraryMetadataTest(unittest.TestCase):
                 first_mtime = sidecar.stat().st_mtime_ns
                 db.execute(
                     "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
-                    ("sidecar-1", "entity-1", sidecar.name, "subtitle", "ja", None, 1, first_mtime, "legacy-fingerprint"),
+                    (
+                        "sidecar-1",
+                        "entity-1",
+                        sidecar.name,
+                        "subtitle",
+                        "ja",
+                        None,
+                        1,
+                        first_mtime,
+                        "legacy-fingerprint",
+                    ),
                 )
                 with patch("app.library._quick_fingerprint") as fingerprint:
                     result = scanner._files("entity-1", root, [sidecar])
@@ -562,16 +586,18 @@ class LibraryMetadataTest(unittest.TestCase):
 
                 self._prepare_incremental_scan(scanner)
                 scanner._scan_movies("library-1", root, "job-1", lambda: False)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 2)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 2
+                )
 
                 (root / "One" / "One.en.srt").write_text("subtitle")
                 self._prepare_incremental_scan(scanner)
-                scanner._scan_movies(
-                    "library-1", root, "job-1", lambda: False, {"One"}
-                )
+                scanner._scan_movies("library-1", root, "job-1", lambda: False, {"One"})
 
                 self.assertEqual(
-                    db.execute("SELECT progress_total FROM library_jobs WHERE id='job-1'")[0][0],
+                    db.execute(
+                        "SELECT progress_total FROM library_jobs WHERE id='job-1'"
+                    )[0][0],
                     1,
                 )
                 self.assertEqual(
@@ -631,8 +657,12 @@ class LibraryMetadataTest(unittest.TestCase):
                     )
 
                 self.assertEqual(count, 0)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0
+                )
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0
+                )
                 resolve.assert_not_called()
         finally:
             db.close()
@@ -650,7 +680,9 @@ class LibraryMetadataTest(unittest.TestCase):
                 self._prepare_incremental_scan(scanner)
                 scanner._scan_movies("library-1", root, "job-1", lambda: False)
                 self._finish_incremental_scan(scanner, "library-1", root)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 1)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 1
+                )
 
                 video.unlink()
                 (movie / "Movie.en.srt").touch()
@@ -658,8 +690,12 @@ class LibraryMetadataTest(unittest.TestCase):
                 scanner._scan_movies("library-1", root, "job-1", lambda: False)
                 self._finish_incremental_scan(scanner, "library-1", root)
 
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0
+                )
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0
+                )
         finally:
             db.close()
 
@@ -679,9 +715,7 @@ class LibraryMetadataTest(unittest.TestCase):
 
                 (root / "One" / "One.mkv").unlink()
                 self._prepare_incremental_scan(scanner)
-                scanner._scan_movies(
-                    "library-1", root, "job-1", lambda: False, {"One"}
-                )
+                scanner._scan_movies("library-1", root, "job-1", lambda: False, {"One"})
                 self._finish_incremental_scan(scanner, "library-1", root)
 
                 self.assertEqual(
@@ -947,11 +981,14 @@ class LibraryMetadataTest(unittest.TestCase):
                 video.write_bytes(b"video")
                 entries = list(scanner._walk_file_entries(root))
 
-                with patch.object(
-                    Path,
-                    "stat",
-                    side_effect=AssertionError("unexpected second stat"),
-                ), patch("app.playback.PlaybackManager.probe_entity"):
+                with (
+                    patch.object(
+                        Path,
+                        "stat",
+                        side_effect=AssertionError("unexpected second stat"),
+                    ),
+                    patch("app.playback.PlaybackManager.probe_entity"),
+                ):
                     result = scanner._files("entity-1", root, entries)
 
                 self.assertEqual(result["added"], 1)
@@ -1185,9 +1222,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 (unmapped_series / "feature.mkv").touch()
 
                 self._prepare_incremental_scan(scanner)
-                count = scanner._scan_series(
-                    "library-1", root, "job-1", lambda: False
-                )
+                count = scanner._scan_series("library-1", root, "job-1", lambda: False)
                 self._finish_incremental_scan(scanner, "library-1", root)
 
                 self.assertEqual(count, 1)
@@ -1202,9 +1237,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     ],
                 )
                 self.assertEqual(
-                    db.execute(
-                        "SELECT role FROM media_files ORDER BY role"
-                    ),
+                    db.execute("SELECT role FROM media_files ORDER BY role"),
                     [("media",), ("subtitle",)],
                 )
         finally:
@@ -1223,15 +1256,21 @@ class LibraryMetadataTest(unittest.TestCase):
                 self._prepare_incremental_scan(scanner)
                 scanner._scan_series("library-1", root, "job-1", lambda: False)
                 self._finish_incremental_scan(scanner, "library-1", root)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 3)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 3
+                )
 
                 episode.unlink()
                 self._prepare_incremental_scan(scanner)
                 scanner._scan_series("library-1", root, "job-1", lambda: False)
                 self._finish_incremental_scan(scanner, "library-1", root)
 
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0
+                )
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0
+                )
         finally:
             db.close()
 
@@ -1250,15 +1289,15 @@ class LibraryMetadataTest(unittest.TestCase):
                 entity_id = db.execute("SELECT id FROM library_entities")[0][0]
 
                 self._prepare_incremental_scan(scanner)
-                with patch.object(
-                    scanner,
-                    "_walk_file_entries",
-                    side_effect=PermissionError("denied"),
+                with (
+                    patch.object(
+                        scanner,
+                        "_walk_file_entries",
+                        side_effect=PermissionError("denied"),
+                    ),
+                    self.assertRaises(PermissionError),
                 ):
-                    with self.assertRaises(PermissionError):
-                        scanner._scan_movies(
-                            "library-1", root, "job-1", lambda: False
-                        )
+                    scanner._scan_movies("library-1", root, "job-1", lambda: False)
 
                 self.assertFalse(scanner._scan_complete)
                 self.assertEqual(
@@ -1283,14 +1322,18 @@ class LibraryMetadataTest(unittest.TestCase):
                     return original_files(*args, **kwargs)
 
                 self._prepare_incremental_scan(scanner)
-                with patch.object(scanner, "_files", side_effect=remove_before_reconcile):
-                    scanner._scan_movies(
-                        "library-1", root, "job-1", lambda: False
-                    )
+                with patch.object(
+                    scanner, "_files", side_effect=remove_before_reconcile
+                ):
+                    scanner._scan_movies("library-1", root, "job-1", lambda: False)
                 self._finish_incremental_scan(scanner, "library-1", root)
 
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0)
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM library_entities")[0][0], 0
+                )
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM media_files")[0][0], 0
+                )
         finally:
             db.close()
 
@@ -1453,7 +1496,9 @@ class LibraryMetadataTest(unittest.TestCase):
             (specials / "Example - S00E12345.mkv").touch()
             with (
                 patch("app.providers.MetadataService", return_value=MagicMock()),
-                patch.object(scanner, "_resolve_series_root", return_value=None) as resolve,
+                patch.object(
+                    scanner, "_resolve_series_root", return_value=None
+                ) as resolve,
                 patch.object(scanner, "_resolve_season_metadata"),
             ):
                 scanner._scan_series(
@@ -1501,8 +1546,12 @@ class LibraryMetadataTest(unittest.TestCase):
 
                 with (
                     patch("app.providers.MetadataService", return_value=MagicMock()),
-                    patch.object(scanner, "_resolve_series_root", side_effect=resolve_root),
-                    patch.object(scanner, "_resolve_season_metadata", side_effect=resolve_season),
+                    patch.object(
+                        scanner, "_resolve_series_root", side_effect=resolve_root
+                    ),
+                    patch.object(
+                        scanner, "_resolve_season_metadata", side_effect=resolve_season
+                    ),
                 ):
                     scanner._scan_series(
                         "library-1",
@@ -1813,11 +1862,21 @@ class LibraryMetadataTest(unittest.TestCase):
         }
         with patch.object(library_routes, "_entity", side_effect=values.__getitem__):
             self.assertEqual(
-                [value["id"] for value in library_routes._image_entities(values["episode"], "Primary")],
+                [
+                    value["id"]
+                    for value in library_routes._image_entities(
+                        values["episode"], "Primary"
+                    )
+                ],
                 ["episode-1", "season-1", "series-1"],
             )
             self.assertEqual(
-                [value["id"] for value in library_routes._image_entities(values["episode"], "Backdrop")],
+                [
+                    value["id"]
+                    for value in library_routes._image_entities(
+                        values["episode"], "Backdrop"
+                    )
+                ],
                 ["episode-1"],
             )
 
@@ -2760,15 +2819,22 @@ class LibraryJobControlTest(unittest.TestCase):
         self.runtime._recover_active_jobs()
 
         self.assertEqual(
-            self.db.execute("SELECT state FROM library_jobs WHERE id=?", (running["id"],))[0][0],
+            self.db.execute(
+                "SELECT state FROM library_jobs WHERE id=?", (running["id"],)
+            )[0][0],
             "queued",
         )
         self.assertEqual(
-            self.db.execute("SELECT progress_current,progress_total,started_at,finished_at,message FROM library_jobs WHERE id=?", (running["id"],))[0],
+            self.db.execute(
+                "SELECT progress_current,progress_total,started_at,finished_at,message FROM library_jobs WHERE id=?",
+                (running["id"],),
+            )[0],
             (0, 0, None, None, "Queued again after Orchestrator restart"),
         )
         self.assertEqual(
-            self.db.execute("SELECT scan_state FROM libraries WHERE id='library-1'")[0][0],
+            self.db.execute("SELECT scan_state FROM libraries WHERE id='library-1'")[0][
+                0
+            ],
             "idle",
         )
 
@@ -2789,18 +2855,27 @@ class LibraryJobControlTest(unittest.TestCase):
 
     def test_restart_keeps_only_newest_non_terminating_duplicate(self):
         oldest = self.runtime.enqueue("library-1", "scan")
-        self.db.execute("UPDATE library_jobs SET created_at='2020-01-01' WHERE id=?", (oldest["id"],))
+        self.db.execute(
+            "UPDATE library_jobs SET created_at='2020-01-01' WHERE id=?",
+            (oldest["id"],),
+        )
         newest = self.runtime.store.create_job("library-1", "scan")
-        self.db.execute("UPDATE library_jobs SET state='running' WHERE id=?", (newest["id"],))
+        self.db.execute(
+            "UPDATE library_jobs SET state='running' WHERE id=?", (newest["id"],)
+        )
 
         self.runtime._recover_active_jobs()
 
         self.assertEqual(
-            self.db.execute("SELECT state FROM library_jobs WHERE id=?", (newest["id"],))[0][0],
+            self.db.execute(
+                "SELECT state FROM library_jobs WHERE id=?", (newest["id"],)
+            )[0][0],
             "queued",
         )
         self.assertEqual(
-            self.db.execute("SELECT state FROM library_jobs WHERE id=?", (oldest["id"],))[0][0],
+            self.db.execute(
+                "SELECT state FROM library_jobs WHERE id=?", (oldest["id"],)
+            )[0][0],
             "terminated",
         )
 

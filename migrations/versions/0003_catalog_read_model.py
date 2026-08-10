@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0003_catalog_read_model"
 down_revision = "0002_catalog_read_indexes"
 branch_labels = None

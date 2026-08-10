@@ -1,6 +1,7 @@
 from functools import wraps
-from flask import request
+
 from app.models.admin import Admin
+from flask import request
 
 
 def authenticate_admin(func):

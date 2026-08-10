@@ -1,7 +1,6 @@
 from alembic import op
 from sqlalchemy import Column, Integer
 
-
 revision = "0006_analysis_worker_limits"
 down_revision = "0005_sqlalchemy_persistence_indexes"
 branch_labels = None

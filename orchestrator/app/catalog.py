@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import math
 import contextvars
-import time
-import json
 import hashlib
+import json
+import math
 import threading
-from functools import wraps
+import time
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 
-from fastapi import HTTPException
-
 from app.config import Config
-from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
+from app.images import LocalArtworkCache
+from app.logging_config import get_logger
 from app.metadata_domain import (
     choose_artwork,
     fallback_tiers,
@@ -24,11 +23,10 @@ from app.metadata_services import (
     CATALOG_ITEM_PROJECTION_SCHEMA,
     MetadataReadService,
 )
+from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
-from app.images import LocalArtworkCache
-from app.logging_config import get_logger
 from app.search_scoring import match_score, normalize_search_text, trigram_set
-
+from fastapi import HTTPException
 
 LOCAL_ARTWORK_NAMES = {
     "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
@@ -92,9 +90,7 @@ class _CatalogReadContext:
         self.date_values: dict[
             tuple[frozenset[str], frozenset[str] | None], dict[str, dict[str, str]]
         ] = {}
-        self.date_root_values: dict[
-            tuple[frozenset[str], str], dict[str, str]
-        ] = {}
+        self.date_root_values: dict[tuple[frozenset[str], str], dict[str, str]] = {}
         self.date_requested_roots = 0
         self.date_rollup_hits = 0
         self.date_fallback_roots = 0
@@ -108,7 +104,9 @@ class _CatalogReadContext:
         try:
             return action()
         finally:
-            self.timings[stage] = self.timings.get(stage, 0.0) + (time.perf_counter() - started)
+            self.timings[stage] = self.timings.get(stage, 0.0) + (
+                time.perf_counter() - started
+            )
 
 
 def _catalog_read(method):
@@ -144,11 +142,13 @@ def _catalog_read(method):
                 )
             if context is not None:
                 details = " ".join(
-                    part for part in (
+                    part
+                    for part in (
                         details,
                         f"selected_rows={context.selected_rows}",
                         f"query_count={context.query_count}",
-                    ) if part
+                    )
+                    if part
                 )
             log = logger.warning if elapsed > 2 else logger.debug
             log(
@@ -159,12 +159,13 @@ def _catalog_read(method):
                 details,
             )
             self._read_context.reset(token)
+
     return wrapped
 
 
 class Catalog:
-    _read_context: contextvars.ContextVar[_CatalogReadContext | None] = contextvars.ContextVar(
-        "catalog_read_context", default=None
+    _read_context: contextvars.ContextVar[_CatalogReadContext | None] = (
+        contextvars.ContextVar("catalog_read_context", default=None)
     )
 
     def __init__(self):
@@ -186,7 +187,9 @@ class Catalog:
             else:
                 if not hasattr(self, "_home_user_epochs"):
                     self._home_user_epochs = {}
-                self._home_user_epochs[user_id] = self._home_user_epochs.get(user_id, 0) + 1
+                self._home_user_epochs[user_id] = (
+                    self._home_user_epochs.get(user_id, 0) + 1
+                )
                 self._home_cache = {
                     key: value
                     for key, value in self._home_cache.items()
@@ -259,9 +262,7 @@ class Catalog:
             )
         }
         if context:
-            context.table_presence.update(
-                {name: name in present for name in tracked}
-            )
+            context.table_presence.update({name: name in present for name in tracked})
         if not {
             "catalog_entity_summary",
             "catalog_item_projection",
@@ -340,7 +341,10 @@ class Catalog:
         )
         context = self._context(user_id)
         supported = (
-            context.measure("library_capabilities", lambda: self._library_supports_last_added({library_id}))
+            context.measure(
+                "library_capabilities",
+                lambda: self._library_supports_last_added({library_id}),
+            )
             if context
             else self._library_supports_last_added({library_id})
         )
@@ -363,8 +367,8 @@ class Catalog:
             or (
                 self._has_table("collection_members")
                 and self.db.execute(
-                "SELECT 1 FROM collection_members m JOIN library_entities parent ON parent.id=m.collection_entity_id WHERE parent.library_id=? LIMIT 1",
-                (library_id,),
+                    "SELECT 1 FROM collection_members m JOIN library_entities parent ON parent.id=m.collection_entity_id WHERE parent.library_id=? LIMIT 1",
+                    (library_id,),
                 )
             )
         )
@@ -454,7 +458,11 @@ class Catalog:
 
     def _read_service(self) -> MetadataReadService:
         context = self._read_context.get()
-        return context.metadata_service if context is not None else MetadataReadService(self.db)
+        return (
+            context.metadata_service
+            if context is not None
+            else MetadataReadService(self.db)
+        )
 
     @_catalog_read
     def metadata(
@@ -466,7 +474,9 @@ class Catalog:
         if language not in configured:
             raise HTTPException(400, "Metadata language is not configured.")
         context = self._context(user_id)
-        projected = context.projected_metadata.get((entity_id, language)) if context else None
+        projected = (
+            context.projected_metadata.get((entity_id, language)) if context else None
+        )
         if (
             isinstance(projected, dict)
             and isinstance(projected.get("images"), dict)
@@ -541,12 +551,19 @@ class Catalog:
                     image["blurHash"] = local[1]
         if include_credits:
             resolved["metadata"]["credits"] = self.credits(
-                user_id, entity_id, language, resolved["metadata"].get("originalLanguage")
+                user_id,
+                entity_id,
+                language,
+                resolved["metadata"].get("originalLanguage"),
             )
         return resolved
 
     def credits(
-        self, user_id: str, entity_id: str, language: str, original_language: str | None = None
+        self,
+        user_id: str,
+        entity_id: str,
+        language: str,
+        original_language: str | None = None,
     ) -> dict[str, list[dict]]:
         self.require_entity(user_id, entity_id)
         if not self._has_table("entity_person_credits"):
@@ -572,9 +589,7 @@ class Catalog:
         localization_name = "''"
         localization_join = ""
         if self._has_table("person_localizations"):
-            localization_join = (
-                "LEFT JOIN person_localizations l ON l.person_id=c.person_id AND l.locale=c.locale "
-            )
+            localization_join = "LEFT JOIN person_localizations l ON l.person_id=c.person_id AND l.locale=c.locale "
             localization_columns = {
                 row[1]
                 for row in self.db.execute("PRAGMA table_info(person_localizations)")
@@ -585,41 +600,57 @@ class Catalog:
                 localization_name = "l.localized_name"
             elif "value" in localization_columns:
                 localization_name = "l.value"
-        rank_sql = "CASE c.locale " + " ".join(
-            "WHEN ? THEN ?" for _ in locale_order
-        ) + " ELSE 999 END"
+        rank_sql = (
+            "CASE c.locale "
+            + " ".join("WHEN ? THEN ?" for _ in locale_order)
+            + " ELSE 999 END"
+        )
         rank_params: list[object] = []
         for index, locale in enumerate(locale_order):
             rank_params.extend([locale, index])
         rows = self.db.execute(
             "WITH ranked AS ("
-            "SELECT c.person_id,c.credit_type,COALESCE(" + localization_name + ", '') AS name,c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,p.updated_at,c.id,"
+            "SELECT c.person_id,c.credit_type,COALESCE("
+            + localization_name
+            + ", '') AS name,c.role,c.department,c.credit_order,p.local_path,p.image_blur_hash,p.updated_at,c.id,"
             f"DENSE_RANK() OVER (PARTITION BY c.credit_type ORDER BY {rank_sql}) AS locale_rank "
             "FROM entity_person_credits c JOIN people p ON p.id=c.person_id "
-            + localization_join +
-            "WHERE c.entity_id=? AND c.locale IN (" + ",".join("?" for _ in locale_order) + ")"
+            + localization_join
+            + "WHERE c.entity_id=? AND c.locale IN ("
+            + ",".join("?" for _ in locale_order)
+            + ")"
             ") SELECT person_id,credit_type,name,role,department,credit_order,local_path,image_blur_hash,updated_at "
             "FROM ranked WHERE locale_rank=1 ORDER BY credit_type,credit_order,id",
             [*rank_params, entity_id, *locale_order],
         )
         result = {"cast": [], "crew": []}
-        for person_id, credit_type, name, role, department, order, local_path, blur_hash, updated_at in rows:
-                value = {"id": person_id, "name": name, "order": order}
-                if credit_type == "cast":
-                    value["character"] = role
-                else:
-                    value["job"] = role
-                    value["department"] = department
-                if local_path:
-                    version = hashlib.sha256(
-                        f"{local_path}:{updated_at or ''}".encode("utf-8")
-                    ).hexdigest()[:12]
-                    value["image"] = {
-                        "url": f"/api/catalog/items/{entity_id}/people/{person_id}/image?v={version}"
-                    }
-                    if blur_hash:
-                        value["image"]["blurHash"] = blur_hash
-                result[credit_type].append(value)
+        for (
+            person_id,
+            credit_type,
+            name,
+            role,
+            department,
+            order,
+            local_path,
+            blur_hash,
+            updated_at,
+        ) in rows:
+            value = {"id": person_id, "name": name, "order": order}
+            if credit_type == "cast":
+                value["character"] = role
+            else:
+                value["job"] = role
+                value["department"] = department
+            if local_path:
+                version = hashlib.sha256(
+                    f"{local_path}:{updated_at or ''}".encode()
+                ).hexdigest()[:12]
+                value["image"] = {
+                    "url": f"/api/catalog/items/{entity_id}/people/{person_id}/image?v={version}"
+                }
+                if blur_hash:
+                    value["image"]["blurHash"] = blur_hash
+            result[credit_type].append(value)
         return result
 
     def person_image(self, user_id: str, entity_id: str, person_id: str) -> Path | None:
@@ -638,14 +669,20 @@ class Catalog:
         path = Path(rows[0][0])
         return path if path.is_file() else None
 
-    def local_artwork(self, entity_id: str, image_type: str) -> tuple[Path, str | None] | None:
+    def local_artwork(
+        self, entity_id: str, image_type: str
+    ) -> tuple[Path, str | None] | None:
         row = self._entity_row(entity_id)
         if not row or image_type not in LOCAL_ARTWORK_NAMES:
             return None
-        directory_rows = self.db.execute("SELECT directory FROM libraries WHERE id=?", (row[1],))
+        directory_rows = self.db.execute(
+            "SELECT directory FROM libraries WHERE id=?", (row[1],)
+        )
         if not directory_rows or not directory_rows[0][0]:
             return None
-        columns = {value[1] for value in self.db.execute("PRAGMA table_info(media_files)")}
+        columns = {
+            value[1] for value in self.db.execute("PRAGMA table_info(media_files)")
+        }
         if not columns:
             return None
         blur_field = ",image_blur_hash" if "image_blur_hash" in columns else ""
@@ -657,7 +694,12 @@ class Catalog:
             relative_path, content_hash, *blur_hash = values
             candidate = Path(directory_rows[0][0]) / relative_path
             cached = cache.path(content_hash)
-            if candidate.stem.lower() in LOCAL_ARTWORK_NAMES[image_type] and candidate.is_file() and cached and cached.is_file():
+            if (
+                candidate.stem.lower() in LOCAL_ARTWORK_NAMES[image_type]
+                and candidate.is_file()
+                and cached
+                and cached.is_file()
+            ):
                 return cached, blur_hash[0] if blur_hash else None
         return None
 
@@ -686,7 +728,9 @@ class Catalog:
         row = self.require_entity(user_id, entity_id)
         self._preload_projected_states(user_id, [entity_id])
         self._preload_projected_metadata(user_id, [entity_id], language)
-        metadata = self.metadata(user_id, entity_id, language, include_credits=True)["metadata"]
+        metadata = self.metadata(user_id, entity_id, language, include_credits=True)[
+            "metadata"
+        ]
         if row[3] == "collection":
             allowed = self.allowed_libraries(user_id)
             placeholders = ",".join("?" for _ in allowed)
@@ -707,18 +751,28 @@ class Catalog:
             user_id, row, metadata, [child[0] for child in children], language=language
         )
 
-    def _relationship_graph(self, user_id: str) -> tuple[dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]]:
+    def _relationship_graph(
+        self, user_id: str
+    ) -> tuple[
+        dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]
+    ]:
         context = self._context(user_id)
         if context and context.graph is not None:
             return context.graph
+
         def load_graph():
             return self._relationship_graph_uncached(user_id)
+
         graph = context.measure("graph", load_graph) if context else load_graph()
         if context:
             context.graph = graph
         return graph
 
-    def _relationship_graph_uncached(self, user_id: str) -> tuple[dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]]:
+    def _relationship_graph_uncached(
+        self, user_id: str
+    ) -> tuple[
+        dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]
+    ]:
         allowed = self.allowed_libraries(user_id)
         if not allowed:
             return {}, {}, {}
@@ -801,6 +855,7 @@ class Catalog:
         if not allowed:
             return {}
         placeholders = ",".join("?" for _ in allowed)
+
         def load_states():
             rows = self.db.execute(
                 f"SELECT s.entity_id,s.favorite,s.played,s.play_count,s.position_seconds,s.duration_seconds,s.last_played_at "
@@ -809,14 +864,21 @@ class Catalog:
                 [user_id, *allowed],
             )
             return {row[0]: row[1:] for row in rows}
-        values = context.measure("state_preload", load_states) if context else load_states()
+
+        values = (
+            context.measure("state_preload", load_states) if context else load_states()
+        )
         if context:
             context.direct_states = values
         return values
 
     def _state_row(self, user_id: str, entity_id: str, cursor=None):
         query = "SELECT favorite,played,play_count,position_seconds,duration_seconds,last_played_at FROM user_item_state WHERE user_id=? AND entity_id=?"
-        rows = cursor.execute(query, (user_id, entity_id)).fetchall() if cursor else self.db.execute(query, (user_id, entity_id))
+        rows = (
+            cursor.execute(query, (user_id, entity_id)).fetchall()
+            if cursor
+            else self.db.execute(query, (user_id, entity_id))
+        )
         return rows[0] if rows else None
 
     @staticmethod
@@ -832,7 +894,11 @@ class Catalog:
             }
         position = max(0.0, float(row[3] or 0))
         duration = max(0.0, float(row[4] or 0))
-        percentage = None if position <= 0 or duration <= 0 else min(100.0, position / duration * 100)
+        percentage = (
+            None
+            if position <= 0 or duration <= 0
+            else min(100.0, position / duration * 100)
+        )
         return {
             "favorite": bool(row[0]),
             "played": bool(row[1]),
@@ -865,11 +931,21 @@ class Catalog:
             context.resolved_states[entity_id] = dict(direct)
             return direct
         entities, children, _ = self._relationship_graph(user_id)
-        row = self._state_rows(user_id).get(entity_id) if context else self._state_row(user_id, entity_id)
+        row = (
+            self._state_rows(user_id).get(entity_id)
+            if context
+            else self._state_row(user_id, entity_id)
+        )
         direct = self._direct_state(row)
         leaves = self._playable_descendants(entity_id, entities, children)
         if not leaves or (len(leaves) == 1 and leaves[0] == entity_id):
-            if entities.get(entity_id, (None, ""))[1] in {"series", "season", "collection", "artist", "release"}:
+            if entities.get(entity_id, (None, ""))[1] in {
+                "series",
+                "season",
+                "collection",
+                "artist",
+                "release",
+            }:
                 direct["played"] = False
                 direct["playedPercentage"] = None
                 direct["unplayedItemCount"] = 0
@@ -878,10 +954,16 @@ class Catalog:
             return direct
         states = self._state_rows(user_id) if context else None
         leaf_states = [
-            self._direct_state(states.get(leaf_id) if states is not None else self._state_row(user_id, leaf_id))
+            self._direct_state(
+                states.get(leaf_id)
+                if states is not None
+                else self._state_row(user_id, leaf_id)
+            )
             for leaf_id in leaves
         ]
-        direct["played"] = bool(leaf_states) and all(state["played"] for state in leaf_states)
+        direct["played"] = bool(leaf_states) and all(
+            state["played"] for state in leaf_states
+        )
         direct["unplayedItemCount"] = sum(not state["played"] for state in leaf_states)
         direct["playedPercentage"] = None
         if context:
@@ -897,7 +979,14 @@ class Catalog:
             projected = context.projected_states.get(entity_id)
             if projected is not None:
                 value = self._direct_state(
-                    (projected[0], projected[1], projected[2], projected[5], projected[6], projected[7])
+                    (
+                        projected[0],
+                        projected[1],
+                        projected[2],
+                        projected[5],
+                        projected[6],
+                        projected[7],
+                    )
                 )
                 context.resolved_states[entity_id] = dict(value)
                 return value
@@ -910,7 +999,11 @@ class Catalog:
         context = self._context(user_id)
         if context is None or not entity_ids:
             return
-        missing = [entity_id for entity_id in entity_ids if entity_id not in context.projected_states]
+        missing = [
+            entity_id
+            for entity_id in entity_ids
+            if entity_id not in context.projected_states
+        ]
         if not missing:
             return
         placeholders = ",".join("?" for _ in missing)
@@ -929,7 +1022,8 @@ class Catalog:
                 {
                     row[0]: (
                         row[1],
-                        bool(row[2]) or (int(row[4]) == int(row[5]) and int(row[5]) > 0),
+                        bool(row[2])
+                        or (int(row[4]) == int(row[5]) and int(row[5]) > 0),
                         row[3],
                         row[4],
                         max(0, int(row[5]) - int(row[4])),
@@ -940,7 +1034,11 @@ class Catalog:
                     for row in rows
                 }
             )
-            missing = [entity_id for entity_id in missing if entity_id not in context.projected_states]
+            missing = [
+                entity_id
+                for entity_id in missing
+                if entity_id not in context.projected_states
+            ]
             if not missing:
                 return
         if not self._has_table("catalog_user_rollups"):
@@ -999,7 +1097,11 @@ class Catalog:
                         {row[0]: int(row[1] or 0) for row in rows}
                     )
                     context.empty_state_counts.update(
-                        {entity_id: 0 for entity_id in missing if entity_id not in context.empty_state_counts}
+                        {
+                            entity_id: 0
+                            for entity_id in missing
+                            if entity_id not in context.empty_state_counts
+                        }
                     )
 
     def _preload_projected_metadata(
@@ -1030,7 +1132,9 @@ class Catalog:
             if isinstance(value, dict):
                 context.projected_metadata[(entity_id, language)] = value
 
-    def _seed_hydration_rows(self, user_id: str, rows: list[tuple], language: str) -> None:
+    def _seed_hydration_rows(
+        self, user_id: str, rows: list[tuple], language: str
+    ) -> None:
         context = self._context(user_id)
         if context is None or not rows:
             return
@@ -1038,7 +1142,11 @@ class Catalog:
         context.entity_rows.update({row[0]: row for row in rows})
         parent_ids = {row[2] for row in rows if row[2]}
         for _ in range(2):
-            missing = [entity_id for entity_id in parent_ids if entity_id not in context.entity_rows]
+            missing = [
+                entity_id
+                for entity_id in parent_ids
+                if entity_id not in context.entity_rows
+            ]
             if not missing:
                 break
             placeholders = ",".join("?" for _ in missing)
@@ -1053,7 +1161,11 @@ class Catalog:
         self._preload_projected_metadata(user_id, list(context.entity_rows), language)
 
     def _hydrate_rows(
-        self, user_id: str, rows: list[tuple], language: str, dates: dict[str, dict] | None = None
+        self,
+        user_id: str,
+        rows: list[tuple],
+        language: str,
+        dates: dict[str, dict] | None = None,
     ) -> list[dict]:
         self._seed_hydration_rows(user_id, rows, language)
         return [
@@ -1130,10 +1242,14 @@ class Catalog:
         index_tie_direction = "ASC" if direction == "DESC" else "DESC"
         params: list[object] = [language, library_id, parent_id]
         if sort_by in {"added", "lastAdded"}:
-            order_column = "s.added_sort_ns" if sort_by == "added" else "s.last_added_sort_ns"
+            order_column = (
+                "s.added_sort_ns" if sort_by == "added" else "s.last_added_sort_ns"
+            )
             select_dates = "s.added_sort_ns,s.last_added_sort_ns"
             date_params: list[object] = []
-            if library["type"] == "collection" and self._has_table("catalog_collection_summary"):
+            if library["type"] == "collection" and self._has_table(
+                "catalog_collection_summary"
+            ):
                 scope = sorted(self.allowed_libraries(user_id))
                 scope_placeholders = ",".join("?" for _ in scope)
                 select_dates = (
@@ -1145,15 +1261,29 @@ class Catalog:
             order = f"{order_column} {direction},e.id {index_tie_direction}"
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
-                "e.episode_number,e.episode_end_number,e.created_at,e.updated_at," + select_dates + " "
+                "e.episode_number,e.episode_end_number,e.created_at,e.updated_at,"
+                + select_dates
+                + " "
                 "FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
-                "WHERE s.library_id=? AND s.parent_id IS ? ORDER BY " + order + " LIMIT ? OFFSET ?"
+                "WHERE s.library_id=? AND s.parent_id IS ? ORDER BY "
+                + order
+                + " LIMIT ? OFFSET ?"
             )
             if date_params:
                 # The computed date aliases are used only for ordering; SQLite
                 # permits the equivalent expressions in the SELECT and ORDER BY.
-                order = ("(SELECT MIN(c.added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN (" + scope_placeholders + "))" if sort_by == "added" else "(SELECT MAX(c.last_added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN (" + scope_placeholders + "))")
-                query = query.replace("ORDER BY sort_added", "ORDER BY " + order).replace("ORDER BY sort_last", "ORDER BY " + order)
+                order = (
+                    "(SELECT MIN(c.added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN ("
+                    + scope_placeholders
+                    + "))"
+                    if sort_by == "added"
+                    else "(SELECT MAX(c.last_added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN ("
+                    + scope_placeholders
+                    + "))"
+                )
+                query = query.replace(
+                    "ORDER BY sort_added", "ORDER BY " + order
+                ).replace("ORDER BY sort_last", "ORDER BY " + order)
                 params = [*date_params, library_id, parent_id, page_size, offset]
             else:
                 params = [library_id, parent_id, page_size, offset]
@@ -1166,7 +1296,11 @@ class Catalog:
             }.get(sort_by, "p.title_sort")
             if parent_id:
                 parent_row = self._entity_row(parent_id)
-                if parent_row and parent_row[3] in {"series", "season"} and sort_by is None:
+                if (
+                    parent_row
+                    and parent_row[3] in {"series", "season"}
+                    and sort_by is None
+                ):
                     projection_order = (
                         "e.season_number IS NOT NULL,e.season_number,e.episode_number IS NOT NULL,"
                         "e.episode_number,e.relative_path COLLATE NOCASE,e.id"
@@ -1187,7 +1321,11 @@ class Catalog:
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                 "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
-                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY " + projection_order + ",p.entity_id " + projection_tie_direction + " LIMIT ? OFFSET ?"
+                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY "
+                + projection_order
+                + ",p.entity_id "
+                + projection_tie_direction
+                + " LIMIT ? OFFSET ?"
             )
             params.extend([page_size, offset])
         else:
@@ -1214,7 +1352,9 @@ class Catalog:
                 }
                 for row in date_rows
             }
-        values = self._hydrate_rows(user_id, [row[:10] for row in rows], language, dates)
+        values = self._hydrate_rows(
+            user_id, [row[:10] for row in rows], language, dates
+        )
         if self._context(user_id):
             self._context(user_id).timings.setdefault("candidate_selection", 0.0)
         return {"items": values, "page": page, "pageSize": page_size, "total": total}
@@ -1342,6 +1482,7 @@ class Catalog:
                 return cached_roots
 
         if self._read_model_ready():
+
             def resolve_indexed() -> dict[str, dict[str, str]]:
                 placeholders = ",".join("?" for _ in scope)
                 params: list[object] = []
@@ -1390,11 +1531,18 @@ class Catalog:
                     context.date_values[cache_key] = values
                     if requested_root_ids is not None:
                         context.date_root_values.update(
-                            {(scope_key, entity_id): value for entity_id, value in values.items()}
+                            {
+                                (scope_key, entity_id): value
+                                for entity_id, value in values.items()
+                            }
                         )
                 return values
 
-            values = context.measure("date_values", resolve_indexed) if context else resolve_indexed()
+            values = (
+                context.measure("date_values", resolve_indexed)
+                if context
+                else resolve_indexed()
+            )
             return values
 
         def resolve() -> dict[str, dict[str, str]]:
@@ -1453,14 +1601,16 @@ class Catalog:
                         f" AND entity_id IN ({','.join('?' for _ in requested_params)})"
                     )
                     rollup_params.extend(requested_params)
-                for entity_id, added_ns, last_added_ns, rollup_library_id in self.db.execute(
-                    rollup_query, rollup_params
-                ):
+                for (
+                    entity_id,
+                    added_ns,
+                    last_added_ns,
+                    rollup_library_id,
+                ) in self.db.execute(rollup_query, rollup_params):
                     projection_ready = projection_states.get(rollup_library_id)
-                    if (
-                        scan_states.get(rollup_library_id) == "scanning"
-                        or projection_ready not in (None, "ready")
-                    ):
+                    if scan_states.get(
+                        rollup_library_id
+                    ) == "scanning" or projection_ready not in (None, "ready"):
                         continue
                     if entity_id in requested_ids:
                         rollup_values[entity_id] = (added_ns, last_added_ns)
@@ -1547,9 +1697,7 @@ class Catalog:
             compute_params: list[str] = []
             if requested_root_ids is not None:
                 compute_params = sorted(compute_ids)
-                compute_filter = (
-                    f" AND id IN ({','.join('?' for _ in compute_params)})"
-                )
+                compute_filter = f" AND id IN ({','.join('?' for _ in compute_params)})"
             date_rows = self.db.execute(
                 f"""
                 WITH RECURSIVE entity_tree(root_id, entity_id) AS (
@@ -1598,10 +1746,7 @@ class Catalog:
             context.date_values[cache_key] = values
             if requested_root_ids is not None:
                 context.date_root_values.update(
-                    {
-                        (scope_key, root_id): value
-                        for root_id, value in values.items()
-                    }
+                    {(scope_key, root_id): value for root_id, value in values.items()}
                 )
         return values
 
@@ -1645,6 +1790,7 @@ class Catalog:
         display_rows = rows
         projected_page = False
         if sort_by is None and hierarchy_parent in {"series", "season"}:
+
             def row_hierarchy_key(row):
                 season = row[5]
                 episode = row[6]
@@ -1680,8 +1826,15 @@ class Catalog:
                 display_rows = projected_rows
                 projected_page = True
         context = self._context(user_id)
-        date_scope = self.allowed_libraries(user_id) if library["type"] == "collection" else {library_id}
-        roots_for_dates = {row[0] for row in (rows if sort_by in {"added", "lastAdded"} else display_rows)}
+        date_scope = (
+            self.allowed_libraries(user_id)
+            if library["type"] == "collection"
+            else {library_id}
+        )
+        roots_for_dates = {
+            row[0]
+            for row in (rows if sort_by in {"added", "lastAdded"} else display_rows)
+        }
         date_values = lambda: self._date_values(library_id, date_scope, roots_for_dates)
         dates = context.measure("date_sort", date_values) if context else date_values()
         if sort_by in {"added", "lastAdded"} and display_rows is rows:
@@ -1700,6 +1853,7 @@ class Catalog:
                 if len(candidate_rows) >= end:
                     break
             display_rows = candidate_rows
+
         def serialize_values():
             self._preload_projected_states(user_id, [row[0] for row in display_rows])
             self._preload_projected_metadata(
@@ -1710,12 +1864,22 @@ class Catalog:
                 metadata = self.metadata(user_id, row[0], language)["metadata"]
                 values.append(
                     self._serialize(
-                        user_id, row, metadata, dates=dates.get(row[0]), language=language
+                        user_id,
+                        row,
+                        metadata,
+                        dates=dates.get(row[0]),
+                        language=language,
                     )
                 )
             return values
-        values = context.measure("serialization", serialize_values) if context else serialize_values()
+
+        values = (
+            context.measure("serialization", serialize_values)
+            if context
+            else serialize_values()
+        )
         if sort_by is None and hierarchy_parent in {"series", "season"}:
+
             def hierarchy_key(value):
                 season = value.get("seasonNumber")
                 episode = value.get("episodeNumber")
@@ -1736,7 +1900,12 @@ class Catalog:
             values.sort(key=hierarchy_key)
         elif display_rows is rows:
             reverse = sort_order.lower() == "descending"
-            selected_sort = sort_by if sort_by in {"rating", "title", "added", "lastAdded", "release", "runtime"} else "title"
+            selected_sort = (
+                sort_by
+                if sort_by
+                in {"rating", "title", "added", "lastAdded", "release", "runtime"}
+                else "title"
+            )
             key = {
                 "added": lambda value: value.get("addedAt") or "",
                 "lastAdded": lambda value: value.get("lastAddedAt") or "",
@@ -1744,7 +1913,14 @@ class Catalog:
                 "rating": lambda value: value["metadata"].get("communityRating") or 0,
                 "runtime": lambda value: value["metadata"].get("runtimeMinutes") or 0,
             }.get(selected_sort, lambda value: str(value.get("name") or "").casefold())
-            values.sort(key=lambda value: (key(value), str(value.get("name") or "").casefold(), value["id"]), reverse=reverse)
+            values.sort(
+                key=lambda value: (
+                    key(value),
+                    str(value.get("name") or "").casefold(),
+                    value["id"],
+                ),
+                reverse=reverse,
+            )
         if sort_by is None and hierarchy_parent in {"series", "season"}:
             return {
                 "items": values,
@@ -1789,13 +1965,16 @@ class Catalog:
                 if self._has_table("catalog_root_search_grams")
                 else "catalog_search_grams"
             )
-            query_grams = sorted(
-                trigram_set(wanted) if len(wanted) >= 3 else {wanted}
-            )
+            query_grams = sorted(trigram_set(wanted) if len(wanted) >= 3 else {wanted})
             gram_placeholders = ",".join("?" for _ in query_grams)
-            locale_rank = "CASE " + " ".join(
-                f"WHEN g.locale=? THEN {index}" for index, _ in enumerate(locale_order)
-            ) + " ELSE 99 END"
+            locale_rank = (
+                "CASE "
+                + " ".join(
+                    f"WHEN g.locale=? THEN {index}"
+                    for index, _ in enumerate(locale_order)
+                )
+                + " ELSE 99 END"
+            )
             if grams_table == "catalog_root_search_grams":
                 title_expression = "g.title_sort"
                 source_join = ""
@@ -1807,7 +1986,9 @@ class Catalog:
             source = (
                 "WITH scored AS ("
                 "SELECT g.entity_id,g.locale," + title_expression + " AS title_sort,"
-                "catalog_match_score(?," + title_expression + ") AS score,"
+                "catalog_match_score(?,"
+                + title_expression
+                + ") AS score,"
                 + locale_rank
                 + " AS locale_rank "
                 f"FROM {grams_table} g {source_join} "
@@ -1838,8 +2019,15 @@ class Catalog:
             if not page_rows and page > 1:
                 first_match = self.db.execute(source, [*match_params, 1, 0])
                 total = int(first_match[0][10] or 0) if first_match else 0
-            values = self._hydrate_rows(user_id, [row[:10] for row in page_rows], language)
-            return {"items": values, "page": page, "pageSize": page_size, "total": total}
+            values = self._hydrate_rows(
+                user_id, [row[:10] for row in page_rows], language
+            )
+            return {
+                "items": values,
+                "page": page,
+                "pageSize": page_size,
+                "total": total,
+            }
         if not self._has_table("catalog_search"):
             return {"items": [], "page": page, "pageSize": page_size, "total": 0}
         indexed = self.db.execute(
@@ -1875,7 +2063,11 @@ class Catalog:
                 continue
             metadata = self.metadata(user_id, row[0], language)["metadata"]
             ranked.append(
-                (*best, row[0], self._serialize(user_id, row, metadata, language=language))
+                (
+                    *best,
+                    row[0],
+                    self._serialize(user_id, row, metadata, language=language),
+                )
             )
         ranked.sort(key=lambda value: (*value[:3], value[3]))
         values = [value[4] for value in ranked]
@@ -1910,13 +2102,19 @@ class Catalog:
             else bool(duration and position / duration >= 0.9)
         )
         favorite = bool(changes.get("favorite", current["favorite"]))
-        descendants = self._walk_children(entity_id, children) if explicit_played is not None else []
+        descendants = (
+            self._walk_children(entity_id, children)
+            if explicit_played is not None
+            else []
+        )
         affected = [entity_id, *descendants]
         ancestor_ids = self._walk_parents(entity_id, parents)
         now = _now()
         with self.db.transaction() as cursor:
             states = {
-                affected_id: self._direct_state(self._state_row(user_id, affected_id, cursor))
+                affected_id: self._direct_state(
+                    self._state_row(user_id, affected_id, cursor)
+                )
                 for affected_id in affected
             }
             original_played = {
@@ -1938,9 +2136,18 @@ class Catalog:
                 leaves = self._playable_descendants(ancestor_id, entities, children)
                 if not leaves:
                     continue
-                leaf_states = [states.get(leaf_id) or self._direct_state(self._state_row(user_id, leaf_id, cursor)) for leaf_id in leaves]
-                ancestor = self._direct_state(self._state_row(user_id, ancestor_id, cursor))
-                ancestor.update(played=all(state["played"] for state in leaf_states), positionSeconds=0)
+                leaf_states = [
+                    states.get(leaf_id)
+                    or self._direct_state(self._state_row(user_id, leaf_id, cursor))
+                    for leaf_id in leaves
+                ]
+                ancestor = self._direct_state(
+                    self._state_row(user_id, ancestor_id, cursor)
+                )
+                ancestor.update(
+                    played=all(state["played"] for state in leaf_states),
+                    positionSeconds=0,
+                )
                 states[ancestor_id] = ancestor
                 affected.append(ancestor_id)
             for affected_id in dict.fromkeys(affected):
@@ -1951,7 +2158,19 @@ class Catalog:
                 cursor.execute(
                     "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,position_seconds,duration_seconds,last_played_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(user_id,entity_id) DO UPDATE SET favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
-                    (user_id, affected_id, int(state["favorite"]), int(next_played), play_count, state["positionSeconds"], state["durationSeconds"], now if state["positionSeconds"] or next_played else state.get("lastPlayedAt"), now),
+                    (
+                        user_id,
+                        affected_id,
+                        int(state["favorite"]),
+                        int(next_played),
+                        play_count,
+                        state["positionSeconds"],
+                        state["durationSeconds"],
+                        now
+                        if state["positionSeconds"] or next_played
+                        else state.get("lastPlayedAt"),
+                        now,
+                    ),
                 )
         if self._has_table("catalog_user_summary"):
             from app.catalog_read_model import CatalogReadModel
@@ -1981,7 +2200,11 @@ class Catalog:
             )
             total = int(total_rows[0][0] or 0) if total_rows else 0
             direction = "DESC" if sort_order.lower() == "descending" else "ASC"
-            order = "p.title_sort" if sort_by.lower() not in {"datecreated", "dateadded"} else "x.added_sort_ns"
+            order = (
+                "p.title_sort"
+                if sort_by.lower() not in {"datecreated", "dateadded"}
+                else "x.added_sort_ns"
+            )
             rows = self.db.execute(
                 f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,x.added_sort_ns,x.last_added_sort_ns "
                 f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id JOIN catalog_entity_summary x ON x.entity_id=e.id "
@@ -1997,8 +2220,15 @@ class Catalog:
                 }
                 for row in rows
             }
-            values = self._hydrate_rows(user_id, [row[:10] for row in rows], language, dates)
-            return {"items": values, "page": page, "pageSize": page_size, "total": total}
+            values = self._hydrate_rows(
+                user_id, [row[:10] for row in rows], language, dates
+            )
+            return {
+                "items": values,
+                "page": page,
+                "pageSize": page_size,
+                "total": total,
+            }
         rows = self.db.execute(
             f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders})",
             [user_id, *allowed],
@@ -2040,7 +2270,11 @@ class Catalog:
             for value in (source.get("genres") or source.get("tags") or [])
         }
         allowed = self.allowed_libraries(user_id)
-        if self._read_model_ready() and self._has_table("catalog_item_genres") and allowed:
+        if (
+            self._read_model_ready()
+            and self._has_table("catalog_item_genres")
+            and allowed
+        ):
             genre_rows = self.db.execute(
                 "SELECT genre_key FROM catalog_item_genres WHERE entity_id=? AND locale=?",
                 (entity_id, normalize_metadata_locale(language)),
@@ -2056,9 +2290,18 @@ class Catalog:
                     "GROUP BY g.entity_id ORDER BY score DESC,title_sort,g.entity_id LIMIT ?) "
                     "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                     "FROM ranked JOIN library_entities e ON e.id=ranked.entity_id ORDER BY ranked.score DESC,ranked.title_sort,ranked.entity_id",
-                    [normalize_metadata_locale(language), *keys, entity_id, *allowed, source_row[3], limit],
+                    [
+                        normalize_metadata_locale(language),
+                        *keys,
+                        entity_id,
+                        *allowed,
+                        source_row[3],
+                        limit,
+                    ],
                 )
-                values = self._hydrate_rows(user_id, [row[:10] for row in rows], language)
+                values = self._hydrate_rows(
+                    user_id, [row[:10] for row in rows], language
+                )
                 return {"items": values}
         placeholders = ",".join("?" for _ in allowed)
         rows = self.db.execute(
@@ -2098,7 +2341,11 @@ class Catalog:
         root_row = row
         if row[3] == "episode" and row[2]:
             season_row = self.require_entity(user_id, row[2])
-            root_row = self.require_entity(user_id, season_row[2]) if season_row[2] else season_row
+            root_row = (
+                self.require_entity(user_id, season_row[2])
+                if season_row[2]
+                else season_row
+            )
             season_id = season_id or season_row[0]
         elif row[3] == "season" and row[2]:
             root_row = self.require_entity(user_id, row[2])
@@ -2153,7 +2400,16 @@ class Catalog:
             )
 
         hydration_rows = list(
-            {value[0]: value for value in [row, root_row, *season_rows, *episode_rows, *collection_rows]}.values()
+            {
+                value[0]: value
+                for value in [
+                    row,
+                    root_row,
+                    *season_rows,
+                    *episode_rows,
+                    *collection_rows,
+                ]
+            }.values()
         )
         self._seed_hydration_rows(user_id, hydration_rows, language)
         hydrated = {
@@ -2190,9 +2446,7 @@ class Catalog:
         return {
             "item": item,
             "backgroundItem": (
-                hydrated[root_row[0]]
-                if root_row[0] != row[0]
-                else None
+                hydrated[root_row[0]] if root_row[0] != row[0] else None
             ),
             "seasons": [hydrated[value[0]] for value in season_rows],
             "selectedSeasonId": season_id,
@@ -2243,7 +2497,11 @@ class Catalog:
                 "ORDER BY s.last_added_sort_ns DESC,s.entity_id LIMIT 36",
                 list(allowed),
             )
-            rows = context.measure("home_discovery_sql", select_rows) if context else select_rows()
+            rows = (
+                context.measure("home_discovery_sql", select_rows)
+                if context
+                else select_rows()
+            )
             dates = {
                 row[0]: {
                     "addedAt": _date_from_ns(row[10]) or row[8],
@@ -2251,7 +2509,9 @@ class Catalog:
                 }
                 for row in rows
             }
-            return self._hydrate_rows(user_id, [row[:10] for row in rows], language, dates)
+            return self._hydrate_rows(
+                user_id, [row[:10] for row in rows], language, dates
+            )
         select_rows = lambda: self.db.execute(
             f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection') ORDER BY created_at DESC LIMIT 36",
             list(allowed),
@@ -2264,6 +2524,7 @@ class Catalog:
         self._preload_projected_states(user_id, [row[0] for row in rows])
         self._preload_projected_metadata(user_id, [row[0] for row in rows], language)
         dates = self._date_values("", allowed, {row[0] for row in rows})
+
         def serialize_rows():
             return [
                 self._serialize(
@@ -2275,6 +2536,7 @@ class Catalog:
                 )
                 for row in rows
             ]
+
         return (
             context.measure("serialization", serialize_rows)
             if context
@@ -2317,7 +2579,9 @@ class Catalog:
                 user_id,
                 row[:10],
                 self.metadata(user_id, row[0], language)["metadata"],
-                series_name=self._home_series_name(user_id, language, row[10], series_names),
+                series_name=self._home_series_name(
+                    user_id, language, row[10], series_names
+                ),
                 language=language,
             )
             for row in rows
@@ -2329,6 +2593,7 @@ class Catalog:
         if not allowed:
             return []
         placeholders = ",".join("?" for _ in allowed)
+
         def select_rows():
             started_series = self.db.execute(
                 f"SELECT DISTINCT series.id "
@@ -2357,6 +2622,7 @@ class Catalog:
                 f"FROM ranked WHERE item_rank=1 ORDER BY last_played_at DESC,id LIMIT 18",
                 [user_id, *allowed, *(row[0] for row in started_series)],
             )
+
         context = self._context(user_id)
         rows = (
             context.measure("home_next_up_sql", select_rows)
@@ -2372,7 +2638,9 @@ class Catalog:
                 user_id,
                 row[:10],
                 self.metadata(user_id, row[0], language)["metadata"],
-                series_name=self._home_series_name(user_id, language, row[10], series_names),
+                series_name=self._home_series_name(
+                    user_id, language, row[10], series_names
+                ),
                 language=language,
             )
             for row in rows
@@ -2396,7 +2664,9 @@ class Catalog:
             favorite_query += " ORDER BY e.relative_path COLLATE NOCASE,e.id LIMIT 18"
         favorite_rows = self.db.execute(favorite_query, favorite_params)
         self._preload_projected_states(user_id, [row[0] for row in favorite_rows])
-        self._preload_projected_metadata(user_id, [row[0] for row in favorite_rows], language)
+        self._preload_projected_metadata(
+            user_id, [row[0] for row in favorite_rows], language
+        )
         my_list = [
             self._serialize(
                 user_id,
@@ -2420,7 +2690,9 @@ class Catalog:
             f"ORDER BY s.last_played_at DESC,e.id LIMIT 18",
             [user_id, *allowed],
         )
-        recent_ids = [row[0] for row in recent_rows] + [row[10] for row in recent_rows if row[10]]
+        recent_ids = [row[0] for row in recent_rows] + [
+            row[10] for row in recent_rows if row[10]
+        ]
         self._preload_projected_states(user_id, recent_ids)
         self._preload_projected_metadata(user_id, recent_ids, language)
         series_names: dict[str, str] = {}
@@ -2429,7 +2701,9 @@ class Catalog:
                 user_id,
                 row[:10],
                 self.metadata(user_id, row[0], language)["metadata"],
-                series_name=self._home_series_name(user_id, language, row[10], series_names),
+                series_name=self._home_series_name(
+                    user_id, language, row[10], series_names
+                ),
                 language=language,
             )
             for row in recent_rows
@@ -2456,14 +2730,19 @@ class Catalog:
                 genre_counts[key] = genre_counts.get(key, 0) + 1
         genre_rows = []
         for key in sorted(
-            genre_counts, key=lambda value: (-genre_counts[value], genre_names[value].casefold())
+            genre_counts,
+            key=lambda value: (-genre_counts[value], genre_names[value].casefold()),
         )[:3]:
             items = [
                 item
                 for item in genre_candidates
                 if any(
                     isinstance(tag, str) and tag.strip().casefold() == key
-                    for tag in ((item.get("metadata") or {}).get("genres") or (item.get("metadata") or {}).get("tags") or [])
+                    for tag in (
+                        (item.get("metadata") or {}).get("genres")
+                        or (item.get("metadata") or {}).get("tags")
+                        or []
+                    )
                 )
             ][:18]
             if items:
@@ -2561,14 +2840,10 @@ class Catalog:
                         event.set()
 
     @_catalog_read
-    def _home_build(
-        self, user_id: str, language: str, allowed: set[str]
-    ) -> dict:
+    def _home_build(self, user_id: str, language: str, allowed: set[str]) -> dict:
         return self._home_uncached(user_id, language, allowed)
 
-    def _home_uncached(
-        self, user_id: str, language: str, allowed: set[str]
-    ) -> dict:
+    def _home_uncached(self, user_id: str, language: str, allowed: set[str]) -> dict:
         if not allowed:
             return {
                 "latestItems": [],
@@ -2595,7 +2870,10 @@ class Catalog:
         }
         for library_id, library in by_library.items():
             newly_added = []
-            if self._has_table("media_files") and library["type"] in {"movies", "tv_series"}:
+            if self._has_table("media_files") and library["type"] in {
+                "movies",
+                "tv_series",
+            }:
                 entity_type = "movie" if library["type"] == "movies" else "episode"
                 select_rows = lambda: self._newly_added_rows(library_id, entity_type)
                 playable_rows = (
@@ -2616,7 +2894,9 @@ class Catalog:
                         self._serialize(
                             user_id,
                             playable_row,
-                            self.metadata(user_id, playable_row[0], language)["metadata"],
+                            self.metadata(user_id, playable_row[0], language)[
+                                "metadata"
+                            ],
                             dates=dates.get(playable_row[0]),
                             series_name=self._home_series_name(
                                 user_id, language, episode_series_id, series_names
@@ -2678,9 +2958,7 @@ class Catalog:
         context = self._context(user_id)
         derived = lambda: self.home_derived(user_id, language, items)
         derived_rows = (
-            context.measure("home_derived", derived)
-            if context
-            else derived()
+            context.measure("home_derived", derived) if context else derived()
         )
         return {
             "latestItems": items[:25],

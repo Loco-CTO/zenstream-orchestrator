@@ -1,12 +1,11 @@
 import json
-import threading
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app.database import DatabaseHandler
-from app.models.metadata import MetadataCache
 from app.metadata_services import (
     MetadataAssetExecutor,
     MetadataImageIngestService,
@@ -16,6 +15,7 @@ from app.metadata_services import (
     _asset_version,
     metadata_fetch_activity,
 )
+from app.models.metadata import MetadataCache
 
 
 class _Settings:
@@ -50,15 +50,11 @@ class _BulkFetcher(_Fetcher):
         super().__init__()
         self.bulk_calls = []
 
-    def fetch_locales(
-        self, provider, entity_type, provider_id, locales, force=False
-    ):
+    def fetch_locales(self, provider, entity_type, provider_id, locales, force=False):
         self.bulk_calls.append(
             (provider, entity_type, provider_id, tuple(locales), force)
         )
-        return {
-            locale: {"title": locale, "images": []} for locale in locales
-        }
+        return {locale: {"title": locale, "images": []} for locale in locales}
 
 
 class _ImageCache:
@@ -103,27 +99,96 @@ class MetadataServicesTest(unittest.TestCase):
                     "CREATE TABLE media_files(entity_id TEXT,relative_path TEXT,role TEXT,quick_fingerprint TEXT,image_blur_hash TEXT)",
                 ):
                     database.execute(statement)
-                database.execute("INSERT INTO library_entities VALUES('movie','library',NULL,'movie')")
-                database.execute("INSERT INTO entity_provider_ids VALUES('movie','tmdb','1',1)")
-                database.execute("INSERT INTO entity_provider_ids VALUES('movie','tvdb','2',0)")
-                database.execute("INSERT INTO media_files VALUES('movie','poster.jpg','image','local-v1','local-blur')")
                 database.execute(
-                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
-                    ("tmdb", "movie", "1", "en", "Primary", "https://primary", str(primary_path), "1", "hash-primary"),
+                    "INSERT INTO library_entities VALUES('movie','library',NULL,'movie')"
+                )
+                database.execute(
+                    "INSERT INTO entity_provider_ids VALUES('movie','tmdb','1',1)"
+                )
+                database.execute(
+                    "INSERT INTO entity_provider_ids VALUES('movie','tvdb','2',0)"
+                )
+                database.execute(
+                    "INSERT INTO media_files VALUES('movie','poster.jpg','image','local-v1','local-blur')"
                 )
                 database.execute(
                     "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
-                    ("tvdb", "movie", "2", "en", "Primary", "https://secondary", str(secondary_path), "2", "hash-secondary"),
+                    (
+                        "tmdb",
+                        "movie",
+                        "1",
+                        "en",
+                        "Primary",
+                        "https://primary",
+                        str(primary_path),
+                        "1",
+                        "hash-primary",
+                    ),
                 )
                 database.execute(
                     "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
-                    ("tvdb", "movie", "2", "en", "Logo", "https://secondary-logo", str(secondary_path), "2", None),
+                    (
+                        "tvdb",
+                        "movie",
+                        "2",
+                        "en",
+                        "Primary",
+                        "https://secondary",
+                        str(secondary_path),
+                        "2",
+                        "hash-secondary",
+                    ),
+                )
+                database.execute(
+                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        "tvdb",
+                        "movie",
+                        "2",
+                        "en",
+                        "Logo",
+                        "https://secondary-logo",
+                        str(secondary_path),
+                        "2",
+                        None,
+                    ),
                 )
                 MetadataSearchProjection(database).project(
-                    "tmdb", "movie", "1", "en", {"title": "Movie", "images": [{"type": "Primary", "url": "https://primary", "language": "en"}]}
+                    "tmdb",
+                    "movie",
+                    "1",
+                    "en",
+                    {
+                        "title": "Movie",
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "url": "https://primary",
+                                "language": "en",
+                            }
+                        ],
+                    },
                 )
                 MetadataSearchProjection(database).project(
-                    "tvdb", "movie", "2", "en", {"title": "Secondary", "images": [{"type": "Primary", "url": "https://secondary", "language": "en"}, {"type": "Logo", "url": "https://secondary-logo", "language": "en"}]}
+                    "tvdb",
+                    "movie",
+                    "2",
+                    "en",
+                    {
+                        "title": "Secondary",
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "url": "https://secondary",
+                                "language": "en",
+                            },
+                            {
+                                "type": "Logo",
+                                "url": "https://secondary-logo",
+                                "language": "en",
+                            },
+                        ],
+                    },
                 )
                 self.assertEqual(
                     database.read_execute(
@@ -133,10 +198,32 @@ class MetadataServicesTest(unittest.TestCase):
                 )
                 database.execute(
                     "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
-                    ("tvdb", "movie", "2", "en", "Logo", "https://secondary-logo", str(refreshed_logo_path), "3", None),
+                    (
+                        "tvdb",
+                        "movie",
+                        "2",
+                        "en",
+                        "Logo",
+                        "https://secondary-logo",
+                        str(refreshed_logo_path),
+                        "3",
+                        None,
+                    ),
                 )
                 MetadataSearchProjection(database).project(
-                    "tvdb", "movie", "2", "en", {"images": [{"type": "Logo", "url": "https://secondary-logo", "language": "en"}]}
+                    "tvdb",
+                    "movie",
+                    "2",
+                    "en",
+                    {
+                        "images": [
+                            {
+                                "type": "Logo",
+                                "url": "https://secondary-logo",
+                                "language": "en",
+                            }
+                        ]
+                    },
                 )
                 self.assertEqual(
                     database.read_execute(
@@ -155,29 +242,61 @@ class MetadataServicesTest(unittest.TestCase):
                         "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
                     )[0][0]
                 )
-                self.assertTrue(projected["images"]["Primary"]["url"].endswith("v=local-v1"))
+                self.assertTrue(
+                    projected["images"]["Primary"]["url"].endswith("v=local-v1")
+                )
                 database.execute(
                     "UPDATE media_files SET quick_fingerprint='local-v2' WHERE entity_id='movie'"
                 )
                 MetadataSearchProjection(database).project(
-                    "tmdb", "movie", "1", "en", {"title": "Movie", "images": [{"type": "Primary", "url": "https://primary", "language": "en"}]}
+                    "tmdb",
+                    "movie",
+                    "1",
+                    "en",
+                    {
+                        "title": "Movie",
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "url": "https://primary",
+                                "language": "en",
+                            }
+                        ],
+                    },
                 )
                 refreshed = json.loads(
                     database.read_execute(
                         "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
                     )[0][0]
                 )
-                self.assertTrue(refreshed["images"]["Primary"]["url"].endswith("v=local-v2"))
+                self.assertTrue(
+                    refreshed["images"]["Primary"]["url"].endswith("v=local-v2")
+                )
                 database.execute("DELETE FROM media_files WHERE entity_id='movie'")
                 MetadataSearchProjection(database).project(
-                    "tmdb", "movie", "1", "en", {"title": "Movie", "images": [{"type": "Primary", "url": "https://primary", "language": "en"}]}
+                    "tmdb",
+                    "movie",
+                    "1",
+                    "en",
+                    {
+                        "title": "Movie",
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "url": "https://primary",
+                                "language": "en",
+                            }
+                        ],
+                    },
                 )
                 without_local = json.loads(
                     database.read_execute(
                         "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
                     )[0][0]
                 )
-                self.assertNotIn("v=local-v2", without_local["images"]["Primary"]["url"])
+                self.assertNotIn(
+                    "v=local-v2", without_local["images"]["Primary"]["url"]
+                )
                 self.assertEqual(
                     without_local["_catalogArtworkProviders"]["Primary"], "tmdb"
                 )
@@ -186,7 +305,9 @@ class MetadataServicesTest(unittest.TestCase):
 
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
-        self.db.execute("CREATE TABLE metadata_cache(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,payload TEXT,fetched_at TEXT,expires_at TEXT)")
+        self.db.execute(
+            "CREATE TABLE metadata_cache(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,payload TEXT,fetched_at TEXT,expires_at TEXT)"
+        )
 
     def tearDown(self):
         self.db.close()
@@ -205,7 +326,9 @@ class MetadataServicesTest(unittest.TestCase):
         try:
             executor.submit(("tmdb", "movie", "10", "en", "digest"), first_work)
             self.assertTrue(started.wait(5))
-            executor.submit(("tmdb", "movie", "10", "en", "digest"), lambda: calls.append(2))
+            executor.submit(
+                ("tmdb", "movie", "10", "en", "digest"), lambda: calls.append(2)
+            )
             release.set()
             executor.drain(5)
         finally:
@@ -528,11 +651,21 @@ class MetadataServicesTest(unittest.TestCase):
         )
 
     def test_read_fallback_is_field_level_and_does_not_use_arbitrary_locale(self):
-        self._cache("ja", {
-            "title": "Japanese",
-            "originalLanguage": "ja",
-            "images": [{"type": "Primary", "url": "neutral.jpg", "language": None, "provider": "tmdb"}],
-        })
+        self._cache(
+            "ja",
+            {
+                "title": "Japanese",
+                "originalLanguage": "ja",
+                "images": [
+                    {
+                        "type": "Primary",
+                        "url": "neutral.jpg",
+                        "language": None,
+                        "provider": "tmdb",
+                    }
+                ],
+            },
+        )
         self._cache("en", {"overview": "English overview", "originalLanguage": "ja"})
         self._cache("de", {"title": "German only"})
         service = MetadataReadService(self.db)
@@ -542,7 +675,9 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(value["images"][0]["url"], "neutral.jpg")
 
     def test_read_fallback_ignores_language_code_overview_placeholders(self):
-        self._cache("ja", {"title": "Japanese", "overview": "eng", "originalLanguage": "ja"})
+        self._cache(
+            "ja", {"title": "Japanese", "overview": "eng", "originalLanguage": "ja"}
+        )
         self._cache("en", {"overview": "English overview", "originalLanguage": "ja"})
         service = MetadataReadService(self.db)
         value = service.resolve_raw("movie", [{"provider": "tmdb", "id": "10"}], "ja")
@@ -558,17 +693,41 @@ class MetadataServicesTest(unittest.TestCase):
         self.db.execute(
             "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,blur_hash TEXT,fetched_at TEXT)"
         )
-        self._cache("en", {"images": [{"type": "Primary", "url": "poster.jpg", "language": "en", "provider": "tmdb"}]})
+        self._cache(
+            "en",
+            {
+                "images": [
+                    {
+                        "type": "Primary",
+                        "url": "poster.jpg",
+                        "language": "en",
+                        "provider": "tmdb",
+                    }
+                ]
+            },
+        )
         self.db.execute(
             "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?)",
-            ("tmdb", "movie", "10", "en", "Primary", "poster.jpg", "LEHV6nWB2yk8pyo0adR*.7kCMdnj", "now"),
+            (
+                "tmdb",
+                "movie",
+                "10",
+                "en",
+                "Primary",
+                "poster.jpg",
+                "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+                "now",
+            ),
         )
 
         value = MetadataReadService(self.db).resolve_public(
             "movie", "movie", [{"provider": "tmdb", "id": "10"}], "en"
         )
 
-        self.assertEqual(value["metadata"]["images"]["Primary"]["blurHash"], "LEHV6nWB2yk8pyo0adR*.7kCMdnj")
+        self.assertEqual(
+            value["metadata"]["images"]["Primary"]["blurHash"],
+            "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+        )
 
     def test_original_language_provider_codes_match_canonical_cache_locales(self):
         self._cache("en", {"title": "English", "originalLanguage": "eng"})
@@ -612,14 +771,20 @@ class MetadataServicesTest(unittest.TestCase):
                 hasher=lambda target: "hash",
             )
             ingest = MetadataIngestService(
-                _Fetcher(), _Settings(["ja", "de"]), image_ingest=image_ingest,
+                _Fetcher(),
+                _Settings(["ja", "de"]),
+                image_ingest=image_ingest,
                 background_assets=False,
             )
             ingest.ingest("tmdb", "movie", "10")
 
             self.assertEqual(len(cache.rows), 2)
-            self.assertTrue(all(value[-1] and Path(value[-1]).is_file() for value in cache.rows))
-            self.assertTrue(all(str(value[-1]).endswith(".webp") for value in cache.rows))
+            self.assertTrue(
+                all(value[-1] and Path(value[-1]).is_file() for value in cache.rows)
+            )
+            self.assertTrue(
+                all(str(value[-1]).endswith(".webp") for value in cache.rows)
+            )
 
     def test_forced_ingest_redownloads_existing_artwork_and_portraits(self):
         fetcher = _BulkFetcher()
@@ -690,7 +855,9 @@ class MetadataServicesTest(unittest.TestCase):
                 hasher=lambda target: "hash",
             )
             ingest = MetadataIngestService(
-                _Fetcher(), _Settings(["en"]), image_ingest=image_ingest,
+                _Fetcher(),
+                _Settings(["en"]),
+                image_ingest=image_ingest,
                 background_assets=False,
             )
             ingest.ingest_document(
@@ -757,7 +924,11 @@ class MetadataServicesTest(unittest.TestCase):
                 "movie",
                 "10",
                 "en",
-                {"images": [{"type": "Primary", "url": "https://images.example/poster.jpg"}]},
+                {
+                    "images": [
+                        {"type": "Primary", "url": "https://images.example/poster.jpg"}
+                    ]
+                },
             )
 
         self.assertEqual(cache.rows[0][-2], "LEHV6nWB2yk8pyo0adR*.7kCMdnj")

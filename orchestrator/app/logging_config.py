@@ -6,7 +6,6 @@ import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-
 _configured = False
 _lock = __import__("threading").Lock()
 _secret_pattern = re.compile(

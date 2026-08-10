@@ -3,17 +3,16 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response
-
-from app.config import Config
 from app.images import LocalArtworkCache
-from app.library import LibraryRuntime, LibraryStore, runtime
+from app.intro_outro import IntroOutroStore, render_audio_preview
 from app.jobs import scheduler
+from app.library import LibraryStore, runtime
+from app.logging_config import get_logger
+from app.metadata_domain import choose_artwork
+from app.metadata_services import MetadataIngestService, MetadataReadService
 from app.models.admin import Admin
 from app.models.metadata import (
     IMAGE_LANGUAGE_SCHEMA,
@@ -21,19 +20,16 @@ from app.models.metadata import (
     MetadataLanguageSettings,
     normalize_metadata_locale,
 )
-from app.metadata_domain import choose_artwork
-from app.metadata_services import MetadataIngestService, MetadataReadService
 from app.providers import (
     IMAGE_TYPES,
     PRIMARY_PROVIDER_BY_ENTITY,
     MetadataService,
     ProviderError,
 )
-from app.logging_config import get_logger
 from app.search_scoring import match_score, normalize_search_text
 from app.trickplay import TrickplayExtractor
-from app.intro_outro import IntroOutroStore, render_audio_preview
-
+from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response
 
 router = APIRouter(prefix="/api/admin")
 logger = get_logger("library_api")
@@ -78,9 +74,7 @@ def _trickplay_asset(entity_id: str) -> dict | None:
         (media_file_id, generation),
     )
     value["frameCount"] = sum(row[1] for row in sheets)
-    value["sheets"] = [
-        {"index": row[0], "frameCount": row[1]} for row in sheets
-    ]
+    value["sheets"] = [{"index": row[0], "frameCount": row[1]} for row in sheets]
     return value
 
 
@@ -133,9 +127,13 @@ def _entity_ids(entity_id: str) -> list[dict]:
 def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) -> dict:
     hydration = _admin_hydration.get()
     row = hydration["entities"].get(entity_id) if hydration is not None else None
-    rows = [] if row is not None else store.db.execute(
-        "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,disc_number,track_number,match_status,match_confidence,match_method FROM library_entities WHERE id=?",
-        (entity_id,),
+    rows = (
+        []
+        if row is not None
+        else store.db.execute(
+            "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,disc_number,track_number,match_status,match_confidence,match_method FROM library_entities WHERE id=?",
+            (entity_id,),
+        )
     )
     if row is None and not rows:
         raise HTTPException(404, "Library item not found.")
@@ -162,9 +160,13 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     )
     if row[3] in {"movie", "episode"}:
         value["trickplay"] = _trickplay_asset(entity_id)
-    children = hydration["children"].get(entity_id, []) if hydration is not None else store.db.execute(
-        "SELECT id,entity_type,relative_path,season_number,episode_number,track_number FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
-        (entity_id,),
+    children = (
+        hydration["children"].get(entity_id, [])
+        if hydration is not None
+        else store.db.execute(
+            "SELECT id,entity_type,relative_path,season_number,episode_number,track_number FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
+            (entity_id,),
+        )
     )
     value["children"] = [
         {
@@ -740,7 +742,9 @@ def _list_admin_items_sync(
             entity_ids,
         )
         for entity_id, provider, identifier_type, provider_id in provider_rows:
-            entity_type = hydration["entities"].get(entity_id, (None, None, None, ""))[3]
+            entity_type = hydration["entities"].get(entity_id, (None, None, None, ""))[
+                3
+            ]
             primary = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
             hydration["providers"].setdefault(entity_id, []).append(
                 {
@@ -752,9 +756,13 @@ def _list_admin_items_sync(
                 }
             )
         for entity_id, values in hydration["providers"].items():
-            entity_type = hydration["entities"].get(entity_id, (None, None, None, ""))[3]
+            entity_type = hydration["entities"].get(entity_id, (None, None, None, ""))[
+                3
+            ]
             primary = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
-            values.sort(key=lambda value: (value["provider"] != primary, value["provider"]))
+            values.sort(
+                key=lambda value: (value["provider"] != primary, value["provider"])
+            )
         child_rows = store.db.execute(
             f"SELECT id,entity_type,relative_path,season_number,episode_number,track_number,parent_id FROM library_entities WHERE parent_id IN ({placeholders}) ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
             entity_ids,
@@ -763,11 +771,18 @@ def _list_admin_items_sync(
             hydration["children"].setdefault(row[6], []).append(row[:6])
         projection_tables = {
             row[0]
-            for row in store.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('catalog_item_projection','catalog_read_model_status')")
+            for row in store.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('catalog_item_projection','catalog_read_model_status')"
+            )
         }
         ready = False
-        if "catalog_item_projection" in projection_tables and "catalog_read_model_status" in projection_tables:
-            status = store.db.execute("SELECT state FROM catalog_read_model_status WHERE id=1")
+        if (
+            "catalog_item_projection" in projection_tables
+            and "catalog_read_model_status" in projection_tables
+        ):
+            status = store.db.execute(
+                "SELECT state FROM catalog_read_model_status WHERE id=1"
+            )
             ready = bool(status and status[0][0] == "ready")
         if ready:
             projection_rows = store.db.execute(
@@ -862,7 +877,11 @@ async def get_trickplay_sheet(
     if item["type"] not in {"movie", "episode"}:
         raise HTTPException(404, "Trickplay sheet not found.")
     path = TrickplayExtractor().sheet_path(entity_id, generation, sheet_index)
-    return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "private, max-age=3600"})
+    return FileResponse(
+        path,
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.get("/library-items/{entity_id}/intro-outro")
@@ -874,7 +893,9 @@ async def get_intro_outro_inspection(
     require_admin(Username, TOKEN)
     item = _entity(entity_id)
     if item["type"] != "episode":
-        raise HTTPException(404, "Intro and outro inspection is only available for episodes.")
+        raise HTTPException(
+            404, "Intro and outro inspection is only available for episodes."
+        )
     return IntroOutroStore(store.db).inspection(entity_id)
 
 
@@ -1018,7 +1039,9 @@ async def get_image(
     # and the administrator-triggered backfill own metadata population.
     image = None
     for candidate in _image_entities(item, imageType):
-        metadata = await asyncio.to_thread(_metadata_for, candidate, locale, False, False)
+        metadata = await asyncio.to_thread(
+            _metadata_for, candidate, locale, False, False
+        )
         if not metadata:
             pending = pending or bool(candidate.get("providerIds"))
             continue

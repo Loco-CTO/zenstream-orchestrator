@@ -1,7 +1,6 @@
 import unittest
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -39,8 +38,12 @@ class DockerLayoutTest(unittest.TestCase):
 
         self.assertIn("COPY assets/ ./assets/", dockerfile)
         self.assertIn("FROM mwader/static-ffmpeg:7.1.1 AS media-tools", dockerfile)
-        self.assertIn("COPY --from=media-tools /ffmpeg ./assets/ffmpeg/linux/ffmpeg", dockerfile)
-        self.assertIn("COPY --from=media-tools /ffprobe ./assets/ffmpeg/linux/ffprobe", dockerfile)
+        self.assertIn(
+            "COPY --from=media-tools /ffmpeg ./assets/ffmpeg/linux/ffmpeg", dockerfile
+        )
+        self.assertIn(
+            "COPY --from=media-tools /ffprobe ./assets/ffmpeg/linux/ffprobe", dockerfile
+        )
         self.assertIn("COPY frontend/ ./", dockerfile)
         self.assertIn("COPY frontend/package.json ./", dockerfile)
         self.assertIn(

@@ -2,9 +2,8 @@ import asyncio
 import unittest
 from unittest.mock import MagicMock, patch
 
-from fastapi import HTTPException
-
 from api.zenstream import application_routes as app_module
+from fastapi import HTTPException
 
 
 class AdminProfileRouteTest(unittest.TestCase):

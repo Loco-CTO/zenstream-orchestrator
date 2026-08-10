@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 SUPPORTED_LOCALES = {"en", "ja"}
 DEFAULT_SUBTITLE_STYLE = {
     "renderer": "native",

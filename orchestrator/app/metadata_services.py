@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import copy
-from contextlib import contextmanager
-import json
 import hashlib
+import json
 import os
 import threading
 import uuid
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable
 from urllib.parse import urlparse
 
-
+from app.images import blurhash_for_image, encode_webp_bytes
+from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORY_SET,
     choose_artwork,
@@ -27,11 +28,8 @@ from app.models.metadata import (
     MetadataLanguageSettings,
     iso_now,
 )
-from app.logging_config import get_logger
-from app.images import blurhash_for_image, encode_webp_bytes
 from app.search_scoring import normalize_search_text, search_grams
 from app.worker_config import configured_worker_limit
-
 
 logger = get_logger("metadata")
 
@@ -289,16 +287,10 @@ class MetadataSearchProjection:
         )
         has_root_grams = "catalog_root_search_grams" in tables
         has_artwork_selection = "catalog_artwork_selection" in tables
-        artwork_selection_has_provider = (
-            has_artwork_selection
-            and "provider"
-            in {
-                row[1]
-                for row in self.db.execute(
-                    "PRAGMA table_info(catalog_artwork_selection)"
-                )
-            }
-        )
+        artwork_selection_has_provider = has_artwork_selection and "provider" in {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(catalog_artwork_selection)")
+        }
         metadata_image_columns = (
             {row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")}
             if "metadata_images" in tables
@@ -366,7 +358,9 @@ class MetadataSearchProjection:
                             (entity_id, locale),
                         )
                         for selected_type, selected_provider in selected_rows:
-                            artwork_providers.setdefault(selected_type, selected_provider)
+                            artwork_providers.setdefault(
+                                selected_type, selected_provider
+                            )
                     artwork_fallbacks = merged.get("_catalogArtworkFallbacks")
                     if not isinstance(artwork_fallbacks, dict):
                         artwork_fallbacks = {}
@@ -450,15 +444,15 @@ class MetadataSearchProjection:
                             if has_artwork_selection and cached_row and cached_row[0]:
                                 artwork_rows.append(
                                     (
-                                            entity_id,
-                                            locale,
-                                            image_type,
-                                            provider,
-                                            cached_row[0],
-                                            cached_row[1],
-                                            version,
-                                        )
+                                        entity_id,
+                                        locale,
+                                        image_type,
+                                        provider,
+                                        cached_row[0],
+                                        cached_row[1],
+                                        version,
                                     )
+                                )
                             current_images[image_type] = projected
                             artwork_providers[image_type] = provider
                     if "media_files" in tables:
@@ -473,7 +467,11 @@ class MetadataSearchProjection:
                                 else ",NULL"
                             )
                             selected_local: set[str] = set()
-                            for relative_path, fingerprint, blur_hash in self.db.execute(
+                            for (
+                                relative_path,
+                                fingerprint,
+                                blur_hash,
+                            ) in self.db.execute(
                                 "SELECT relative_path,quick_fingerprint"
                                 + blur_field
                                 + " FROM media_files WHERE entity_id=? AND role='image' ORDER BY relative_path COLLATE NOCASE",
@@ -490,7 +488,9 @@ class MetadataSearchProjection:
                                     if image_type in current_images:
                                         artwork_fallbacks[image_type] = {
                                             "image": current_images[image_type],
-                                            "provider": artwork_providers.get(image_type),
+                                            "provider": artwork_providers.get(
+                                                image_type
+                                            ),
                                         }
                                     local_image = {
                                         "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}&v={str(fingerprint)[:12]}",
@@ -1484,9 +1484,7 @@ class PersonCreditIngestService:
                     source_id
                     or "credit:"
                     + hashlib.sha256(
-                        f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode(
-                            "utf-8"
-                        )
+                        f"{entity_id}|{locale}|{credit_type}|{fallback_order}|{name}|{role or ''}".encode()
                     ).hexdigest(),
                     role,
                     department,

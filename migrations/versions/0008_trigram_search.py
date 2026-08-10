@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0008_trigram_search"
 down_revision = "0007_catalog_performance"
 branch_labels = None

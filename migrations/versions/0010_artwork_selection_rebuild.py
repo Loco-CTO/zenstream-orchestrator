@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0010_artwork_selection_rebuild"
 down_revision = "0009_artwork_selection_provider"
 branch_labels = None

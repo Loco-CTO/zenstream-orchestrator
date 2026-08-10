@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import platform
 import re
@@ -16,15 +15,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import HTTPException
-
 from app.catalog import Catalog
-from app.config import Config
 from app.client_auth import issue_ticket
+from app.config import Config
 from app.library import LANGUAGE_ALIASES, language_name, sidecar_display_title
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
-
+from fastapi import HTTPException
 
 logger = get_logger("playback")
 PLAYABLE_ROLE = "media"
@@ -138,13 +135,17 @@ class PlaybackManager:
             for session_id, process_id in persisted or []:
                 if any(session_id == active_id for active_id, _ in sessions):
                     continue
-                cls._stop_process_id(process_id, f"shutdown persisted session_id={session_id}")
+                cls._stop_process_id(
+                    process_id, f"shutdown persisted session_id={session_id}"
+                )
                 database.execute(
                     "UPDATE playback_sessions SET state='stopping',completed_at=?,process_id=NULL WHERE id=? AND process_id=?",
                     (_iso(), session_id, process_id),
                 )
         except Exception:
-            logger.exception("could not clean persisted playback workers during shutdown")
+            logger.exception(
+                "could not clean persisted playback workers during shutdown"
+            )
         cls._users.clear()
         if cleanup_thread and cleanup_thread is not threading.current_thread():
             cleanup_thread.join(timeout=2)
@@ -161,18 +162,28 @@ class PlaybackManager:
             process.terminate()
             process.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            logger.warning("killing unresponsive playback worker pid=%s reason=%s", process.pid, reason)
+            logger.warning(
+                "killing unresponsive playback worker pid=%s reason=%s",
+                process.pid,
+                reason,
+            )
             process.kill()
             try:
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                logger.error("playback worker did not exit after kill pid=%s reason=%s", process.pid, reason)
+                logger.error(
+                    "playback worker did not exit after kill pid=%s reason=%s",
+                    process.pid,
+                    reason,
+                )
 
     @staticmethod
     def _stop_process_id(process_id: int | None, reason: str) -> None:
         if not process_id or process_id <= 0:
             return
-        logger.info("stopping persisted playback worker pid=%s reason=%s", process_id, reason)
+        logger.info(
+            "stopping persisted playback worker pid=%s reason=%s", process_id, reason
+        )
         if os.name == "nt":
             try:
                 result = subprocess.run(
@@ -183,7 +194,12 @@ class PlaybackManager:
                     timeout=10,
                 )
             except (OSError, subprocess.TimeoutExpired) as error:
-                logger.warning("could not stop persisted playback worker pid=%s reason=%s error=%s", process_id, reason, error)
+                logger.warning(
+                    "could not stop persisted playback worker pid=%s reason=%s error=%s",
+                    process_id,
+                    reason,
+                    error,
+                )
                 return
             if result.returncode not in {0, 128}:
                 logger.warning(
@@ -199,7 +215,12 @@ class PlaybackManager:
         except ProcessLookupError:
             return
         except OSError as error:
-            logger.warning("could not stop persisted playback worker pid=%s reason=%s error=%s", process_id, reason, error)
+            logger.warning(
+                "could not stop persisted playback worker pid=%s reason=%s error=%s",
+                process_id,
+                reason,
+                error,
+            )
             return
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
@@ -227,7 +248,6 @@ class PlaybackManager:
     def _limits() -> tuple[int, int]:
         settings = PlaybackSettings().get()
         return settings["maxTranscodes"], settings["maxTranscodesPerUser"]
-
 
     def _file_path(
         self,
@@ -717,10 +737,7 @@ class PlaybackManager:
             base_key = session_key[:3]
             for existing_id, existing_key in list(self._session_keys.items()):
                 process = self._processes.get(existing_id)
-                if (
-                    existing_key == session_key
-                    and existing_key[:3] == base_key
-                ):
+                if existing_key == session_key and existing_key[:3] == base_key:
                     session_rows = self.db.execute(
                         "SELECT output_directory,state FROM playback_sessions WHERE id=? AND user_id=?",
                         (existing_id, user_id),
@@ -740,7 +757,9 @@ class PlaybackManager:
                     if process is None and existing_id not in self._session_specs:
                         continue
                     playlist_ready = self._startup_ready(output)
-                    if not playlist_ready and (process is None or process.poll() is not None):
+                    if not playlist_ready and (
+                        process is None or process.poll() is not None
+                    ):
                         continue
                     logger.info(
                         "reusing playback session user_id=%s entity_id=%s session_id=%s state=%s playlist_ready=%s",
@@ -757,7 +776,9 @@ class PlaybackManager:
                 result = self._hls_result(existing_id, source, access, transcode_mode)
                 result["startPositionSeconds"] = start_time
                 result["actualStartPositionSeconds"] = 0.0
-                result["sessionState"] = "ready" if self._startup_ready(reused_session[1]) else "starting"
+                result["sessionState"] = (
+                    "ready" if self._startup_ready(reused_session[1]) else "starting"
+                )
                 result["sourceId"] = source["id"]
                 result["audioStreamId"] = profile.get("audioStreamId")
                 logger.info(
@@ -767,7 +788,9 @@ class PlaybackManager:
                 )
                 return result
             active = [
-                process for process in self._processes.values() if process.poll() is None
+                process
+                for process in self._processes.values()
+                if process.poll() is None
             ]
             per_user = [
                 process
@@ -879,7 +902,9 @@ class PlaybackManager:
 
     @classmethod
     def _write_public_playlist(cls, output: Path, duration: float) -> None:
-        segment_count = max(1, int((duration + cls._segment_seconds - 0.0001) // cls._segment_seconds))
+        segment_count = max(
+            1, int((duration + cls._segment_seconds - 0.0001) // cls._segment_seconds)
+        )
         lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:3",
@@ -888,8 +913,12 @@ class PlaybackManager:
             "#EXT-X-MEDIA-SEQUENCE:0",
         ]
         for index in range(segment_count):
-            segment_duration = min(cls._segment_seconds, max(0.1, duration - index * cls._segment_seconds))
-            lines.extend([f"#EXTINF:{segment_duration:.3f},", f"segment-{index:06d}.ts"])
+            segment_duration = min(
+                cls._segment_seconds, max(0.1, duration - index * cls._segment_seconds)
+            )
+            lines.extend(
+                [f"#EXTINF:{segment_duration:.3f},", f"segment-{index:06d}.ts"]
+            )
         lines.append("#EXT-X-ENDLIST")
         temporary = output / "master.m3u8.tmp"
         temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -912,26 +941,45 @@ class PlaybackManager:
             else "0:a:0?"
         )
         selected_audio = self._stream_for_profile(source, profile)
-        selected_audio_codec = str(selected_audio.get("codec_name") or source.get("audioCodec") or "").lower()
+        selected_audio_codec = str(
+            selected_audio.get("codec_name") or source.get("audioCodec") or ""
+        ).lower()
         try:
             selected_audio_channels = int(selected_audio.get("channels") or 2)
         except (TypeError, ValueError):
             selected_audio_channels = 2
         copy_audio = mode == "remux" or (
-            mode == "video-transcode" and selected_audio_codec == "aac" and selected_audio_channels <= 2
+            mode == "video-transcode"
+            and selected_audio_codec == "aac"
+            and selected_audio_channels <= 2
         )
         has_video = any(
             str(stream.get("codec_type") or "").lower() == "video"
             for stream in source.get("streams", [])
         ) or bool(source.get("width") or source.get("height"))
         command = [
-            spec["executable"], "-hide_banner", "-loglevel", "error", "-y",
-            "-ss", f"{start_time:.3f}",
-            "-noaccurate_seek" if mode in {"remux", "audio-transcode"} else "-accurate_seek",
-            "-i", str(spec["path"]),
+            spec["executable"],
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{start_time:.3f}",
+            "-noaccurate_seek"
+            if mode in {"remux", "audio-transcode"}
+            else "-accurate_seek",
+            "-i",
+            str(spec["path"]),
         ]
         if has_video:
-            command.extend(["-map", "0:v:0", "-c:v", "copy" if mode in {"remux", "audio-transcode"} else "libx264"])
+            command.extend(
+                [
+                    "-map",
+                    "0:v:0",
+                    "-c:v",
+                    "copy" if mode in {"remux", "audio-transcode"} else "libx264",
+                ]
+            )
         else:
             command.append("-vn")
         command.extend(["-map", audio_map, "-c:a", "copy" if copy_audio else "aac"])
@@ -939,16 +987,45 @@ class PlaybackManager:
             command.extend(["-ac", "2", "-ar", "48000", "-b:a", "192k"])
         maximum_bitrate = profile.get("maxStreamingBitrate")
         if maximum_bitrate and mode == "video-transcode":
-            command.extend(["-maxrate", str(int(maximum_bitrate)), "-bufsize", str(int(maximum_bitrate) * 2)])
+            command.extend(
+                [
+                    "-maxrate",
+                    str(int(maximum_bitrate)),
+                    "-bufsize",
+                    str(int(maximum_bitrate) * 2),
+                ]
+            )
         if mode == "video-transcode":
-            command.extend([
-                "-preset", "veryfast", "-force_key_frames", "expr:gte(t,n_forced*4)",
-                "-sc_threshold", "0", "-g", "96", "-keyint_min", "96",
-            ])
+            command.extend(
+                [
+                    "-preset",
+                    "veryfast",
+                    "-force_key_frames",
+                    "expr:gte(t,n_forced*4)",
+                    "-sc_threshold",
+                    "0",
+                    "-g",
+                    "96",
+                    "-keyint_min",
+                    "96",
+                ]
+            )
         output_options = [
-            "-copyts", "-avoid_negative_ts", "disabled", "-f", "hls", "-hls_time", "4",
-            "-hls_playlist_type", "event", "-hls_list_size", "0", "-start_number", str(start_index),
-            "-hls_segment_filename", str(worker_dir / "segment-%06d.ts"),
+            "-copyts",
+            "-avoid_negative_ts",
+            "disabled",
+            "-f",
+            "hls",
+            "-hls_time",
+            "4",
+            "-hls_playlist_type",
+            "event",
+            "-hls_list_size",
+            "0",
+            "-start_number",
+            str(start_index),
+            "-hls_segment_filename",
+            str(worker_dir / "segment-%06d.ts"),
             str(worker_dir / "worker.m3u8"),
         ]
         command.extend(output_options)
@@ -1013,7 +1090,9 @@ class PlaybackManager:
             generation,
             self._playlist_snapshot(output),
         )
-        self._stop_process(process, f"startup_timeout session_id={session_id} generation={generation}")
+        self._stop_process(
+            process, f"startup_timeout session_id={session_id} generation={generation}"
+        )
         self.db.execute(
             "UPDATE playback_sessions SET state='failed',completed_at=?,failure_code=?,failure_detail=? WHERE id=? AND state='starting' AND seek_generation=?",
             (
@@ -1098,10 +1177,14 @@ class PlaybackManager:
             )
             self._stop_process(process, f"idle_timeout session_id={session_id}")
             if process is None:
-                self._stop_process_id(rows[0][2], f"idle_timeout session_id={session_id}")
+                self._stop_process_id(
+                    rows[0][2], f"idle_timeout session_id={session_id}"
+                )
             return
 
-    def _start_worker_locked(self, session_id: str, start_index: int) -> subprocess.Popen:
+    def _start_worker_locked(
+        self, session_id: str, start_index: int
+    ) -> subprocess.Popen:
         spec = self._session_specs[session_id]
         old = self._processes.get(session_id)
         if old is not None and old.poll() is None:
@@ -1113,7 +1196,11 @@ class PlaybackManager:
         command = self._build_ffmpeg_command(spec, worker_dir, start_index)
         logger.info(
             "starting playback worker session_id=%s generation=%s start_index=%s source_start=%.3f output_directory=%s",
-            session_id, generation, start_index, start_index * self._segment_seconds, spec["output"],
+            session_id,
+            generation,
+            start_index,
+            start_index * self._segment_seconds,
+            spec["output"],
         )
         logger.info(
             "ffmpeg command session_id=%s generation=%s command=%s",
@@ -1135,11 +1222,19 @@ class PlaybackManager:
             )
             self.db.execute(
                 "UPDATE playback_sessions SET process_id=?,state='starting',requested_start_seconds=?,actual_start_seconds=?,seek_generation=?,failure_code=NULL,failure_detail=NULL WHERE id=?",
-                (process.pid, start_index * self._segment_seconds, start_index * self._segment_seconds, generation, session_id),
+                (
+                    process.pid,
+                    start_index * self._segment_seconds,
+                    start_index * self._segment_seconds,
+                    generation,
+                    session_id,
+                ),
             )
         except Exception as error:
             if process is not None:
-                self._stop_process(process, f"worker_registration_failed session_id={session_id}")
+                self._stop_process(
+                    process, f"worker_registration_failed session_id={session_id}"
+                )
             logger.exception(
                 "could not register playback worker session_id=%s generation=%s error=%s",
                 session_id,
@@ -1152,7 +1247,10 @@ class PlaybackManager:
                     (_iso(), str(error)[-1000:], session_id, generation),
                 )
             except Exception:
-                logger.exception("could not record worker registration failure session_id=%s", session_id)
+                logger.exception(
+                    "could not record worker registration failure session_id=%s",
+                    session_id,
+                )
             raise HTTPException(
                 503,
                 detail={
@@ -1249,11 +1347,15 @@ class PlaybackManager:
             "firstSegmentDurationSeconds": next(
                 (
                     float(line.split(":", 1)[1].rstrip(","))
-                    for line in playlist.read_text(encoding="utf-8", errors="replace").splitlines()
+                    for line in playlist.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
                     if line.startswith("#EXTINF:") and ":" in line
                 ),
                 None,
-            ) if playlist.is_file() else None,
+            )
+            if playlist.is_file()
+            else None,
             "playlistState": playlist_state,
         }
 
@@ -1349,13 +1451,21 @@ class PlaybackManager:
                     )
                     return destination
                 process = worker.get("process") if worker else None
-                available_end = self._playlist_snapshot(output).get("availableSegmentEnd")
-                if process is not None and process.poll() is not None and process.returncode != 0:
+                available_end = self._playlist_snapshot(output).get(
+                    "availableSegmentEnd"
+                )
+                if (
+                    process is not None
+                    and process.poll() is not None
+                    and process.returncode != 0
+                ):
                     failure_row = self.db.execute(
                         "SELECT state,failure_code,failure_detail FROM playback_sessions WHERE id=?",
                         (session_id,),
                     )
-                    failure_detail = "FFmpeg exited before the requested HLS segment was produced."
+                    failure_detail = (
+                        "FFmpeg exited before the requested HLS segment was produced."
+                    )
                     failure_code = "FFMPEG_FAILED"
                     state = "failed"
                     if failure_row:
@@ -1379,8 +1489,7 @@ class PlaybackManager:
                     or index < int(worker.get("start_index", 0))
                     or (
                         int(worker.get("start_index", 0)) < index
-                        and
-                        available_end is not None
+                        and available_end is not None
                         and index > int(available_end) + 2
                     )
                 )
@@ -1612,7 +1721,9 @@ class PlaybackManager:
         )
         for session_id, last_accessed_at, process_id, generation in orphan_rows or []:
             try:
-                idle_for = time.time() - datetime.fromisoformat(last_accessed_at).timestamp()
+                idle_for = (
+                    time.time() - datetime.fromisoformat(last_accessed_at).timestamp()
+                )
             except (TypeError, ValueError, OSError):
                 idle_for = timeout
             if idle_for < timeout:
@@ -1646,7 +1757,9 @@ class PlaybackManager:
                 process = self._processes.get(session_id)
             self._stop_process(process, f"orphan_reaper session_id={session_id}")
             if process is None:
-                self._stop_process_id(process_id, f"orphan_reaper session_id={session_id}")
+                self._stop_process_id(
+                    process_id, f"orphan_reaper session_id={session_id}"
+                )
                 self.db.execute(
                     "UPDATE playback_sessions SET process_id=NULL WHERE id=? AND seek_generation=? AND state='stopping'",
                     (session_id, generation),
@@ -1789,6 +1902,10 @@ class PlaybackManager:
         )
         with self._lock:
             process = self._processes.get(session_id)
-        self._stop_process(process, f"client_cancel user_id={user_id} session_id={session_id}")
+        self._stop_process(
+            process, f"client_cancel user_id={user_id} session_id={session_id}"
+        )
         if process is None:
-            self._stop_process_id(process_id, f"client_cancel user_id={user_id} session_id={session_id}")
+            self._stop_process_id(
+                process_id, f"client_cancel user_id={user_id} session_id={session_id}"
+            )

@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0005_sqlalchemy_persistence_indexes"
 down_revision = "0004_catalog_read_model_progress"
 branch_labels = None
@@ -31,8 +30,7 @@ def _create_metadata_images(nullable_locale: bool) -> None:
 def upgrade():
     bind = op.get_bind()
     queue_columns = {
-        row[1]
-        for row in bind.exec_driver_sql("PRAGMA table_info(enrichment_queue)")
+        row[1] for row in bind.exec_driver_sql("PRAGMA table_info(enrichment_queue)")
     }
     for name, definition in (
         ("next_attempt_at", "TEXT"),

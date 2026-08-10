@@ -3,11 +3,9 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy.exc import SQLAlchemyError
-
 from app.database_session import create_sqlite_persistence
 from app.logging_config import get_logger
-
+from sqlalchemy.exc import SQLAlchemyError
 
 logger = get_logger("database")
 
@@ -286,7 +284,9 @@ class DatabaseHandler:
                 "checkpoint", wait_seconds, hold_seconds, wait_started
             )
 
-    def maintain_wal(self, *, scan_complete: bool = False) -> tuple[int, int, int] | None:
+    def maintain_wal(
+        self, *, scan_complete: bool = False
+    ) -> tuple[int, int, int] | None:
         """Best-effort, rate-limited WAL maintenance outside request transactions."""
         threshold = 64 * 1024 * 1024
         if not self._wal_maintenance_lock.acquire(blocking=False):

@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0009_artwork_selection_provider"
 down_revision = "0008_trigram_search"
 branch_labels = None

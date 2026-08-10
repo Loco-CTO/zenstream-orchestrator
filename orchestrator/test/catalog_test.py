@@ -4,12 +4,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-from fastapi import HTTPException
-
 from app.catalog import Catalog, _CatalogReadContext
 from app.database import DatabaseHandler
 from app.models.account import Account
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
+from fastapi import HTTPException
 
 
 class CatalogTest(unittest.TestCase):
@@ -128,11 +127,35 @@ class CatalogTest(unittest.TestCase):
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("series-1", "allowed", None, "series", "Example", None, None, None, None, "2026", "2026"),
+            (
+                "series-1",
+                "allowed",
+                None,
+                "series",
+                "Example",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("season-1", "allowed", "series-1", "season", "Example/Season 1", 1, None, None, None, "2026", "2026"),
+            (
+                "season-1",
+                "allowed",
+                "series-1",
+                "season",
+                "Example/Season 1",
+                1,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         for entity_id, episode, title in (
             ("episode-10", 10, "Episode 10"),
@@ -141,16 +164,52 @@ class CatalogTest(unittest.TestCase):
         ):
             self.db.execute(
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, "allowed", "season-1", "episode", f"Example/Season 1/{title}", 1, episode, None, None, "2026", "2026"),
+                (
+                    entity_id,
+                    "allowed",
+                    "season-1",
+                    "episode",
+                    f"Example/Season 1/{title}",
+                    1,
+                    episode,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
             )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("episode-unset", "allowed", "season-1", "episode", "Example/Season 1/Unaired", 1, None, None, None, "2026", "2026"),
+            (
+                "episode-unset",
+                "allowed",
+                "season-1",
+                "episode",
+                "Example/Season 1/Unaired",
+                1,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         for entity_id, season in (("season-10", 10), ("season-2", 2), ("season-3", 3)):
             self.db.execute(
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, "allowed", "series-1", "season", f"Example/Season {season}", season, None, None, None, "2026", "2026"),
+                (
+                    entity_id,
+                    "allowed",
+                    "series-1",
+                    "season",
+                    f"Example/Season {season}",
+                    season,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
             )
         return account["id"]
 
@@ -161,16 +220,18 @@ class CatalogTest(unittest.TestCase):
 
     def create_date_projection_tables(self):
         self.db.execute(
-            "CREATE TABLE catalog_entity_rollups(" 
+            "CREATE TABLE catalog_entity_rollups("
             "entity_id TEXT PRIMARY KEY,library_id TEXT,added_ns INTEGER,last_added_ns INTEGER)"
         )
         self.db.execute(
-            "CREATE TABLE catalog_projection_status(" 
+            "CREATE TABLE catalog_projection_status("
             "library_id TEXT PRIMARY KEY,state TEXT)"
         )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_hierarchy_defaults_to_numeric_episode_order_and_paginates(self, _languages):
+    def test_hierarchy_defaults_to_numeric_episode_order_and_paginates(
+        self, _languages
+    ):
         user_id = self.seed_series_hierarchy()
         catalog = self.catalog()
         self.patch_catalog_metadata(catalog)
@@ -203,25 +264,33 @@ class CatalogTest(unittest.TestCase):
             user_id, "allowed", "en", parent_id="season-1", page_size=2
         )
 
-        self.assertEqual([item["id"] for item in result["items"]], ["episode-1", "episode-2"])
+        self.assertEqual(
+            [item["id"] for item in result["items"]], ["episode-1", "episode-2"]
+        )
         self.assertNotIn("episode-10", calls)
         self.assertNotIn("episode-unset", calls)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_episode_serialization_includes_the_resolved_series_poster(self, _languages):
+    def test_episode_serialization_includes_the_resolved_series_poster(
+        self, _languages
+    ):
         user_id = self.seed_series_hierarchy()
         catalog = self.catalog()
         catalog.metadata = lambda _user_id, entity_id, _language: {
-                "metadata": {
-                    "title": entity_id,
-                    "images": (
-                        {"Primary": {"url": "/api/catalog/items/series-1/images/Primary?language=en"}}
-                        if entity_id == "series-1"
-                        else {}
-                    ),
-                    "date": "2026-04-01" if entity_id == "series-1" else None,
-                }
+            "metadata": {
+                "title": entity_id,
+                "images": (
+                    {
+                        "Primary": {
+                            "url": "/api/catalog/items/series-1/images/Primary?language=en"
+                        }
+                    }
+                    if entity_id == "series-1"
+                    else {}
+                ),
+                "date": "2026-04-01" if entity_id == "series-1" else None,
             }
+        }
 
         result = catalog.list_items(user_id, "allowed", "en", parent_id="season-1")
 
@@ -277,34 +346,84 @@ class CatalogTest(unittest.TestCase):
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("series-2", "allowed", None, "series", "Other", None, None, None, None, "2026", "2026"),
+            (
+                "series-2",
+                "allowed",
+                None,
+                "series",
+                "Other",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("episode-20", "allowed", "series-2", "episode", "Other/Episode", 1, 1, None, None, "2026", "2026"),
+            (
+                "episode-20",
+                "allowed",
+                "series-2",
+                "episode",
+                "Other/Episode",
+                1,
+                1,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO media_files VALUES(?,?,?,?,?)",
-            ("file-1", "episode-1", "episode-1.mkv", "media", 1_700_000_000_000_000_000),
+            (
+                "file-1",
+                "episode-1",
+                "episode-1.mkv",
+                "media",
+                1_700_000_000_000_000_000,
+            ),
         )
         self.db.execute(
             "INSERT INTO media_files VALUES(?,?,?,?,?)",
-            ("file-2", "episode-2", "episode-2.mkv", "media", 1_800_000_000_000_000_000),
+            (
+                "file-2",
+                "episode-2",
+                "episode-2.mkv",
+                "media",
+                1_800_000_000_000_000_000,
+            ),
         )
         self.db.execute(
             "INSERT INTO media_files VALUES(?,?,?,?,?)",
-            ("file-3", "episode-20", "episode-20.mkv", "media", 1_750_000_000_000_000_000),
+            (
+                "file-3",
+                "episode-20",
+                "episode-20.mkv",
+                "media",
+                1_750_000_000_000_000_000,
+            ),
         )
         catalog = self.catalog()
         catalog.metadata = lambda _user_id, entity_id, _language: {
             "metadata": {"title": entity_id}
         }
 
-        added = catalog.list_items(user_id, "allowed", "en", sort_by="added", sort_order="ascending")
-        latest = catalog.list_items(user_id, "allowed", "en", sort_by="lastAdded", sort_order="descending")
+        added = catalog.list_items(
+            user_id, "allowed", "en", sort_by="added", sort_order="ascending"
+        )
+        latest = catalog.list_items(
+            user_id, "allowed", "en", sort_by="lastAdded", sort_order="descending"
+        )
 
-        self.assertEqual([item["id"] for item in added["items"]], ["series-1", "series-2"])
-        self.assertEqual([item["id"] for item in latest["items"]], ["series-1", "series-2"])
+        self.assertEqual(
+            [item["id"] for item in added["items"]], ["series-1", "series-2"]
+        )
+        self.assertEqual(
+            [item["id"] for item in latest["items"]], ["series-1", "series-2"]
+        )
         self.assertEqual(added["items"][0]["addedAt"], "2023-11-14T22:13:20+00:00")
         self.assertEqual(added["items"][0]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
 
@@ -315,33 +434,67 @@ class CatalogTest(unittest.TestCase):
         )
         for library_id in ("allowed", "collections"):
             self.db.execute(
-                "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, library_id, "now")
+                "INSERT INTO user_library_access VALUES(?,?,?)",
+                (user_id, library_id, "now"),
             )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("source-movie", "allowed", None, "movie", "Source", None, None, None, None, "2026", "2026"),
+            (
+                "source-movie",
+                "allowed",
+                None,
+                "movie",
+                "Source",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("collection-1", "collections", None, "collection", "Collection", None, None, None, None, "2026", "2026"),
+            (
+                "collection-1",
+                "collections",
+                None,
+                "collection",
+                "Collection",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "CREATE TABLE collection_members(collection_entity_id TEXT,source_entity_id TEXT,position INTEGER)"
         )
         self.db.execute(
-            "INSERT INTO collection_members VALUES(?,?,?)", ("collection-1", "source-movie", 0)
+            "INSERT INTO collection_members VALUES(?,?,?)",
+            ("collection-1", "source-movie", 0),
         )
         self.db.execute(
             "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
         )
         self.db.execute(
             "INSERT INTO media_files VALUES(?,?,?,?,?)",
-            ("source-file", "source-movie", "source.mkv", "media", 1_800_000_000_000_000_000),
+            (
+                "source-file",
+                "source-movie",
+                "source.mkv",
+                "media",
+                1_800_000_000_000_000_000,
+            ),
         )
 
         values = self.catalog()._date_values("collections", {"allowed", "collections"})
 
-        self.assertEqual(values["collection-1"]["lastAddedAt"], "2027-01-15T08:00:00+00:00")
+        self.assertEqual(
+            values["collection-1"]["lastAddedAt"], "2027-01-15T08:00:00+00:00"
+        )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_library_capability_probe_uses_parent_index(self, _languages):
@@ -370,7 +523,13 @@ class CatalogTest(unittest.TestCase):
         )
         self.db.execute(
             "INSERT INTO media_files VALUES(?,?,?,?,?)",
-            ("file-1", "episode-1", "episode-1.mkv", "media", 1_800_000_000_000_000_000),
+            (
+                "file-1",
+                "episode-1",
+                "episode-1.mkv",
+                "media",
+                1_800_000_000_000_000_000,
+            ),
         )
         catalog = self.catalog()
         token = catalog._read_context.set(_CatalogReadContext(catalog, "series"))
@@ -384,7 +543,9 @@ class CatalogTest(unittest.TestCase):
 
         try:
             self.db.execute = counted_execute
-            first = catalog._date_values("allowed", {"allowed"}, {"episode-1", "episode-2"})
+            first = catalog._date_values(
+                "allowed", {"allowed"}, {"episode-1", "episode-2"}
+            )
             second = catalog._date_values("allowed", {"allowed"}, {"episode-1"})
         finally:
             self.db.execute = execute
@@ -394,7 +555,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(len(date_queries), 1)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_next_up_returns_without_episode_scan_when_user_has_no_state(self, _languages):
+    def test_next_up_returns_without_episode_scan_when_user_has_no_state(
+        self, _languages
+    ):
         user_id = self.seed_series_hierarchy()
         catalog = self.catalog()
         queries = []
@@ -417,24 +580,61 @@ class CatalogTest(unittest.TestCase):
         self.seed_series_hierarchy()
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("series-2", "allowed", None, "series", "Other", None, None, None, None, "2026", "2026"),
+            (
+                "series-2",
+                "allowed",
+                None,
+                "series",
+                "Other",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("episode-20", "allowed", "series-2", "episode", "Other/Episode", 1, 1, None, None, "2026", "2026"),
+            (
+                "episode-20",
+                "allowed",
+                "series-2",
+                "episode",
+                "Other/Episode",
+                1,
+                1,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
         )
         self.db.execute(
             "INSERT INTO media_files VALUES(?,?,?,?,?)",
-            ("file-20", "episode-20", "episode-20.mkv", "media", 1_900_000_000_000_000_000),
+            (
+                "file-20",
+                "episode-20",
+                "episode-20.mkv",
+                "media",
+                1_900_000_000_000_000_000,
+            ),
         )
         self.create_date_projection_tables()
-        self.db.execute("INSERT INTO catalog_projection_status VALUES(?,?)", ("allowed", "ready"))
+        self.db.execute(
+            "INSERT INTO catalog_projection_status VALUES(?,?)", ("allowed", "ready")
+        )
         self.db.execute(
             "INSERT INTO catalog_entity_rollups VALUES(?,?,?,?)",
-            ("series-1", "allowed", 1_700_000_000_000_000_000, 1_800_000_000_000_000_000),
+            (
+                "series-1",
+                "allowed",
+                1_700_000_000_000_000_000,
+                1_800_000_000_000_000_000,
+            ),
         )
 
         values = self.catalog()._date_values(
@@ -461,10 +661,17 @@ class CatalogTest(unittest.TestCase):
             )
         self.create_date_projection_tables()
         self.db.execute("UPDATE libraries SET scan_state='scanning' WHERE id='allowed'")
-        self.db.execute("INSERT INTO catalog_projection_status VALUES(?,?)", ("allowed", "ready"))
+        self.db.execute(
+            "INSERT INTO catalog_projection_status VALUES(?,?)", ("allowed", "ready")
+        )
         self.db.execute(
             "INSERT INTO catalog_entity_rollups VALUES(?,?,?,?)",
-            ("series-1", "allowed", 1_000_000_000_000_000_000, 1_100_000_000_000_000_000),
+            (
+                "series-1",
+                "allowed",
+                1_000_000_000_000_000_000,
+                1_100_000_000_000_000_000,
+            ),
         )
 
         values = self.catalog()._date_values("allowed", {"allowed"}, {"series-1"})
@@ -476,22 +683,58 @@ class CatalogTest(unittest.TestCase):
         self.seed_series_hierarchy()
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("series-2", "allowed", None, "series", "Other", None, None, None, None, "2026", "2026"),
+            (
+                "series-2",
+                "allowed",
+                None,
+                "series",
+                "Other",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("episode-20", "allowed", "series-2", "episode", "Other/Episode", 1, 1, None, None, "2026", "2026"),
+            (
+                "episode-20",
+                "allowed",
+                "series-2",
+                "episode",
+                "Other/Episode",
+                1,
+                1,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
         )
         self.db.execute(
             "INSERT INTO media_files VALUES(?,?,?,?,?)",
-            ("file-1", "episode-1", "episode-1.mkv", "media", 1_800_000_000_000_000_000),
+            (
+                "file-1",
+                "episode-1",
+                "episode-1.mkv",
+                "media",
+                1_800_000_000_000_000_000,
+            ),
         )
         self.db.execute(
             "INSERT INTO media_files VALUES(?,?,?,?,?)",
-            ("file-20", "episode-20", "episode-20.mkv", "media", 1_900_000_000_000_000_000),
+            (
+                "file-20",
+                "episode-20",
+                "episode-20.mkv",
+                "media",
+                1_900_000_000_000_000_000,
+            ),
         )
         catalog = self.catalog()
         execute = self.db.execute
@@ -511,7 +754,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(set(values), {"series-1"})
         self.assertEqual(len(recursive_queries), 1)
         self.assertNotIn("edges(parent_id", recursive_queries[0][0])
-        self.assertIn("child.parent_id = entity_tree.entity_id", recursive_queries[0][0])
+        self.assertIn(
+            "child.parent_id = entity_tree.entity_id", recursive_queries[0][0]
+        )
 
     def test_date_recursive_plan_probes_children_by_parent_index(self):
         self.seed_series_hierarchy()
@@ -570,7 +815,9 @@ class CatalogTest(unittest.TestCase):
             ("allowed", "episode"),
         )
         plan_text = " ".join(row[3] for row in plan)
-        self.assertIn("USING COVERING INDEX idx_media_files_role_modified_entity", plan_text)
+        self.assertIn(
+            "USING COVERING INDEX idx_media_files_role_modified_entity", plan_text
+        )
         self.assertNotIn("USE TEMP B-TREE FOR ORDER BY", plan_text)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
@@ -586,13 +833,37 @@ class CatalogTest(unittest.TestCase):
             series_id = f"series-{series_index}"
             self.db.execute(
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (series_id, "allowed", None, "series", series_id, None, None, None, None, "2026", "2026"),
+                (
+                    series_id,
+                    "allowed",
+                    None,
+                    "series",
+                    series_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
             )
             for episode_index in range(26 if series_index < 82 else 25):
                 episode_id = f"{series_id}-episode-{episode_index}"
                 self.db.execute(
                     "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (episode_id, "allowed", series_id, "episode", episode_id, 1, episode_index + 1, None, None, "2026", "2026"),
+                    (
+                        episode_id,
+                        "allowed",
+                        series_id,
+                        "episode",
+                        episode_id,
+                        1,
+                        episode_index + 1,
+                        None,
+                        None,
+                        "2026",
+                        "2026",
+                    ),
                 )
                 if episode_index == 0:
                     self.db.execute(
@@ -610,7 +881,9 @@ class CatalogTest(unittest.TestCase):
                         (user_id, episode_id, 0, 1, 1, 0, 0, None, "2026"),
                     )
         catalog = self.catalog()
-        catalog.metadata = lambda _user_id, entity_id, _language: {"metadata": {"title": entity_id}}
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {"title": entity_id}
+        }
         graph_calls = 0
         state_queries = 0
         graph = catalog._relationship_graph_uncached
@@ -656,22 +929,88 @@ class CatalogTest(unittest.TestCase):
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("movie-new", "movies", None, "movie", "New", None, None, None, None, "2026", "2026"),
+            (
+                "movie-new",
+                "movies",
+                None,
+                "movie",
+                "New",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("movie-old", "movies", None, "movie", "Old", None, None, None, None, "2026", "2026"),
+            (
+                "movie-old",
+                "movies",
+                None,
+                "movie",
+                "Old",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("hidden-movie", "hidden", None, "movie", "Hidden", None, None, None, None, "2026", "2026"),
+            (
+                "hidden-movie",
+                "hidden",
+                None,
+                "movie",
+                "Hidden",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         for row in (
-            ("episode-1-file", "episode-1", "episode-1.mkv", "media", 1_700_000_000_000_000_000),
-            ("episode-2-file", "episode-2", "episode-2.mkv", "media", 1_800_000_000_000_000_000),
-            ("movie-new-file", "movie-new", "new.mkv", "media", 1_750_000_000_000_000_000),
-            ("movie-old-file", "movie-old", "old.mkv", "media", 1_600_000_000_000_000_000),
-            ("hidden-file", "hidden-movie", "hidden.mkv", "media", 1_900_000_000_000_000_000),
+            (
+                "episode-1-file",
+                "episode-1",
+                "episode-1.mkv",
+                "media",
+                1_700_000_000_000_000_000,
+            ),
+            (
+                "episode-2-file",
+                "episode-2",
+                "episode-2.mkv",
+                "media",
+                1_800_000_000_000_000_000,
+            ),
+            (
+                "movie-new-file",
+                "movie-new",
+                "new.mkv",
+                "media",
+                1_750_000_000_000_000_000,
+            ),
+            (
+                "movie-old-file",
+                "movie-old",
+                "old.mkv",
+                "media",
+                1_600_000_000_000_000_000,
+            ),
+            (
+                "hidden-file",
+                "hidden-movie",
+                "hidden.mkv",
+                "media",
+                1_900_000_000_000_000_000,
+            ),
         ):
             self.db.execute("INSERT INTO media_files VALUES(?,?,?,?,?)", row)
         catalog = self.catalog()
@@ -684,10 +1023,15 @@ class CatalogTest(unittest.TestCase):
             if row["titleKey"] == "newlyAddedOn"
         }
 
-        self.assertEqual([item["id"] for item in rows["allowed"]["items"]], ["episode-2", "episode-1"])
+        self.assertEqual(
+            [item["id"] for item in rows["allowed"]["items"]],
+            ["episode-2", "episode-1"],
+        )
         self.assertTrue(rows["allowed"]["stackEpisodes"])
         self.assertEqual(rows["allowed"]["items"][0]["seriesName"], "series 1")
-        self.assertEqual([item["id"] for item in rows["movies"]["items"]], ["movie-new", "movie-old"])
+        self.assertEqual(
+            [item["id"] for item in rows["movies"]["items"]], ["movie-new", "movie-old"]
+        )
         self.assertFalse(rows["movies"]["stackEpisodes"])
         self.assertNotIn("hidden", rows)
 
@@ -705,11 +1049,29 @@ class CatalogTest(unittest.TestCase):
             entity_id = f"movie-{index}"
             self.db.execute(
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, "allowed", None, "movie", entity_id, None, None, None, None, "2026", "2026"),
+                (
+                    entity_id,
+                    "allowed",
+                    None,
+                    "movie",
+                    entity_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
             )
             self.db.execute(
                 "INSERT INTO media_files VALUES(?,?,?,?,?)",
-                (f"file-{index}", entity_id, f"{entity_id}.mkv", "media", 1_700_000_000_000_000_000 + index),
+                (
+                    f"file-{index}",
+                    entity_id,
+                    f"{entity_id}.mkv",
+                    "media",
+                    1_700_000_000_000_000_000 + index,
+                ),
             )
         catalog = self.catalog()
         metadata_calls = 0
@@ -741,7 +1103,19 @@ class CatalogTest(unittest.TestCase):
         ):
             self.db.execute(
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, "hidden" if entity_id == "hidden-movie" else "allowed", None, "movie", path, None, None, None, None, created_at, created_at),
+                (
+                    entity_id,
+                    "hidden" if entity_id == "hidden-movie" else "allowed",
+                    None,
+                    "movie",
+                    path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    created_at,
+                    created_at,
+                ),
             )
         for entity_id, favorite, position, duration, last_played_at in (
             ("movie-action", 1, 0, 0, None),
@@ -751,7 +1125,17 @@ class CatalogTest(unittest.TestCase):
         ):
             self.db.execute(
                 "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
-                (user_id, entity_id, favorite, int(position >= duration and duration > 0), 0, position, duration, last_played_at, "2026-04-04"),
+                (
+                    user_id,
+                    entity_id,
+                    favorite,
+                    int(position >= duration > 0),
+                    0,
+                    position,
+                    duration,
+                    last_played_at,
+                    "2026-04-04",
+                ),
             )
         catalog = self.catalog()
         catalog.metadata = lambda _user_id, entity_id, _language: {
@@ -772,7 +1156,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(
             [item["id"] for item in derived["recentlyPlayed"]], ["movie-drama"]
         )
-        self.assertEqual([row["genre"] for row in derived["genreRows"]], ["Action", "Drama"])
+        self.assertEqual(
+            [row["genre"] for row in derived["genreRows"]], ["Action", "Drama"]
+        )
         self.assertEqual(
             [item["id"] for item in derived["genreRows"][0]["items"]],
             ["movie-drama-2", "movie-action"],
@@ -916,7 +1302,9 @@ class CatalogTest(unittest.TestCase):
         self.assertIsNone(state["playedPercentage"])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_parent_state_cascades_and_unwatch_clears_descendant_progress(self, _languages):
+    def test_parent_state_cascades_and_unwatch_clears_descendant_progress(
+        self, _languages
+    ):
         user_id = self.seed_series_hierarchy()
         catalog = self.catalog()
 
@@ -927,14 +1315,28 @@ class CatalogTest(unittest.TestCase):
         )
         catalog.update_state(user_id, "series-1", {"played": True})
 
-        for entity_id in ("series-1", "season-1", "episode-1", "episode-2", "episode-10", "episode-unset"):
+        for entity_id in (
+            "series-1",
+            "season-1",
+            "episode-1",
+            "episode-2",
+            "episode-10",
+            "episode-unset",
+        ):
             state = catalog._state(user_id, entity_id)
             self.assertTrue(state["played"], entity_id)
             self.assertEqual(state["positionSeconds"], 0, entity_id)
         self.assertEqual(catalog._state(user_id, "series-1")["unplayedItemCount"], 0)
 
         catalog.update_state(user_id, "series-1", {"played": False})
-        for entity_id in ("series-1", "season-1", "episode-1", "episode-2", "episode-10", "episode-unset"):
+        for entity_id in (
+            "series-1",
+            "season-1",
+            "episode-1",
+            "episode-2",
+            "episode-10",
+            "episode-unset",
+        ):
             state = catalog._state(user_id, entity_id)
             self.assertFalse(state["played"], entity_id)
             self.assertEqual(state["positionSeconds"], 0, entity_id)

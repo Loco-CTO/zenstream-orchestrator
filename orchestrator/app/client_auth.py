@@ -7,9 +7,8 @@ import json
 import os
 import time
 
-from fastapi import HTTPException, Request, WebSocket
-
 from app.models.account import Account
+from fastapi import HTTPException, Request, WebSocket
 
 
 def bearer_token(value: str | None) -> str | None:

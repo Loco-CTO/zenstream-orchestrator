@@ -4,10 +4,10 @@ import asyncio
 import os
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Callable, TypeVar
-
+from typing import TypeVar
 
 T = TypeVar("T")
 

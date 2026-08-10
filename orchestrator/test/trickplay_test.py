@@ -112,7 +112,9 @@ class TrickplayTest(unittest.TestCase):
                 store.processed.append(asset["mediaFileId"])
 
         extractor.extract = extract
-        with patch("app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 2}):
+        with patch(
+            "app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 2}
+        ):
             extractor.run("run", JobStore())
         self.assertEqual(set(store.processed), {f"media-{index}" for index in range(4)})
         self.assertEqual(len(store.processed), 4)

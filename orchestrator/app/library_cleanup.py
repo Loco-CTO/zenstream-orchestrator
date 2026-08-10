@@ -87,7 +87,9 @@ def _person_image_paths(db, tables: set[str]) -> set[str]:
         return set()
     return {
         row[0]
-        for row in db.execute("SELECT local_path FROM people WHERE local_path IS NOT NULL")
+        for row in db.execute(
+            "SELECT local_path FROM people WHERE local_path IS NOT NULL"
+        )
         if row[0]
     }
 
@@ -221,7 +223,9 @@ def _remove_person_cached_files(db, tables: set[str], paths: set[str]) -> None:
             path = Path(raw_path)
             resolved = path.resolve()
             resolved.relative_to(cache_root)
-            if not db.execute("SELECT 1 FROM people WHERE local_path=? LIMIT 1", (str(path),)):
+            if not db.execute(
+                "SELECT 1 FROM people WHERE local_path=? LIMIT 1", (str(path),)
+            ):
                 resolved.unlink(missing_ok=True)
         except (OSError, ValueError):
             continue

@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0007_catalog_performance"
 down_revision = "0006_analysis_worker_limits"
 branch_labels = None
@@ -107,6 +106,8 @@ def upgrade():
         "CASE WHEN EXISTS(SELECT 1 FROM catalog_entity_summary s WHERE s.library_id=l.id AND s.parent_id IS NOT NULL) THEN 1 ELSE 0 END,"
         "NULL,CURRENT_TIMESTAMP FROM libraries l"
     )
+
+
 def downgrade():
     op.execute("DROP INDEX IF EXISTS idx_catalog_collection_member_projection_page")
     op.execute("DROP TABLE IF EXISTS catalog_collection_member_projection")

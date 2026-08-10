@@ -1,16 +1,15 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from datetime import datetime, timezone
-import json
 
+from app.catalog_read_model import CatalogReadModel
 from app.config import Config
 from app.logging_config import get_logger
 from app.metadata_services import MetadataReadService
 from app.models.metadata import MetadataLanguageSettings
 from app.providers import PRIMARY_PROVIDER_BY_ENTITY
-from app.catalog_read_model import CatalogReadModel
-
 
 logger = get_logger("catalog_projections")
 LEAF_TYPES = {"movie", "episode", "track", "release"}
@@ -86,7 +85,9 @@ class CatalogProjectionStore:
             if should_terminate():
                 raise RuntimeError("Projection rebuild cancelled")
             row = entities[entity_id]
-            child_ids = [child for child in children.get(entity_id, []) if child in entities]
+            child_ids = [
+                child for child in children.get(entity_id, []) if child in entities
+            ]
             if not child_ids and row[2] in LEAF_TYPES:
                 result = ([entity_id], 0)
             else:
@@ -104,9 +105,17 @@ class CatalogProjectionStore:
         for entity_id in target_ids:
             row = entities[entity_id]
             leaves, descendant_count = aggregate(entity_id)
-            dates = [media_dates.get(leaf_id) for leaf_id in leaves if media_dates.get(leaf_id)]
-            added = min((value[0] for value in dates if value[0] is not None), default=None)
-            last_added = max((value[1] for value in dates if value[1] is not None), default=None)
+            dates = [
+                media_dates.get(leaf_id)
+                for leaf_id in leaves
+                if media_dates.get(leaf_id)
+            ]
+            added = min(
+                (value[0] for value in dates if value[0] is not None), default=None
+            )
+            last_added = max(
+                (value[1] for value in dates if value[1] is not None), default=None
+            )
             values.append(
                 (
                     entity_id,
@@ -133,9 +142,20 @@ class CatalogProjectionStore:
             cursor.execute(
                 "INSERT INTO catalog_projection_status(library_id,generation,state,progress_current,progress_total,updated_at) VALUES(?,?,?,?,?,?) "
                 "ON CONFLICT(library_id) DO UPDATE SET generation=excluded.generation,state=excluded.state,progress_current=excluded.progress_current,progress_total=excluded.progress_total,error=NULL,updated_at=excluded.updated_at",
-                (library_id, 1, "ready", len(values), len(values), datetime.now(timezone.utc).isoformat()),
+                (
+                    library_id,
+                    1,
+                    "ready",
+                    len(values),
+                    len(values),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
-        logger.info("catalog projection complete library_id=%s entities=%s", library_id, len(values))
+        logger.info(
+            "catalog projection complete library_id=%s entities=%s",
+            library_id,
+            len(values),
+        )
         return len(values)
 
     def rebuild_user(self, user_id: str, library_id: str, should_terminate=None) -> int:
@@ -164,7 +184,9 @@ class CatalogProjectionStore:
             if should_terminate():
                 raise RuntimeError("User projection rebuild cancelled")
             row = entities[entity_id]
-            child_ids = [child for child in children.get(entity_id, []) if child in entities]
+            child_ids = [
+                child for child in children.get(entity_id, []) if child in entities
+            ]
             if not child_ids and row[2] in LEAF_TYPES:
                 state = states.get(entity_id, (0, 0, 0, 0, 0, None))
                 result = (int(bool(state[1])), int(not state[1]), 1 if state[1] else 0)
@@ -186,7 +208,22 @@ class CatalogProjectionStore:
             row = entities[entity_id]
             played, unplayed, _ = aggregate(entity_id)
             state = states.get(entity_id, (0, 0, 0, 0, 0, None))
-            values.append((user_id, entity_id, state[0], state[1], state[2], played, unplayed, state[3], state[4], state[5], 1, now))
+            values.append(
+                (
+                    user_id,
+                    entity_id,
+                    state[0],
+                    state[1],
+                    state[2],
+                    played,
+                    unplayed,
+                    state[3],
+                    state[4],
+                    state[5],
+                    1,
+                    now,
+                )
+            )
         with self.db.transaction() as cursor:
             cursor.execute(
                 "DELETE FROM catalog_user_rollups WHERE user_id=? AND entity_id IN (SELECT id FROM library_entities WHERE library_id=?)",
@@ -223,14 +260,15 @@ class CatalogProjectionStore:
                 (entity_id, primary),
             )
             provider_ids = [
-                {"provider": row[0], "type": row[1], "id": row[2]}
-                for row in providers
+                {"provider": row[0], "type": row[1], "id": row[2]} for row in providers
             ]
             if not provider_ids:
                 continue
             for locale in locales:
                 try:
-                    resolved = reader.resolve_public(entity_id, entity_type, provider_ids, locale)
+                    resolved = reader.resolve_public(
+                        entity_id, entity_type, provider_ids, locale
+                    )
                 except Exception as error:
                     logger.debug(
                         "metadata projection skipped entity_id=%s locale=%s error=%s",
@@ -239,13 +277,25 @@ class CatalogProjectionStore:
                         error,
                     )
                     continue
-                values.append((entity_id, locale, json.dumps(resolved["metadata"], ensure_ascii=False), now, 1))
+                values.append(
+                    (
+                        entity_id,
+                        locale,
+                        json.dumps(resolved["metadata"], ensure_ascii=False),
+                        now,
+                        1,
+                    )
+                )
                 if len(values) >= 100:
                     self._write_metadata_batch(values)
                     values.clear()
         if values:
             self._write_metadata_batch(values)
-        logger.info("metadata projection complete library_id=%s entities=%s", library_id, len(rows))
+        logger.info(
+            "metadata projection complete library_id=%s entities=%s",
+            library_id,
+            len(rows),
+        )
         return len(rows)
 
     def _write_metadata_batch(self, values) -> None:

@@ -7,11 +7,9 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from app.config import Config
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
-
-from app.config import Config
-
 
 _hasher = PasswordHasher()
 

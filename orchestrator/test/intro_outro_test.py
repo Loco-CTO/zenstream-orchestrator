@@ -31,7 +31,9 @@ class IntroOutroTest(unittest.TestCase):
         self.assertEqual(decode_fingerprint(b"bad"), ())
 
     def test_downsamples_fingerprint_bit_density_for_dashboard_preview(self):
-        preview = fingerprint_preview(struct.pack("<4I", 0, 0xFFFFFFFF, 0, 0xFFFFFFFF), maximum_samples=2)
+        preview = fingerprint_preview(
+            struct.pack("<4I", 0, 0xFFFFFFFF, 0, 0xFFFFFFFF), maximum_samples=2
+        )
         self.assertEqual(preview["pointCount"], 4)
         self.assertEqual(preview["values"], [16.0, 16.0])
 
@@ -44,8 +46,16 @@ class IntroOutroTest(unittest.TestCase):
 
     def test_finds_a_long_shared_region_after_an_offset(self):
         points = max(130, int(DEFAULTS["minimumIntroDuration"] / SAMPLE_SECONDS) + 4)
-        shared = tuple((1000 + index) * 0x9E3779B1 & 0xFFFFFFFF for index in range(points))
-        result = shared_region((0xFFFFFFFF, 0xFFFFFFFE, *shared), (0xAAAA0000, 0xAAAA0001, 0xAAAA0002, *shared), DEFAULTS, 15, 120)
+        shared = tuple(
+            (1000 + index) * 0x9E3779B1 & 0xFFFFFFFF for index in range(points)
+        )
+        result = shared_region(
+            (0xFFFFFFFF, 0xFFFFFFFE, *shared),
+            (0xAAAA0000, 0xAAAA0001, 0xAAAA0002, *shared),
+            DEFAULTS,
+            15,
+            120,
+        )
         self.assertIsNotNone(result)
         left_start, left_end, right_start, right_end = result
         self.assertAlmostEqual(left_start, 2 * SAMPLE_SECONDS)
@@ -54,7 +64,9 @@ class IntroOutroTest(unittest.TestCase):
         self.assertAlmostEqual(right_end - right_start, left_end - left_start)
 
     def test_rejects_short_matches(self):
-        self.assertIsNone(shared_region(tuple(range(30)), tuple(range(30)), DEFAULTS, 15, 120))
+        self.assertIsNone(
+            shared_region(tuple(range(30)), tuple(range(30)), DEFAULTS, 15, 120)
+        )
 
     def test_rejects_sparse_near_matches(self):
         points = int(DEFAULTS["minimumIntroDuration"] / SAMPLE_SECONDS) + 10
@@ -78,7 +90,12 @@ class IntroOutroTest(unittest.TestCase):
             def __init__(self):
                 self.lock = threading.Lock()
                 self.assets = [
-                    {"mediaFileId": f"episode-{index}", "entityId": f"entity-{index}", "durationSeconds": 600, "path": Path(f"episode-{index}.mkv")}
+                    {
+                        "mediaFileId": f"episode-{index}",
+                        "entityId": f"entity-{index}",
+                        "durationSeconds": 600,
+                        "path": Path(f"episode-{index}.mkv"),
+                    }
                     for index in range(4)
                 ]
                 self.processed = []
@@ -125,6 +142,8 @@ class IntroOutroTest(unittest.TestCase):
 
         detector._fingerprint = fingerprint
         detector.run("run", JobStore())
-        self.assertEqual(set(store.processed), {f"episode-{index}" for index in range(4)})
+        self.assertEqual(
+            set(store.processed), {f"episode-{index}" for index in range(4)}
+        )
         self.assertEqual(len(store.processed), 4)
         self.assertEqual(maximum, 2)

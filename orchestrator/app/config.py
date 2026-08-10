@@ -1,10 +1,10 @@
-from .database import DatabaseHandler
-import os
 import time
 from pathlib import Path
+
 from alembic import command
 from alembic.config import Config as AlembicConfig
 
+from .database import DatabaseHandler
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,7 +19,7 @@ class Config:
     ):
         """Create a new instance of the configuration handler."""
         if cls._instance is None:
-            cls._instance = super(Config, cls).__new__(cls)
+            cls._instance = super().__new__(cls)
 
             cls._instance._initialize()
         return cls._instance
@@ -190,18 +190,25 @@ class Config:
                     )
                 columns = database.execute("PRAGMA table_info(syncplay_members)", ())
                 names = [row[1] for row in columns]
-            primary = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
+            primary = [
+                row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]
+            ]
             indexes = database.execute("PRAGMA index_list(syncplay_members)", ())
             has_old_unique = any(
-                bool(row[2]) and str(row[1]).lower() not in {"sqlite_autoindex_syncplay_members_1"}
+                bool(row[2])
+                and str(row[1]).lower() not in {"sqlite_autoindex_syncplay_members_1"}
                 for row in indexes
             )
             if primary == ["group_id", "participant_id"] and not has_old_unique:
                 return
             with database.transaction() as cursor:
                 source_names = set(names)
-                source_expr = lambda name, default: name if name in source_names else default
-                cursor.execute("ALTER TABLE syncplay_members RENAME TO syncplay_members_legacy")
+                source_expr = lambda name, default: (
+                    name if name in source_names else default
+                )
+                cursor.execute(
+                    "ALTER TABLE syncplay_members RENAME TO syncplay_members_legacy"
+                )
                 cursor.execute(
                     """CREATE TABLE syncplay_members (
                         group_id TEXT NOT NULL, user_id TEXT NOT NULL,
@@ -222,8 +229,7 @@ class Config:
                         CASE WHEN COALESCE(participant_id,'')='' THEN '__legacy__:' || user_id ELSE participant_id END,
                         username,COALESCE({watching_together},1),COALESCE({viewing},0),
                         COALESCE({loading},0),COALESCE({ready_generation},-1),COALESCE({presence_sequence},0)
-                    FROM syncplay_members_legacy"""
-                    .format(
+                    FROM syncplay_members_legacy""".format(
                         watching_together=source_expr("watching_together", "1"),
                         viewing=source_expr("viewing", "0"),
                         loading=source_expr("loading", "0"),

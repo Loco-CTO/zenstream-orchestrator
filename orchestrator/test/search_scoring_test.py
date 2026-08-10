@@ -24,7 +24,9 @@ class SearchScoringTest(unittest.TestCase):
 
     def test_word_span_scoring_handles_multitoken_typos(self):
         self.assertGreater(match_score("spder man", "Spider-Man: No Way Home"), 0.0)
-        self.assertGreater(match_score("gintma", "Gintama - Mr. Ginpachi's Zany Class"), 0.0)
+        self.assertGreater(
+            match_score("gintma", "Gintama - Mr. Ginpachi's Zany Class"), 0.0
+        )
 
 
 if __name__ == "__main__":

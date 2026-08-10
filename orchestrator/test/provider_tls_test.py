@@ -3,7 +3,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import httpx
-
 from app.providers import ProviderClient, TVDBClient
 
 

@@ -1,6 +1,7 @@
 from functools import wraps
-from flask import request
+
 from app.models.user import User
+from flask import request
 
 
 def authenticate(func):

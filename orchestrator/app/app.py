@@ -4,28 +4,29 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-
 from api.zenstream.application_routes import (
     _static_roots,
     hub,
+)
+from api.zenstream.application_routes import (
     router as application_router,
 )
 from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
-from app.config import load_config
-from app.foreground import active_requests, run_foreground, shutdown as shutdown_foreground
 from app.catalog_read_model import CatalogReadModel
+from app.config import load_config
+from app.foreground import active_requests, run_foreground
+from app.foreground import shutdown as shutdown_foreground
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
-from app.metadata_services import asset_executor
 from app.logging_config import get_logger
-from app.playback import PlaybackManager
+from app.metadata_services import asset_executor
 from app.models.account import Account
+from app.playback import PlaybackManager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from version import __version__
-
 
 request_logger = get_logger("http")
 
@@ -38,6 +39,7 @@ async def lifespan(_app: FastAPI):
     await asyncio.to_thread(CatalogReadModel().bootstrap)
     library_runtime.start()
     job_scheduler.start()
+
     async def maintain_sessions():
         while True:
             await asyncio.sleep(60)
@@ -99,7 +101,9 @@ async def request_timing(request, call_next):
 
         token = bearer_token(authorization)
         if token:
-            request.state.authenticated = await run_foreground(Account().authenticate_token, token)
+            request.state.authenticated = await run_foreground(
+                Account().authenticate_token, token
+            )
             auth_ms = (time.perf_counter() - auth_started) * 1000
     response = await call_next(request)
     duration_ms = (time.perf_counter() - started) * 1000
@@ -114,6 +118,7 @@ async def request_timing(request, call_next):
         active_requests(),
     )
     return response
+
 
 app.include_router(client_router)
 app.include_router(library_router)

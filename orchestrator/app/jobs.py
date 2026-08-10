@@ -3,27 +3,27 @@ from __future__ import annotations
 import json
 import threading
 import time
-import uuid
 import traceback
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.config import Config
-from app.library import JobTerminated, runtime as library_runtime
+from app.foreground import active_requests
+from app.intro_outro import IntroOutroDetector
+from app.library import JobTerminated
+from app.library import runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
+from app.logging_config import get_logger
 from app.metadata_domain import choose_artwork
-from app.providers import ProviderError
 from app.metadata_services import (
     FACT_FIELDS,
     TEXT_FIELDS,
     MetadataIngestService,
     metadata_task_results,
 )
-from app.logging_config import get_logger
+from app.providers import ProviderError
 from app.trickplay import TrickplayExtractor
-from app.intro_outro import IntroOutroDetector
-from app.foreground import active_requests
-
 
 logger = get_logger("jobs")
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
@@ -80,9 +80,7 @@ def _metadata_document_gaps(
         and isinstance(image.get("url"), str)
         and image.get("url")
     }
-    image_columns = {
-        row[1] for row in db.execute("PRAGMA table_info(metadata_images)")
-    }
+    image_columns = {row[1] for row in db.execute("PRAGMA table_info(metadata_images)")}
     blur_hash_column = ",blur_hash" if "blur_hash" in image_columns else ""
     image_rows = db.execute(
         "SELECT image_type,image_url,local_path" + blur_hash_column + " "
@@ -132,7 +130,10 @@ def _metadata_document_gaps(
             gaps.add("projection")
         for field in projected_fields:
             source_value = document.get(field)
-            if _usable_metadata_value(source_value) and projection.get(field) != source_value:
+            if (
+                _usable_metadata_value(source_value)
+                and projection.get(field) != source_value
+            ):
                 gaps.add(f"metadata:{field}")
         projected_images = projection.get("images")
         if not isinstance(projected_images, dict):
@@ -282,9 +283,9 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
                 key = (int(season_number), None)
                 provider_ids[key] = f"{series_provider_id}:{season_number}"
                 if entity_type == "episode" and episode_number is not None:
-                    provider_ids[
-                        (int(season_number), int(episode_number))
-                    ] = f"{series_provider_id}:{season_number}:{episode_number}"
+                    provider_ids[(int(season_number), int(episode_number))] = (
+                        f"{series_provider_id}:{season_number}:{episode_number}"
+                    )
         else:
             discover = getattr(metadata_service, "series_child_ids", None)
             if not callable(discover):
@@ -743,6 +744,7 @@ class MetadataMissingJob:
             progress_total=total,
             message=f"Processing 0/{total} metadata documents",
         )
+
         def queue_failures(
             provider: str,
             entity_type: str,
@@ -860,9 +862,7 @@ class MetadataMissingJob:
                         provider_id,
                         fetch_locales,
                     )
-            failed_locales = {
-                str(failure.get("locale")) for failure in item_failures
-            }
+            failed_locales = {str(failure.get("locale")) for failure in item_failures}
             publish_ids: set[str] = set()
             for locale in locales:
                 if locale in failed_locales:
@@ -965,7 +965,9 @@ class MetadataMissingJob:
                 error=summary,
                 error_details=json.dumps(
                     {
-                        "operation": "metadata_refresh" if force else "metadata_missing",
+                        "operation": "metadata_refresh"
+                        if force
+                        else "metadata_missing",
                         "failures": failures,
                         "incompleteRepairs": incomplete_repairs,
                     }
@@ -1372,7 +1374,9 @@ class JobScheduler:
             kind,
         )
         worker.run(run_id, self.store, should_terminate)
-        logger.info("analysis job completed worker pool run_id=%s kind=%s", run_id, kind)
+        logger.info(
+            "analysis job completed worker pool run_id=%s kind=%s", run_id, kind
+        )
 
 
 scheduler = JobScheduler(library_runtime)

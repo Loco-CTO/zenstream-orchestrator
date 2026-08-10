@@ -1624,9 +1624,9 @@ class LibraryScanner:
                         cached,
                     )
                     continue
-                tasks.setdefault(
-                    (provider, entity_type, str(provider_id)), []
-                ).append(locale)
+                tasks.setdefault((provider, entity_type, str(provider_id)), []).append(
+                    locale
+                )
 
         def fetch_locales(task):
             (provider, entity_type, provider_id), missing = task
@@ -1800,7 +1800,7 @@ class LibraryScanner:
                 result = service.resolve_inventory_entity(
                     entity_type, query, year, explicit
                 )
-            except ProviderError as error:
+            except ProviderError:
                 self.db.execute(
                     "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
                     (now(), entity_id),
@@ -1925,9 +1925,7 @@ class LibraryScanner:
         index: int,
         total: int,
     ) -> None:
-        self._resolve_movie_row(
-            library_id, row, job_id, should_terminate, index, total
-        )
+        self._resolve_movie_row(library_id, row, job_id, should_terminate, index, total)
         self._publish_root(row[0])
 
     def _queue_metadata_repair(
@@ -1999,9 +1997,7 @@ class LibraryScanner:
         try:
             provider_ids = explicit
             if not provider_ids:
-                result = service.resolve_inventory_entity(
-                    entity_type, query, year, []
-                )
+                result = service.resolve_inventory_entity(entity_type, query, year, [])
                 provider_ids = result["providerIds"]
                 self._ids(
                     entity_id,
@@ -2011,9 +2007,7 @@ class LibraryScanner:
                     ],
                 )
             supported = [
-                value
-                for value in provider_ids
-                if value["provider"] in {"tmdb", "tvdb"}
+                value for value in provider_ids if value["provider"] in {"tmdb", "tvdb"}
             ]
             if not supported:
                 raise ValueError(f"No supported metadata identity for movie '{query}'")
@@ -2531,9 +2525,7 @@ class LibraryScanner:
                         f"Metadata resolution failed for {entity_type} "
                         f"'{relative_path}': {type(error).__name__}: {error}"
                     )
-                    self._queue_metadata_repair(
-                        entity_id, library_id, job_id, failure
-                    )
+                    self._queue_metadata_repair(entity_id, library_id, job_id, failure)
                     self.store.update_job(
                         job_id,
                         progress_current=index,
@@ -3320,9 +3312,7 @@ class LibraryScanner:
                 for candidate in self._walk_file_entries(season_dir):
                     self._check_termination(should_terminate)
                     episode_entries.append(candidate)
-            files_by_parent: dict[
-                Path, list[tuple[Path, os.stat_result | None]]
-            ] = {}
+            files_by_parent: dict[Path, list[tuple[Path, os.stat_result | None]]] = {}
             for entry in episode_entries:
                 files_by_parent.setdefault(entry[0].parent, []).append(entry)
             episode_records = []
@@ -3424,8 +3414,7 @@ class LibraryScanner:
                     files = []
             relative_path = relative(str(root), str(entry))
             if not any(
-                self._is_supported_video(path, file_stat)
-                for path, file_stat in files
+                self._is_supported_video(path, file_stat) for path, file_stat in files
             ):
                 self._reject_existing_entity(library_id, "movie", relative_path)
                 self.store.update_job(
@@ -3934,7 +3923,7 @@ class LibraryScanner:
             by_id = {(row[1], str(row[2])): row[0] for row in source_rows}
             lists: dict[str, dict] = {}
             # Lists are paged; stop at the first short page to avoid unbounded calls.
-            for page in range(0, 50):
+            for page in range(50):
                 self._check_termination(should_terminate)
                 page_values = client.lists(page)
                 for value in page_values:
@@ -4133,7 +4122,7 @@ def _music_ids(tags: dict[str, str]) -> list[tuple[str, str, str]]:
 
 
 class _LibraryChangeHandler(FileSystemEventHandler):
-    def __init__(self, runtime: "LibraryRuntime", library_id: str):
+    def __init__(self, runtime: LibraryRuntime, library_id: str):
         self.runtime = runtime
         self.library_id = library_id
 
@@ -4479,7 +4468,6 @@ class LibraryRuntime:
                 library_id,
                 kind,
             )
-            pass
         finally:
             with self._active_lock:
                 self._active_jobs.discard(job_id)

@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from app.catalog_read_model import CatalogReadModel
 from app.catalog import Catalog
+from app.catalog_read_model import CatalogReadModel
 from app.database import DatabaseHandler
 
 
@@ -35,25 +35,51 @@ class CatalogReadModelTest(unittest.TestCase):
             "CREATE INDEX idx_catalog_item_genres_covering ON catalog_item_genres(locale,library_id,entity_type,genre_key,entity_id)",
         ):
             self.db.execute(statement)
-        self.db.execute("INSERT INTO libraries VALUES('library','Library','tv_series','scanning',NULL,'2026')")
-        self.db.execute("INSERT INTO libraries VALUES('collection','Collection','collection','ready',NULL,'2026')")
+        self.db.execute(
+            "INSERT INTO libraries VALUES('library','Library','tv_series','scanning',NULL,'2026')"
+        )
+        self.db.execute(
+            "INSERT INTO libraries VALUES('collection','Collection','collection','ready',NULL,'2026')"
+        )
         self.db.execute("INSERT INTO users VALUES('user')")
-        self.db.execute("CREATE TABLE user_library_access(user_id TEXT,library_id TEXT,created_at TEXT,PRIMARY KEY(user_id,library_id))")
-        self.db.execute("INSERT INTO user_library_access VALUES('user','library','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('series','library',NULL,'series','Series',NULL,NULL,NULL,NULL,NULL,'2026','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('season','library','series','season','Series/Season 1',1,NULL,NULL,NULL,NULL,'2026','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('episode-1','library','season','episode','Series/Season 1/Episode 1.mkv',1,1,NULL,NULL,NULL,'2026','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('episode-2','library','season','episode','Series/Season 1/Episode 2.mkv',1,2,NULL,NULL,NULL,'2026','2026')")
-        self.db.execute("INSERT INTO library_entities VALUES('collection-item','collection',NULL,'collection','Collection',NULL,NULL,NULL,NULL,NULL,'2026','2026')")
-        self.db.execute("INSERT INTO collection_members VALUES('collection-item','series',1)")
-        self.db.execute("INSERT INTO media_files VALUES('file-1','episode-1','Episode 1.mkv','media',10)")
-        self.db.execute("INSERT INTO media_files VALUES('file-2','episode-2','Episode 2.mkv','media',20)")
+        self.db.execute(
+            "CREATE TABLE user_library_access(user_id TEXT,library_id TEXT,created_at TEXT,PRIMARY KEY(user_id,library_id))"
+        )
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES('user','library','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('series','library',NULL,'series','Series',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('season','library','series','season','Series/Season 1',1,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('episode-1','library','season','episode','Series/Season 1/Episode 1.mkv',1,1,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('episode-2','library','season','episode','Series/Season 1/Episode 2.mkv',1,2,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('collection-item','collection',NULL,'collection','Collection',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO collection_members VALUES('collection-item','series',1)"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES('file-1','episode-1','Episode 1.mkv','media',10)"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES('file-2','episode-2','Episode 2.mkv','media',20)"
+        )
 
     def tearDown(self):
         self.db.close()
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
-    def test_rebuild_propagates_file_extrema_and_collection_contributions(self, _languages):
+    def test_rebuild_propagates_file_extrema_and_collection_contributions(
+        self, _languages
+    ):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
         series = self.db.read_execute(
@@ -74,7 +100,9 @@ class CatalogReadModelTest(unittest.TestCase):
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_rebuild_backfills_cached_artwork_selection(self, _languages):
-        self.db.execute("INSERT INTO entity_provider_ids VALUES('series','tvdb','series','1',1)")
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('series','tvdb','series','1',1)"
+        )
         self.db.execute(
             "INSERT INTO catalog_item_projection VALUES('series','en','library',NULL,'series','{\"title\":\"Series\"}','series',0,'',0,'2026',1)"
         )
@@ -121,7 +149,9 @@ class CatalogReadModelTest(unittest.TestCase):
         )
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
-    def test_refresh_root_handles_timestamp_decrease_without_library_scan(self, _languages):
+    def test_refresh_root_handles_timestamp_decrease_without_library_scan(
+        self, _languages
+    ):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
         initial_generation = model.status()[1]
@@ -138,12 +168,17 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(library, (2, "series"))
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
-    def test_refresh_root_preserves_localized_and_original_title_grams(self, _languages):
+    def test_refresh_root_preserves_localized_and_original_title_grams(
+        self, _languages
+    ):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
         self.db.execute(
             "UPDATE catalog_item_projection SET payload=?,title_sort=? WHERE entity_id='series' AND locale='en'",
-            ('{"title":"Localized Name","originalTitle":"Original Name"}', "localized name"),
+            (
+                '{"title":"Localized Name","originalTitle":"Original Name"}',
+                "localized name",
+            ),
         )
         model.refresh_roots(["series"])
         indexed = set(
@@ -185,14 +220,14 @@ class CatalogReadModelTest(unittest.TestCase):
         self.db.execute("DELETE FROM catalog_entity_summary WHERE entity_id='series'")
         self.db.execute("UPDATE catalog_read_model_status SET state='ready' WHERE id=1")
 
-        with patch.object(model, "rebuild", side_effect=AssertionError("unexpected full rebuild")):
+        with patch.object(
+            model, "rebuild", side_effect=AssertionError("unexpected full rebuild")
+        ):
             result = model.bootstrap(["en"])
 
         self.assertEqual(result, 5)
         self.assertEqual(
-            self.db.read_execute(
-                "SELECT COUNT(*) FROM catalog_entity_summary"
-            )[0][0],
+            self.db.read_execute("SELECT COUNT(*) FROM catalog_entity_summary")[0][0],
             5,
         )
 
@@ -201,21 +236,27 @@ class CatalogReadModelTest(unittest.TestCase):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
         self.db.execute("DELETE FROM catalog_entity_summary WHERE entity_id='series'")
-        self.db.execute("UPDATE catalog_read_model_status SET state='building' WHERE id=1")
+        self.db.execute(
+            "UPDATE catalog_read_model_status SET state='building' WHERE id=1"
+        )
         with patch.object(model, "rebuild", wraps=model.rebuild) as rebuild:
             result = model.bootstrap(["en"])
         self.assertEqual(result, 5)
         rebuild.assert_called_once_with(["en"])
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
-    def test_bootstrap_repairs_small_projection_gap_without_full_rebuild(self, _languages):
+    def test_bootstrap_repairs_small_projection_gap_without_full_rebuild(
+        self, _languages
+    ):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
         self.db.execute(
             "DELETE FROM catalog_item_projection WHERE entity_id='episode-1' AND locale='en'"
         )
 
-        with patch.object(model, "rebuild", side_effect=AssertionError("unexpected full rebuild")):
+        with patch.object(
+            model, "rebuild", side_effect=AssertionError("unexpected full rebuild")
+        ):
             result = model.bootstrap(["en"])
 
         self.assertEqual(result, 5)
@@ -240,7 +281,9 @@ class CatalogReadModelTest(unittest.TestCase):
             "INSERT INTO library_entities VALUES('unpublished','library','series','episode','Series/Season 1/Episode 3.mkv',1,3,NULL,NULL,NULL,'2026','2026')"
         )
 
-        with patch.object(model, "rebuild", side_effect=AssertionError("unexpected full rebuild")):
+        with patch.object(
+            model, "rebuild", side_effect=AssertionError("unexpected full rebuild")
+        ):
             result = model.bootstrap(["en"])
 
         self.assertEqual(result, 5)
@@ -267,10 +310,20 @@ class CatalogReadModelTest(unittest.TestCase):
         model.rebuild(["en"])
         catalog = Catalog.__new__(Catalog)
         catalog.db = self.db
-        response = catalog.list_items("user", "library", "en", parent_id="season", page_size=1, sort_by="lastAdded", sort_order="descending")
+        response = catalog.list_items(
+            "user",
+            "library",
+            "en",
+            parent_id="season",
+            page_size=1,
+            sort_by="lastAdded",
+            sort_order="descending",
+        )
         self.assertEqual(response["total"], 2)
         self.assertEqual(response["items"][0]["id"], "episode-2")
-        self.assertEqual(response["items"][0]["lastAddedAt"], "1970-01-01T00:00:00+00:00")
+        self.assertEqual(
+            response["items"][0]["lastAddedAt"], "1970-01-01T00:00:00+00:00"
+        )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_projection_first_title_plan_avoids_temp_ordering_tree(self, _languages):
@@ -329,7 +382,9 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(response["items"][0]["id"], "series")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_fts_search_does_not_use_bm25_inside_grouped_read_model_query(self, _languages):
+    def test_fts_search_does_not_use_bm25_inside_grouped_read_model_query(
+        self, _languages
+    ):
         self.db.execute(
             "CREATE VIRTUAL TABLE catalog_search USING fts5(entity_id UNINDEXED, library_id UNINDEXED, locale UNINDEXED, title, tokenize='trigram')"
         )
@@ -345,7 +400,9 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(response["items"][0]["id"], "series")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_catalog_search_ranks_typo_candidates_by_score_before_pagination(self, _languages):
+    def test_catalog_search_ranks_typo_candidates_by_score_before_pagination(
+        self, _languages
+    ):
         for entity_id, title in (
             ("gintama", "Gintama"),
             ("gintama-chronicles", "Gintama Chronicles"),
@@ -354,11 +411,37 @@ class CatalogReadModelTest(unittest.TestCase):
         ):
             self.db.execute(
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, "library", None, "series", title, None, None, None, None, None, "2026", "2026"),
+                (
+                    entity_id,
+                    "library",
+                    None,
+                    "series",
+                    title,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
             )
             self.db.execute(
                 "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, "en", "library", None, "series", '{"title":"' + title + '"}', title.casefold(), 0, "", 0, "2026", 1),
+                (
+                    entity_id,
+                    "en",
+                    "library",
+                    None,
+                    "series",
+                    '{"title":"' + title + '"}',
+                    title.casefold(),
+                    0,
+                    "",
+                    0,
+                    "2026",
+                    1,
+                ),
             )
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
@@ -368,7 +451,8 @@ class CatalogReadModelTest(unittest.TestCase):
         response = catalog.search("user", "gintma", "en", 1, 2)
         self.assertEqual(response["total"], 4)
         self.assertEqual(
-            [item["id"] for item in response["items"]], ["gintama", "gintama-chronicles"]
+            [item["id"] for item in response["items"]],
+            ["gintama", "gintama-chronicles"],
         )
         self.assertEqual(
             [

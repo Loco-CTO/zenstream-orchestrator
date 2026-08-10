@@ -10,7 +10,9 @@ from app.database import DatabaseHandler
 class DatabaseHandlerTest(unittest.TestCase):
     def test_file_reads_use_a_connection_per_thread(self):
         with tempfile.TemporaryDirectory() as directory:
-            database = DatabaseHandler("sqlite", {}, str(Path(directory) / "orchestrator.db"))
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
             database.execute("CREATE TABLE values_table(value INTEGER)")
             database.execute("INSERT INTO values_table VALUES(1)")
             connections = []
@@ -19,7 +21,9 @@ class DatabaseHandlerTest(unittest.TestCase):
 
             def read_value():
                 barrier.wait()
-                self.assertEqual(database.read_execute("SELECT value FROM values_table"), [(1,)])
+                self.assertEqual(
+                    database.read_execute("SELECT value FROM values_table"), [(1,)]
+                )
                 with lock:
                     connections.append(id(database.read_local.connection))
 
@@ -55,9 +59,7 @@ class DatabaseHandlerTest(unittest.TestCase):
         try:
             self.assertFalse(worker.is_alive())
             self.assertEqual(
-                database.execute(
-                    "SELECT value FROM values_table ORDER BY sequence"
-                ),
+                database.execute("SELECT value FROM values_table ORDER BY sequence"),
                 [("immediate",), ("batch",)],
             )
         finally:

@@ -1,37 +1,35 @@
 import asyncio
 import math
-import os
 import time
 from pathlib import Path
 
+from app.client_auth import bearer_token, websocket_account
+from app.intro_outro import IntroOutroStore
+from app.jobs import scheduler
+from app.models import Invite
+from app.models.account import Account
+from app.models.admin import Admin
+from app.models.playback_settings import PlaybackSettings
+from app.models.syncplay import (
+    StaleSyncplayState,
+    SyncplayGroup,
+    SyncplayMembershipConflict,
+    pause,
+    schedule,
+)
+from app.playback import ffmpeg_path, ffprobe_path
 from fastapi import (
     APIRouter,
     Header,
     HTTPException,
-    Query,
     Request,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
-
-from app.models import Invite
-from app.models.admin import Admin
-from app.models.syncplay import (
-    SyncplayGroup,
-    SyncplayMembershipConflict,
-    StaleSyncplayState,
-    pause,
-    schedule,
-)
-from app.playback import ffmpeg_path, ffprobe_path
-from app.client_auth import bearer_token, websocket_account
-from app.models.account import Account
-from app.models.playback_settings import PlaybackSettings
-from app.intro_outro import IntroOutroStore
-from app.jobs import scheduler
-from api.zenstream.version import _main_version
 from version import __version__
+
+from api.zenstream.version import _main_version
 
 
 class WebSocketHub:
@@ -306,7 +304,9 @@ async def admin_intro_outro_settings(
 
 @router.put("/api/admin/intro-outro/settings")
 async def update_admin_intro_outro_settings(
-    request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     _admin_headers(Username, TOKEN)
     settings = IntroOutroStore().update_settings(await request.json())

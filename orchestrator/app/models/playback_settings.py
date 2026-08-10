@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 
 from app.config import Config
 
-
 DEFAULT_MAX_TRANSCODES = 0
 DEFAULT_MAX_TRANSCODES_PER_USER = 0
 MAX_ALLOWED_TRANSCODES = 64
@@ -58,7 +57,10 @@ class PlaybackSettings:
                 raise ValueError(
                     f"{name} must be between 0 and {MAX_ALLOWED_TRANSCODES}."
                 )
-            if name == "trickplayWorkers" and not 1 <= integer <= MAX_ALLOWED_TRANSCODES:
+            if (
+                name == "trickplayWorkers"
+                and not 1 <= integer <= MAX_ALLOWED_TRANSCODES
+            ):
                 raise ValueError(
                     f"{name} must be between 1 and {MAX_ALLOWED_TRANSCODES}."
                 )
@@ -75,9 +77,14 @@ class PlaybackSettings:
         if width % 16:
             raise ValueError("trickplay frame width must be divisible by 16.")
         if normalized["trickplayFrameHeight"] != width * 9 // 16:
-            raise ValueError("trickplay frame height must equal the derived 16:9 height.")
+            raise ValueError(
+                "trickplay frame height must equal the derived 16:9 height."
+            )
         interval = normalized["trickplayIntervalSeconds"]
-        if interval < MIN_TRICKPLAY_INTERVAL_SECONDS or interval > MAX_TRICKPLAY_INTERVAL_SECONDS:
+        if (
+            interval < MIN_TRICKPLAY_INTERVAL_SECONDS
+            or interval > MAX_TRICKPLAY_INTERVAL_SECONDS
+        ):
             raise ValueError("trickplay interval must be between 1 and 60 seconds.")
         return normalized
 
@@ -106,7 +113,9 @@ class PlaybackSettings:
         if not isinstance(rows, list) or not rows:
             return defaults
         try:
-            return self.normalize(rows[0][0], rows[0][1], rows[0][2], rows[0][3], rows[0][4], rows[0][5])
+            return self.normalize(
+                rows[0][0], rows[0][1], rows[0][2], rows[0][3], rows[0][4], rows[0][5]
+            )
         except (IndexError, TypeError, ValueError):
             return defaults
 

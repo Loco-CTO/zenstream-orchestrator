@@ -9,7 +9,9 @@ def normalize_search_text(value: object) -> str:
     """Normalize search text consistently across indexes and ranking."""
     normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
     return " ".join(
-        "".join(character if character.isalnum() else " " for character in normalized).split()
+        "".join(
+            character if character.isalnum() else " " for character in normalized
+        ).split()
     )
 
 
@@ -41,9 +43,7 @@ def _dice(left: str, right: str) -> float:
     right_grams = trigram_set(right)
     if not left_grams or not right_grams:
         return 0.0
-    return (2.0 * len(left_grams & right_grams)) / (
-        len(left_grams) + len(right_grams)
-    )
+    return (2.0 * len(left_grams & right_grams)) / (len(left_grams) + len(right_grams))
 
 
 def _candidate_windows(candidate: str, query_word_count: int):
@@ -73,7 +73,10 @@ def match_score(query: object, candidate: object) -> float:
 
     query_word_count = len(wanted.split())
     fuzzy = max(
-        (_dice(wanted, window) for window in _candidate_windows(value, query_word_count)),
+        (
+            _dice(wanted, window)
+            for window in _candidate_windows(value, query_word_count)
+        ),
         default=0.0,
     )
     # Keep fuzzy matches below substring matches while preserving their relative order.

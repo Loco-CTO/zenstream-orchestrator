@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import math
 import subprocess
 import tempfile
 import uuid
-import math
 from pathlib import Path
 
 WEBP_QUALITY = 85
@@ -20,12 +20,18 @@ def _base83(value: int, length: int) -> str:
 
 def _srgb_to_linear(value: int) -> float:
     normalized = value / 255
-    return normalized / 12.92 if normalized <= 0.04045 else ((normalized + 0.055) / 1.055) ** 2.4
+    return (
+        normalized / 12.92
+        if normalized <= 0.04045
+        else ((normalized + 0.055) / 1.055) ** 2.4
+    )
 
 
 def _linear_to_srgb(value: float) -> int:
     value = max(0.0, min(1.0, value))
-    normalized = value * 12.92 if value <= 0.0031308 else 1.055 * value ** (1 / 2.4) - 0.055
+    normalized = (
+        value * 12.92 if value <= 0.0031308 else 1.055 * value ** (1 / 2.4) - 0.055
+    )
     return int(max(0, min(255, normalized * 255 + 0.5)))
 
 
@@ -33,7 +39,9 @@ def _sign_pow(value: float, exponent: float) -> float:
     return math.copysign(abs(value) ** exponent, value)
 
 
-def encode_blurhash(pixels: bytes, width: int, height: int, components_x: int = 4, components_y: int = 3) -> str:
+def encode_blurhash(
+    pixels: bytes, width: int, height: int, components_x: int = 4, components_y: int = 3
+) -> str:
     if width <= 0 or height <= 0 or len(pixels) != width * height * 3:
         raise ValueError("BlurHash pixels must be a complete RGB image.")
     linear = [_srgb_to_linear(value) for value in pixels]
@@ -44,7 +52,9 @@ def encode_blurhash(pixels: bytes, width: int, height: int, components_x: int = 
             red = green = blue = 0.0
             for y in range(height):
                 for x in range(width):
-                    basis = math.cos(math.pi * x_component * x / width) * math.cos(math.pi * y_component * y / height)
+                    basis = math.cos(math.pi * x_component * x / width) * math.cos(
+                        math.pi * y_component * y / height
+                    )
                     index = 3 * (x + y * width)
                     red += basis * linear[index]
                     green += basis * linear[index + 1]
@@ -52,15 +62,24 @@ def encode_blurhash(pixels: bytes, width: int, height: int, components_x: int = 
             scale = normal / (width * height)
             factors.append((red * scale, green * scale, blue * scale))
     dc = factors[0]
-    dc_value = (_linear_to_srgb(dc[0]) << 16) + (_linear_to_srgb(dc[1]) << 8) + _linear_to_srgb(dc[2])
-    maximum = max((max(abs(value) for value in factor) for factor in factors[1:]), default=0.0)
+    dc_value = (
+        (_linear_to_srgb(dc[0]) << 16)
+        + (_linear_to_srgb(dc[1]) << 8)
+        + _linear_to_srgb(dc[2])
+    )
+    maximum = max(
+        (max(abs(value) for value in factor) for factor in factors[1:]), default=0.0
+    )
     quantized_maximum = int(max(0, min(82, maximum * 166 - 0.5)))
     actual_maximum = (quantized_maximum + 1) / 166
     encoded = _base83((components_x - 1) + (components_y - 1) * 9, 1)
     encoded += _base83(quantized_maximum, 1)
     encoded += _base83(dc_value, 4)
     for factor in factors[1:]:
-        quantized = [int(max(0, min(18, _sign_pow(value / actual_maximum, 0.5) * 9 + 9.5))) for value in factor]
+        quantized = [
+            int(max(0, min(18, _sign_pow(value / actual_maximum, 0.5) * 9 + 9.5)))
+            for value in factor
+        ]
         encoded += _base83(quantized[0] * 19 * 19 + quantized[1] * 19 + quantized[2], 2)
     return encoded
 
@@ -138,8 +157,14 @@ def encode_webp(source: Path, target: Path) -> None:
             timeout=60,
             check=False,
         )
-        if completed.returncode != 0 or not temporary.is_file() or not temporary.stat().st_size:
-            detail = (completed.stderr or "FFmpeg did not produce a WebP image.").strip()
+        if (
+            completed.returncode != 0
+            or not temporary.is_file()
+            or not temporary.stat().st_size
+        ):
+            detail = (
+                completed.stderr or "FFmpeg did not produce a WebP image."
+            ).strip()
             raise RuntimeError(detail[-1000:])
         temporary.replace(target)
     finally:
@@ -172,8 +197,10 @@ class LocalArtworkCache:
 
     @staticmethod
     def _valid_hash(value: str | None) -> bool:
-        return isinstance(value, str) and len(value) == 64 and all(
-            character in "0123456789abcdef" for character in value.lower()
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value.lower())
         )
 
     def path(self, content_hash: str | None) -> Path | None:

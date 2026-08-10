@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.search_scoring import register_sqlite_functions
 from sqlalchemy import URL, create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool, StaticPool
-
-from app.search_scoring import register_sqlite_functions
 
 
 @dataclass

@@ -4,9 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fastapi import HTTPException
-
 from app.playback import PlaybackManager
+from fastapi import HTTPException
 
 
 class PlaybackTest(unittest.TestCase):
@@ -60,14 +59,21 @@ class PlaybackTest(unittest.TestCase):
         self.assertIsNone(PlaybackManager._segment_index("segment-12.ts.tmp"))
         self.assertIsNone(PlaybackManager._segment_index("../segment-000012.ts"))
 
-    def test_segment_worker_starts_on_the_source_timeline_without_per_segment_cutoff(self):
+    def test_segment_worker_starts_on_the_source_timeline_without_per_segment_cutoff(
+        self,
+    ):
         manager = object.__new__(PlaybackManager)
         manager._segment_seconds = 4.0
         spec = {
             "source": {
                 "streams": [
                     {"index": 0, "codec_type": "video", "codec_name": "hevc"},
-                    {"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2},
+                    {
+                        "index": 1,
+                        "codec_type": "audio",
+                        "codec_name": "aac",
+                        "channels": 2,
+                    },
                 ],
                 "width": 1920,
                 "height": 1080,
@@ -91,7 +97,14 @@ class PlaybackTest(unittest.TestCase):
             manager.db = MagicMock()
             manager._cleanup_expired = MagicMock()
             manager.db.execute.side_effect = [
-                [(str(Path(directory)), "failed", "FFMPEG_FAILED", '{"stage":"ffmpeg"}')],
+                [
+                    (
+                        str(Path(directory)),
+                        "failed",
+                        "FFMPEG_FAILED",
+                        '{"stage":"ffmpeg"}',
+                    )
+                ],
             ]
             with self.assertRaises(HTTPException) as context:
                 manager.session_file("user-1", "session-1", "master.m3u8")
@@ -103,21 +116,33 @@ class PlaybackTest(unittest.TestCase):
         self.assertEqual(
             PlaybackManager._playback_mode(
                 {"container": "mp4", "videoCodec": "h264", "audioCodec": "aac"},
-                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+                {
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                },
             ),
             "direct",
         )
         self.assertEqual(
             PlaybackManager._playback_mode(
                 {"container": "mkv", "videoCodec": "h264", "audioCodec": "aac"},
-                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+                {
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                },
             ),
             "remux",
         )
         self.assertEqual(
             PlaybackManager._playback_mode(
                 {"container": "mp4", "videoCodec": "h264", "audioCodec": "ac3"},
-                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+                {
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                },
             ),
             "audio-transcode",
         )
@@ -127,16 +152,33 @@ class PlaybackTest(unittest.TestCase):
                     "container": "mp4",
                     "videoCodec": "h264",
                     "audioCodec": "aac",
-                    "streams": [{"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 6}],
+                    "streams": [
+                        {
+                            "index": 1,
+                            "codec_type": "audio",
+                            "codec_name": "aac",
+                            "channels": 6,
+                        }
+                    ],
                 },
-                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"], "audioStreamId": 1, "maxAudioChannels": 2},
+                {
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                    "audioStreamId": 1,
+                    "maxAudioChannels": 2,
+                },
             ),
             "audio-transcode",
         )
         self.assertEqual(
             PlaybackManager._playback_mode(
                 {"container": "mp4", "videoCodec": "hevc", "audioCodec": "aac"},
-                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+                {
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                },
             ),
             "video-transcode",
         )
@@ -160,15 +202,35 @@ class PlaybackTest(unittest.TestCase):
     def test_bitrate_limit_requires_video_transcode(self):
         self.assertEqual(
             PlaybackManager._playback_mode(
-                {"container": "mkv", "videoCodec": "h264", "audioCodec": "aac", "bitrate": 8_000_000},
-                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"], "maxStreamingBitrate": 2_000_000},
+                {
+                    "container": "mkv",
+                    "videoCodec": "h264",
+                    "audioCodec": "aac",
+                    "bitrate": 8_000_000,
+                },
+                {
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                    "maxStreamingBitrate": 2_000_000,
+                },
             ),
             "video-transcode",
         )
         self.assertEqual(
             PlaybackManager._playback_mode(
-                {"container": "mkv", "videoCodec": "h264", "audioCodec": "ac3", "bitrate": 8_000_000},
-                {"containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"], "maxStreamingBitrate": 2_000_000},
+                {
+                    "container": "mkv",
+                    "videoCodec": "h264",
+                    "audioCodec": "ac3",
+                    "bitrate": 8_000_000,
+                },
+                {
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                    "maxStreamingBitrate": 2_000_000,
+                },
             ),
             "video-transcode",
         )
@@ -253,7 +315,10 @@ class PlaybackTest(unittest.TestCase):
 
         self.assertEqual(sources[0]["mediaFileId"], "file-1")
         media_query = manager.db.execute.call_args_list[0].args[0]
-        self.assertIn("role IN ('media','subtitle','lyrics')", manager.db.execute.call_args_list[1].args[0])
+        self.assertIn(
+            "role IN ('media','subtitle','lyrics')",
+            manager.db.execute.call_args_list[1].args[0],
+        )
         self.assertIn("media_sources", media_query)
 
     def test_sources_add_descriptor_to_sidecar_title(self):
@@ -276,9 +341,24 @@ class PlaybackTest(unittest.TestCase):
                 )
             ],
             [
-                ("file-1", "5 Centimeters per Second/5 Centimeters per Second.mkv", None, "media"),
-                ("file-2", "5 Centimeters per Second/5 Centimeters per Second.AI 音声認識.ja.srt", "ja", "subtitle"),
-                ("file-3", "5 Centimeters per Second/5 Centimeters per Second.ja.srt", "ja", "subtitle"),
+                (
+                    "file-1",
+                    "5 Centimeters per Second/5 Centimeters per Second.mkv",
+                    None,
+                    "media",
+                ),
+                (
+                    "file-2",
+                    "5 Centimeters per Second/5 Centimeters per Second.AI 音声認識.ja.srt",
+                    "ja",
+                    "subtitle",
+                ),
+                (
+                    "file-3",
+                    "5 Centimeters per Second/5 Centimeters per Second.ja.srt",
+                    "ja",
+                    "subtitle",
+                ),
             ],
         ]
 
@@ -323,10 +403,15 @@ class PlaybackTest(unittest.TestCase):
 
         source = manager.source_metadata("user-1", "entity-1")
 
-        self.assertEqual(source, {
-            "id": "source-1",
-            "streams": [{"index": 1, "codec_type": "audio", "tags": {"language": "en"}}],
-        })
+        self.assertEqual(
+            source,
+            {
+                "id": "source-1",
+                "streams": [
+                    {"index": 1, "codec_type": "audio", "tags": {"language": "en"}}
+                ],
+            },
+        )
         manager.sources.assert_called_once_with("user-1", "entity-1")
 
     def test_source_metadata_reports_unready_media(self):
@@ -344,16 +429,35 @@ class PlaybackTest(unittest.TestCase):
         manager = object.__new__(PlaybackManager)
         manager.sources = MagicMock(
             return_value=[
-                {"id": "source-1", "mediaFileId": "file-1", "container": "mp4", "videoCodec": "h264", "audioCodec": "aac"},
-                {"id": "source-2", "mediaFileId": "file-2", "container": "webm", "videoCodec": "vp9", "audioCodec": "opus"},
+                {
+                    "id": "source-1",
+                    "mediaFileId": "file-1",
+                    "container": "mp4",
+                    "videoCodec": "h264",
+                    "audioCodec": "aac",
+                },
+                {
+                    "id": "source-2",
+                    "mediaFileId": "file-2",
+                    "container": "webm",
+                    "videoCodec": "vp9",
+                    "audioCodec": "opus",
+                },
             ]
         )
-        manager._transcode = MagicMock(return_value={"mode": "remux", "url": "playlist"})
+        manager._transcode = MagicMock(
+            return_value={"mode": "remux", "url": "playlist"}
+        )
 
         result = manager.negotiate(
             "user-1",
             "entity-1",
-            {"sourceId": "source-2", "containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+            {
+                "sourceId": "source-2",
+                "containers": ["mp4"],
+                "videoCodecs": ["h264"],
+                "audioCodecs": ["aac"],
+            },
         )
 
         self.assertEqual(result["sourceId"], "source-2")
@@ -364,7 +468,13 @@ class PlaybackTest(unittest.TestCase):
         manager = object.__new__(PlaybackManager)
         manager.sources = MagicMock(
             return_value=[
-                {"id": "source-1", "mediaFileId": "file-1", "container": "mkv", "videoCodec": "hevc", "audioCodec": "ac3"}
+                {
+                    "id": "source-1",
+                    "mediaFileId": "file-1",
+                    "container": "mkv",
+                    "videoCodec": "hevc",
+                    "audioCodec": "ac3",
+                }
             ]
         )
         manager._transcode = MagicMock()
@@ -373,7 +483,12 @@ class PlaybackTest(unittest.TestCase):
             manager.negotiate(
                 "user-1",
                 "entity-1",
-                {"directPlayOnly": True, "containers": ["mp4"], "videoCodecs": ["h264"], "audioCodecs": ["aac"]},
+                {
+                    "directPlayOnly": True,
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                },
             )
 
         self.assertEqual(context.exception.status_code, 409)
@@ -384,7 +499,13 @@ class PlaybackTest(unittest.TestCase):
         manager = object.__new__(PlaybackManager)
         manager.sources = MagicMock(
             return_value=[
-                {"id": "source-1", "mediaFileId": "file-1", "container": "mp4", "videoCodec": "h264", "audioCodec": "aac"}
+                {
+                    "id": "source-1",
+                    "mediaFileId": "file-1",
+                    "container": "mp4",
+                    "videoCodec": "h264",
+                    "audioCodec": "aac",
+                }
             ]
         )
         manager._transcode = MagicMock()
@@ -409,7 +530,15 @@ class PlaybackTest(unittest.TestCase):
     def test_forced_transcoding_requires_ffmpeg(self, _ffmpeg):
         manager = object.__new__(PlaybackManager)
         manager.sources = MagicMock(
-            return_value=[{"id": "source-1", "mediaFileId": "file-1", "container": "mp4", "videoCodec": "h264", "audioCodec": "aac"}]
+            return_value=[
+                {
+                    "id": "source-1",
+                    "mediaFileId": "file-1",
+                    "container": "mp4",
+                    "videoCodec": "h264",
+                    "audioCodec": "aac",
+                }
+            ]
         )
 
         with self.assertRaises(Exception) as context:

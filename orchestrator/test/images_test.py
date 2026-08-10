@@ -24,7 +24,9 @@ class LocalArtworkCacheTest(unittest.TestCase):
                 source = root / "poster.jpg"
                 source.write_bytes(b"source")
                 content_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-                db.execute("INSERT INTO media_files VALUES(?, 'image')", (content_hash,))
+                db.execute(
+                    "INSERT INTO media_files VALUES(?, 'image')", (content_hash,)
+                )
                 cache = LocalArtworkCache(db)
 
                 def encode(_source, target):

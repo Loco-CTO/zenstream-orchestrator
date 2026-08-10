@@ -1,6 +1,5 @@
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision = "0001_initial"
 down_revision = None
@@ -319,11 +318,23 @@ INDEXES = [
 def upgrade():
     for statement in TABLES:
         op.execute(sa.text(statement))
-    op.execute(sa.text("CREATE VIRTUAL TABLE catalog_search USING fts5(entity_id UNINDEXED, library_id UNINDEXED, locale UNINDEXED, title, tokenize='trigram')"))
+    op.execute(
+        sa.text(
+            "CREATE VIRTUAL TABLE catalog_search USING fts5(entity_id UNINDEXED, library_id UNINDEXED, locale UNINDEXED, title, tokenize='trigram')"
+        )
+    )
     for statement in INDEXES:
         op.execute(sa.text(statement))
-    op.execute(sa.text("INSERT INTO schema_metadata(key,value) VALUES('generation','catalog-projection-v1')"))
-    op.execute(sa.text("INSERT INTO intro_outro_settings(id,scan_on_added,updated_at) VALUES(1,1,CURRENT_TIMESTAMP)"))
+    op.execute(
+        sa.text(
+            "INSERT INTO schema_metadata(key,value) VALUES('generation','catalog-projection-v1')"
+        )
+    )
+    op.execute(
+        sa.text(
+            "INSERT INTO intro_outro_settings(id,scan_on_added,updated_at) VALUES(1,1,CURRENT_TIMESTAMP)"
+        )
+    )
 
 
 def downgrade():

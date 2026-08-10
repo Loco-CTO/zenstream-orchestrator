@@ -8,23 +8,35 @@ import re
 import subprocess
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response, StreamingResponse
-
-from app.catalog import Catalog, LOCAL_ARTWORK_NAMES
+from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
+from app.catalog_read_model import CatalogReadModel
+from app.client_auth import (
+    account_from_access,
+    issue_ticket,
+    require_account,
+    websocket_account,
+)
+from app.foreground import run_foreground
 from app.images import LocalArtworkCache
+from app.intro_outro import IntroOutroStore
+from app.logging_config import get_logger
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
-from app.client_auth import account_from_access, issue_ticket, require_account, websocket_account
-from app.catalog_read_model import CatalogReadModel
-from app.logging_config import get_logger
-from app.foreground import run_foreground
 from app.playback import PlaybackManager, ffmpeg_path
 from app.trickplay import TrickplayExtractor
-from app.intro_outro import IntroOutroStore
-from api.zenstream.library_routes import require_admin
+from fastapi import (
+    APIRouter,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
+from api.zenstream.library_routes import require_admin
 
 router = APIRouter()
 catalog = Catalog()
@@ -78,7 +90,13 @@ def _catalog_status_fingerprint(payload: dict) -> tuple:
         payload["generation"],
         payload["state"],
         tuple(
-            (value["id"], value["scanState"], value["lastScanFinishedAt"], value["catalogGeneration"], value["lastRootEntityId"])
+            (
+                value["id"],
+                value["scanState"],
+                value["lastScanFinishedAt"],
+                value["catalogGeneration"],
+                value["lastRootEntityId"],
+            )
             for value in payload["libraries"]
         ),
     )
@@ -147,9 +165,7 @@ async def catalog_socket(websocket: WebSocket):
             changed = fingerprint != previous
             if changed or current - last_sent >= 15:
                 if previous is not None and changed:
-                    previous_libraries = {
-                        value[0]: value for value in previous[2]
-                    }
+                    previous_libraries = {value[0]: value for value in previous[2]}
                     for library in payload["libraries"]:
                         current_value = (
                             library["id"],
@@ -166,7 +182,9 @@ async def catalog_socket(websocket: WebSocket):
                                 "libraryId": library["id"],
                                 "rootEntityId": library["lastRootEntityId"],
                                 "generation": library["catalogGeneration"],
-                                "reason": "scan" if library["scanState"] != "idle" else "refresh",
+                                "reason": "scan"
+                                if library["scanState"] != "idle"
+                                else "refresh",
                             }
                         )
                 else:
@@ -250,9 +268,7 @@ async def home(
     account, _ = require_account(request)
     preferred = await run_foreground(_preferred, account, language)
     if section is None:
-        return await run_foreground(
-            catalog.home, account["id"], preferred
-        )
+        return await run_foreground(catalog.home, account["id"], preferred)
     if section == "featured":
         return {
             "latestItems": await run_foreground(
@@ -272,9 +288,7 @@ async def home(
             )
         }
     if section == "derived":
-        return await run_foreground(
-            catalog.home_derived, account["id"], preferred
-        )
+        return await run_foreground(catalog.home_derived, account["id"], preferred)
     else:
         raise HTTPException(400, "Unsupported home section.")
 
@@ -355,18 +369,14 @@ async def favorites(
 async def item(entity_id: str, request: Request, language: str | None = Query(None)):
     account, _ = require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(
-        catalog.item, account["id"], entity_id, preferred
-    )
+    return await run_foreground(catalog.item, account["id"], entity_id, preferred)
 
 
 @router.get("/api/catalog/items/{entity_id}/similar")
 async def similar(entity_id: str, request: Request, language: str | None = Query(None)):
     account, _ = require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(
-        catalog.similar, account["id"], entity_id, preferred
-    )
+    return await run_foreground(catalog.similar, account["id"], entity_id, preferred)
 
 
 @router.get("/api/catalog/items/{entity_id}/metadata")
@@ -396,7 +406,10 @@ async def item_image(
                 (entity_id,),
             ):
                 candidate = directory / relative_path
-                if candidate.stem.lower() in LOCAL_ARTWORK_NAMES.get(image_type, set()) and candidate.is_file():
+                if (
+                    candidate.stem.lower() in LOCAL_ARTWORK_NAMES.get(image_type, set())
+                    and candidate.is_file()
+                ):
                     cached = LocalArtworkCache(catalog.db).path(content_hash)
                     if cached and cached.is_file():
                         return cached
@@ -496,10 +509,14 @@ async def playback_source_metadata(entity_id: str, request: Request):
 
 
 @router.get("/api/playback/items/{entity_id}/trickplay")
-async def trickplay_manifest(entity_id: str, request: Request, sourceId: str | None = Query(None)):
+async def trickplay_manifest(
+    entity_id: str, request: Request, sourceId: str | None = Query(None)
+):
     account, _ = require_account(request)
     catalog.require_entity(account["id"], entity_id)
-    payload = await asyncio.to_thread(trickplay.manifest, account["id"], entity_id, sourceId)
+    payload = await asyncio.to_thread(
+        trickplay.manifest, account["id"], entity_id, sourceId
+    )
     if payload["state"] != "ready":
         return Response(
             content=json.dumps(payload),
@@ -511,18 +528,28 @@ async def trickplay_manifest(entity_id: str, request: Request, sourceId: str | N
 
 
 @router.get("/api/playback/items/{entity_id}/segments")
-async def playback_segments(entity_id: str, request: Request, sourceId: str | None = Query(None)):
+async def playback_segments(
+    entity_id: str, request: Request, sourceId: str | None = Query(None)
+):
     account, _ = require_account(request)
     catalog.require_entity(account["id"], entity_id)
     return await asyncio.to_thread(intro_outro.segments, entity_id, sourceId)
 
 
 @router.get("/api/playback/items/{entity_id}/trickplay/{generation}/{sheet_index}.webp")
-async def trickplay_sheet(entity_id: str, generation: str, sheet_index: int, request: Request):
+async def trickplay_sheet(
+    entity_id: str, generation: str, sheet_index: int, request: Request
+):
     account = account_from_access(request)
     catalog.require_entity(account["id"], entity_id)
-    path = await asyncio.to_thread(trickplay.sheet_path, entity_id, generation, sheet_index)
-    return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "private, max-age=3600"})
+    path = await asyncio.to_thread(
+        trickplay.sheet_path, entity_id, generation, sheet_index
+    )
+    return FileResponse(
+        path,
+        media_type="image/webp",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.api_route("/api/playback/items/{entity_id}/stream", methods=["GET", "HEAD"])
@@ -539,7 +566,9 @@ async def direct_stream(entity_id: str, request: Request):
     if not range_header:
         if request.method == "HEAD":
             return Response(status_code=200, headers=headers, media_type=media_type)
-        return FileResponse(path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
+        return FileResponse(
+            path, media_type=media_type, headers={"Accept-Ranges": "bytes"}
+        )
     if not range_header.startswith("bytes=") or "," in range_header:
         return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
     start_text, _, end_text = range_header[6:].partition("-")
@@ -577,7 +606,9 @@ async def direct_stream(entity_id: str, request: Request):
                 remaining -= len(chunk)
                 yield chunk
 
-    return StreamingResponse(chunks(), status_code=206, headers=headers, media_type=media_type)
+    return StreamingResponse(
+        chunks(), status_code=206, headers=headers, media_type=media_type
+    )
 
 
 @router.get("/api/playback/sessions/{session_id}/{filename}")
@@ -589,7 +620,9 @@ async def playback_output(session_id: str, filename: str, request: Request):
         filename,
         account["id"],
     )
-    path = await asyncio.to_thread(media.session_file, account["id"], session_id, filename)
+    path = await asyncio.to_thread(
+        media.session_file, account["id"], session_id, filename
+    )
     if path.suffix.lower() == ".m3u8":
         access = request.query_params.get("access") or ""
         lines = []
@@ -648,9 +681,15 @@ def _lyrics_to_vtt(source: Path) -> str:
         cues = []
         for index, (start, lyric) in enumerate(timed):
             end = timed[index + 1][0] if index + 1 < len(timed) else start + 8
-            cues.append(f"{index + 1}\n{_vtt_time(start)} --> {_vtt_time(max(end, start + 0.5))}\n{lyric}\n")
+            cues.append(
+                f"{index + 1}\n{_vtt_time(start)} --> {_vtt_time(max(end, start + 0.5))}\n{lyric}\n"
+            )
         return "WEBVTT\n\n" + "\n".join(cues)
-    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("[")]
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.startswith("[")
+    ]
     return "WEBVTT\n\n1\n00:00:00.000 --> 99:59:59.000\n" + "\n".join(lines) + "\n"
 
 
@@ -676,7 +715,10 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
         target_root = Path(catalog.db.db_file).parent / "subtitle-cache"
         target_root.mkdir(parents=True, exist_ok=True)
         target = target_root / f"{hashlib.sha256(str(source).encode()).hexdigest()}.vtt"
-        if not target.is_file() or target.stat().st_mtime_ns < source.stat().st_mtime_ns:
+        if (
+            not target.is_file()
+            or target.stat().st_mtime_ns < source.stat().st_mtime_ns
+        ):
             target.write_text(_lyrics_to_vtt(source), encoding="utf-8")
         return FileResponse(target, media_type="text/vtt")
     if source.suffix.lower() == ".vtt":

@@ -6,8 +6,8 @@ from contextlib import contextmanager
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "orchestrator"))
 
-from app.models.syncplay import StaleSyncplayState, SyncplayGroup
 from app.config import Config
+from app.models.syncplay import StaleSyncplayState, SyncplayGroup
 
 
 class MemoryDatabase:

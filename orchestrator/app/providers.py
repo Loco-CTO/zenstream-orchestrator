@@ -1,29 +1,27 @@
 from __future__ import annotations
 
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import ExitStack
-import threading
-import time
+import os
 import random
 import re
 import ssl
-import os
+import threading
+import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from typing import Any
-from pathlib import Path
 from urllib.parse import quote
 
 import httpx
 import pycountry
-
-from app.models.metadata import MetadataCache, MetadataCredentials
+from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORIES,
     choose_artwork,
     is_language_code_placeholder,
 )
-from app.logging_config import get_logger
+from app.models.metadata import MetadataCache, MetadataCredentials
 from version import __version__
 
 
@@ -284,9 +282,7 @@ class ProviderClient:
                 except httpx.TransportError as error:
                     if attempt == 2:
                         raise
-                    delay = min(5.0, 0.25 * (2**attempt)) * random.uniform(
-                        0.8, 1.2
-                    )
+                    delay = min(5.0, 0.25 * (2**attempt)) * random.uniform(0.8, 1.2)
                     logger.warning(
                         "metadata provider transport retry client=%s url=%s delay_seconds=%.2f attempt=%s error=%s",
                         client_name,
@@ -463,7 +459,9 @@ class TMDBClient(ProviderClient):
         normalized = _normalize_language_tag(locale)
         language, _, region = normalized.partition("-")
         candidates = []
-        for translation in (payload.get("translations") or {}).get("translations", []) or []:
+        for translation in (payload.get("translations") or {}).get(
+            "translations", []
+        ) or []:
             if not isinstance(translation, dict):
                 continue
             if str(translation.get("iso_639_1") or "").lower() != language:
@@ -575,13 +573,18 @@ class TMDBClient(ProviderClient):
         credits = payload.get("credits") or {}
         normalized_credits = {"cast": [], "crew": []}
         people = []
-        for credit_type, source in (("cast", credits.get("cast") or []), ("crew", credits.get("crew") or [])):
+        for credit_type, source in (
+            ("cast", credits.get("cast") or []),
+            ("crew", credits.get("crew") or []),
+        ):
             for order, person in enumerate(source):
                 if not isinstance(person, dict):
                     continue
                 profile = person.get("profile_path")
                 entry = {
-                    "id": str(person.get("id")) if person.get("id") is not None else None,
+                    "id": str(person.get("id"))
+                    if person.get("id") is not None
+                    else None,
                     "name": person.get("name"),
                     "role": person.get("character")
                     or person.get("job")
@@ -1030,14 +1033,33 @@ class TVDBClient(ProviderClient):
                 )
         normalized_credits = {"cast": [], "crew": []}
         people = []
-        for order, person in enumerate(data.get("characters", []) or data.get("people", []) or []):
+        for order, person in enumerate(
+            data.get("characters", []) or data.get("people", []) or []
+        ):
             if not isinstance(person, dict):
                 continue
             image = person.get("image") or person.get("imageUrl")
             role = person.get("role") or person.get("character")
-            department = person.get("department") or person.get("peopleType") or person.get("type")
-            kind = str(person.get("creditType") or person.get("type") or person.get("peopleType") or "").lower()
-            credit_type = "crew" if person.get("job") or any(value in kind for value in ("crew", "director", "writer", "producer")) else "cast"
+            department = (
+                person.get("department")
+                or person.get("peopleType")
+                or person.get("type")
+            )
+            kind = str(
+                person.get("creditType")
+                or person.get("type")
+                or person.get("peopleType")
+                or ""
+            ).lower()
+            credit_type = (
+                "crew"
+                if person.get("job")
+                or any(
+                    value in kind
+                    for value in ("crew", "director", "writer", "producer")
+                )
+                else "cast"
+            )
             entry = {
                 "id": str(person.get("id")) if person.get("id") is not None else None,
                 "name": person.get("name") or person.get("personName"),
@@ -1264,7 +1286,7 @@ class MusicBrainzClient(ProviderClient):
             match = re.search(
                 r"(?:themoviedb\.org/(?:movie|tv)|thetvdb\.com/(?:series|movies)|imdb\.com/title)/(?:.*?/)?(\d+|tt\d+)",
                 resource,
-                re.I,
+                re.IGNORECASE,
             )
             if not match:
                 continue
@@ -1528,9 +1550,7 @@ class MetadataService:
                 elif provider == "tvdb":
                     client = TVDBClient(credential)
                 else:
-                    raise ProviderError(
-                        f"Unsupported metadata provider '{provider}'"
-                    )
+                    raise ProviderError(f"Unsupported metadata provider '{provider}'")
             clients[provider] = client
             return client
 
@@ -1661,7 +1681,10 @@ class MetadataService:
         normalized = client.normalize(entity_type, provider_id, payload)
         self.cache.put(provider, entity_type, provider_id, locale, normalized)
         from app.metadata_services import MetadataSearchProjection
-        MetadataSearchProjection(self.cache.db).project(provider, entity_type, provider_id, locale, normalized)
+
+        MetadataSearchProjection(self.cache.db).project(
+            provider, entity_type, provider_id, locale, normalized
+        )
         logger.info(
             "metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d",
             provider,
@@ -1672,10 +1695,14 @@ class MetadataService:
         )
         return normalized
 
-    def fetch_for_identity(self, provider: str, entity_type: str, provider_id: str) -> dict:
+    def fetch_for_identity(
+        self, provider: str, entity_type: str, provider_id: str
+    ) -> dict:
         """Fetch an unlocalized identity/hierarchy response without caching metadata."""
         client = self.client(provider)
-        return client.normalize(entity_type, provider_id, client.details(entity_type, provider_id, "en"))
+        return client.normalize(
+            entity_type, provider_id, client.details(entity_type, provider_id, "en")
+        )
 
     def series_child_ids(self, provider: str, provider_id: str) -> dict:
         """Fetch provider child identities without caching localized child metadata."""
@@ -1683,7 +1710,7 @@ class MetadataService:
             return {"seasons": [], "episodes": []}
         hierarchy = self.client(provider).series_hierarchy(provider_id)
         seasons = []
-        for value in (hierarchy.get("extended", {}).get("data", {}).get("seasons") or []):
+        for value in hierarchy.get("extended", {}).get("data", {}).get("seasons") or []:
             season_number = value.get("seasonNumber")
             if season_number is None:
                 season_number = value.get("number")
@@ -1703,7 +1730,11 @@ class MetadataService:
             episode_number = value.get("number")
             if episode_number is None:
                 episode_number = value.get("episodeNumber")
-            if value.get("id") is None or season_number is None or episode_number is None:
+            if (
+                value.get("id") is None
+                or season_number is None
+                or episode_number is None
+            ):
                 continue
             episodes.append(
                 {

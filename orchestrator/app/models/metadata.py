@@ -7,10 +7,9 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 
-from cryptography.fernet import Fernet, InvalidToken
-
 from app.config import Config
 from app.metadata_domain import ARTWORK_CATEGORY_SET
+from cryptography.fernet import Fernet, InvalidToken
 
 IMAGE_LANGUAGE_SCHEMA = 3
 

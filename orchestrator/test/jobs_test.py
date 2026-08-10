@@ -1,9 +1,10 @@
 import json
-import threading
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 from app.database import DatabaseHandler
 from app.jobs import (
     JobScheduler,
@@ -19,8 +20,12 @@ class DatabaseRollbackTest(unittest.TestCase):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         try:
             db.execute("CREATE TABLE parent (id TEXT PRIMARY KEY)")
-            db.execute("CREATE TABLE child (parent_id TEXT NOT NULL REFERENCES parent(id))")
-            self.assertIsInstance(db.execute("INSERT INTO child VALUES('missing')"), Exception)
+            db.execute(
+                "CREATE TABLE child (parent_id TEXT NOT NULL REFERENCES parent(id))"
+            )
+            self.assertIsInstance(
+                db.execute("INSERT INTO child VALUES('missing')"), Exception
+            )
             with db.transaction() as cursor:
                 cursor.execute("INSERT INTO parent VALUES('valid')")
             self.assertEqual(db.execute("SELECT id FROM parent"), [("valid",)])
@@ -38,7 +43,10 @@ class DatabaseRollbackTest(unittest.TestCase):
                 def read_values():
                     try:
                         for _ in range(25):
-                            self.assertEqual(db.read_execute("SELECT value FROM values_table"), [(1,)])
+                            self.assertEqual(
+                                db.read_execute("SELECT value FROM values_table"),
+                                [(1,)],
+                            )
                     except Exception as error:
                         errors.append(error)
 
@@ -74,7 +82,9 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.db.execute(
             "CREATE TABLE people(provider TEXT,provider_person_id TEXT,image_url TEXT,local_path TEXT)"
         )
-        self.db.execute("INSERT INTO library_entities VALUES('movie-1','library-1','movie')")
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('movie-1','library-1','movie')"
+        )
         self.db.execute(
             "INSERT INTO entity_provider_ids VALUES('movie-1','tmdb','movie','42',1)"
         )
@@ -287,7 +297,9 @@ class MetadataMissingInspectionTest(unittest.TestCase):
 
         factory.assert_called_once_with(background_assets=False)
         read_model.refresh_roots.assert_called_once_with(["movie-1"])
-        self.assertEqual(store.updates[0]["message"], "Processing 0/1 metadata documents")
+        self.assertEqual(
+            store.updates[0]["message"], "Processing 0/1 metadata documents"
+        )
         self.assertEqual(store.updates[-2]["message"], "Processing 1/1: movie tmdb:42")
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 1", store.updates[-1]["message"])
@@ -393,14 +405,14 @@ class MissingTvChildIdentityRepairTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
         self.db.execute(
-            "CREATE TABLE library_entities(" 
-            "id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT," 
-            "season_number INTEGER,episode_number INTEGER,match_status TEXT," 
+            "CREATE TABLE library_entities("
+            "id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT,"
+            "season_number INTEGER,episode_number INTEGER,match_status TEXT,"
             "match_confidence REAL,match_method TEXT,updated_at TEXT)"
         )
         self.db.execute(
-            "CREATE TABLE entity_provider_ids(" 
-            "entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT," 
+            "CREATE TABLE entity_provider_ids("
+            "entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,"
             "is_primary INTEGER,PRIMARY KEY(entity_id,provider,identifier_type))"
         )
         self.db.execute(
@@ -474,7 +486,23 @@ class MissingTvChildIdentityRepairTest(unittest.TestCase):
 
 class JobMappingTest(unittest.TestCase):
     def test_definition_mapping_uses_all_persisted_columns(self):
-        row = ("id", "key", "Name", "Description", "kind", 60, 1, '{"libraryId":"library-1"}', "next", "last", "run", "completed", "done", "created", "updated")
+        row = (
+            "id",
+            "key",
+            "Name",
+            "Description",
+            "kind",
+            60,
+            1,
+            '{"libraryId":"library-1"}',
+            "next",
+            "last",
+            "run",
+            "completed",
+            "done",
+            "created",
+            "updated",
+        )
         value = JobStore._definition(row)
         self.assertEqual(value["config"], {"libraryId": "library-1"})
         self.assertEqual(value["nextRunAt"], "next")
@@ -487,7 +515,22 @@ class JobMappingTest(unittest.TestCase):
         self.assertTrue(value["enabled"])
 
     def test_run_mapping_preserves_progress_and_thread(self):
-        row = ("run", "definition", None, "metadata_refresh", "running", 4, 10, "Working", None, None, "created", "started", None, "worker")
+        row = (
+            "run",
+            "definition",
+            None,
+            "metadata_refresh",
+            "running",
+            4,
+            10,
+            "Working",
+            None,
+            None,
+            "created",
+            "started",
+            None,
+            "worker",
+        )
         value = JobStore._run(row)
         self.assertEqual(value["progressCurrent"], 4)
         self.assertEqual(value["threadName"], "worker")
@@ -495,7 +538,9 @@ class JobMappingTest(unittest.TestCase):
     def test_default_tasks_include_orphan_cleanup(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         try:
-            db.execute("CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            db.execute(
+                "CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+            )
             store = JobStore.__new__(JobStore)
             store.db = db
 
@@ -512,8 +557,12 @@ class JobMappingTest(unittest.TestCase):
 class JobLockingTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
-        self.db.execute("CREATE TABLE job_definitions (id TEXT PRIMARY KEY, last_state TEXT, last_message TEXT, updated_at TEXT)")
-        self.db.execute("CREATE TABLE job_runs (id TEXT PRIMARY KEY, definition_id TEXT, library_id TEXT, kind TEXT, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, thread_name TEXT)")
+        self.db.execute(
+            "CREATE TABLE job_definitions (id TEXT PRIMARY KEY, last_state TEXT, last_message TEXT, updated_at TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE job_runs (id TEXT PRIMARY KEY, definition_id TEXT, library_id TEXT, kind TEXT, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, thread_name TEXT)"
+        )
         self.store = JobStore.__new__(JobStore)
         self.store.db = self.db
 

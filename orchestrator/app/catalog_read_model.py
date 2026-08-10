@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from datetime import datetime, timezone
 import hashlib
 import json
 import threading
-from pathlib import Path
 import time
-from typing import Iterable
+from collections import defaultdict
+from collections.abc import Iterable
+from datetime import datetime, timezone
+from pathlib import Path
 
 from app.config import Config
 from app.logging_config import get_logger
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataLanguageSettings
 from app.search_scoring import normalize_search_text, search_grams
-
 
 logger = get_logger("catalog_read_model")
 
@@ -24,7 +23,11 @@ _latest_root_by_library: dict[str, str] = {}
 def latest_catalog_root(library_id: str) -> str | None:
     with _latest_root_lock:
         return _latest_root_by_library.get(library_id)
+
+
 LEAF_TYPES = {"movie", "episode", "track", "release"}
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -127,7 +130,9 @@ class CatalogReadModel:
             visiting.add(entity_id)
             row = entities[entity_id]
             own_added, own_last, own_count = media.get(entity_id, (None, None, 0))
-            leaf_count = 1 if not children.get(entity_id) and row[3] in LEAF_TYPES else 0
+            leaf_count = (
+                1 if not children.get(entity_id) and row[3] in LEAF_TYPES else 0
+            )
             media_count = int(own_count or 0)
             added_values = [own_added] if own_added is not None else []
             last_values = [own_last] if own_last is not None else []
@@ -160,20 +165,22 @@ class CatalogReadModel:
         now = _now()
         for entity_id, row in entities.items():
             summary = summarize(entity_id)
-            values.append((
-                entity_id,
-                row[1],
-                row[2],
-                row[3],
-                summary[0],
-                summary[1],
-                summary[2],
-                summary[3],
-                summary[4],
-                summary[5],
-                1,
-                now,
-            ))
+            values.append(
+                (
+                    entity_id,
+                    row[1],
+                    row[2],
+                    row[3],
+                    summary[0],
+                    summary[1],
+                    summary[2],
+                    summary[3],
+                    summary[4],
+                    summary[5],
+                    1,
+                    now,
+                )
+            )
         return values, memo
 
     @staticmethod
@@ -213,7 +220,11 @@ class CatalogReadModel:
             for locale in locales:
                 payload_text = old.get((entity_id, locale))
                 try:
-                    payload = json.loads(payload_text) if payload_text else self._fallback_payload(row)
+                    payload = (
+                        json.loads(payload_text)
+                        if payload_text
+                        else self._fallback_payload(row)
+                    )
                 except (TypeError, ValueError, json.JSONDecodeError):
                     payload = self._fallback_payload(row)
                 if not isinstance(payload, dict):
@@ -223,20 +234,22 @@ class CatalogReadModel:
                 rating = _numeric(payload.get("communityRating"))
                 release = str(payload.get("date") or payload.get("releaseDate") or "")
                 runtime = _numeric(payload.get("runtimeMinutes"))
-                values.append((
-                    entity_id,
-                    locale,
-                    row[1],
-                    row[2],
-                    row[3],
-                    payload_text,
-                    title,
-                    rating,
-                    release,
-                    runtime,
-                    now,
-                    1,
-                ))
+                values.append(
+                    (
+                        entity_id,
+                        locale,
+                        row[1],
+                        row[2],
+                        row[3],
+                        payload_text,
+                        title,
+                        rating,
+                        release,
+                        runtime,
+                        now,
+                        1,
+                    )
+                )
                 if progress is not None:
                     progress("projections", len(values), len(entities) * len(locales))
                 if row[2] is None and row[3] in {"movie", "series", "collection"}:
@@ -298,14 +311,19 @@ class CatalogReadModel:
             if progress is not None:
                 progress("user_summary", index, len(states))
         now = _now()
-        return [(user_id, entity_id, count, now) for (user_id, entity_id), count in counts.items()]
+        return [
+            (user_id, entity_id, count, now)
+            for (user_id, entity_id), count in counts.items()
+        ]
 
     def _has_progress_columns(self) -> bool:
         if not self._has_table("catalog_read_model_status"):
             return False
         columns = {
             row[1]
-            for row in self.db.read_execute("PRAGMA table_info(catalog_read_model_status)")
+            for row in self.db.read_execute(
+                "PRAGMA table_info(catalog_read_model_status)"
+            )
         }
         return {
             "stage",
@@ -391,7 +409,9 @@ class CatalogReadModel:
         progress("summaries", len(entities), len(entities), force=True)
         projection_total = len(entities) * len(locales)
         progress("projections", 0, projection_total, force=True)
-        projections, genres, grams = self._projection_values(entities, locales, progress)
+        projections, genres, grams = self._projection_values(
+            entities, locales, progress
+        )
         progress("projections", len(projections), projection_total, force=True)
         progress("user_summary", 0, 0, force=True)
         users = self._user_values(entities, children, progress)
@@ -435,51 +455,59 @@ class CatalogReadModel:
 
         with self.db.transaction() as cursor:
             cursor.execute("DELETE FROM catalog_entity_summary")
-            write_rows(cursor,
+            write_rows(
+                cursor,
                 "INSERT INTO catalog_entity_summary(entity_id,library_id,parent_id,entity_type,playable_leaf_count,media_file_count,media_added_ns,media_last_added_ns,added_sort_ns,last_added_sort_ns,generation,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 summaries,
                 "writing_summaries",
             )
             cursor.execute("DELETE FROM catalog_item_projection")
-            write_rows(cursor,
+            write_rows(
+                cursor,
                 "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 projections,
                 "writing_projections",
             )
             cursor.execute("DELETE FROM catalog_item_genres")
             if self._has_columns("catalog_item_genres", {"library_id", "entity_type"}):
-                write_rows(cursor,
+                write_rows(
+                    cursor,
                     "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
                     genres,
                     "writing_genres",
                 )
             else:
-                write_rows(cursor,
+                write_rows(
+                    cursor,
                     "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,genre_key,genre_name) VALUES(?,?,?,?)",
                     [(row[0], row[1], row[4], row[5]) for row in genres],
                     "writing_genres",
                 )
             cursor.execute("DELETE FROM catalog_search_grams")
-            write_rows(cursor,
+            write_rows(
+                cursor,
                 "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) VALUES(?,?,?,?,NULL)",
                 [row[:4] for row in grams],
                 "writing_search_grams",
             )
             if self._has_table("catalog_root_search_grams"):
                 cursor.execute("DELETE FROM catalog_root_search_grams")
-                write_rows(cursor,
+                write_rows(
+                    cursor,
                     "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) VALUES(?,?,?,?,?)",
                     grams,
                     "writing_root_search_grams",
                 )
             cursor.execute("DELETE FROM catalog_user_summary")
-            write_rows(cursor,
+            write_rows(
+                cursor,
                 "INSERT INTO catalog_user_summary(user_id,entity_id,played_leaf_count,updated_at) VALUES(?,?,?,?)",
                 users,
                 "writing_user_summary",
             )
             cursor.execute("DELETE FROM catalog_collection_summary")
-            write_rows(cursor,
+            write_rows(
+                cursor,
                 "INSERT INTO catalog_collection_summary(collection_entity_id,collection_library_id,source_library_id,playable_leaf_count,media_file_count,added_sort_ns,last_added_sort_ns,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                 collections,
                 "writing_collection_summary",
@@ -624,9 +652,9 @@ class CatalogReadModel:
                 provider,
                 local_path,
                 blur_hash,
-                hashlib.sha256(
-                    f"{local_path}:{fetched_at or ''}".encode("utf-8")
-                ).hexdigest()[:12],
+                hashlib.sha256(f"{local_path}:{fetched_at or ''}".encode()).hexdigest()[
+                    :12
+                ],
                 now,
             )
             for entity_id, locale, image_type, provider, local_path, blur_hash, fetched_at in rows
@@ -720,7 +748,9 @@ class CatalogReadModel:
                     f"DELETE FROM catalog_item_genres WHERE entity_id IN ({entity_placeholders})",
                     entity_ids,
                 )
-                if self._has_columns("catalog_item_genres", {"library_id", "entity_type"}):
+                if self._has_columns(
+                    "catalog_item_genres", {"library_id", "entity_type"}
+                ):
                     cursor.executemany(
                         "INSERT OR IGNORE INTO catalog_item_genres(entity_id,locale,library_id,entity_type,genre_key,genre_name) VALUES(?,?,?,?,?,?)",
                         genres,
@@ -756,9 +786,15 @@ class CatalogReadModel:
             return 0
         configured = list(locales or MetadataLanguageSettings().get()) or ["en"]
         status = self.status()
-        entity_count = int(self.db.read_execute("SELECT COUNT(*) FROM library_entities")[0][0])
-        summary_count = int(self.db.read_execute("SELECT COUNT(*) FROM catalog_entity_summary")[0][0])
-        projection_count = int(self.db.read_execute("SELECT COUNT(*) FROM catalog_item_projection")[0][0])
+        entity_count = int(
+            self.db.read_execute("SELECT COUNT(*) FROM library_entities")[0][0]
+        )
+        summary_count = int(
+            self.db.read_execute("SELECT COUNT(*) FROM catalog_entity_summary")[0][0]
+        )
+        projection_count = int(
+            self.db.read_execute("SELECT COUNT(*) FROM catalog_item_projection")[0][0]
+        )
         expected_projections = entity_count * len(configured)
         entities, missing_summary_ids, missing_projection_ids = self._coverage_gaps(
             configured
@@ -892,9 +928,7 @@ class CatalogReadModel:
                 payload = existing_payloads.get((entity_id, locale))
                 try:
                     payload_value = (
-                        json.loads(payload)
-                        if payload
-                        else self._fallback_payload(row)
+                        json.loads(payload) if payload else self._fallback_payload(row)
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
                     payload_value = self._fallback_payload(row)
@@ -905,10 +939,25 @@ class CatalogReadModel:
                     payload_value.get("title") or row[4] or row[3]
                 )
                 projection_rows.append(
-                    (entity_id, locale, row[1], row[2], row[3], payload, title, 0.0, "", 0.0, now, 1)
+                    (
+                        entity_id,
+                        locale,
+                        row[1],
+                        row[2],
+                        row[3],
+                        payload,
+                        title,
+                        0.0,
+                        "",
+                        0.0,
+                        now,
+                        1,
+                    )
                 )
                 if row[2] is None and row[3] in {"movie", "series", "collection"}:
-                    documents = [(locale, payload_value.get("title") or row[4] or row[3])]
+                    documents = [
+                        (locale, payload_value.get("title") or row[4] or row[3])
+                    ]
                     if payload_value.get("originalTitle"):
                         documents.append(("original", payload_value["originalTitle"]))
                     for document_locale, document_title in documents:
@@ -1004,7 +1053,9 @@ class CatalogReadModel:
                         for root_id in roots
                         if entities.get(root_id) and entities[root_id][1] == library_id
                     ]
-                    published_root = library_roots[0] if len(library_roots) == 1 else None
+                    published_root = (
+                        library_roots[0] if len(library_roots) == 1 else None
+                    )
                     cursor.execute(
                         "INSERT INTO catalog_library_summary(library_id,generation,supports_last_added,last_root_entity_id,updated_at) "
                         "VALUES(?,1,EXISTS(SELECT 1 FROM catalog_entity_summary WHERE library_id=? AND parent_id IS NOT NULL),?,?) "
@@ -1025,7 +1076,9 @@ class CatalogReadModel:
                         (library_id, library_id, now),
                     )
         with _latest_root_lock:
-            for library_id in explicit_libraries | {row[1] for row in entities.values()}:
+            for library_id in explicit_libraries | {
+                row[1] for row in entities.values()
+            }:
                 library_roots = [
                     root_id
                     for root_id in roots

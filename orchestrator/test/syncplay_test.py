@@ -4,9 +4,9 @@ import unittest
 from app.config import Config
 from app.database import DatabaseHandler
 from app.models.syncplay import (
+    StaleSyncplayState,
     SyncplayGroup,
     SyncplayMembershipConflict,
-    StaleSyncplayState,
     pause,
     schedule,
 )

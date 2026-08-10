@@ -295,6 +295,28 @@ class IntroOutroStore:
             "path": Path(row[5]) / row[6],
         }
 
+    def recover_generating(self) -> int:
+        """Make assets claimed by an interrupted worker eligible again."""
+        if not self.available():
+            return 0
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE intro_outro_assets SET state='queued',error=NULL,updated_at=? "
+                "WHERE state='generating'",
+                (now(),),
+            )
+            return cursor.rowcount
+
+    def requeue(self, asset: dict) -> bool:
+        """Return one interrupted asset to the queue without clobbering newer work."""
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE intro_outro_assets SET state='queued',error=NULL,updated_at=? "
+                "WHERE media_file_id=? AND state='generating' AND source_fingerprint=?",
+                (now(), asset["mediaFileId"], asset["sourceFingerprint"]),
+            )
+            return cursor.rowcount == 1
+
     def mark_fingerprinted(
         self, asset: dict, intro: bytes | None, outro: bytes | None
     ) -> None:
@@ -744,6 +766,7 @@ class IntroOutroDetector:
 
     def run(self, run_id: str, job_store, should_terminate=None) -> None:
         should_terminate = should_terminate or (lambda: False)
+        self.store.recover_generating()
         settings = self.store.settings()
         queued = self.store.queue_pending(settings=settings)
         workers = settings["introOutroWorkers"]
@@ -798,6 +821,7 @@ class IntroOutroDetector:
                         )
                 except Exception as error:
                     if should_terminate():
+                        self.store.requeue(asset)
                         return
                     self.store.mark_failed(asset, str(error))
                     with progress_lock:

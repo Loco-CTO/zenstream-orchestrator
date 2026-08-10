@@ -241,6 +241,61 @@ class SyncplayReadinessTests(unittest.TestCase):
         self.assertTrue(resumed["playing"])
         self.assertEqual(resumed["playbackState"], "playing")
 
+    def test_inactive_viewers_do_not_block_readiness(self):
+        self.database.execute(
+            "UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1 WHERE user_id=?",
+            ("viewer",),
+        )
+        with self.database.transaction() as cursor:
+            self.assertFalse(self.group.waiting_for_members(cursor, 0))
+
+    def test_paused_seek_barrier_remains_paused_after_ready(self):
+        self.database.execute(
+            "UPDATE syncplay_groups SET playing=0,resume=0,playback_state='paused',pause_reason='command' WHERE id=?",
+            ("group",),
+        )
+
+        def apply(cursor, old):
+            cursor.execute(
+                "UPDATE syncplay_members SET loading=1,ready_generation=-1 WHERE group_id=? AND viewing=1",
+                ("group",),
+            )
+            self.group.transition(
+                cursor,
+                old,
+                timeline=True,
+                position=42.0,
+                playing=0,
+                resume=0,
+                anchor_position=42.0,
+                anchor_time=old["anchorServerTime"],
+                effective_at=0,
+                playback_state="paused",
+                pause_reason="seek",
+            )
+
+        state = self.group.mutate("host", 4, "paused-seek", apply)
+        self.database.execute(
+            "UPDATE syncplay_members SET loading=0,ready_generation=? WHERE group_id=? AND viewing=1",
+            (state["mediaGeneration"], "group"),
+        )
+        with self.database.transaction() as cursor:
+            self.group.reconcile_readiness(cursor, self.group.state())
+        ready = self.group.state()
+        self.assertFalse(ready["playing"])
+        self.assertFalse(ready["resumeWhenReady"])
+        self.assertEqual(ready["anchorPosition"], 42.0)
+
+    def test_disconnected_viewer_is_deactivated_before_removal(self):
+        state = self.group.deactivate_member("viewer", "viewer-tab")
+        self.assertTrue(state["playing"])
+        viewer = next(member for member in state["members"] if member["userId"] == "viewer")
+        self.assertFalse(viewer["viewing"])
+        self.assertEqual(
+            self.group.state()["members"][-1]["userId"],
+            "viewer",
+        )
+
     def test_disconnecting_a_viewer_releases_a_group_waiting_to_resume(self):
         self.database.execute(
             "UPDATE syncplay_groups SET playing=0,resume=1,playback_state='paused',pause_reason='buffering' WHERE id=?",

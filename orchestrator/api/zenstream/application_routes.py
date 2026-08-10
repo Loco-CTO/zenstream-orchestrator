@@ -105,7 +105,7 @@ async def _disconnect_cleanup(user, participant, epoch):
         if state and state["hostUserId"] == user:
             await _broadcast_group(group.mark_host_disconnected())
         else:
-            await _broadcast_group(group.remove_disconnected_member(user, participant))
+            await _broadcast_group(group.deactivate_member(user, participant))
 
     await asyncio.sleep(270)
     if await hub.epoch(user, participant) != epoch or await hub.sockets_for(
@@ -113,6 +113,10 @@ async def _disconnect_cleanup(user, participant, epoch):
     ):
         return
     for group in SyncplayGroup.active_groups_for_user(user, participant):
+        state = group.remove_disconnected_member(user, participant)
+        if state and state["hostUserId"] != user:
+            await _broadcast_group(state)
+            continue
         state = group.expire_host_disconnect()
         if state:
             await hub.broadcast(
@@ -640,7 +644,7 @@ async def syncplay_command(group_id: str, request: Request):
                 (group_id, participant),
             )
             cursor.execute(
-                "UPDATE syncplay_members SET viewing=0,loading=CASE WHEN watching_together=1 THEN 1 ELSE 0 END,ready_generation=-1,presence_sequence=0 WHERE group_id=?",
+                "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 AND viewing=1 THEN 1 ELSE 0 END,ready_generation=-1,presence_sequence=0 WHERE group_id=?",
                 (group_id,),
             )
             group.transition(
@@ -661,7 +665,7 @@ async def syncplay_command(group_id: str, request: Request):
             return
         if action == "seek":
             cursor.execute(
-                "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 THEN 1 ELSE 0 END,ready_generation=-1 WHERE group_id=?",
+                "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 AND viewing=1 THEN 1 ELSE 0 END,ready_generation=-1 WHERE group_id=?",
                 (group_id,),
             )
             group.transition(
@@ -670,7 +674,16 @@ async def syncplay_command(group_id: str, request: Request):
                 timeline=True,
                 position=float(position),
                 playing=0,
-                resume=1,
+                resume=1
+                if bool(
+                    data.get(
+                        "playing",
+                        state["playing"]
+                        or state["resumeWhenReady"]
+                        or state["playbackState"] == "playing",
+                    )
+                )
+                else 0,
                 anchor_position=float(position),
                 anchor_time=time.time(),
                 effective_at=0,

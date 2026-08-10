@@ -205,12 +205,13 @@ class SyncplayGroup:
 
     def waiting_for_members(self, cursor, generation):
         cursor.execute(
-            "SELECT viewing,loading,ready_generation FROM syncplay_members WHERE group_id=? AND watching_together=1",
+            "SELECT viewing,loading,ready_generation FROM syncplay_members "
+            "WHERE group_id=? AND watching_together=1 AND (viewing=1 OR loading=1)",
             (self.id,),
         )
         return any(
-            not viewing or loading or ready_generation != generation
-            for viewing, loading, ready_generation in cursor.fetchall()
+            loading or ready_generation != generation
+            for _viewing, loading, ready_generation in cursor.fetchall()
         )
 
     def reconcile_readiness(self, cursor, state):
@@ -383,6 +384,25 @@ class SyncplayGroup:
                 return None
             cursor.execute(
                 "DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+                (self.id, user_id, participant_id),
+            )
+            self.reconcile_readiness(cursor, state)
+            return self._state(cursor, include_ended=True)
+
+    def deactivate_member(self, user_id, participant_id="legacy"):
+        """Stop a disconnected viewer from blocking the current barrier."""
+        with self.db.transaction() as cursor:
+            state = self._state(cursor)
+            if not state:
+                return None
+            cursor.execute(
+                "SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+                (self.id, user_id, participant_id),
+            )
+            if not cursor.fetchone():
+                return None
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=0,loading=0,ready_generation=-1 WHERE group_id=? AND user_id=? AND participant_id=?",
                 (self.id, user_id, participant_id),
             )
             self.reconcile_readiness(cursor, state)

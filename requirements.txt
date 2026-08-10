@@ -13,4 +13,4 @@ argon2-cffi>=25.1.0
 mutagen>=1.48.1
 watchdog>=6.0.0
 guessit>=4.1.0
-pycountry>=24.6.1
+pycountry>=26.2.16

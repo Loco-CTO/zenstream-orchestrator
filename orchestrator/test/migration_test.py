@@ -99,6 +99,20 @@ class PersistenceMigrationTest(unittest.TestCase):
                     )
                 }
                 self.assertIn("provider", artwork_columns)
+                admin_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(admins)")
+                }
+                session_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(admin_sessions)"
+                    )
+                }
+                self.assertIn("password_scheme", admin_columns)
+                self.assertEqual(
+                    session_columns, {"username", "token_hash", "expires_at"}
+                )
             finally:
                 connection.close()
 

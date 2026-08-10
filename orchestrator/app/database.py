@@ -94,8 +94,9 @@ class DatabaseHandler:
             self.connection = self.persistence.writer_engine.raw_connection()
             if db_file != ":memory:":
                 self.connection.execute("PRAGMA journal_mode = WAL")
-        except Exception as e:
-            print(f"Error connecting to SQLite: {e}")
+        except Exception:
+            logger.exception("could not connect to SQLite")
+            raise
 
     def execute(self, query, params=None):
         """Execute a statement through the appropriate read or write path."""
@@ -119,13 +120,13 @@ class DatabaseHandler:
                 cursor.execute(query, params or ())
                 self.connection.commit()
                 return cursor.fetchall()
-            except Exception as e:
+            except Exception:
                 # sqlite3 leaves the connection inside the failed transaction
                 # after constraint/locking errors. Always roll it back before
-                # returning so the next serialized operation can begin cleanly.
+                # re-raising so the next serialized operation can begin cleanly.
                 self.connection.rollback()
-                print(f"Database error: {e}")
-                return e
+                logger.exception("SQLite write failed")
+                raise
             finally:
                 cursor.close()
         finally:

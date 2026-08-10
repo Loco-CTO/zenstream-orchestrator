@@ -1,9 +1,17 @@
-export type Session = { username: string; token: string };
+export type Session = { username: string };
 
 export function readSession(): Session | null {
 	if (typeof window === "undefined") return null;
 	const raw = localStorage.getItem("zenstream.admin");
-	return raw ? (JSON.parse(raw) as Session) : null;
+	if (!raw) return null;
+	try {
+		const value = JSON.parse(raw) as Partial<Session>;
+		return typeof value.username === "string"
+			? { username: value.username }
+			: null;
+	} catch {
+		return null;
+	}
 }
 
 export function saveSession(session: Session) {
@@ -21,11 +29,8 @@ export async function adminFetch(
 ) {
 	const response = await fetch(path, {
 		...init,
-		headers: {
-			...(init.headers || {}),
-			Username: session.username,
-			TOKEN: session.token,
-		},
+		credentials: "same-origin",
+		headers: init.headers,
 	});
 	if (
 		(response.status === 401 || response.status === 403) &&

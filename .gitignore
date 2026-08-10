@@ -286,6 +286,9 @@ package-lock.json
 yarn.lock
 pnpm-lock.yaml
 
+# The dashboard uses npm ci in its container image; keep its lockfile tracked.
+!frontend/package-lock.json
+
 # Environment variables
 .env
 .env.*.local

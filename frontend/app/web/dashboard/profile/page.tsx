@@ -32,7 +32,7 @@ export default function ProfilePage() {
 			return;
 		}
 		const data = await r.json();
-		const next = { username: data.username, token: session.token };
+		const next = { username: data.username };
 		saveSession(next);
 		setSession(next);
 		setPassword("");

@@ -206,12 +206,20 @@ class SyncplayGroup:
     def waiting_for_members(self, cursor, generation):
         cursor.execute(
             "SELECT viewing,loading,ready_generation FROM syncplay_members "
-            "WHERE group_id=? AND watching_together=1 AND (viewing=1 OR loading=1)",
+            "WHERE group_id=? AND watching_together=1",
             (self.id,),
         )
+        members = cursor.fetchall()
+        # A member that has explicitly left the viewer state must not hold a
+        # live room behind.  During a media transition every opted-in member
+        # is temporarily marked loading before its new player is mounted; if
+        # the whole room is in that transition, retain the barrier.  When at
+        # least one viewer remains active, only active viewers participate.
+        active_viewers = [row for row in members if row[0]]
+        participants = active_viewers or [row for row in members if row[1]]
         return any(
             loading or ready_generation != generation
-            for _viewing, loading, ready_generation in cursor.fetchall()
+            for _viewing, loading, ready_generation in participants
         )
 
     def reconcile_readiness(self, cursor, state):

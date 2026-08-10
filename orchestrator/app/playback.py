@@ -266,10 +266,16 @@ class PlaybackManager:
         )
         if not rows:
             raise HTTPException(404, "Media source not found.")
-        path = Path(rows[0][1]) / rows[0][2]
-        if not path.is_file():
+        root = Path(rows[0][1]).resolve()
+        path = root / rows[0][2]
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
             raise HTTPException(404, "Media source is unavailable.")
-        return rows[0][0], path
+        if path.is_symlink() or not resolved.is_file():
+            raise HTTPException(404, "Media source is unavailable.")
+        return rows[0][0], resolved
 
     def probe_entity(self, entity_id: str) -> list[dict]:
         executable = ffprobe_path()
@@ -281,8 +287,14 @@ class PlaybackManager:
         )
         values = []
         for media_file_id, directory, relative_path in rows:
-            path = Path(directory) / relative_path
-            if not path.is_file():
+            root = Path(directory).resolve()
+            path = root / relative_path
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if path.is_symlink() or not resolved.is_file():
                 continue
             try:
                 completed = subprocess.run(
@@ -294,7 +306,7 @@ class PlaybackManager:
                         "-show_streams",
                         "-of",
                         "json",
-                        str(path),
+                        str(resolved),
                     ],
                     capture_output=True,
                     text=True,
@@ -595,7 +607,13 @@ class PlaybackManager:
         mode = cls._playback_mode(source, profile)
         return "video-transcode" if mode == "direct" else mode
 
-    def negotiate(self, user_id: str, entity_id: str, profile: dict) -> dict:
+    def negotiate(
+        self,
+        user_id: str,
+        entity_id: str,
+        profile: dict,
+        auth_session_id: str | None = None,
+    ) -> dict:
         forbidden = {
             "EnableTranscoding",
             "MediaSourceId",
@@ -665,7 +683,10 @@ class PlaybackManager:
             source.get("bitrate"),
             profile.get("maxStreamingBitrate"),
         )
-        access = issue_ticket(user_id, "resource", 6 * 60 * 60, entity=entity_id)
+        ticket_claims = {"entity": entity_id}
+        if auth_session_id:
+            ticket_claims["sessionId"] = auth_session_id
+        access = issue_ticket(user_id, "resource", 15 * 60, **ticket_claims)
         start_time = max(0.0, float(profile.get("startPositionSeconds") or 0.0))
         duration_seconds = max(0.0, float(source.get("durationSeconds") or 0.0))
         if duration_seconds > 0:
@@ -1764,6 +1785,18 @@ class PlaybackManager:
                     "UPDATE playback_sessions SET process_id=NULL WHERE id=? AND seek_generation=? AND state='stopping'",
                     (session_id, generation),
                 )
+
+        # Keep terminal rows only for bounded diagnostics.  Purging is
+        # deliberately restricted to rows with no worker and no output path so
+        # a delayed cleanup cannot erase evidence for an active process.
+        retention_cutoff = _iso(datetime.now(timezone.utc) - timedelta(days=7))
+        self.db.execute(
+            "DELETE FROM playback_sessions "
+            "WHERE state IN ('failed','completed','expired') "
+            "AND completed_at IS NOT NULL AND completed_at<? "
+            "AND process_id IS NULL AND (output_directory IS NULL OR output_directory='')",
+            (retention_cutoff,),
+        )
 
     def direct_path(
         self, user_id: str, entity_id: str, media_source_id: str | None = None

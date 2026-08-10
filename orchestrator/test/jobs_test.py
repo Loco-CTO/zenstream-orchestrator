@@ -23,9 +23,8 @@ class DatabaseRollbackTest(unittest.TestCase):
             db.execute(
                 "CREATE TABLE child (parent_id TEXT NOT NULL REFERENCES parent(id))"
             )
-            self.assertIsInstance(
-                db.execute("INSERT INTO child VALUES('missing')"), Exception
-            )
+            with self.assertRaises(Exception):
+                db.execute("INSERT INTO child VALUES('missing')")
             with db.transaction() as cursor:
                 cursor.execute("INSERT INTO parent VALUES('valid')")
             self.assertEqual(db.execute("SELECT id FROM parent"), [("valid",)])

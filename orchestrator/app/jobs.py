@@ -934,7 +934,32 @@ class MetadataMissingJob:
             if worked_locales and publish_ids:
                 from app.catalog_read_model import CatalogReadModel
 
-                CatalogReadModel(self.db).refresh_roots(sorted(publish_ids))
+                # Repairs may be linked to an episode/season.  Publication is
+                # rooted at the top-level movie/series/collection so dependent
+                # projections are refreshed once per root.
+                roots = set()
+                reader = getattr(self.db, "read_execute", self.db.execute)
+                for entity_id in publish_ids:
+                    current = entity_id
+                    seen_ancestors = set()
+                    while current and current not in seen_ancestors:
+                        seen_ancestors.add(current)
+                        try:
+                            rows = reader(
+                                "SELECT parent_id FROM library_entities WHERE id=?",
+                                (current,),
+                            )
+                        except Exception:
+                            # Older/fixture schemas do not carry hierarchy;
+                            # publish the linked entity itself in that case.
+                            roots.add(current)
+                            break
+                        parent = rows[0][0] if rows else None
+                        if not parent:
+                            roots.add(current)
+                            break
+                        current = parent
+                CatalogReadModel(self.db).refresh_roots(sorted(roots))
             return len(locales), item_failures, len(worked_locales)
 
         completed = 0

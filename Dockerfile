@@ -2,9 +2,9 @@
 
 FROM node:26-slim AS dashboard-build
 WORKDIR /frontend
-COPY frontend/package.json ./
+COPY frontend/package.json frontend/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm install --ignore-scripts --no-audit --no-fund --no-package-lock
+    npm ci --ignore-scripts --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build && test -f /frontend/out/web/login/index.html
 
@@ -28,5 +28,10 @@ RUN mkdir -p ./assets/ffmpeg/linux && \
     ./assets/ffmpeg/linux/ffmpeg -hide_banner -h muxer=chromaprint 2>&1 | grep -q fp_format
 COPY orchestrator/ ./orchestrator/
 COPY --from=dashboard-build /frontend/out/ ./orchestrator/web/
+RUN addgroup --system --gid 10001 zenstream && \
+    adduser --system --uid 10001 --ingroup zenstream --home /nonexistent --no-create-home zenstream && \
+    mkdir -p /app/sqlite /tmp && \
+    chown -R zenstream:zenstream /app/sqlite /app/orchestrator /app/assets /tmp
+USER zenstream
 EXPOSE 9088
 CMD ["python", "orchestrator/init.py"]

@@ -8,7 +8,7 @@ from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite
 from app.models.account import Account
-from app.models.admin import Admin
+from app.models.admin import ADMIN_SESSION_COOKIE, Admin
 from app.models.playback_settings import PlaybackSettings
 from app.models.syncplay import (
     StaleSyncplayState,
@@ -30,6 +30,30 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from version import __version__
 
 from api.zenstream.version import _main_version
+from api.zenstream.client_routes import _bounded_json_object, _enforce_rate_limit
+
+
+def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
+    """Return full state to members and a safe lobby projection to everyone else."""
+    group_id = state.get("id")
+    if group_id and SyncplayGroup(group_id).member(user_id, participant):
+        return state
+    return {
+        **state,
+        "hostUserId": None,
+        "itemId": None,
+        "position": 0,
+        "playing": False,
+        "members": [
+            {
+                "role": member.get("role"),
+                "watchingTogether": bool(member.get("watchingTogether")),
+                "viewing": False,
+                "loading": False,
+            }
+            for member in state.get("members", [])
+        ],
+    }
 
 
 class WebSocketHub:
@@ -79,7 +103,14 @@ class WebSocketHub:
         dead = []
         for client in clients:
             try:
-                await client.send_json(message)
+                payload = message
+                if message.get("type") == "group" and isinstance(message.get("group"), dict):
+                    user_id, participant = self.identities.get(client, ("", ""))
+                    payload = {
+                        **message,
+                        "group": _redact_syncplay_state(message["group"], user_id, participant),
+                    }
+                await client.send_json(payload)
             except Exception:
                 dead.append(client)
         for client in dead:
@@ -148,10 +179,54 @@ def _user_headers(username: str | None, token: str | None):
 
 
 def _admin_headers(username: str | None, token: str | None):
-    username, token = _user_headers(username, token)
-    if not Admin(username).authenticate(token):
+    admin = Admin.from_token(token)
+    if admin is None:
         raise HTTPException(403, "Invalid administrator credentials.")
+    return admin.username, token
+
+
+def _admin_request(
+    request: Request, username: str | None = None, token: str | None = None
+):
+    cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
+    if cookie_token and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin")
+        expected = f"{request.url.scheme}://{request.url.netloc}"
+        if (
+            not origin
+            or origin.rstrip("/").casefold() != expected.rstrip("/").casefold()
+        ):
+            raise HTTPException(403, "A same-origin administrator request is required.")
+    return _admin_headers(username, cookie_token or token)
+
+
+def _root_admin_request(
+    request: Request, username: str | None = None, token: str | None = None
+):
+    username, token = _admin_request(request, username, token)
+    profile = Admin(username).profile()
+    if not profile or not profile["is_root"]:
+        raise HTTPException(403, "Root administrator access is required.")
     return username, token
+
+
+def _contained_static_file(root: Path, *parts: str) -> Path | None:
+    resolved_root = root.resolve()
+    try:
+        candidate = resolved_root.joinpath(*parts).resolve()
+        candidate.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _static_path_is_contained(root: Path, path: str) -> bool:
+    resolved_root = root.resolve()
+    try:
+        resolved_root.joinpath(path).resolve().relative_to(resolved_root)
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 router = APIRouter()
@@ -170,23 +245,25 @@ async def docs_alias():
 
 @router.get("/favicon.ico")
 async def favicon():
-    path = web_root / "favicon.ico"
-    if not path.is_file():
+    path = _contained_static_file(web_root, "favicon.ico")
+    if path is None:
         raise HTTPException(404)
     return FileResponse(path)
 
 
 @router.get("/web/{path:path}")
 async def dashboard(path: str = ""):
-    requested = web_root / path
-    if requested.is_file():
+    if not _static_path_is_contained(web_root, path):
+        raise HTTPException(404)
+    requested = _contained_static_file(web_root, path)
+    if requested is not None:
         return FileResponse(requested)
     route = path.strip("/") or "login"
-    page = web_root / "web" / route / "index.html"
-    if page.is_file():
+    page = _contained_static_file(web_root, "web", route, "index.html")
+    if page is not None:
         return FileResponse(page)
-    fallback = web_root / "web" / "login" / "index.html"
-    if fallback.is_file():
+    fallback = _contained_static_file(web_root, "web", "login", "index.html")
+    if fallback is not None:
         return FileResponse(fallback)
     return JSONResponse(
         {"message": "Dashboard assets are not installed."}, status_code=503
@@ -201,22 +278,47 @@ async def admin_login(
     token = Admin(username).login(password)
     if not token:
         raise HTTPException(403, "Invalid administrator credentials.")
-    return JSONResponse({}, status_code=202, headers={"TOKEN": token})
+    response = JSONResponse({"username": username}, status_code=202)
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        token,
+        max_age=7 * 24 * 60 * 60,
+        secure=True,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
 
 
 @router.post("/api/admin/logout", status_code=204)
 async def admin_logout(
+    request: Request,
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
-    username, token = _admin_headers(Username, TOKEN)
+    username, token = _admin_request(request, Username, TOKEN)
     Admin(username).logout(token)
+    response = Response(status_code=204)
+    response.delete_cookie(
+        ADMIN_SESSION_COOKIE,
+        secure=True,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
 
 
 @router.get("/api/admin/profile")
 async def admin_profile(
+    request: Request = None,
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
-    username, _ = _admin_headers(Username, TOKEN)
+    username, _ = (
+        _admin_request(request, Username, TOKEN)
+        if request is not None
+        else _admin_headers(Username, TOKEN)
+    )
     profile = Admin(username).profile()
     if not profile:
         raise HTTPException(404, "Administrator account not found.")
@@ -225,12 +327,17 @@ async def admin_profile(
 
 @router.patch("/api/admin/profile")
 async def admin_update_profile(
+    request: Request = None,
     New_Username: str | None = Header(None),
     New_Password: str | None = Header(None),
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, token = _admin_headers(Username, TOKEN)
+    username, token = (
+        _admin_request(request, Username, TOKEN)
+        if request is not None
+        else _admin_headers(Username, TOKEN)
+    )
     try:
         result = Admin(username).update_profile(New_Username, New_Password, token)
     except ValueError as error:
@@ -240,9 +347,10 @@ async def admin_update_profile(
 
 @router.get("/api/admin/overview")
 async def admin_overview(
+    request: Request,
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
-    username, _ = _admin_headers(Username, TOKEN)
+    username, _ = _admin_request(request, Username, TOKEN)
     db = Admin(username)._db
     counts = db.execute(
         "SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users"
@@ -260,9 +368,10 @@ async def admin_overview(
 
 @router.get("/api/admin/playback/settings")
 async def admin_playback_settings(
+    request: Request,
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
-    _admin_headers(Username, TOKEN)
+    _admin_request(request, Username, TOKEN)
     return PlaybackSettings().get()
 
 
@@ -272,7 +381,7 @@ async def update_admin_playback_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_headers(Username, TOKEN)
+    _admin_request(request, Username, TOKEN)
     data = await request.json()
     current = PlaybackSettings().get()
     width = data.get("trickplayFrameWidth", current["trickplayFrameWidth"])
@@ -298,9 +407,10 @@ async def update_admin_playback_settings(
 
 @router.get("/api/admin/intro-outro/settings")
 async def admin_intro_outro_settings(
+    request: Request,
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
-    _admin_headers(Username, TOKEN)
+    _admin_request(request, Username, TOKEN)
     store = IntroOutroStore()
     definition = scheduler.store.by_key("intro_outro_detect")
     return {**store.settings(), "task": definition}
@@ -312,7 +422,7 @@ async def update_admin_intro_outro_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_headers(Username, TOKEN)
+    _admin_request(request, Username, TOKEN)
     settings = IntroOutroStore().update_settings(await request.json())
     scheduler.enqueue_intro_outro_detection()
     return settings
@@ -320,28 +430,31 @@ async def update_admin_intro_outro_settings(
 
 @router.post("/api/admin/intro-outro/clear")
 async def clear_admin_intro_outro_segments(
+    request: Request,
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
-    _admin_headers(Username, TOKEN)
+    _admin_request(request, Username, TOKEN)
     return {"removedSegments": IntroOutroStore().clear_segments()}
 
 
 @router.get("/api/admin/accounts")
 async def admin_accounts(
+    request: Request,
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
-    username, _ = _admin_headers(Username, TOKEN)
+    username, _ = _admin_request(request, Username, TOKEN)
     return Admin(username).list_accounts()
 
 
 @router.post("/api/admin/accounts", status_code=201)
 async def admin_create_account(
+    request: Request,
     Target_Username: str | None = Header(None),
     New_Password: str | None = Header(None),
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _admin_headers(Username, TOKEN)
+    username, _ = _admin_request(request, Username, TOKEN)
     if (
         not Target_Username
         or not New_Password
@@ -349,6 +462,32 @@ async def admin_create_account(
         or not Admin(username).create(Target_Username, New_Password)
     ):
         raise HTTPException(400, "Invalid or duplicate administrator account.")
+
+
+@router.patch("/api/admin/accounts/{target_username}")
+async def admin_set_account_disabled(
+    target_username: str,
+    disabled: bool,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    username, _ = _root_admin_request(request, Username, TOKEN)
+    if not Admin(username).set_disabled(target_username.strip(), disabled):
+        raise HTTPException(404, "Administrator account not found.")
+    profile = Admin(target_username.strip()).profile()
+    if not profile:
+        raise HTTPException(404, "Administrator account not found.")
+    return profile
+
+
+@router.post("/api/admin/invites", status_code=201)
+async def admin_create_invite(
+    request: Request,
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    _root_admin_request(request, Username, TOKEN)
+    return {"inviteid": Invite().generate()}
 
 
 @router.get("/api/user/check_invite")
@@ -378,7 +517,8 @@ async def mobile_config():
 
 @router.post("/api/user/register", status_code=201)
 async def register_client(request: Request):
-    data = await request.json()
+    _enforce_rate_limit(request, "register", 5)
+    data = await _bounded_json_object(request)
     invite_id = str(data.get("invite") or request.headers.get("url") or "").strip()
     username = str(
         data.get("username") or request.headers.get("username") or ""
@@ -406,11 +546,16 @@ async def syncplay_groups(
     request: Request,
     x_zenstream_participant: str | None = Header(None),
 ):
-    _sync_identity(request.headers.get("authorization"), x_zenstream_participant)
+    user_id, participant = _sync_identity(request.headers.get("authorization"), x_zenstream_participant)
     rows = SyncplayGroup("_").db.execute(
         "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
     )
-    return {"groups": [SyncplayGroup(row[0]).state() for row in rows]}
+    return {
+        "groups": [
+            _redact_syncplay_state(SyncplayGroup(row[0]).state(), user_id, participant)
+            for row in rows
+        ]
+    }
 
 
 @router.post("/api/syncplay/groups")
@@ -420,8 +565,9 @@ async def syncplay_create(request: Request):
         request.headers.get("x-zenstream-participant"),
     )
     try:
+        account = Account()._row(user_id=user, read_only=True)
         state = SyncplayGroup.create(
-            user, participant, request.headers.get("x-zenstream-username", "ZenStream")
+            user, participant, account[1] if account else "ZenStream"
         ).state()
     except SyncplayMembershipConflict:
         raise HTTPException(409, "You already belong to an active Syncplay group.")
@@ -813,7 +959,10 @@ async def syncplay_socket(websocket: WebSocket):
             {
                 "version": 1,
                 "type": "groups",
-                "groups": [SyncplayGroup(row[0]).state() for row in rows],
+                "groups": [
+                    _redact_syncplay_state(SyncplayGroup(row[0]).state(), user_id, participant)
+                    for row in rows
+                ],
             }
         )
         while True:

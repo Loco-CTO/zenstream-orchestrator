@@ -1,5 +1,6 @@
-from random import choice
-from string import ascii_letters, digits
+import hashlib
+import secrets
+from datetime import datetime, timedelta, timezone
 
 from app.config import Config
 
@@ -18,7 +19,18 @@ class Invite:
         Returns:
             bool: True if invite exists, False otherwise
         """
-        result = self._db.execute("SELECT * FROM invites WHERE url = ?", (inviteid,))
+        digest = hashlib.sha256(inviteid.encode("utf-8")).hexdigest()
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(invites)")}
+        expiry = ",expires_at" if "expires_at" in columns else ""
+        result = self._db.execute(
+            f"SELECT 1{expiry} FROM invites WHERE url IN (?, ?) LIMIT 1",
+            (inviteid, digest),
+        )
+        if result and len(result[0]) > 1 and result[0][1]:
+            try:
+                return datetime.fromisoformat(result[0][1]) > datetime.now(timezone.utc)
+            except ValueError:
+                return False
         return bool(result)
 
     def generate(self) -> str:
@@ -28,8 +40,14 @@ class Invite:
         Returns:
             str: The invite URL
         """
-        inviteid = "".join(choice(ascii_letters + digits) for _ in range(64))
-        self._db.execute("INSERT INTO invites VALUES (?)", (inviteid,))
+        inviteid = secrets.token_urlsafe(48)
+        digest = hashlib.sha256(inviteid.encode("utf-8")).hexdigest()
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(invites)")}
+        if "expires_at" in columns:
+            expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+            self._db.execute("INSERT INTO invites(url,expires_at) VALUES (?,?)", (digest, expires))
+        else:
+            self._db.execute("INSERT INTO invites(url) VALUES (?)", (digest,))
         return inviteid
 
     def delete(self, inviteid: str) -> bool:
@@ -42,9 +60,11 @@ class Invite:
         Returns:
             bool: True if deletion was successful, False otherwise
         """
-        if (
-            type(self._db.execute("DELETE FROM invites WHERE url = ?", (inviteid,)))
-            is list
-        ):
-            return True
-        return False
+        digest = hashlib.sha256(inviteid.encode("utf-8")).hexdigest()
+        with self._db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM invites WHERE url IN (?, ?)", (inviteid, digest)
+            )
+            return cursor.rowcount == 1
+
+    consume = delete

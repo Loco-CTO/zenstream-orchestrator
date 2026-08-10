@@ -1,6 +1,7 @@
 "use client";
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
+import { saveSession } from "../dashboard/components/admin-client";
 
 export default function AdminLogin() {
 	const router = useRouter();
@@ -17,9 +18,9 @@ export default function AdminLogin() {
 			method: "POST",
 			headers: { Username: username, Password: password },
 		});
-		const token = response.headers.get("TOKEN");
-		if (response.ok && token) {
-			localStorage.setItem("zenstream.admin", JSON.stringify({ username, token }));
+		if (response.ok) {
+			const profile = (await response.json()) as { username: string };
+			saveSession({ username: profile.username });
 			router.push("/web/dashboard");
 		} else setError("Invalid administrator credentials.");
 		setBusy(false);

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -198,11 +200,20 @@ class TrickplayStore:
         )
 
     def recover_generating(self) -> int:
-        self.db.execute(
-            "UPDATE trickplay_assets SET state='queued',updated_at=? WHERE state='generating'",
+        result = self.db.execute(
+            "UPDATE trickplay_assets SET state='queued',error=NULL,updated_at=? WHERE state='generating'",
             (now(),),
         )
-        return 0
+        return getattr(result, "rowcount", 0) if not isinstance(result, Exception) else 0
+
+    def requeue(self, asset: dict) -> bool:
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE trickplay_assets SET state='queued',error=NULL,updated_at=? "
+                "WHERE media_file_id=? AND source_fingerprint=? AND state='generating'",
+                (now(), asset["mediaFileId"], asset["fingerprint"]),
+            )
+            return cursor.rowcount == 1
 
 
 class TrickplayExtractor:
@@ -253,25 +264,43 @@ class TrickplayExtractor:
             str(output_pattern),
         ]
 
-    def extract(self, asset: dict) -> None:
+    def extract(self, asset: dict, should_terminate=None) -> None:
+        should_terminate = should_terminate or (lambda: False)
         if not asset["path"].is_file():
             raise RuntimeError("Media source is unavailable.")
         root = self.cache_root()
         root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=root, prefix=".tmp-") as temporary:
             temporary_root = Path(temporary)
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 self.command(asset, temporary_root / "sheet-%05d.webp"),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=3600,
-                check=False,
             )
-            if completed.returncode != 0:
+            started = time.monotonic()
+            while True:
+                try:
+                    stdout, stderr = process.communicate(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    if should_terminate() or time.monotonic() - started >= 3600:
+                        process.terminate()
+                        try:
+                            stdout, stderr = process.communicate(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            stdout, stderr = process.communicate()
+                        raise RuntimeError(
+                            "Terminated by administrator"
+                            if should_terminate()
+                            else "FFmpeg trickplay extraction timed out."
+                        )
+            if process.returncode != 0:
                 raise RuntimeError(
-                    (completed.stderr or "FFmpeg trickplay extraction failed.").strip()[
+                    (stderr or "FFmpeg trickplay extraction failed.").strip()[
                         -1000:
                     ]
                 )
@@ -377,7 +406,11 @@ class TrickplayExtractor:
                 if not asset:
                     return
                 try:
-                    self.extract(asset)
+                    extractor = self.extract
+                    if len(inspect.signature(extractor).parameters) >= 2:
+                        extractor(asset, should_terminate)
+                    else:
+                        extractor(asset)
                     with progress_lock:
                         completed += 1
                         current = completed
@@ -388,6 +421,9 @@ class TrickplayExtractor:
                             message=f"Extracted {current} trickplay assets",
                         )
                 except Exception as error:
+                    if should_terminate():
+                        self.store.requeue(asset)
+                        return
                     self.store.mark_failed(asset, str(error))
                     with progress_lock:
                         failures.append(asset["mediaFileId"])
@@ -435,7 +471,11 @@ class TrickplayExtractor:
             )
 
     def manifest(
-        self, user_id: str, entity_id: str, source_id: str | None = None
+        self,
+        user_id: str,
+        entity_id: str,
+        source_id: str | None = None,
+        auth_session_id: str | None = None,
     ) -> dict:
         rows = self.db.execute(
             "SELECT s.id,s.media_file_id,s.duration_seconds FROM media_sources s "
@@ -478,7 +518,10 @@ class TrickplayExtractor:
             "WHERE media_file_id=? AND output_key=? ORDER BY sheet_index",
             (media_file_id, output_key),
         )
-        ticket = issue_ticket(user_id, "resource", 6 * 60 * 60)
+        claims = {"entity": entity_id}
+        if auth_session_id:
+            claims["sessionId"] = auth_session_id
+        ticket = issue_ticket(user_id, "resource", 15 * 60, **claims)
         return {
             **base,
             "generation": output_key,

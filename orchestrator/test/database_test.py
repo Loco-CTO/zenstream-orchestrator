@@ -65,6 +65,21 @@ class DatabaseHandlerTest(unittest.TestCase):
         finally:
             database.close()
 
+    def test_failed_write_rolls_back_and_raises(self):
+        database = DatabaseHandler("sqlite", {}, ":memory:")
+        database.execute("CREATE TABLE values_table(value TEXT UNIQUE)")
+        database.execute("INSERT INTO values_table VALUES('first')")
+        try:
+            with self.assertRaises(Exception):
+                database.execute("INSERT INTO values_table VALUES('first')")
+            database.execute("INSERT INTO values_table VALUES('second')")
+            self.assertEqual(
+                database.execute("SELECT value FROM values_table ORDER BY value"),
+                [("first",), ("second",)],
+            )
+        finally:
+            database.close()
+
     def test_writer_gate_admits_waiters_in_arrival_order(self):
         database = DatabaseHandler("sqlite", {}, ":memory:")
         database.execute("CREATE TABLE values_table(value INTEGER)")

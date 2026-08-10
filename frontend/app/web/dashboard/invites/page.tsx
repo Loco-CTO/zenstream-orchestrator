@@ -12,7 +12,7 @@ export default function InvitesPage() {
 	async function generate() {
 		const session = readSession();
 		if (!session) return;
-		const r = await adminFetch("/api/user/generate_invite", session, {
+		const r = await adminFetch("/api/admin/invites", session, {
 			method: "POST",
 		});
 		if (!r.ok) {

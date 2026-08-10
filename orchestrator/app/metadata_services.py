@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import ipaddress
 import json
 import os
+import socket
 import threading
 import uuid
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from app.images import blurhash_for_image, encode_webp_bytes
 from app.logging_config import get_logger
@@ -1225,6 +1227,34 @@ class MetadataImageIngestService:
     def _file_lock(cls, target: Path):
         return cls._file_locks[hash(str(target)) % len(cls._file_locks)]
 
+    @staticmethod
+    def _validate_provider_url(value: str) -> None:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+            raise ValueError("provider image URL is not an HTTP(S) URL")
+        allowlist = {
+            host.strip().lower()
+            for host in os.getenv(
+                "METADATA_IMAGE_HOST_ALLOWLIST",
+                "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com",
+            ).split(",")
+            if host.strip()
+        }
+        hostname = parsed.hostname.casefold().rstrip(".")
+        if not any(hostname == allowed or hostname.endswith("." + allowed) for allowed in allowlist):
+            raise ValueError("provider image host is not allowlisted")
+        try:
+            addresses = {
+                info[4][0]
+                for info in socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+            }
+        except OSError as error:
+            raise ValueError("provider image host could not be resolved") from error
+        for address in addresses:
+            ip = ipaddress.ip_address(address)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                raise ValueError("provider image host resolves to a private address")
+
     def _download(self, url: str, target: Path) -> None:
         if self.downloader is not None:
             content = self.downloader(url)
@@ -1239,7 +1269,8 @@ class MetadataImageIngestService:
             if client is None:
                 client = self._http_local.client = httpx.Client(
                     timeout=timeout,
-                    follow_redirects=True,
+                    follow_redirects=False,
+                    trust_env=False,
                     headers={
                         "Accept": "image/*",
                         "User-Agent": "ZenStream/metadata",
@@ -1248,14 +1279,29 @@ class MetadataImageIngestService:
                         max_connections=16, max_keepalive_connections=8
                     ),
                 )
-            response = client.get(url, timeout=timeout)
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "").split(";", 1)[0]
-            if content_type and not content_type.startswith("image/"):
-                raise ValueError(
-                    f"provider returned non-image content type {content_type}"
-                )
-            content = response.content
+            current = url
+            content = bytearray()
+            for _ in range(6):
+                self._validate_provider_url(current)
+                response = client.stream("GET", current, timeout=timeout)
+                with response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ValueError("provider redirect has no location")
+                        current = urljoin(current, location)
+                        continue
+                    response.raise_for_status()
+                    content_type = response.headers.get("content-type", "").split(";", 1)[0]
+                    if content_type and not content_type.startswith("image/"):
+                        raise ValueError(f"provider returned non-image content type {content_type}")
+                    for chunk in response.iter_bytes(64 * 1024):
+                        content.extend(chunk)
+                        if len(content) > self.MAX_IMAGE_BYTES:
+                            raise ValueError("provider image exceeds the 20 MiB limit")
+                    break
+            else:
+                raise ValueError("provider image redirect limit exceeded")
         if not content:
             raise ValueError("provider returned an empty image")
         if len(content) > self.MAX_IMAGE_BYTES:

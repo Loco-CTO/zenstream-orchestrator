@@ -2926,6 +2926,11 @@ class LibraryScanner:
             role = media_role(path)
             if not role:
                 continue
+            if discovered_stat is None and path.is_symlink():
+                relative_path = relative(str(root), str(path))
+                if (relative_path, role) in existing:
+                    seen.add((relative_path, role))
+                continue
             if job_id:
                 self._set_stage(
                     job_id,
@@ -2964,6 +2969,12 @@ class LibraryScanner:
                     file_stat = path.stat()
                     file_size, modified_ns = file_stat.st_size, file_stat.st_mtime_ns
                 except OSError:
+                    # An existing row is retained when a scan cannot stat the
+                    # path.  A transient permission/mount failure must never
+                    # be interpreted as confirmed deletion.
+                    relative_path = relative(str(root), str(path))
+                    if (relative_path, role) in existing:
+                        seen.add((relative_path, role))
                     logger.warning(
                         "library scan file stat failed entity_id=%s path=%s duration_seconds=%.1f",
                         entity_id,
@@ -3169,11 +3180,19 @@ class LibraryScanner:
             if target is None:
                 continue
             source = root / relative_path
+            try:
+                resolved_root = root.resolve()
+                resolved_source = source.resolve(strict=True)
+                resolved_source.relative_to(resolved_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if source.is_symlink():
+                continue
             if not target.is_file() or not target.stat().st_size:
-                if not source.is_file():
+                if not resolved_source.is_file():
                     continue
                 try:
-                    cache.materialize(source, content_hash)
+                    cache.materialize(resolved_source, content_hash)
                 except Exception as error:
                     logger.warning(
                         "local artwork WebP encoding failed entity_id=%s path=%s error=%s",
@@ -3208,6 +3227,12 @@ class LibraryScanner:
             current_path = Path(current)
             for name in filenames:
                 path = current_path / name
+                # Do not index symlinks or reparse points.  A path that
+                # resolves outside the library root is treated as inaccessible
+                # and retained in the existing inventory for a later scan.
+                if path.is_symlink():
+                    yield path, None
+                    continue
                 stat_started = time.monotonic()
                 try:
                     file_stat = path.stat()

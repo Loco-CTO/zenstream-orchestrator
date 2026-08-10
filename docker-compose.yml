@@ -24,6 +24,15 @@ services:
       # caches. Keep it separate from the media library and do not make it read-only.
       - "${METADATA_PATH:-./metadata}:/app/sqlite"
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: ${ORCHESTRATOR_MEMORY_LIMIT:-4g}
     logging:
       driver: json-file
       options:

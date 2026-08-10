@@ -13,7 +13,7 @@ from app.library import LibraryStore, runtime
 from app.logging_config import get_logger
 from app.metadata_domain import choose_artwork
 from app.metadata_services import MetadataIngestService, MetadataReadService
-from app.models.admin import Admin
+from app.models.admin import ADMIN_SESSION_COOKIE, Admin
 from app.models.metadata import (
     IMAGE_LANGUAGE_SCHEMA,
     MetadataCredentials,
@@ -28,10 +28,9 @@ from app.providers import (
 )
 from app.search_scoring import match_score, normalize_search_text
 from app.trickplay import TrickplayExtractor
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
-router = APIRouter(prefix="/api/admin")
 logger = get_logger("library_api")
 store = LibraryStore()
 credentials = MetadataCredentials()
@@ -78,14 +77,58 @@ def _trickplay_asset(entity_id: str) -> dict | None:
     return value
 
 
-def require_admin(username: str | None, token: str | None) -> str:
-    if (
-        not isinstance(username, str)
-        or not isinstance(token, str)
-        or not Admin(username.strip()).authenticate(token)
-    ):
+_admin_identity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "admin_identity", default=None
+)
+
+
+def _require_same_origin(request: Request) -> None:
+    if request.method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        return
+    origin = request.headers.get("origin")
+    expected = f"{request.url.scheme}://{request.url.netloc}"
+    if not origin or origin.rstrip("/").casefold() != expected.rstrip("/").casefold():
+        raise HTTPException(403, "A same-origin administrator request is required.")
+
+
+def authenticate_admin_request(
+    request: Request, token_header: str | None = None
+) -> str:
+    cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
+    # Administrator sessions are browser-only and must never be supplied via a
+    # client-controlled bearer/header value.  `require_admin` retains its
+    # direct-call fallback for internal jobs/tests, but HTTP routes require the
+    # HttpOnly cookie boundary here.
+    if not cookie_token:
+        raise HTTPException(403, "Administrator cookie authentication is required.")
+    admin = Admin.from_token(cookie_token)
+    if admin is None:
         raise HTTPException(403, "Invalid administrator credentials.")
-    return username.strip()
+    if cookie_token:
+        _require_same_origin(request)
+    return admin.username
+
+
+async def _admin_boundary(request: Request):
+    identity = authenticate_admin_request(request)
+    context_token = _admin_identity.set(identity)
+    try:
+        yield
+    finally:
+        _admin_identity.reset(context_token)
+
+
+def require_admin(username: str | None = None, token: str | None = None) -> str:
+    identity = _admin_identity.get()
+    if identity:
+        return identity
+    admin = Admin.from_token(token)
+    if admin is None:
+        raise HTTPException(403, "Invalid administrator credentials.")
+    return admin.username
+
+
+router = APIRouter(prefix="/api/admin", dependencies=[Depends(_admin_boundary)])
 
 
 def _configured_locale(value: str | None) -> str:

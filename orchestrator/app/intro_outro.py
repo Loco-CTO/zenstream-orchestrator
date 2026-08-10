@@ -766,7 +766,9 @@ class IntroOutroDetector:
 
     def run(self, run_id: str, job_store, should_terminate=None) -> None:
         should_terminate = should_terminate or (lambda: False)
-        self.store.recover_generating()
+        recover = getattr(self.store, "recover_generating", None)
+        if recover is not None:
+            recover()
         settings = self.store.settings()
         queued = self.store.queue_pending(settings=settings)
         workers = settings["introOutroWorkers"]

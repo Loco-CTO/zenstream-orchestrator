@@ -4,16 +4,21 @@ import asyncio
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import subprocess
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 
 from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import (
+    CLIENT_SESSION_COOKIE,
     account_from_access,
     issue_ticket,
     require_account,
+    session_id_for_token,
     websocket_account,
 )
 from app.foreground import run_foreground
@@ -36,7 +41,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
-from api.zenstream.library_routes import require_admin
+from api.zenstream.library_routes import authenticate_admin_request
 
 router = APIRouter()
 catalog = Catalog()
@@ -44,6 +49,62 @@ media = PlaybackManager()
 trickplay = TrickplayExtractor()
 intro_outro = IntroOutroStore()
 logger = get_logger("playback_routes")
+AUTH_BODY_LIMIT_BYTES = 16 * 1024
+RESOURCE_TICKET_TTL_SECONDS = 15 * 60
+_RATE_LIMIT_EVENTS: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+
+
+def _client_address(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    trusted = {
+        value.strip()
+        for value in os.getenv("TRUSTED_PROXY_IPS", "").split(",")
+        if value.strip()
+    }
+    if peer in trusted:
+        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        if forwarded:
+            return forwarded
+    return peer
+
+
+def _enforce_rate_limit(request: Request, bucket: str, limit: int, window: int = 60) -> None:
+    now = time.monotonic()
+    key = (bucket, _client_address(request))
+    events = _RATE_LIMIT_EVENTS[key]
+    while events and now - events[0] >= window:
+        events.popleft()
+    if len(events) >= limit:
+        retry_after = max(1, int(window - (now - events[0])))
+        raise HTTPException(429, "Too many requests. Please try again later.", headers={"Retry-After": str(retry_after)})
+    events.append(now)
+
+
+async def _bounded_json_object(
+    request: Request, limit: int = AUTH_BODY_LIMIT_BYTES
+) -> dict:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            length = int(content_length)
+            if length < 0:
+                raise ValueError
+            if length > limit:
+                raise HTTPException(413, "Request body is too large.")
+        except ValueError as error:
+            raise HTTPException(400, "Invalid Content-Length header.") from error
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise HTTPException(413, "Request body is too large.")
+    try:
+        value = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise HTTPException(400, "A JSON object is required.") from error
+    if not isinstance(value, dict):
+        raise HTTPException(400, "A JSON object is required.")
+    return value
 
 
 def _catalog_status_payload(user_id: str) -> dict:
@@ -104,7 +165,8 @@ def _catalog_status_fingerprint(payload: dict) -> tuple:
 
 @router.post("/api/auth/login")
 async def login(request: Request):
-    data = await request.json()
+    _enforce_rate_limit(request, "login", 10)
+    data = await _bounded_json_object(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
     account_model = Account()
@@ -121,25 +183,66 @@ async def me(request: Request):
     return {"user": account}
 
 
+@router.post("/api/auth/browser-login")
+async def browser_login(request: Request):
+    """Same-site browser login with an HttpOnly bearer cookie."""
+    _enforce_rate_limit(request, "login", 10)
+    data = await _bounded_json_object(request)
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    account = Account().authenticate_password(username, password)
+    if not account:
+        raise HTTPException(401, "Invalid credentials.")
+    session = Account().create_session(account["id"])
+    response = JSONResponse({"user": account}, status_code=200)
+    response.set_cookie(
+        CLIENT_SESSION_COOKIE,
+        session["token"],
+        max_age=7 * 24 * 60 * 60,
+        secure=True,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
 @router.post("/api/auth/logout", status_code=204)
 async def logout(request: Request):
     _, token = require_account(request)
     Account().revoke(token)
+    response = Response(status_code=204)
+    response.delete_cookie(CLIENT_SESSION_COOKIE, secure=True, httponly=True, samesite="strict", path="/")
+    return response
 
 
 @router.get("/api/auth/resource-ticket")
 async def resource_ticket(request: Request):
-    account, _ = require_account(request)
+    account, token = require_account(request)
+    session_id = session_id_for_token(token)
+    if not session_id:
+        raise HTTPException(401, "Authentication required.")
     return {
-        "ticket": issue_ticket(account["id"], "resource", 6 * 60 * 60),
-        "expiresIn": 6 * 60 * 60,
+        "ticket": issue_ticket(
+            account["id"],
+            "resource",
+            RESOURCE_TICKET_TTL_SECONDS,
+            sessionId=session_id,
+        ),
+        "expiresIn": RESOURCE_TICKET_TTL_SECONDS,
     }
 
 
 @router.post("/api/auth/socket-ticket")
 async def socket_ticket(request: Request):
-    account, _ = require_account(request)
-    return {"ticket": issue_ticket(account["id"], "socket", 60), "expiresIn": 60}
+    account, token = require_account(request)
+    session_id = session_id_for_token(token)
+    if not session_id:
+        raise HTTPException(401, "Authentication required.")
+    return {
+        "ticket": issue_ticket(account["id"], "socket", 60, sessionId=session_id),
+        "expiresIn": 60,
+    }
 
 
 @router.get("/api/catalog/status")
@@ -496,9 +599,14 @@ async def update_item_state(entity_id: str, request: Request):
 
 @router.post("/api/playback/items/{entity_id}/negotiate")
 async def negotiate_playback(entity_id: str, request: Request):
-    account, _ = require_account(request)
+    account, token = require_account(request)
+    session_id = session_id_for_token(token)
     return await asyncio.to_thread(
-        media.negotiate, account["id"], entity_id, await request.json()
+        media.negotiate,
+        account["id"],
+        entity_id,
+        await request.json(),
+        session_id,
     )
 
 
@@ -512,10 +620,11 @@ async def playback_source_metadata(entity_id: str, request: Request):
 async def trickplay_manifest(
     entity_id: str, request: Request, sourceId: str | None = Query(None)
 ):
-    account, _ = require_account(request)
+    account, token = require_account(request)
+    session_id = session_id_for_token(token)
     catalog.require_entity(account["id"], entity_id)
     payload = await asyncio.to_thread(
-        trickplay.manifest, account["id"], entity_id, sourceId
+        trickplay.manifest, account["id"], entity_id, sourceId, session_id
     )
     if payload["state"] != "ready":
         return Response(
@@ -758,9 +867,10 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
 
 @router.get("/api/admin/users")
 async def admin_users(
+    request: Request,
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
-    require_admin(Username, TOKEN)
+    authenticate_admin_request(request, TOKEN)
     return {"users": Account().list()}
 
 
@@ -770,7 +880,7 @@ async def create_user(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    require_admin(Username, TOKEN)
+    authenticate_admin_request(request, TOKEN)
     data = await request.json()
     try:
         return Account().create(
@@ -787,7 +897,7 @@ async def set_user_libraries(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    require_admin(Username, TOKEN)
+    authenticate_admin_request(request, TOKEN)
     data = await request.json()
     try:
         return {
@@ -808,7 +918,7 @@ async def reset_user_password(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    require_admin(Username, TOKEN)
+    authenticate_admin_request(request, TOKEN)
     try:
         return Account().set_password(
             user_id, str((await request.json()).get("password") or "")
@@ -826,7 +936,7 @@ async def update_user(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    require_admin(Username, TOKEN)
+    authenticate_admin_request(request, TOKEN)
     try:
         return Account().set_disabled(
             user_id, bool((await request.json()).get("disabled"))
@@ -837,8 +947,11 @@ async def update_user(
 
 @router.delete("/api/admin/users/{user_id}", status_code=204)
 async def delete_user(
-    user_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    user_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
-    require_admin(Username, TOKEN)
+    authenticate_admin_request(request, TOKEN)
     if not Account().delete(user_id):
         raise HTTPException(404, "User not found.")

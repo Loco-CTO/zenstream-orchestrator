@@ -117,7 +117,11 @@ class Account:
                 _iso(now),
             ),
         )
-        return {"token": token, "expiresAt": _iso(expires)}
+        # Return the opaque session identifier alongside the bearer so
+        # short-lived resource/socket tickets can be bound to this login.
+        # Clients may ignore the field; it is never accepted as caller
+        # identity on its own.
+        return {"token": token, "expiresAt": _iso(expires), "sessionId": session_id}
 
     def authenticate_token(self, token: str | None) -> dict | None:
         if not token:

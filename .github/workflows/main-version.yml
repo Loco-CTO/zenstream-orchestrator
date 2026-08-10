@@ -20,10 +20,6 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.10.0
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
@@ -31,13 +27,13 @@ jobs:
           package-manager-cache: false
       - name: Install dashboard dependencies
         working-directory: frontend
-        run: pnpm install --frozen-lockfile
+        run: npm ci
       - name: Apply dashboard ESLint fixes
         working-directory: frontend
-        run: pnpm lint:fix
+        run: npm run lint:fix
       - name: Format dashboard files
         working-directory: frontend
-        run: pnpm format
+        run: npm run format
       - name: Apply Ruff lint fixes
         uses: astral-sh/ruff-action@v3
         with:

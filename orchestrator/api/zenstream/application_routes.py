@@ -3,7 +3,7 @@ import math
 import time
 from pathlib import Path
 
-from app.client_auth import bearer_token, websocket_account
+from app.client_auth import require_account, websocket_account
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite
@@ -546,9 +546,10 @@ async def register_client(request: Request):
     return {"user": account}
 
 
-def _sync_identity(token: str | None, participant: str | None):
-    account = Account().authenticate_token(bearer_token(token))
-    if not account or not participant:
+def _sync_identity(request: Request):
+    account, _ = require_account(request)
+    participant = request.headers.get("x-zenstream-participant")
+    if not participant:
         raise HTTPException(401, "Authentication required.")
     return account["id"], participant
 
@@ -556,11 +557,8 @@ def _sync_identity(token: str | None, participant: str | None):
 @router.get("/api/syncplay/groups")
 async def syncplay_groups(
     request: Request,
-    x_zenstream_participant: str | None = Header(None),
 ):
-    user_id, participant = _sync_identity(
-        request.headers.get("authorization"), x_zenstream_participant
-    )
+    user_id, participant = _sync_identity(request)
     rows = SyncplayGroup("_").db.execute(
         "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
     )
@@ -574,10 +572,7 @@ async def syncplay_groups(
 
 @router.post("/api/syncplay/groups")
 async def syncplay_create(request: Request):
-    user, participant = _sync_identity(
-        request.headers.get("authorization"),
-        request.headers.get("x-zenstream-participant"),
-    )
+    user, participant = _sync_identity(request)
     try:
         account = Account()._row(user_id=user, read_only=True)
         state = SyncplayGroup.create(
@@ -591,10 +586,7 @@ async def syncplay_create(request: Request):
 
 @router.get("/api/syncplay/groups/{group_id}")
 async def syncplay_group(group_id: str, request: Request):
-    user, participant = _sync_identity(
-        request.headers.get("authorization"),
-        request.headers.get("x-zenstream-participant"),
-    )
+    user, participant = _sync_identity(request)
     group = SyncplayGroup(group_id)
     state = group.state()
     if not state:
@@ -605,10 +597,7 @@ async def syncplay_group(group_id: str, request: Request):
 
 
 async def _sync_group_context(group_id: str, request: Request):
-    user, participant = _sync_identity(
-        request.headers.get("authorization"),
-        request.headers.get("x-zenstream-participant"),
-    )
+    user, participant = _sync_identity(request)
     group = SyncplayGroup(group_id)
     if not group.state():
         raise HTTPException(404, "Group not found.")
@@ -626,10 +615,7 @@ async def _sync_group_context(group_id: str, request: Request):
 
 @router.post("/api/syncplay/groups/{group_id}/join")
 async def syncplay_join(group_id: str, request: Request):
-    user, participant = _sync_identity(
-        request.headers.get("authorization"),
-        request.headers.get("x-zenstream-participant"),
-    )
+    user, participant = _sync_identity(request)
     group = SyncplayGroup(group_id)
     if not group.state():
         raise HTTPException(404, "Group not found.")

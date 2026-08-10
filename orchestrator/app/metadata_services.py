@@ -1296,8 +1296,7 @@ class MetadataImageIngestService:
             content = bytearray()
             for _ in range(6):
                 self._validate_provider_url(current)
-                response = client.stream("GET", current, timeout=timeout)
-                with response:
+                with client.stream("GET", current, timeout=timeout) as response:
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location")
                         if not location:

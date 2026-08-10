@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 from app.database import DatabaseHandler
 from app.metadata_services import (
     MetadataAssetExecutor,
@@ -900,6 +902,60 @@ class MetadataServicesTest(unittest.TestCase):
 
         self.assertEqual(len(downloads), 2)
         self.assertEqual(result, {"ready": 1, "failed": 0, "skipped": 0})
+
+    def test_image_download_enters_stream_response_context(self):
+        requests = []
+
+        def handler(request):
+            requests.append(str(request.url))
+            if request.url.path == "/poster.jpg":
+                return httpx.Response(
+                    302, headers={"location": "/redirected-poster.jpg"}
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "image/jpeg"},
+                content=b"image-data",
+            )
+
+        cache = _ImageCache(self.db)
+        client = httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                image_ingest = MetadataImageIngestService(
+                    cache,
+                    directory,
+                    encoder=lambda content, target, suffix: target.write_bytes(
+                        bytes(content)
+                    ),
+                )
+                target = Path(directory) / "poster.webp"
+                with (
+                    patch.object(image_ingest, "_validate_provider_url"),
+                    patch.object(
+                        MetadataImageIngestService._http_local,
+                        "client",
+                        client,
+                        create=True,
+                    ),
+                ):
+                    image_ingest._download(
+                        "https://images.example/poster.jpg", target
+                    )
+
+                self.assertEqual(target.read_bytes(), b"image-data")
+        finally:
+            client.close()
+
+        self.assertEqual(
+            requests,
+            [
+                "https://images.example/poster.jpg",
+                "https://images.example/redirected-poster.jpg",
+            ],
+        )
 
     def test_ingest_document_materializes_aggregated_series(self):
         cache = _ImageCache(self.db)

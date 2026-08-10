@@ -289,7 +289,9 @@ class SyncplayReadinessTests(unittest.TestCase):
     def test_disconnected_viewer_is_deactivated_before_removal(self):
         state = self.group.deactivate_member("viewer", "viewer-tab")
         self.assertTrue(state["playing"])
-        viewer = next(member for member in state["members"] if member["userId"] == "viewer")
+        viewer = next(
+            member for member in state["members"] if member["userId"] == "viewer"
+        )
         self.assertFalse(viewer["viewing"])
         self.assertEqual(
             self.group.state()["members"][-1]["userId"],

@@ -29,8 +29,8 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from version import __version__
 
-from api.zenstream.version import _main_version
 from api.zenstream.client_routes import _bounded_json_object, _enforce_rate_limit
+from api.zenstream.version import _main_version
 
 
 def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
@@ -104,11 +104,15 @@ class WebSocketHub:
         for client in clients:
             try:
                 payload = message
-                if message.get("type") == "group" and isinstance(message.get("group"), dict):
+                if message.get("type") == "group" and isinstance(
+                    message.get("group"), dict
+                ):
                     user_id, participant = self.identities.get(client, ("", ""))
                     payload = {
                         **message,
-                        "group": _redact_syncplay_state(message["group"], user_id, participant),
+                        "group": _redact_syncplay_state(
+                            message["group"], user_id, participant
+                        ),
                     }
                 await client.send_json(payload)
             except Exception:
@@ -294,7 +298,8 @@ async def admin_login(
 @router.post("/api/admin/logout", status_code=204)
 async def admin_logout(
     request: Request,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     username, token = _admin_request(request, Username, TOKEN)
     Admin(username).logout(token)
@@ -312,7 +317,8 @@ async def admin_logout(
 @router.get("/api/admin/profile")
 async def admin_profile(
     request: Request = None,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     username, _ = (
         _admin_request(request, Username, TOKEN)
@@ -348,7 +354,8 @@ async def admin_update_profile(
 @router.get("/api/admin/overview")
 async def admin_overview(
     request: Request,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     username, _ = _admin_request(request, Username, TOKEN)
     db = Admin(username)._db
@@ -369,7 +376,8 @@ async def admin_overview(
 @router.get("/api/admin/playback/settings")
 async def admin_playback_settings(
     request: Request,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     _admin_request(request, Username, TOKEN)
     return PlaybackSettings().get()
@@ -408,7 +416,8 @@ async def update_admin_playback_settings(
 @router.get("/api/admin/intro-outro/settings")
 async def admin_intro_outro_settings(
     request: Request,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     _admin_request(request, Username, TOKEN)
     store = IntroOutroStore()
@@ -431,7 +440,8 @@ async def update_admin_intro_outro_settings(
 @router.post("/api/admin/intro-outro/clear")
 async def clear_admin_intro_outro_segments(
     request: Request,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     _admin_request(request, Username, TOKEN)
     return {"removedSegments": IntroOutroStore().clear_segments()}
@@ -440,7 +450,8 @@ async def clear_admin_intro_outro_segments(
 @router.get("/api/admin/accounts")
 async def admin_accounts(
     request: Request,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     username, _ = _admin_request(request, Username, TOKEN)
     return Admin(username).list_accounts()
@@ -484,7 +495,8 @@ async def admin_set_account_disabled(
 @router.post("/api/admin/invites", status_code=201)
 async def admin_create_invite(
     request: Request,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     _root_admin_request(request, Username, TOKEN)
     return {"inviteid": Invite().generate()}
@@ -546,7 +558,9 @@ async def syncplay_groups(
     request: Request,
     x_zenstream_participant: str | None = Header(None),
 ):
-    user_id, participant = _sync_identity(request.headers.get("authorization"), x_zenstream_participant)
+    user_id, participant = _sync_identity(
+        request.headers.get("authorization"), x_zenstream_participant
+    )
     rows = SyncplayGroup("_").db.execute(
         "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
     )
@@ -960,7 +974,9 @@ async def syncplay_socket(websocket: WebSocket):
                 "version": 1,
                 "type": "groups",
                 "groups": [
-                    _redact_syncplay_state(SyncplayGroup(row[0]).state(), user_id, participant)
+                    _redact_syncplay_state(
+                        SyncplayGroup(row[0]).state(), user_id, participant
+                    )
                     for row in rows
                 ],
             }

@@ -45,7 +45,9 @@ class Invite:
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(invites)")}
         if "expires_at" in columns:
             expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-            self._db.execute("INSERT INTO invites(url,expires_at) VALUES (?,?)", (digest, expires))
+            self._db.execute(
+                "INSERT INTO invites(url,expires_at) VALUES (?,?)", (digest, expires)
+            )
         else:
             self._db.execute("INSERT INTO invites(url) VALUES (?)", (digest,))
         return inviteid

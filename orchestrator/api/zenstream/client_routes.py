@@ -68,7 +68,9 @@ def _client_address(request: Request) -> str:
     return peer
 
 
-def _enforce_rate_limit(request: Request, bucket: str, limit: int, window: int = 60) -> None:
+def _enforce_rate_limit(
+    request: Request, bucket: str, limit: int, window: int = 60
+) -> None:
     now = time.monotonic()
     key = (bucket, _client_address(request))
     events = _RATE_LIMIT_EVENTS[key]
@@ -76,7 +78,11 @@ def _enforce_rate_limit(request: Request, bucket: str, limit: int, window: int =
         events.popleft()
     if len(events) >= limit:
         retry_after = max(1, int(window - (now - events[0])))
-        raise HTTPException(429, "Too many requests. Please try again later.", headers={"Retry-After": str(retry_after)})
+        raise HTTPException(
+            429,
+            "Too many requests. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
     events.append(now)
 
 
@@ -212,7 +218,9 @@ async def logout(request: Request):
     _, token = require_account(request)
     Account().revoke(token)
     response = Response(status_code=204)
-    response.delete_cookie(CLIENT_SESSION_COOKIE, secure=True, httponly=True, samesite="strict", path="/")
+    response.delete_cookie(
+        CLIENT_SESSION_COOKIE, secure=True, httponly=True, samesite="strict", path="/"
+    )
     return response
 
 
@@ -868,7 +876,8 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
 @router.get("/api/admin/users")
 async def admin_users(
     request: Request,
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     authenticate_admin_request(request, TOKEN)
     return {"users": Account().list()}

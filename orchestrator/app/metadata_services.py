@@ -1241,18 +1241,31 @@ class MetadataImageIngestService:
             if host.strip()
         }
         hostname = parsed.hostname.casefold().rstrip(".")
-        if not any(hostname == allowed or hostname.endswith("." + allowed) for allowed in allowlist):
+        if not any(
+            hostname == allowed or hostname.endswith("." + allowed)
+            for allowed in allowlist
+        ):
             raise ValueError("provider image host is not allowlisted")
         try:
             addresses = {
                 info[4][0]
-                for info in socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+                for info in socket.getaddrinfo(
+                    hostname,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                )
             }
         except OSError as error:
             raise ValueError("provider image host could not be resolved") from error
         for address in addresses:
             ip = ipaddress.ip_address(address)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+            ):
                 raise ValueError("provider image host resolves to a private address")
 
     def _download(self, url: str, target: Path) -> None:
@@ -1292,9 +1305,13 @@ class MetadataImageIngestService:
                         current = urljoin(current, location)
                         continue
                     response.raise_for_status()
-                    content_type = response.headers.get("content-type", "").split(";", 1)[0]
+                    content_type = response.headers.get("content-type", "").split(
+                        ";", 1
+                    )[0]
                     if content_type and not content_type.startswith("image/"):
-                        raise ValueError(f"provider returned non-image content type {content_type}")
+                        raise ValueError(
+                            f"provider returned non-image content type {content_type}"
+                        )
                     for chunk in response.iter_bytes(64 * 1024):
                         content.extend(chunk)
                         if len(content) > self.MAX_IMAGE_BYTES:

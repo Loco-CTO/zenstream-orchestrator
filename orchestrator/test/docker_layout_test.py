@@ -10,7 +10,10 @@ class DockerLayoutTest(unittest.TestCase):
 
         web_root, assets_root = _static_roots()
 
-        self.assertIn(web_root, {PROJECT_ROOT / "orchestrator" / "web", PROJECT_ROOT / "frontend" / "out"})
+        self.assertIn(
+            web_root,
+            {PROJECT_ROOT / "orchestrator" / "web", PROJECT_ROOT / "frontend" / "out"},
+        )
         self.assertEqual(assets_root, PROJECT_ROOT / "assets")
 
     def test_docker_image_includes_alembic_configuration_and_migrations(self):
@@ -41,7 +44,9 @@ class DockerLayoutTest(unittest.TestCase):
         self.assertIn("cp /usr/bin/ffmpeg ./assets/ffmpeg/linux/ffmpeg", dockerfile)
         self.assertIn("cp /usr/bin/ffprobe ./assets/ffmpeg/linux/ffprobe", dockerfile)
         self.assertIn("COPY frontend/ ./", dockerfile)
-        self.assertIn("COPY frontend/package.json frontend/package-lock.json ./", dockerfile)
+        self.assertIn(
+            "COPY frontend/package.json frontend/package-lock.json ./", dockerfile
+        )
         self.assertIn("npm ci --ignore-scripts --no-audit --no-fund", dockerfile)
         self.assertNotRegex(dockerignore, r"(?m)^/?assets/?$")
         self.assertNotRegex(dockerignore, r"(?m)^/?frontend/?$")

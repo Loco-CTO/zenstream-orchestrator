@@ -12,9 +12,7 @@ def _request(method="GET", origin="https://example.test", cookie=True):
     if origin is not None:
         headers.append((b"origin", origin.encode("ascii")))
     if cookie:
-        headers.append(
-            (b"cookie", b"__Host-zenstream-admin=server-owned-session")
-        )
+        headers.append((b"cookie", b"__Host-zenstream-admin=server-owned-session"))
     return Request(
         {
             "type": "http",

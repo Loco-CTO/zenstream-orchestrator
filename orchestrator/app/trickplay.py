@@ -204,7 +204,9 @@ class TrickplayStore:
             "UPDATE trickplay_assets SET state='queued',error=NULL,updated_at=? WHERE state='generating'",
             (now(),),
         )
-        return getattr(result, "rowcount", 0) if not isinstance(result, Exception) else 0
+        return (
+            getattr(result, "rowcount", 0) if not isinstance(result, Exception) else 0
+        )
 
     def requeue(self, asset: dict) -> bool:
         with self.db.transaction() as cursor:
@@ -300,9 +302,7 @@ class TrickplayExtractor:
                         )
             if process.returncode != 0:
                 raise RuntimeError(
-                    (stderr or "FFmpeg trickplay extraction failed.").strip()[
-                        -1000:
-                    ]
+                    (stderr or "FFmpeg trickplay extraction failed.").strip()[-1000:]
                 )
             images = sorted(temporary_root.glob("sheet-*.webp"))
             if not images:

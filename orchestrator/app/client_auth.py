@@ -11,7 +11,6 @@ import time
 from app.models.account import Account
 from fastapi import HTTPException, Request, WebSocket
 
-
 _TICKET_TTL_LIMITS = {"resource": 15 * 60, "socket": 60}
 _RESERVED_TICKET_CLAIMS = {"uid", "kind", "iat", "exp"}
 CLIENT_SESSION_COOKIE = "__Host-zenstream-session"

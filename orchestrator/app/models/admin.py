@@ -6,7 +6,6 @@ from app.config import Config
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
-
 _hasher = PasswordHasher()
 ADMIN_SESSION_COOKIE = "__Host-zenstream-admin"
 

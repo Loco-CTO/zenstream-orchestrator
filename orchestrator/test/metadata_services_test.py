@@ -67,6 +67,59 @@ class _ImageCache:
 
 
 class MetadataServicesTest(unittest.TestCase):
+    def test_trailer_resolution_uses_regional_match_then_configured_english(self):
+        payloads = {
+            ("tmdb", "ja-JP"): {
+                "trailers": [
+                    {"url": "https://youtube.com/ja-jp", "language": "ja-JP"},
+                    {"url": "https://youtube.com/ja-us", "language": "ja-US"},
+                ]
+            },
+            ("tmdb", "en-US"): {
+                "trailers": [
+                    {"url": "https://youtube.com/en", "language": "en-US"}
+                ]
+            },
+            ("tmdb", "fr-FR"): {
+                "trailers": [
+                    {"url": "https://youtube.com/fr", "language": "fr-FR"}
+                ]
+            },
+        }
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["ja-JP", "en-US"]),
+        ):
+            selected = MetadataReadService._localized_trailers(
+                payloads, ["tmdb"], "ja-JP", "fr-FR"
+            )
+        self.assertEqual(
+            [value["url"] for value in selected],
+            ["https://youtube.com/ja-jp"],
+        )
+
+    def test_trailer_resolution_allows_neutral_media_metadata(self):
+        payloads = {
+            ("tmdb", "ja"): {
+                "trailers": [{"url": "https://youtube.com/neutral"}]
+            },
+            ("tmdb", "fr-FR"): {
+                "trailers": [
+                    {"url": "https://youtube.com/fr", "language": "fr-FR"}
+                ]
+            },
+        }
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["ja-JP"]),
+        ):
+            selected = MetadataReadService._localized_trailers(
+                payloads, ["tmdb"], "ja-JP", "ja-JP"
+            )
+        self.assertEqual(
+            [value["url"] for value in selected], ["https://youtube.com/neutral"]
+        )
+
     def test_asset_version_changes_when_same_url_bytes_change(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "image.webp"

@@ -117,6 +117,31 @@ class PersistenceMigrationTest(unittest.TestCase):
                 connection.close()
             command.upgrade(config, "head")
 
+    def test_artwork_selection_rebuild_migration_marks_ready_models_dirty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "0009_artwork_selection_provider")
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "UPDATE catalog_read_model_status SET state='ready' WHERE id=1"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT state FROM catalog_read_model_status WHERE id=1"
+                    ).fetchone()[0],
+                    "building",
+                )
+            finally:
+                connection.close()
+
     def test_upgrade_deduplicates_neutral_images_before_enforcing_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "orchestrator.db"

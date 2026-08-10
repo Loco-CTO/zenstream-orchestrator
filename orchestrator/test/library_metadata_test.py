@@ -2106,7 +2106,7 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(values["ja-JP"]["videos"]["results"][0]["iso_639_1"], "ja")
         self.assertIn(
             "translations",
-            provider_request.call_args.kwargs["params"]["append_to_response"],
+            provider_request.call_args_list[0].kwargs["params"]["append_to_response"],
         )
 
     def test_tmdb_tv_details_requests_all_configured_video_languages(self):

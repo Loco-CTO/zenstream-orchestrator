@@ -4171,6 +4171,7 @@ class LibraryRuntime:
         self._reconcile_due: dict[str, float] = {}
         self._reconcile_targets: dict[str, set[str]] = {}
         self._reconcile_deadlines: dict[str, dict[str, float]] = {}
+        self._reconcile_event_counts: dict[str, int] = {}
         self._reconcile_full_scan: set[str] = set()
         self._reconcile_full_deadline: dict[str, float] = {}
         self._job_targets: dict[str, set[str]] = {}
@@ -4186,6 +4187,8 @@ class LibraryRuntime:
             self._reconcile_full_deadline = {}
         if not hasattr(self, "_reconcile_deadlines"):
             self._reconcile_deadlines = {}
+        if not hasattr(self, "_reconcile_event_counts"):
+            self._reconcile_event_counts = {}
         if not hasattr(self, "_job_full_scan"):
             self._job_full_scan = set()
 
@@ -4371,17 +4374,26 @@ class LibraryRuntime:
                     (timestamp, library_id),
                 )
 
-    def request_reconcile(self, library_id: str, *paths: str | None) -> None:
+    def request_reconcile(
+        self,
+        library_id: str,
+        *paths: str | None,
+        root: Path | None = None,
+    ) -> None:
         """Debounce watcher changes into quiet top-level, path-scoped reconciles."""
         self._ensure_reconcile_state()
-        library = self.store.get(library_id)
-        if not library:
-            return
-        root = Path(library["directory"])
+        if root is None:
+            library = self.store.get(library_id)
+            if not library or not library.get("directory"):
+                return
+            root = Path(library["directory"])
         now_monotonic = time.monotonic()
         with self.condition:
             targets = self._reconcile_targets.setdefault(library_id, set())
             deadlines = self._reconcile_deadlines.setdefault(library_id, {})
+            self._reconcile_event_counts[library_id] = (
+                self._reconcile_event_counts.get(library_id, 0) + max(1, len(paths))
+            )
             valid = 0
             for value in paths:
                 if not value:
@@ -4401,7 +4413,7 @@ class LibraryRuntime:
             if not valid and paths:
                 self._reconcile_full_scan.add(library_id)
                 self._reconcile_full_deadline[library_id] = now_monotonic + 5
-            if len(targets) > 256:
+            if len(targets) > 256 or self._reconcile_event_counts[library_id] > 10000:
                 self._reconcile_full_scan.add(library_id)
                 self._reconcile_full_deadline[library_id] = now_monotonic + 5
                 targets.clear()
@@ -4429,11 +4441,12 @@ class LibraryRuntime:
                 self._reconcile_full_deadline[library_id] = deadline
                 self._reconcile_targets.pop(library_id, None)
                 self._reconcile_deadlines.pop(library_id, None)
+                self._reconcile_event_counts.pop(library_id, None)
                 self._reconcile_due[library_id] = deadline
                 self._mark_watcher_pending(library_id, 0)
                 self.condition.notify_all()
             return
-        self.request_reconcile(library_id, *paths)
+        self.request_reconcile(library_id, *paths, root=root)
 
     def _mark_watcher_pending(self, library_id: str, count: int) -> None:
         watcher = getattr(self, "watcher", None)
@@ -4457,6 +4470,7 @@ class LibraryRuntime:
                             self._reconcile_full_deadline.pop(library_id, None)
                             self._reconcile_targets.pop(library_id, None)
                             self._reconcile_deadlines.pop(library_id, None)
+                            self._reconcile_event_counts.pop(library_id, None)
                         else:
                             deadlines = self._reconcile_deadlines.get(library_id, {})
                             targets = {
@@ -4471,6 +4485,7 @@ class LibraryRuntime:
                                 self._reconcile_targets.pop(library_id, None)
                             if not deadlines:
                                 self._reconcile_deadlines.pop(library_id, None)
+                                self._reconcile_event_counts.pop(library_id, None)
                         remaining = []
                         if library_id in self._reconcile_full_scan:
                             remaining.append(self._reconcile_full_deadline[library_id])

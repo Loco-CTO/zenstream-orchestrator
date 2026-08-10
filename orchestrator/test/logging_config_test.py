@@ -23,9 +23,7 @@ class MetadataPathTest(unittest.TestCase):
 
     def test_relative_metadata_path_is_resolved_from_the_project_root(self):
         with patch.dict(os.environ, {"METADATA_PATH": "persistent-data"}):
-            self.assertEqual(
-                metadata_directory(), PROJECT_ROOT / "persistent-data"
-            )
+            self.assertEqual(metadata_directory(), PROJECT_ROOT / "persistent-data")
 
 
 class LoggingConfigurationTest(unittest.TestCase):

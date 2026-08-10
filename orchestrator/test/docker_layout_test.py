@@ -39,7 +39,7 @@ class DockerLayoutTest(unittest.TestCase):
         compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
         self.assertIn("METADATA_PATH: /app/sqlite", compose)
-        self.assertIn('${METADATA_PATH:-./metadata}:/app/sqlite', compose)
+        self.assertIn("${METADATA_PATH:-./metadata}:/app/sqlite", compose)
 
     def test_docker_context_keeps_dashboard_assets(self):
         dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")

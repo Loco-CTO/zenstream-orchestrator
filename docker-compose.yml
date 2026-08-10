@@ -32,8 +32,6 @@ services:
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev
-    cap_drop:
-      - ALL
     security_opt:
       - no-new-privileges:true
     pids_limit: 512

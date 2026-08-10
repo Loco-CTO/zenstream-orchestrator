@@ -10,7 +10,7 @@ name: Auto formatting
       - "pyproject.toml"
       - "ruff.toml"
       - ".ruff.toml"
-      - ".github/workflows/ruff.yml"
+      - ".github/workflows/format.yml"
       - "frontend/**/*.ts"
       - "frontend/**/*.tsx"
       - "frontend/**/*.js"

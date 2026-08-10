@@ -113,6 +113,23 @@ export default function LibrariesPage() {
 		);
 		load();
 	}
+	async function updateSettings(
+		library: Library,
+		values: Partial<Pick<Library, "watchEnabled" | "watchMode" | "safetyScanEnabled">>,
+	) {
+		if (!session) return;
+		const response = await adminFetch(
+			"/api/admin/libraries/" + library.id,
+			session,
+			{
+				method: "PATCH",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(values),
+			},
+		);
+		setMessage(response.ok ? "Library watcher settings updated." : "Could not update library settings.");
+		if (response.ok) load();
+	}
 	async function remove(library: Library) {
 		if (!session) return;
 		const response = await adminFetch(
@@ -172,7 +189,7 @@ export default function LibrariesPage() {
 								<span className="rounded-lg bg-[#aeb9ff]/10 p-2.5 text-[#aeb9ff]">
 									<IconFolder size={18} />
 								</span>
-								<div className="min-w-0">
+							<div className="min-w-0">
 									<p className="font-medium">{library.name}</p>
 									<p className="mt-1 truncate text-xs console-muted">
 										{labels[library.type]}{" "}
@@ -197,6 +214,48 @@ export default function LibrariesPage() {
 												? library.watcherStatus?.state || "starting"
 												: "watch disabled"}
 									</p>
+									{library.type !== "collection" && (
+										<div className="mt-3 flex flex-wrap items-center gap-3 text-xs console-muted">
+											<label className="flex items-center gap-2">
+												<input
+													type="checkbox"
+													checked={library.watchEnabled}
+													onChange={(event) =>
+														void updateSettings(library, {
+															watchEnabled: event.target.checked,
+														})
+													}
+												/>
+												Watch changes
+											</label>
+											<select
+												value={library.watchMode}
+												onChange={(event) =>
+													void updateSettings(library, {
+															watchMode: event.target.value as Library["watchMode"],
+														})
+													}
+												className="console-input h-8 rounded-md px-2"
+												aria-label="Watcher backend"
+											>
+												<option value="auto">Automatic backend</option>
+												<option value="native">Native events</option>
+												<option value="polling">Polling backend</option>
+											</select>
+											<label className="flex items-center gap-2">
+												<input
+													type="checkbox"
+													checked={library.safetyScanEnabled}
+													onChange={(event) =>
+														void updateSettings(library, {
+															safetyScanEnabled: event.target.checked,
+														})
+													}
+												/>
+												Safety scan
+											</label>
+										</div>
+									)}
 								</div>
 							</div>
 							<div className="flex shrink-0 gap-2">

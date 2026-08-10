@@ -328,7 +328,7 @@ class MetadataSearchProjection:
                         merged = {}
                     if not isinstance(merged, dict):
                         merged = {}
-                    for field in TEXT_FIELDS | FACT_FIELDS:
+                    for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
                         if (
                             field in payload
                             and _usable_projection_value(payload[field])
@@ -340,6 +340,34 @@ class MetadataSearchProjection:
                             merged[field] = payload[field]
                     merged["_catalogItemProjectionSchema"] = (
                         CATALOG_ITEM_PROJECTION_SCHEMA
+                    )
+                    provider_ids = [
+                        {"provider": row[0], "id": row[1]}
+                        for row in self.db.execute(
+                            "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                            (entity_id,),
+                        )
+                    ]
+                    trailer_reader = MetadataReadService(self.db)
+                    trailer_payloads = trailer_reader.payloads(
+                        entity_type, provider_ids
+                    )
+                    trailer_payloads[(provider, locale)] = payload
+                    trailer_original = next(
+                        (
+                            _canonical_metadata_language(
+                                value.get("originalLanguage")
+                            )
+                            for value in trailer_payloads.values()
+                            if value.get("originalLanguage")
+                        ),
+                        None,
+                    )
+                    merged["trailers"] = MetadataReadService._localized_trailers(
+                        trailer_payloads,
+                        trailer_reader.providers(entity_type),
+                        locale,
+                        trailer_original,
                     )
                     current_images = merged.get("images")
                     if not isinstance(current_images, dict):
@@ -894,7 +922,6 @@ class MetadataReadService:
         )
         provider_rank = {value: index for index, value in enumerate(providers)}
         candidates = []
-        available = {locale for _, locale in payloads}
         for (provider, locale), payload in payloads.items():
             if provider not in provider_rank:
                 continue
@@ -904,12 +931,19 @@ class MetadataReadService:
                 trailer_language = trailer.get("language") or locale
                 rank = 99
                 for index, tier in enumerate(tiers):
-                    for variant in locale_variants(
-                        tier, available | {str(trailer_language)}
+                    trailer_tag = str(trailer_language).lower()
+                    tier_tag = str(tier).lower()
+                    if trailer_tag == tier_tag:
+                        rank = index * 2
+                        break
+                    if (
+                        trailer_tag
+                        and tier_tag
+                        and trailer_tag.split("-", 1)[0].split("_", 1)[0]
+                        == tier_tag.split("-", 1)[0].split("_", 1)[0]
                     ):
-                        if str(trailer_language).lower() == str(variant).lower():
-                            rank = index * 2
-                            break
+                        rank = index * 2 + 1
+                        break
                     if rank < 99:
                         break
                 if rank < 99:
@@ -980,6 +1014,7 @@ class MetadataIngestService:
         provider_id: str,
         *,
         force: bool = False,
+        force_assets: bool | None = None,
         should_terminate=None,
     ) -> list[dict]:
         if provider not in {"tmdb", "tvdb", "musicbrainz"}:
@@ -992,7 +1027,12 @@ class MetadataIngestService:
             locales.append(locale)
         return list(
             self.ingest_locales(
-                provider, entity_type, provider_id, locales, force=force
+                provider,
+                entity_type,
+                provider_id,
+                locales,
+                force=force,
+                force_assets=force_assets,
             ).values()
         )
 
@@ -1004,11 +1044,14 @@ class MetadataIngestService:
         locales: list[str] | None = None,
         *,
         force: bool = False,
+        force_assets: bool | None = None,
     ) -> dict[str, dict]:
         locales = list(dict.fromkeys(locales or self.locales()))
         unsupported = [locale for locale in locales if locale not in self._locales]
         if unsupported:
             raise ValueError(f"Metadata language is not configured: {unsupported[0]}")
+        if force_assets is None:
+            force_assets = force
         with metadata_fetch_activity():
             if hasattr(self.metadata_service, "fetch_locales"):
                 values = self.metadata_service.fetch_locales(
@@ -1036,7 +1079,7 @@ class MetadataIngestService:
                 provider_id,
                 locale,
                 values[locale],
-                force_assets=force,
+                force_assets=force_assets,
             )
             for locale in locales
         }
@@ -1049,11 +1092,17 @@ class MetadataIngestService:
         locale: str,
         *,
         force: bool = False,
+        force_assets: bool | None = None,
     ) -> dict:
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
         return self.ingest_locales(
-            provider, entity_type, provider_id, [locale], force=force
+            provider,
+            entity_type,
+            provider_id,
+            [locale],
+            force=force,
+            force_assets=force_assets,
         )[locale]
 
     def ingest_document(

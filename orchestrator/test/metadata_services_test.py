@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
-
 from app.database import DatabaseHandler
 from app.metadata_services import (
     MetadataAssetExecutor,
@@ -941,9 +940,7 @@ class MetadataServicesTest(unittest.TestCase):
                         create=True,
                     ),
                 ):
-                    image_ingest._download(
-                        "https://images.example/poster.jpg", target
-                    )
+                    image_ingest._download("https://images.example/poster.jpg", target)
 
                 self.assertEqual(target.read_bytes(), b"image-data")
         finally:

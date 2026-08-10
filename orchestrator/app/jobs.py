@@ -728,6 +728,7 @@ class MetadataMissingJob:
         definition: dict,
         should_terminate=None,
         force: bool = False,
+        force_assets: bool | None = None,
     ) -> None:
         should_terminate = should_terminate or (lambda: False)
         ingest = MetadataIngestService(background_assets=False)
@@ -862,6 +863,7 @@ class MetadataMissingJob:
                         provider_id,
                         fetch_locales,
                         force=force,
+                        force_assets=force_assets,
                     )
                     documents.update(fetched)
                     worked_locales.update(fetch_locales)
@@ -1314,8 +1316,13 @@ class JobScheduler:
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
             elif kind == "metadata_refresh":
+                config = definition.get("config") or {}
                 MetadataMissingJob(self.store).run(
-                    run_id, definition, self.cancel_events[run_id].is_set, force=True
+                    run_id,
+                    definition,
+                    self.cancel_events[run_id].is_set,
+                    force=True,
+                    force_assets=not bool(config.get("preserveCachedAssets", False)),
                 )
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(

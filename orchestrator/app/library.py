@@ -19,8 +19,8 @@ from queue import Empty
 
 from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
-from app.logging_config import get_logger
 from app.library_watcher import LibraryWatcherManager
+from app.logging_config import get_logger
 from app.worker_config import configured_worker_limit
 
 LIBRARY_TYPES = {"tv_series", "movies", "music", "collection"}
@@ -541,9 +541,15 @@ class LibraryStore:
         self.db = Config().database
 
     def _select_query(self, where: str = "") -> str:
-        columns = {row[1] for row in self.db.read_execute("PRAGMA table_info(libraries)")}
+        columns = {
+            row[1] for row in self.db.read_execute("PRAGMA table_info(libraries)")
+        }
         watch_mode = "watch_mode" if "watch_mode" in columns else "'auto'"
-        safety_scan = "safety_scan_enabled" if "safety_scan_enabled" in columns else "watch_enabled"
+        safety_scan = (
+            "safety_scan_enabled"
+            if "safety_scan_enabled" in columns
+            else "watch_enabled"
+        )
         suffix = f" WHERE {where}" if where else ""
         return (
             "SELECT id,name,type,directory,watch_enabled,"
@@ -677,13 +683,28 @@ class LibraryStore:
         if current["type"] != "collection" and "directory" in values:
             directory = normalized_path(str(values["directory"]))
         watch_enabled = int(bool(values.get("watchEnabled", current["watchEnabled"])))
-        watch_mode = str(values.get("watchMode", current.get("watchMode", "auto")) or "auto").lower()
+        watch_mode = str(
+            values.get("watchMode", current.get("watchMode", "auto")) or "auto"
+        ).lower()
         if watch_mode not in {"auto", "native", "polling"}:
             raise ValueError("watchMode must be auto, native, or polling.")
-        safety_scan_enabled = int(bool(values.get("safetyScanEnabled", current.get("safetyScanEnabled", True))))
+        safety_scan_enabled = int(
+            bool(
+                values.get("safetyScanEnabled", current.get("safetyScanEnabled", True))
+            )
+        )
         self.db.execute(
             "UPDATE libraries SET name=?,directory=?,watch_enabled=?,watch_mode=?,safety_scan_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
-            (name, directory, watch_enabled, watch_mode, safety_scan_enabled, interval, now(), library_id),
+            (
+                name,
+                directory,
+                watch_enabled,
+                watch_mode,
+                safety_scan_enabled,
+                interval,
+                now(),
+                library_id,
+            ),
         )
         if current["type"] == "collection" and "sourceLibraryIds" in values:
             source_ids = list(dict.fromkeys(values["sourceLibraryIds"]))
@@ -4264,9 +4285,13 @@ class LibraryRuntime:
                             deadlines[target] = due
                     pending_deadlines = self._reconcile_deadlines.get(library_id, {})
                     if library_id in self._reconcile_full_scan:
-                        self._reconcile_due[library_id] = self._reconcile_full_deadline[library_id]
+                        self._reconcile_due[library_id] = self._reconcile_full_deadline[
+                            library_id
+                        ]
                     elif pending_deadlines:
-                        self._reconcile_due[library_id] = min(pending_deadlines.values())
+                        self._reconcile_due[library_id] = min(
+                            pending_deadlines.values()
+                        )
                     else:
                         self._reconcile_due.pop(library_id, None)
                 else:
@@ -4391,9 +4416,9 @@ class LibraryRuntime:
         with self.condition:
             targets = self._reconcile_targets.setdefault(library_id, set())
             deadlines = self._reconcile_deadlines.setdefault(library_id, {})
-            self._reconcile_event_counts[library_id] = (
-                self._reconcile_event_counts.get(library_id, 0) + max(1, len(paths))
-            )
+            self._reconcile_event_counts[library_id] = self._reconcile_event_counts.get(
+                library_id, 0
+            ) + max(1, len(paths))
             valid = 0
             for value in paths:
                 if not value:
@@ -4419,7 +4444,9 @@ class LibraryRuntime:
                 targets.clear()
                 deadlines.clear()
             if self._reconcile_full_scan.__contains__(library_id):
-                self._reconcile_due[library_id] = self._reconcile_full_deadline[library_id]
+                self._reconcile_due[library_id] = self._reconcile_full_deadline[
+                    library_id
+                ]
             elif deadlines:
                 self._reconcile_due[library_id] = min(deadlines.values())
             else:
@@ -4474,7 +4501,8 @@ class LibraryRuntime:
                         else:
                             deadlines = self._reconcile_deadlines.get(library_id, {})
                             targets = {
-                                target for target, target_deadline in deadlines.items()
+                                target
+                                for target, target_deadline in deadlines.items()
                                 if target_deadline <= now_monotonic
                             }
                             for target in targets:
@@ -4489,7 +4517,9 @@ class LibraryRuntime:
                         remaining = []
                         if library_id in self._reconcile_full_scan:
                             remaining.append(self._reconcile_full_deadline[library_id])
-                        remaining.extend(self._reconcile_deadlines.get(library_id, {}).values())
+                        remaining.extend(
+                            self._reconcile_deadlines.get(library_id, {}).values()
+                        )
                         if remaining:
                             self._reconcile_due[library_id] = min(remaining)
                         else:
@@ -4574,7 +4604,9 @@ class LibraryRuntime:
             with self.condition:
                 if library_id in self._reconcile_full_scan:
                     self._reconcile_full_deadline[library_id] = time.monotonic()
-                    self._reconcile_due[library_id] = self._reconcile_full_deadline[library_id]
+                    self._reconcile_due[library_id] = self._reconcile_full_deadline[
+                        library_id
+                    ]
                 elif self._reconcile_deadlines.get(library_id):
                     self._reconcile_due[library_id] = time.monotonic()
                 else:

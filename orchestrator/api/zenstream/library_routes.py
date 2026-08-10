@@ -38,6 +38,8 @@ store = LibraryStore()
 def _with_watcher_status(library: dict) -> dict:
     library["watcherStatus"] = runtime.watcher.status(library)
     return library
+
+
 credentials = MetadataCredentials()
 _admin_hydration: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "admin_catalog_hydration", default=None

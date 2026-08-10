@@ -50,7 +50,9 @@ export default function LibrariesPage() {
 	const [directory, setDirectory] = useState("");
 	const [sources, setSources] = useState<string[]>([]);
 	const [watch, setWatch] = useState(true);
-	const [watchMode, setWatchMode] = useState<"auto" | "native" | "polling">("auto");
+	const [watchMode, setWatchMode] = useState<"auto" | "native" | "polling">(
+		"auto",
+	);
 	const [safetyScan, setSafetyScan] = useState(true);
 	const [interval, setIntervalValue] = useState(1440);
 	const [message, setMessage] = useState("");
@@ -78,10 +80,10 @@ export default function LibrariesPage() {
 				type,
 				directory: type === "collection" ? null : directory,
 				sourceLibraryIds: type === "collection" ? sources : [],
-					watchEnabled: watch,
-					watchMode,
-					safetyScanEnabled: safetyScan,
-					scanIntervalMinutes: interval,
+				watchEnabled: watch,
+				watchMode,
+				safetyScanEnabled: safetyScan,
+				scanIntervalMinutes: interval,
 			}),
 		});
 		setMessage(
@@ -186,7 +188,8 @@ export default function LibrariesPage() {
 												: library.scanState === "scanning"
 													? "Scanning…"
 													: "Waiting for first scan"}{" "}
-										· {library.watcherStatus?.state === "active"
+										·{" "}
+										{library.watcherStatus?.state === "active"
 											? library.watcherStatus.backend === "polling"
 												? `polling (${library.watcherStatus.pollIntervalSeconds || 60}s)`
 												: "native watcher"

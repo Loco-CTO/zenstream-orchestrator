@@ -8,9 +8,9 @@ from app import library_watcher
 from app.library_watcher import (
     DirectorySnapshot,
     LibraryWatcherManager,
+    WatchStatus,
     _NativeHandler,
     _PollRegistration,
-    WatchStatus,
     choose_backend,
 )
 
@@ -24,32 +24,47 @@ class _Event:
 
 class BackendSelectionTest(unittest.TestCase):
     def test_explicit_mode_wins(self):
-        with patch.object(library_watcher, "_configured_backend", return_value="native"):
-            self.assertEqual(choose_backend("/media", "polling"), ("polling", "explicit"))
+        with patch.object(
+            library_watcher, "_configured_backend", return_value="native"
+        ):
+            self.assertEqual(
+                choose_backend("/media", "polling"), ("polling", "explicit")
+            )
 
     def test_remote_mounts_use_polling(self):
-        with patch.object(library_watcher, "_linux_mount_type", return_value="cifs"), patch.object(
-            library_watcher, "_in_container", return_value=False
+        with (
+            patch.object(library_watcher, "_linux_mount_type", return_value="cifs"),
+            patch.object(library_watcher, "_in_container", return_value=False),
         ):
-            self.assertEqual(choose_backend("/media", "auto"), ("polling", "filesystem_cifs"))
+            self.assertEqual(
+                choose_backend("/media", "auto"), ("polling", "filesystem_cifs")
+            )
 
     def test_unknown_container_mount_uses_polling(self):
-        with patch.object(library_watcher, "_linux_mount_type", return_value="fuse.grpcfuse"), patch.object(
-            library_watcher, "_in_container", return_value=True
+        with (
+            patch.object(
+                library_watcher, "_linux_mount_type", return_value="fuse.grpcfuse"
+            ),
+            patch.object(library_watcher, "_in_container", return_value=True),
         ):
             self.assertEqual(
                 choose_backend("/media", "auto"), ("polling", "unknown_container_mount")
             )
 
     def test_local_mount_uses_native(self):
-        with patch.object(library_watcher, "_linux_mount_type", return_value="ext4"), patch.object(
-            library_watcher, "_in_container", return_value=False
+        with (
+            patch.object(library_watcher, "_linux_mount_type", return_value="ext4"),
+            patch.object(library_watcher, "_in_container", return_value=False),
         ):
-            self.assertEqual(choose_backend("/media", "auto"), ("native", "local_filesystem"))
+            self.assertEqual(
+                choose_backend("/media", "auto"), ("native", "local_filesystem")
+            )
 
 
 class NativeHandlerTest(unittest.TestCase):
-    def test_directory_and_file_events_are_forwarded_but_directory_modify_is_ignored(self):
+    def test_directory_and_file_events_are_forwarded_but_directory_modify_is_ignored(
+        self,
+    ):
         manager = Mock()
         handler = _NativeHandler(manager, "library-1", Path("/media"))
 
@@ -59,7 +74,9 @@ class NativeHandlerTest(unittest.TestCase):
         handler.on_moved(_Event("/media/Old", "/media/New", is_directory=True))
 
         self.assertEqual(manager.emit.call_count, 3)
-        manager.emit.assert_any_call("library-1", Path("/media"), ("/media/Show",), full_scan=False)
+        manager.emit.assert_any_call(
+            "library-1", Path("/media"), ("/media/Show",), full_scan=False
+        )
         manager.emit.assert_any_call(
             "library-1", Path("/media"), ("/media/Old", "/media/New"), full_scan=False
         )

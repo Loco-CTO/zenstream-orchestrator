@@ -447,6 +447,14 @@ class MetadataServicesTest(unittest.TestCase):
                         "title": "Cached Movie",
                         "overview": "Cached overview",
                         "description": "Cached description",
+                        "trailers": [
+                            {
+                                "url": "https://www.youtube.com/watch?v=cached-trailer",
+                                "site": "YouTube",
+                                "key": "cached-trailer",
+                                "language": "en",
+                            }
+                        ],
                         "images": [
                             {
                                 "type": "Primary",
@@ -464,7 +472,11 @@ class MetadataServicesTest(unittest.TestCase):
                 self.assertEqual(value["title"], "Cached Movie")
                 self.assertEqual(value["overview"], "Cached overview")
                 self.assertEqual(value["description"], "Cached description")
-                self.assertEqual(value["_catalogItemProjectionSchema"], 1)
+                self.assertEqual(
+                    value["trailers"][0]["url"],
+                    "https://www.youtube.com/watch?v=cached-trailer",
+                )
+                self.assertEqual(value["_catalogItemProjectionSchema"], 2)
                 self.assertRegex(
                     value["images"]["Primary"]["url"],
                     r"^/api/catalog/items/movie/images/Primary\?language=en&v=[0-9a-f]{12}$",

@@ -1372,6 +1372,7 @@ class CatalogTest(unittest.TestCase):
 
         self.assertEqual(metadata["title"], "Japanese")
         self.assertEqual(metadata["overview"], "English overview")
+        self.assertEqual(metadata["trailers"][0]["url"], "https://youtube.com/ja")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
     def test_projection_with_language_code_overview_falls_back_to_metadata_cache(

@@ -128,6 +128,15 @@ def _metadata_document_gaps(
             projection = {}
         if not projection_rows:
             gaps.add("projection")
+        # A season can have its provider identity and episode children while
+        # the season details request was interrupted (or returned a partial
+        # response).  Do not treat the synthesized catalog label ("Season N")
+        # as a provider title: the missing-metadata job must retry the
+        # provider document so a localized season name can be materialized.
+        if provider == "tvdb" and entity_type == "season" and not _usable_metadata_value(
+            document.get("title")
+        ):
+            gaps.add("metadata:title")
         for field in projected_fields:
             source_value = document.get(field)
             if (
@@ -828,10 +837,21 @@ class MetadataMissingJob:
                     cached,
                 )
                 if gaps:
-                    ingest.ingest_document(
-                        provider, entity_type, provider_id, locale, cached
-                    )
-                    worked_locales.add(locale)
+                    # A cache hit is normally replayed locally.  A missing
+                    # provider title is different: replaying the same
+                    # normalized document can never repair it, so request a
+                    # fresh localized document instead.
+                    if (
+                        provider == "tvdb"
+                        and entity_type == "season"
+                        and not _usable_metadata_value(cached.get("title"))
+                    ):
+                        fetch_locales.append(locale)
+                    else:
+                        ingest.ingest_document(
+                            provider, entity_type, provider_id, locale, cached
+                        )
+                        worked_locales.add(locale)
             if fetch_locales:
                 try:
                     fetched = ingest.ingest_locales(

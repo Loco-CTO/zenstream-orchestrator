@@ -43,6 +43,7 @@ type Job = {
 	lastRunAt?: string | null;
 	lastState: string;
 	lastMessage?: string | null;
+	config?: Record<string, unknown>;
 	recentRuns: Run[];
 };
 
@@ -115,6 +116,7 @@ export default function JobsPage() {
 			body: JSON.stringify({
 				intervalMinutes: selected.intervalMinutes,
 				enabled: selected.enabled,
+				config: selected.config || {},
 			}),
 		});
 		setMessage(
@@ -276,6 +278,39 @@ export default function JobsPage() {
 								}
 							/>
 						</label>
+						{selected.kind === "metadata_refresh" && (
+							<div className="mt-5 rounded-xl border console-divider p-3">
+								<label className="flex items-start justify-between gap-4 text-sm">
+									<span>
+										<span className="block console-muted">
+											Preserve cached artwork and portraits
+										</span>
+										<span className="mt-1 block text-xs leading-5 console-muted">
+											Reuse valid files during metadata refreshes; missing or changed assets are still downloaded.
+										</span>
+									</span>
+									<input
+										type="checkbox"
+										checked={Boolean(selected.config?.preserveCachedAssets)}
+										onChange={(event) =>
+											setJobs((current) =>
+												current.map((job) =>
+													job.id === selected.id
+														? {
+																...job,
+																config: {
+																	...(job.config || {}),
+																	preserveCachedAssets: event.target.checked,
+																},
+																}
+														: job,
+												),
+											)
+										}
+									/>
+								</label>
+							</div>
+						)}
 						<div className="mt-6 grid grid-cols-2 gap-2">
 							<button
 								onClick={save}

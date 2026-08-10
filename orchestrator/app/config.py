@@ -5,8 +5,7 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 
 from .database import DatabaseHandler
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+from .paths import PROJECT_ROOT, metadata_directory
 
 
 class Config:
@@ -50,8 +49,8 @@ class Config:
 
     def create_database(self):
         """Create the database handler."""
-        database_directory = PROJECT_ROOT / "sqlite"
-        database_directory.mkdir(exist_ok=True)
+        database_directory = metadata_directory()
+        database_directory.mkdir(parents=True, exist_ok=True)
         database_file = database_directory / "orchestrator.db"
         self._database = DatabaseHandler(
             db_type="sqlite",

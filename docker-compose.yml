@@ -14,14 +14,17 @@ services:
       MAX_TRANSCODES: "${MAX_TRANSCODES:-0}"
       MAX_TRANSCODES_PER_USER: "${MAX_TRANSCODES_PER_USER:-0}"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}"
+      # The host METADATA_PATH is mounted here; application paths must use the
+      # writable in-container destination rather than the host source path.
+      METADATA_PATH: /app/sqlite
       ORCHESTRATOR_HOST: 0.0.0.0
       ORCHESTRATOR_PORT: 9088
     volumes:
       # Media is mounted read-only. Set LIBRARY_PATH to an existing host
       # directory; the administrator dashboard should use /media (or a child).
       - "${LIBRARY_PATH:?Set LIBRARY_PATH}:/media:ro"
-      # This holds SQLite plus all generated metadata, artwork, and trickplay
-      # caches. Keep it separate from the media library and do not make it read-only.
+      # This holds SQLite, rotating logs, and all generated metadata, artwork,
+      # and trickplay caches. Keep it separate from the media library and writable.
       - "${METADATA_PATH:-./metadata}:/app/sqlite"
     restart: unless-stopped
     read_only: true

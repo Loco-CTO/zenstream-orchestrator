@@ -4,7 +4,8 @@ import logging
 import os
 import re
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
+
+from app.paths import metadata_directory
 
 _configured = False
 _lock = __import__("threading").Lock()
@@ -51,10 +52,10 @@ def configure_logging() -> None:
         console.setFormatter(formatter)
         console.setLevel(level)
         root.addHandler(console)
-        log_dir = Path(__file__).resolve().parents[2] / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
+        log_directory = metadata_directory() / "logs"
+        log_directory.mkdir(parents=True, exist_ok=True)
         file_handler = RotatingFileHandler(
-            log_dir / "orchestrator.log",
+            log_directory / "orchestrator.log",
             maxBytes=10 * 1024 * 1024,
             backupCount=5,
             encoding="utf-8",

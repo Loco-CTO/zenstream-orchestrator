@@ -35,6 +35,12 @@ class DockerLayoutTest(unittest.TestCase):
         self.assertIn("${ORCHESTRATOR_PORT:-9088}:9088", compose)
         self.assertIn("ORCHESTRATOR_PORT: 9088", compose)
 
+    def test_container_maps_the_configured_metadata_root_to_the_writable_path(self):
+        compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+        self.assertIn("METADATA_PATH: /app/sqlite", compose)
+        self.assertIn('${METADATA_PATH:-./metadata}:/app/sqlite', compose)
+
     def test_docker_context_keeps_dashboard_assets(self):
         dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
         dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")

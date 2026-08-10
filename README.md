@@ -33,8 +33,9 @@ Docker Compose uses two separate persistent mounts:
 
 - `LIBRARY_PATH` is your media directory, mounted read-only in the container at
   `/media`.
-- `METADATA_PATH` holds the SQLite database and generated metadata, artwork,
-  people, and trickplay caches. It is mounted at `/app/sqlite`.
+- `METADATA_PATH` holds the SQLite database, rotating logs, and generated
+  metadata, artwork, people, and trickplay caches. It is mounted at
+  `/app/sqlite`; native runs use the configured path directly.
 
 These are host bind mounts, so you can use an existing directory on the host;
 no Docker named volume is required. Docker calls this a volume mount, but the

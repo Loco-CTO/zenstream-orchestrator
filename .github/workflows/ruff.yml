@@ -32,13 +32,13 @@ jobs:
           fetch-depth: 0
 
       - name: Apply Ruff lint fixes
-        uses: astral-sh/ruff-action@v4
+        uses: astral-sh/ruff-action@v3
         with:
           version: "0.16.0"
           args: check --fix-only
 
       - name: Format Python
-        uses: astral-sh/ruff-action@v4
+        uses: astral-sh/ruff-action@v3
         with:
           version: "0.16.0"
           args: format

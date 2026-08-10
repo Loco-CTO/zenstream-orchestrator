@@ -1,0 +1,60 @@
+name: Ruff auto-fix
+
+"on":
+  push:
+    branches:
+      - "**"
+    paths:
+      - "**/*.py"
+      - "**/*.pyi"
+      - "pyproject.toml"
+      - "ruff.toml"
+      - ".ruff.toml"
+      - ".github/workflows/ruff.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ruff-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Apply Ruff lint fixes
+        uses: astral-sh/ruff-action@v4
+        with:
+          version: "0.16.0"
+          args: check --fix-only
+
+      - name: Format Python
+        uses: astral-sh/ruff-action@v4
+        with:
+          version: "0.16.0"
+          args: format
+
+      - name: Commit Ruff changes
+        shell: bash
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- '*.py' '*.pyi'; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- '*.py' '*.pyi'
+          git commit -m 'style: apply Ruff fixes and formatting'
+          git pull --rebase origin "$BRANCH"
+          git push origin "HEAD:$BRANCH"

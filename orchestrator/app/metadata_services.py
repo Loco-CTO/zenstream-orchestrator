@@ -349,8 +349,10 @@ class MetadataSearchProjection:
                         )
                     ]
                     trailer_reader = MetadataReadService(self.db)
-                    trailer_payloads = trailer_reader.payloads(
-                        entity_type, provider_ids
+                    trailer_payloads = (
+                        trailer_reader.payloads(entity_type, provider_ids)
+                        if "metadata_cache" in tables
+                        else {}
                     )
                     trailer_payloads[(provider, locale)] = payload
                     trailer_original = next(

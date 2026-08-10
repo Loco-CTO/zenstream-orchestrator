@@ -36,6 +36,10 @@ Docker Compose uses two separate persistent mounts:
 - `METADATA_PATH` holds the SQLite database, rotating logs, and generated
   metadata, artwork, people, and trickplay caches. It is mounted at
   `/app/sqlite`; native runs use the configured path directly.
+- Library watching automatically uses native events on local filesystems and a
+  bounded polling snapshot on Docker Desktop, shared, and network filesystems.
+  Polling defaults to 60 seconds; override it with `LIBRARY_WATCH_POLL_SECONDS`
+  or force a backend with `LIBRARY_WATCH_BACKEND=auto|native|polling`.
 
 These are host bind mounts, so you can use an existing directory on the host;
 no Docker named volume is required. Docker calls this a volume mount, but the
@@ -68,6 +72,10 @@ The image includes `ffmpeg` and `ffprobe`, so host media tools are not required.
    printed in the first container startup logs, and add a physical library with
    directory `/media` (or a subdirectory such as `/media/Movies`). Do not enter
    the Windows host path in the dashboard.
+
+   Docker Desktop commonly cannot forward Windows filesystem notifications into
+   a Linux container. Leave the watcher backend set to `auto` so ZenStream uses
+   polling for that mount. The dashboard shows the active backend and health.
 
 ### Linux
 

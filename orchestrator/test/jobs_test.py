@@ -377,10 +377,14 @@ class MetadataMissingInspectionTest(unittest.TestCase):
 
         class Cache:
             def get(self, _provider, entity_type, _provider_id, _locale):
-                return cached if entity_type == "season" else {
-                    "title": "Example",
-                    "images": [],
-                }
+                return (
+                    cached
+                    if entity_type == "season"
+                    else {
+                        "title": "Example",
+                        "images": [],
+                    }
+                )
 
         class Ingest:
             metadata_service = type("MetadataService", (), {"cache": Cache()})()
@@ -391,7 +395,9 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             def locales(self):
                 return ["en"]
 
-            def ingest_locales(self, provider, entity_type, provider_id, locales, **_kwargs):
+            def ingest_locales(
+                self, provider, entity_type, provider_id, locales, **_kwargs
+            ):
                 self.fetches.append((provider, entity_type, provider_id, locales))
                 return {"en": fetched}
 

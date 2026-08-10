@@ -133,8 +133,10 @@ def _metadata_document_gaps(
         # response).  Do not treat the synthesized catalog label ("Season N")
         # as a provider title: the missing-metadata job must retry the
         # provider document so a localized season name can be materialized.
-        if provider == "tvdb" and entity_type == "season" and not _usable_metadata_value(
-            document.get("title")
+        if (
+            provider == "tvdb"
+            and entity_type == "season"
+            and not _usable_metadata_value(document.get("title"))
         ):
             gaps.add("metadata:title")
         for field in projected_fields:

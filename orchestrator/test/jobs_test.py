@@ -136,6 +136,29 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertIn("projection-artwork:Backdrop", gaps)
         self.assertNotIn("artwork:Primary", gaps)
 
+    def test_detects_missing_provider_title_for_a_season(self):
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('season-1','library-1','season')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('season-1','tvdb','season','1726050',1)"
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("season-1", "en", json.dumps({"title": "Season 1", "images": {}})),
+        )
+
+        gaps, _linked = _metadata_document_gaps(
+            self.db,
+            "tvdb",
+            "season",
+            "1726050",
+            "en",
+            {"title": None, "seasonNumber": 1, "images": [], "children": []},
+        )
+
+        self.assertIn("metadata:title", gaps)
+
     def test_detects_projection_missing_a_cached_artwork_blurhash(self):
         self.db.execute("ALTER TABLE metadata_images ADD COLUMN blur_hash TEXT")
         primary_path = self._ready_file("primary-hash.webp")
@@ -332,6 +355,66 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         ingest.ingest_document.assert_not_called()
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 0", store.updates[-1]["message"])
+
+    def test_job_refetches_a_cached_season_without_a_provider_title(self):
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('season-1','library-1','season')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('season-1','tvdb','season','1726050',1)"
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("season-1", "en", json.dumps({"title": "Season 1", "images": {}})),
+        )
+        cached = {"title": None, "seasonNumber": 1, "images": [], "children": []}
+        fetched = {
+            "title": "邂逅 (Kaikō / Kaikou)",
+            "seasonNumber": 1,
+            "images": [],
+            "children": [],
+        }
+
+        class Cache:
+            def get(self, _provider, entity_type, _provider_id, _locale):
+                return cached if entity_type == "season" else {
+                    "title": "Example",
+                    "images": [],
+                }
+
+        class Ingest:
+            metadata_service = type("MetadataService", (), {"cache": Cache()})()
+
+            def __init__(self):
+                self.fetches = []
+
+            def locales(self):
+                return ["en"]
+
+            def ingest_locales(self, provider, entity_type, provider_id, locales, **_kwargs):
+                self.fetches.append((provider, entity_type, provider_id, locales))
+                return {"en": fetched}
+
+            def ingest_document(self, *_args, **_kwargs):
+                return None
+
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=ingest):
+            MetadataMissingJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        self.assertEqual(ingest.fetches, [("tvdb", "season", "1726050", ["en"])])
 
     def test_job_completes_when_metadata_is_legitimately_unavailable(self):
         class Cache:

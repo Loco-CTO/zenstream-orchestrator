@@ -20,6 +20,16 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+      - name: Apply Ruff lint fixes
+        uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.16.0"
+          args: check --fix-only
+      - name: Format Python
+        uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.16.0"
+          args: format
       - name: Update tracked counter
         id: counter
         shell: bash
@@ -36,7 +46,7 @@ jobs:
             fi
           fi
           printf '{\n  "main": %s\n}\n' "$count" > .main-version.json
-          if git diff --quiet -- .main-version.json; then
+          if git diff --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -46,6 +56,6 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .main-version.json
+          git add --update
           git commit -m "chore: update main version counter"
           git push origin HEAD:main

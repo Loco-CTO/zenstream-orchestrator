@@ -58,11 +58,10 @@ jobs:
         with:
           version: 11.10.0
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
+          package-manager-cache: false
       - name: Install dashboard dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile

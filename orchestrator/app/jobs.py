@@ -526,6 +526,14 @@ class JobStore:
             {"libraryId": library["id"]},
             library.get("safetyScanEnabled", True),
         )
+        # The persistent daily safety scan is intentionally independent from
+        # the immediate filesystem watcher.  Existing definitions must follow
+        # the library setting too; ``ensure`` only creates missing rows.
+        desired_enabled = int(bool(library.get("safetyScanEnabled", True)))
+        if int(definition.get("enabled", 1)) != desired_enabled:
+            definition = self.update_definition(
+                definition["id"], {"enabled": bool(desired_enabled)}
+            )
         # Repair older definitions whose config was lost by the former row mapper,
         # while preserving task-level interval and enabled settings.
         self.db.execute(
@@ -1123,6 +1131,7 @@ class JobScheduler:
         definition = self.store.ensure_library(library)
         values = {
             "intervalMinutes": library.get("scanIntervalMinutes"),
+            "enabled": bool(library.get("safetyScanEnabled", True)),
             "config": {"libraryId": library["id"]},
         }
         return self.store.update_definition(definition["id"], values)

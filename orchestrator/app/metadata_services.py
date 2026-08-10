@@ -930,7 +930,12 @@ class MetadataReadService:
             for trailer in payload.get("trailers", []) or []:
                 if not isinstance(trailer, dict) or not trailer.get("url"):
                     continue
-                trailer_language = trailer.get("language") or locale
+                trailer_language = trailer.get("language")
+                if not trailer_language:
+                    # A language-neutral video is not eligible for localized
+                    # trailer fallback.  It must never inherit the cache
+                    # document locale or become an arbitrary-language match.
+                    continue
                 rank = 99
                 for index, tier in enumerate(tiers):
                     trailer_tag = str(trailer_language).lower()

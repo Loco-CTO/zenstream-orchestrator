@@ -115,7 +115,9 @@ export default function LibrariesPage() {
 	}
 	async function updateSettings(
 		library: Library,
-		values: Partial<Pick<Library, "watchEnabled" | "watchMode" | "safetyScanEnabled">>,
+		values: Partial<
+			Pick<Library, "watchEnabled" | "watchMode" | "safetyScanEnabled">
+		>,
 	) {
 		if (!session) return;
 		const response = await adminFetch(
@@ -127,7 +129,11 @@ export default function LibrariesPage() {
 				body: JSON.stringify(values),
 			},
 		);
-		setMessage(response.ok ? "Library watcher settings updated." : "Could not update library settings.");
+		setMessage(
+			response.ok
+				? "Library watcher settings updated."
+				: "Could not update library settings.",
+		);
 		if (response.ok) load();
 	}
 	async function remove(library: Library) {
@@ -189,7 +195,7 @@ export default function LibrariesPage() {
 								<span className="rounded-lg bg-[#aeb9ff]/10 p-2.5 text-[#aeb9ff]">
 									<IconFolder size={18} />
 								</span>
-							<div className="min-w-0">
+								<div className="min-w-0">
 									<p className="font-medium">{library.name}</p>
 									<p className="mt-1 truncate text-xs console-muted">
 										{labels[library.type]}{" "}
@@ -232,9 +238,9 @@ export default function LibrariesPage() {
 												value={library.watchMode}
 												onChange={(event) =>
 													void updateSettings(library, {
-															watchMode: event.target.value as Library["watchMode"],
-														})
-													}
+														watchMode: event.target.value as Library["watchMode"],
+													})
+												}
 												className="console-input h-8 rounded-md px-2"
 												aria-label="Watcher backend"
 											>

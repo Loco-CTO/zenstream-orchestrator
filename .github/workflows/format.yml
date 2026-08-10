@@ -1,4 +1,4 @@
-name: Ruff auto-fix
+name: Auto formatting
 
 "on":
   push:
@@ -11,6 +11,18 @@ name: Ruff auto-fix
       - "ruff.toml"
       - ".ruff.toml"
       - ".github/workflows/ruff.yml"
+      - "frontend/**/*.ts"
+      - "frontend/**/*.tsx"
+      - "frontend/**/*.js"
+      - "frontend/**/*.mjs"
+      - "frontend/**/*.json"
+      - "frontend/**/*.css"
+      - "frontend/**/*.md"
+      - "frontend/package.json"
+      - "frontend/pnpm-lock.yaml"
+      - "frontend/.prettierrc"
+      - "frontend/.prettierignore"
+      - "frontend/eslint.config.mjs"
 permissions:
   contents: write
 
@@ -41,6 +53,26 @@ jobs:
           version: "0.16.0"
           args: format
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install dashboard dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Apply dashboard ESLint fixes
+        working-directory: frontend
+        run: pnpm lint:fix
+      - name: Format dashboard files
+        working-directory: frontend
+        run: pnpm format
+
       - name: Commit Ruff changes
         shell: bash
         env:
@@ -53,6 +85,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add --update
-          git commit -m 'style: apply Ruff fixes and formatting'
+          git commit -m 'style: apply backend and dashboard formatting'
           git pull --rebase origin "$BRANCH"
           git push origin "HEAD:$BRANCH"

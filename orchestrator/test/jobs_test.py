@@ -489,6 +489,47 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertEqual(final_update["state"], "failed")
         self.assertIn("1 repair errors", final_update["error"])
 
+    def test_forced_refresh_passes_asset_preservation_through_to_ingest(self):
+        class Cache:
+            def get(self, *_args):
+                return None
+
+        class Ingest:
+            metadata_service = type("MetadataService", (), {"cache": Cache()})()
+
+            def __init__(self):
+                self.kwargs = None
+
+            def locales(self):
+                return ["en"]
+
+            def ingest_locales(self, *_args, **kwargs):
+                self.kwargs = kwargs
+                return {"en": {"title": "Example", "images": []}}
+
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=ingest):
+            MetadataMissingJob(store).run(
+                "run-1",
+                {"config": {"batchSize": 1}},
+                force=True,
+                force_assets=False,
+            )
+
+        self.assertEqual(ingest.kwargs, {"force": True, "force_assets": False})
+
 
 class MissingTvChildIdentityRepairTest(unittest.TestCase):
     def setUp(self):

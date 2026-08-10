@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: main-version
+  group: branch-writes-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

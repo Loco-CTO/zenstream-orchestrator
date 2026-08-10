@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: ruff-${{ github.ref }}
+  group: branch-writes-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

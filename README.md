@@ -41,9 +41,9 @@ Python, Node.js, Docker, and host media tools are not required. The launcher:
 
 - starts the API and dashboard together at `http://127.0.0.1:9088`;
 - stores configuration at
-  `%APPDATA%\ZenStream Orchestrator\launcher-config.json`, protects
+  `%APPDATA%\zenstream-orchestrator-launcher\launcher-config.json`, protects
   `SECRET_KEY` with Windows secure storage, and prepares the versioned launcher
-  venv beneath `%APPDATA%\ZenStream Orchestrator\runtime`;
+  venv beneath `%APPDATA%\zenstream-orchestrator-launcher\runtime`;
 - stores SQLite and generated caches beneath
   `%LOCALAPPDATA%\ZenStream Orchestrator\metadata` by default;
 - shows live backend output and opens the persistent rotating log directory;
@@ -144,7 +144,8 @@ From a Windows x64 PowerShell prompt with Node.js and Python 3.14 available:
 
 The build verifies and stages the pinned FFmpeg binaries, exports the dashboard,
 stages the backend source with its isolated Python environment, runs launcher
-tests, and writes the
+tests, serializes packaging to prevent overlapping release writers, validates
+the packaged Electron archive, and writes the
 NSIS installer, portable executable, and `SHA256SUMS.txt` beneath
 `launcher/release/`. Generated FFmpeg binaries, Python build directories, and
 release outputs are intentionally untracked.

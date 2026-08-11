@@ -19,6 +19,8 @@ executable with `requirements.txt` installed, build `frontend/` once, and run
 source/virtual-environment and installer pipeline. Do not commit generated files
 beneath `assets/ffmpeg/windows`,
 `dist/`, `.build/`, or `launcher/release/`.
+Windows packaging is serialized by `scripts/pack-windows.ps1`; never bypass its
+lock or publish artifacts unless `scripts/validate-electron-package.mjs` passes.
 
 ## 📜 Using the Swagger API
 

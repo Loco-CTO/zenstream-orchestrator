@@ -135,9 +135,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Launcher dependency installation failed." }
     & npm.cmd test
     if ($LASTEXITCODE -ne 0) { throw "Launcher tests failed." }
-    & npm.cmd run build
-    if ($LASTEXITCODE -ne 0) { throw "Launcher build failed." }
-    if (-not $SkipInstaller) {
+    if ($SkipInstaller) {
+        & npm.cmd run build
+        if ($LASTEXITCODE -ne 0) { throw "Launcher build failed." }
+    }
+    else {
         & npm.cmd run pack:windows
         if ($LASTEXITCODE -ne 0) { throw "Windows installer packaging failed." }
         $releaseRoot = Join-Path $projectRoot "launcher\release"

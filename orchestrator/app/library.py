@@ -4264,9 +4264,7 @@ class LibraryRuntime:
         updates: list[tuple[str, str, str, int | None, str | None, str, int]] = []
         new_dirs: list[tuple[str, str]] = []
         known_paths = set(known_media)
-        known_top_roots = {
-            row[4] for row in directory_rows if row[4]
-        }
+        known_top_roots = {row[4] for row in directory_rows if row[4]}
         known_top_roots.update(
             Path(row[0]).parts[0]
             for row in self.store.db.execute(
@@ -4275,7 +4273,13 @@ class LibraryRuntime:
             )
             if Path(row[0]).parts
         )
-        for relative_path, old_mtime, old_signature, complete, top_level_root in directory_rows:
+        for (
+            relative_path,
+            old_mtime,
+            old_signature,
+            complete,
+            top_level_root,
+        ) in directory_rows:
             directory = root / relative_path if relative_path else root
             try:
                 info = directory.stat()
@@ -4293,13 +4297,25 @@ class LibraryRuntime:
                         entry_info = entry.stat()
                         kind = "d" if entry.is_dir() else "f"
                         entry_relative = "/".join(entry.relative_to(root).parts)
-                        entries.append((entry.name, kind, entry_info.st_size, getattr(entry_info, "st_mtime_ns", 0)))
-                        if kind == "f" and entry_relative not in known_paths:
-                            changed.add(entry_relative.split("/", 1)[0])
-                        elif kind == "d" and entry_relative.split("/", 1)[0] not in known_top_roots:
+                        entries.append(
+                            (
+                                entry.name,
+                                kind,
+                                entry_info.st_size,
+                                getattr(entry_info, "st_mtime_ns", 0),
+                            )
+                        )
+                        if (
+                            kind == "f"
+                            and entry_relative not in known_paths
+                            or kind == "d"
+                            and entry_relative.split("/", 1)[0] not in known_top_roots
+                        ):
                             changed.add(entry_relative.split("/", 1)[0])
                         if kind == "d":
-                            new_dirs.append((entry_relative, entry_relative.split("/", 1)[0]))
+                            new_dirs.append(
+                                (entry_relative, entry_relative.split("/", 1)[0])
+                            )
                     except OSError:
                         continue
             except OSError:
@@ -4307,12 +4323,26 @@ class LibraryRuntime:
             signature = json.dumps(sorted(entries), separators=(",", ":"))
             if complete and old_signature != signature:
                 changed.add(top_level_root or "")
-            updates.append((library_id, relative_path, top_level_root or (relative_path.split("/", 1)[0] if relative_path else ""), mtime, signature, _now_iso(), 1))
+            updates.append(
+                (
+                    library_id,
+                    relative_path,
+                    top_level_root
+                    or (relative_path.split("/", 1)[0] if relative_path else ""),
+                    mtime,
+                    signature,
+                    _now_iso(),
+                    1,
+                )
+            )
         for relative_path, (old_size, old_mtime) in known_media.items():
             path = root / relative_path
             try:
                 info = path.stat()
-                if info.st_size != old_size or getattr(info, "st_mtime_ns", 0) != old_mtime:
+                if (
+                    info.st_size != old_size
+                    or getattr(info, "st_mtime_ns", 0) != old_mtime
+                ):
                     changed.add(relative_path.split("/", 1)[0])
             except OSError:
                 changed.add(relative_path.split("/", 1)[0])
@@ -4331,7 +4361,9 @@ class LibraryRuntime:
                 "INSERT INTO library_watch_state(library_id,generation,last_complete_at) VALUES(?,?,?) ON CONFLICT(library_id) DO UPDATE SET generation=generation+1,last_complete_at=excluded.last_complete_at",
                 (library_id, 1, _now_iso()),
             )
-        return tuple(str(root / target) if target else str(root) for target in sorted(changed))
+        return tuple(
+            str(root / target) if target else str(root) for target in sorted(changed)
+        )
 
     def _ensure_reconcile_state(self) -> None:
         if not hasattr(self, "_reconcile_full_scan"):
@@ -4368,7 +4400,9 @@ class LibraryRuntime:
         with self.condition:
             for library_id, target in rows:
                 self._reconcile_targets.setdefault(library_id, set()).add(target)
-                self._reconcile_deadlines.setdefault(library_id, {})[target] = time.monotonic()
+                self._reconcile_deadlines.setdefault(library_id, {})[target] = (
+                    time.monotonic()
+                )
                 self._reconcile_due[library_id] = time.monotonic()
 
     def stop(self):
@@ -4672,7 +4706,9 @@ class LibraryRuntime:
                         due_jobs.append((library_id, targets, full_scan))
                 for library_id, targets, full_scan in due_jobs:
                     if targets and not full_scan:
-                        self._persist_pending_roots(library_id, targets, "filesystem_change")
+                        self._persist_pending_roots(
+                            library_id, targets, "filesystem_change"
+                        )
                     self.enqueue(library_id, "reconcile", targets, full_scan=full_scan)
                 rows = self.store.db.execute(
                     "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
@@ -4710,7 +4746,9 @@ class LibraryRuntime:
                 with self.condition:
                     self.condition.wait(timeout=1)
 
-    def _persist_pending_roots(self, library_id: str, targets: set[str], reason: str) -> None:
+    def _persist_pending_roots(
+        self, library_id: str, targets: set[str], reason: str
+    ) -> None:
         timestamp = now()
         try:
             with self.store.db.transaction() as cursor:
@@ -4720,7 +4758,9 @@ class LibraryRuntime:
                         (library_id, target, timestamp, timestamp, reason),
                     )
         except Exception:
-            logger.exception("library_watch_pending_persist_failed library_id=%s", library_id)
+            logger.exception(
+                "library_watch_pending_persist_failed library_id=%s", library_id
+            )
 
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
         self._ensure_reconcile_state()

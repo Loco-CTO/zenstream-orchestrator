@@ -1158,7 +1158,10 @@ class JobScheduler:
             library_id = (definition.get("config") or {}).get("libraryId")
             if definition["kind"] == "library_delta_verify":
                 self.library_runtime.request_delta_verification(library_id)
-                job = {"state": "queued", "message": "Library change verification queued"}
+                job = {
+                    "state": "queued",
+                    "message": "Library change verification queued",
+                }
             else:
                 job = self.library_runtime.enqueue(library_id, "scan")
             self.store.db.execute(
@@ -1294,7 +1297,9 @@ class JobScheduler:
                         self.library_runtime.request_delta_verification(library_id)
                     else:
                         self.library_runtime.enqueue(library_id, "scan")
-                self.store.mark_scheduled(definition["id"], None, "Library change verification queued")
+                self.store.mark_scheduled(
+                    definition["id"], None, "Library change verification queued"
+                )
             else:
                 run, created = self.store.create_or_get_active_run(definition)
                 if not created:

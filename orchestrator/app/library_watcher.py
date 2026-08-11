@@ -1,15 +1,16 @@
 """Cross-platform native library monitoring and bounded delta verification."""
+
 from __future__ import annotations
 
 import ctypes
 import os
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -39,7 +40,9 @@ def _configured_backend() -> str:
 
 
 def _delta_interval() -> float:
-    value = os.getenv("LIBRARY_WATCH_DELTA_SECONDS", os.getenv("LIBRARY_WATCH_POLL_SECONDS", "60"))
+    value = os.getenv(
+        "LIBRARY_WATCH_DELTA_SECONDS", os.getenv("LIBRARY_WATCH_POLL_SECONDS", "60")
+    )
     try:
         value = float(value)
     except (TypeError, ValueError):
@@ -76,7 +79,9 @@ def choose_backend(path: str | Path, requested: str = "auto") -> tuple[str, str]
     override = _configured_backend()
     if override != "auto":
         return override, "environment_override"
-    return "native", "native_first_remote" if _windows_remote_drive(Path(path)) else "native_first"
+    return "native", "native_first_remote" if _windows_remote_drive(
+        Path(path)
+    ) else "native_first"
 
 
 @dataclass
@@ -134,7 +139,7 @@ class _Registration:
 
 
 class _NativeHandler(FileSystemEventHandler):
-    def __init__(self, manager: "LibraryWatcherManager", library_id: str, root: Path):
+    def __init__(self, manager: LibraryWatcherManager, library_id: str, root: Path):
         self.manager, self.library_id, self.root = manager, library_id, root
 
     def _emit(self, *paths: str | None) -> None:
@@ -199,7 +204,11 @@ class LibraryWatcherManager:
         ).payload()
 
     def configure(self, libraries: list[dict]) -> None:
-        desired = {x["id"]: x for x in libraries if x.get("type") != "collection" and x.get("directory")}
+        desired = {
+            x["id"]: x
+            for x in libraries
+            if x.get("type") != "collection" and x.get("directory")
+        }
         with self._lock:
             existing_ids = set(self._registrations)
         for library_id in existing_ids - set(desired):
@@ -210,22 +219,34 @@ class LibraryWatcherManager:
                 with self._lock:
                     self._statuses[library_id] = WatchStatus(
                         requested_mode=library.get("watchMode", "auto"),
-                        state="disabled", capability="disabled", reason="watch_disabled",
+                        state="disabled",
+                        capability="disabled",
+                        reason="watch_disabled",
                         delta_interval_seconds=self.delta_interval,
                     )
                 continue
             root = Path(library["directory"])
             with self._lock:
                 current = self._registrations.get(library_id)
-                same = current and current.root == root and current.status.requested_mode == library.get("watchMode", "auto")
+                same = (
+                    current
+                    and current.root == root
+                    and current.status.requested_mode
+                    == library.get("watchMode", "auto")
+                )
             if not same:
                 self._unregister(library_id)
                 self._register(library)
         with self._lock:
             if self._registrations and self._thread is None:
                 self._stop.clear()
-                self._executor = ThreadPoolExecutor(max_workers=MAX_DELTA_WORKERS, thread_name_prefix="zenstream-library-delta")
-                self._thread = threading.Thread(target=self._loop, name="zenstream-library-watcher", daemon=True)
+                self._executor = ThreadPoolExecutor(
+                    max_workers=MAX_DELTA_WORKERS,
+                    thread_name_prefix="zenstream-library-delta",
+                )
+                self._thread = threading.Thread(
+                    target=self._loop, name="zenstream-library-watcher", daemon=True
+                )
                 self._thread.start()
 
     def stop(self) -> None:
@@ -248,7 +269,11 @@ class LibraryWatcherManager:
             return
         self._last_health_check = now
         with self._lock:
-            dead = [r for r in self._registrations.values() if r.observer is not None and not r.observer.is_alive()]
+            dead = [
+                r
+                for r in self._registrations.values()
+                if r.observer is not None and not r.observer.is_alive()
+            ]
         for registration in dead:
             self._stop_observer(registration)
             with self._lock:
@@ -259,10 +284,23 @@ class LibraryWatcherManager:
                 status.capability = "degraded"
                 status.reason = "native_observer_stopped"
                 status.last_error_code = "native_observer_stopped"
-                registration.next_delta = time.monotonic() + RESTART_BACKOFF_SECONDS[min(status.restart_count - 1, 3)]
-            logger.warning("library_watcher_degraded library_id=%s reason=native_observer_stopped", registration.library_id)
+                registration.next_delta = (
+                    time.monotonic()
+                    + RESTART_BACKOFF_SECONDS[min(status.restart_count - 1, 3)]
+                )
+            logger.warning(
+                "library_watcher_degraded library_id=%s reason=native_observer_stopped",
+                registration.library_id,
+            )
 
-    def emit(self, library_id: str, root: Path, paths: tuple[str | None, ...], *, full_scan: bool = False) -> None:
+    def emit(
+        self,
+        library_id: str,
+        root: Path,
+        paths: tuple[str | None, ...],
+        *,
+        full_scan: bool = False,
+    ) -> None:
         with self._lock:
             status = self._statuses.get(library_id)
             if status:
@@ -276,7 +314,9 @@ class LibraryWatcherManager:
         finally:
             self._event_source.native = False
 
-    def emit_delta(self, library_id: str, root: Path, paths: tuple[str | None, ...]) -> None:
+    def emit_delta(
+        self, library_id: str, root: Path, paths: tuple[str | None, ...]
+    ) -> None:
         self._event_source.native = False
         self.callback(library_id, root, paths, False)
 
@@ -300,33 +340,76 @@ class LibraryWatcherManager:
         library_id, root = library["id"], Path(library["directory"])
         requested = library.get("watchMode", "auto")
         backend, reason = choose_backend(root, requested)
-        status = WatchStatus(requested_mode=requested, backend=backend, reason=reason, delta_interval_seconds=self.delta_interval)
+        status = WatchStatus(
+            requested_mode=requested,
+            backend=backend,
+            reason=reason,
+            delta_interval_seconds=self.delta_interval,
+        )
         registration = _Registration(library_id, root, status)
         with self._lock:
             self._registrations[library_id] = registration
             self._statuses[library_id] = status
         if not root.is_dir():
-            status.state, status.capability, status.reason = "failed", "unavailable", "directory_unavailable"
+            status.state, status.capability, status.reason = (
+                "failed",
+                "unavailable",
+                "directory_unavailable",
+            )
             status.last_error_code = "directory_unavailable"
         elif backend == "native" and Observer is not None:
             try:
                 observer = Observer()
-                observer.schedule(_NativeHandler(self, library_id, root), os.fspath(root), recursive=True)
+                observer.schedule(
+                    _NativeHandler(self, library_id, root),
+                    os.fspath(root),
+                    recursive=True,
+                )
                 observer.start()
                 registration.observer = observer
-                status.backend, status.state, status.capability = "native", "active", "listening"
-                status.native_implementation = f"{observer.__class__.__module__}.{observer.__class__.__name__}"
-                logger.info("library_watcher_configured library_id=%s backend=native implementation=%s", library_id, status.native_implementation)
+                status.backend, status.state, status.capability = (
+                    "native",
+                    "active",
+                    "listening",
+                )
+                status.native_implementation = (
+                    f"{observer.__class__.__module__}.{observer.__class__.__name__}"
+                )
+                logger.info(
+                    "library_watcher_configured library_id=%s backend=native implementation=%s",
+                    library_id,
+                    status.native_implementation,
+                )
             except Exception:
-                logger.exception("library_watcher_native_failed library_id=%s", library_id)
+                logger.exception(
+                    "library_watcher_native_failed library_id=%s", library_id
+                )
                 status.restart_count += 1
-                status.backend, status.state, status.capability = "delta", "degraded", "degraded"
-                status.reason, status.last_error_code = "native_start_failed", "native_start_failed"
+                status.backend, status.state, status.capability = (
+                    "delta",
+                    "degraded",
+                    "degraded",
+                )
+                status.reason, status.last_error_code = (
+                    "native_start_failed",
+                    "native_start_failed",
+                )
         elif backend == "native":
-            status.backend, status.state, status.capability = "delta", "degraded", "unavailable"
-            status.reason, status.last_error_code = "watchdog_unavailable", "watchdog_unavailable"
+            status.backend, status.state, status.capability = (
+                "delta",
+                "degraded",
+                "unavailable",
+            )
+            status.reason, status.last_error_code = (
+                "watchdog_unavailable",
+                "watchdog_unavailable",
+            )
         else:
-            status.backend, status.state, status.capability = "delta", "active", "delta_only"
+            status.backend, status.state, status.capability = (
+                "delta",
+                "active",
+                "delta_only",
+            )
             status.reason = "explicit_delta_mode"
         registration.next_delta = time.monotonic()
 
@@ -345,7 +428,10 @@ class LibraryWatcherManager:
                 observer.stop()
                 observer.join(timeout=5)
             except Exception:
-                logger.exception("library_watcher_native_stop_failed library_id=%s", registration.library_id)
+                logger.exception(
+                    "library_watcher_native_stop_failed library_id=%s",
+                    registration.library_id,
+                )
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -358,7 +444,8 @@ class LibraryWatcherManager:
                     if (
                         registration.observer is None
                         and registration.status.requested_mode != "polling"
-                        and registration.status.last_error_code in {"native_observer_stopped", "native_start_failed"}
+                        and registration.status.last_error_code
+                        in {"native_observer_stopped", "native_start_failed"}
                         and registration.next_delta <= now
                     ):
                         self._restart_native(registration)
@@ -367,11 +454,18 @@ class LibraryWatcherManager:
                         registration.future = None
                 active = sum(1 for registration in registrations if registration.future)
                 for registration in registrations:
-                    if registration.future is not None or registration.next_delta > now or not self._executor or active >= MAX_DELTA_WORKERS:
+                    if (
+                        registration.future is not None
+                        or registration.next_delta > now
+                        or not self._executor
+                        or active >= MAX_DELTA_WORKERS
+                    ):
                         continue
                     registration.status.last_delta_started_at = _now_iso()
                     registration.status.catchup_state = "running"
-                    registration.future = self._executor.submit(self._run_delta, registration.library_id, registration.root)
+                    registration.future = self._executor.submit(
+                        self._run_delta, registration.library_id, registration.root
+                    )
                     active += 1
             for registration, future in completed:
                 self._finish_delta(registration, future)
@@ -382,7 +476,11 @@ class LibraryWatcherManager:
             if Observer is None or not registration.root.is_dir():
                 return
             observer = Observer()
-            observer.schedule(_NativeHandler(self, registration.library_id, registration.root), os.fspath(registration.root), recursive=True)
+            observer.schedule(
+                _NativeHandler(self, registration.library_id, registration.root),
+                os.fspath(registration.root),
+                recursive=True,
+            )
             observer.start()
             registration.observer = observer
             registration.status.backend = "native"
@@ -390,17 +488,30 @@ class LibraryWatcherManager:
             registration.status.capability = "listening"
             registration.status.reason = "native_observer_restarted"
             registration.status.last_error_code = None
-            registration.status.native_implementation = f"{observer.__class__.__module__}.{observer.__class__.__name__}"
+            registration.status.native_implementation = (
+                f"{observer.__class__.__module__}.{observer.__class__.__name__}"
+            )
             registration.next_delta = time.monotonic() + self.delta_interval
-            logger.info("library_watcher_restarted library_id=%s", registration.library_id)
+            logger.info(
+                "library_watcher_restarted library_id=%s", registration.library_id
+            )
         except Exception:
             registration.status.restart_count += 1
             registration.status.last_error_code = "native_start_failed"
-            registration.next_delta = time.monotonic() + RESTART_BACKOFF_SECONDS[min(registration.status.restart_count - 1, 3)]
-            logger.exception("library_watcher_restart_failed library_id=%s", registration.library_id)
+            registration.next_delta = (
+                time.monotonic()
+                + RESTART_BACKOFF_SECONDS[min(registration.status.restart_count - 1, 3)]
+            )
+            logger.exception(
+                "library_watcher_restart_failed library_id=%s", registration.library_id
+            )
 
     def _run_delta(self, library_id: str, root: Path) -> tuple[str, ...]:
-        return tuple(self.delta_probe(library_id, root, "startup_or_safety_delta")) if self.delta_probe else ()
+        return (
+            tuple(self.delta_probe(library_id, root, "startup_or_safety_delta"))
+            if self.delta_probe
+            else ()
+        )
 
     def _finish_delta(self, registration: _Registration, future: Future) -> None:
         try:
@@ -414,14 +525,20 @@ class LibraryWatcherManager:
             if registration.observer is None:
                 status.backend = "delta"
                 status.state = "degraded" if status.last_error_code else "active"
-                status.capability = "degraded" if status.last_error_code else "delta_only"
+                status.capability = (
+                    "degraded" if status.last_error_code else "delta_only"
+                )
             if paths:
                 self.emit_delta(registration.library_id, registration.root, paths)
         except Exception:
             registration.failures += 1
-            registration.next_delta = time.monotonic() + min(300, RESTART_BACKOFF_SECONDS[min(registration.failures - 1, 3)])
+            registration.next_delta = time.monotonic() + min(
+                300, RESTART_BACKOFF_SECONDS[min(registration.failures - 1, 3)]
+            )
             registration.status.state = "degraded"
             registration.status.capability = "degraded"
             registration.status.catchup_state = "failed"
             registration.status.last_error_code = "delta_probe_failed"
-            logger.exception("library_watcher_delta_failed library_id=%s", registration.library_id)
+            logger.exception(
+                "library_watcher_delta_failed library_id=%s", registration.library_id
+            )

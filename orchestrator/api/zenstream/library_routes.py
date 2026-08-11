@@ -604,7 +604,11 @@ async def start_watcher_test(
         "expiresAt": time.time() + 30,
         "eventAt": current.get("lastEventAt"),
     }
-    return {"testId": test_id, "expiresAt": _watcher_tests[test_id]["expiresAt"], "status": "pending"}
+    return {
+        "testId": test_id,
+        "expiresAt": _watcher_tests[test_id]["expiresAt"],
+        "status": "pending",
+    }
 
 
 @router.get("/libraries/{library_id}/watcher-test/{test_id}")
@@ -621,7 +625,11 @@ async def get_watcher_test(
     library = store.get(library_id)
     status = runtime.watcher.status(library or {"id": library_id})
     event_at = status.get("lastEventAt")
-    if event_at and event_at != test.get("eventAt") and time.time() <= test["expiresAt"]:
+    if (
+        event_at
+        and event_at != test.get("eventAt")
+        and time.time() <= test["expiresAt"]
+    ):
         result = {"status": "verified", "eventAt": event_at}
     elif time.time() > test["expiresAt"]:
         result = {"status": "expired", "eventAt": event_at}
@@ -647,14 +655,26 @@ async def update_library(
     except (ValueError, TypeError) as error:
         raise HTTPException(400, str(error)) from error
     source_changed = "sourceLibraryIds" in payload
-    directory_changed = "directory" in payload and (before or {}).get("directory") != library.get("directory")
-    settings_only = set(payload).issubset({"watchEnabled", "watchMode", "safetyScanEnabled", "scanIntervalMinutes", "name"})
+    directory_changed = "directory" in payload and (before or {}).get(
+        "directory"
+    ) != library.get("directory")
+    settings_only = set(payload).issubset(
+        {
+            "watchEnabled",
+            "watchMode",
+            "safetyScanEnabled",
+            "scanIntervalMinutes",
+            "name",
+        }
+    )
     if library["type"] == "collection" and source_changed:
         runtime.enqueue(library_id, "collection_rebuild")
     elif library["type"] != "collection" and directory_changed:
         runtime.enqueue(library_id, "scan")
     scheduler.refresh_library_definition(library)
-    if not settings_only or any(key in payload for key in ("watchEnabled", "watchMode")):
+    if not settings_only or any(
+        key in payload for key in ("watchEnabled", "watchMode")
+    ):
         await asyncio.to_thread(runtime.refresh_watchers)
     library["sourceLibraryIds"] = store.sources(library_id)
     return _with_watcher_status(library)

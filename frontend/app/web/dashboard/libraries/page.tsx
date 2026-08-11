@@ -159,15 +159,24 @@ export default function LibrariesPage() {
 	}
 	async function testWatcher(library: Library) {
 		if (!session) return;
-		const response = await adminFetch(`/api/admin/libraries/${library.id}/watcher-test`, session, { method: "POST" });
+		const response = await adminFetch(
+			`/api/admin/libraries/${library.id}/watcher-test`,
+			session,
+			{ method: "POST" },
+		);
 		if (!response.ok) return setMessage("Could not start the real-time test.");
 		const value = await response.json();
 		setWatcherTest(value.testId);
-		setMessage("Add or rename a harmless file in this library within 30 seconds.");
+		setMessage(
+			"Add or rename a harmless file in this library within 30 seconds.",
+		);
 		const started = Date.now();
 		const poll = async () => {
 			if (!session || !value.testId) return;
-			const result = await adminFetch(`/api/admin/libraries/${library.id}/watcher-test/${value.testId}`, session);
+			const result = await adminFetch(
+				`/api/admin/libraries/${library.id}/watcher-test/${value.testId}`,
+				session,
+			);
 			const body = await result.json().catch(() => null);
 			if (body?.status === "verified") {
 				setMessage("Real-time event received.");
@@ -254,10 +263,21 @@ export default function LibrariesPage() {
 									</p>
 									{library.type !== "collection" && library.watchEnabled && (
 										<div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] console-muted">
-											<span>{library.watcherStatus?.nativeImplementation || "Native backend pending"}</span>
-											<span>· catch-up {library.watcherStatus?.catchupState || "pending"}</span>
-											<span>· {library.watcherStatus?.pendingRootCount || 0} pending roots</span>
-											<button className="text-[#aeb9ff]" onClick={() => void testWatcher(library)} disabled={Boolean(watcherTest)}>
+											<span>
+												{library.watcherStatus?.nativeImplementation ||
+													"Native backend pending"}
+											</span>
+											<span>
+												· catch-up {library.watcherStatus?.catchupState || "pending"}
+											</span>
+											<span>
+												· {library.watcherStatus?.pendingRootCount || 0} pending roots
+											</span>
+											<button
+												className="text-[#aeb9ff]"
+												onClick={() => void testWatcher(library)}
+												disabled={Boolean(watcherTest)}
+											>
 												{watcherTest ? "Listening…" : "Test real-time"}
 											</button>
 										</div>
@@ -288,7 +308,7 @@ export default function LibrariesPage() {
 											>
 												<option value="auto">Automatic backend</option>
 												<option value="native">Native events</option>
-								<option value="polling">Delta-only verification</option>
+												<option value="polling">Delta-only verification</option>
 											</select>
 											<label className="flex items-center gap-2">
 												<input
@@ -300,7 +320,7 @@ export default function LibrariesPage() {
 														})
 													}
 												/>
-														Periodic change verification
+												Periodic change verification
 											</label>
 										</div>
 									)}
@@ -414,7 +434,7 @@ export default function LibrariesPage() {
 							>
 								<option value="auto">Automatic (recommended)</option>
 								<option value="native">Native events</option>
-						<option value="polling">Delta verification every 60 seconds</option>
+								<option value="polling">Delta verification every 60 seconds</option>
 							</select>
 						</label>
 					)}

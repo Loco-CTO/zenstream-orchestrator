@@ -73,7 +73,9 @@ class SyncplayRouteAuthenticationTest(unittest.TestCase):
         with (
             patch("app.client_auth.Account", return_value=account_model),
             patch.object(app_module, "Account", return_value=directory_model),
-            patch.object(app_module.SyncplayGroup, "create", return_value=group) as create,
+            patch.object(
+                app_module.SyncplayGroup, "create", return_value=group
+            ) as create,
             patch.object(app_module.hub, "broadcast", new=AsyncMock()) as broadcast,
         ):
             response = asyncio.run(
@@ -100,7 +102,9 @@ class SyncplayRouteAuthenticationTest(unittest.TestCase):
             patch("app.client_auth.Account", return_value=account_model),
             patch.object(app_module, "SyncplayGroup", return_value=syncplay_model),
         ):
-            result = asyncio.run(app_module.syncplay_groups(_request(bearer="api-token")))
+            result = asyncio.run(
+                app_module.syncplay_groups(_request(bearer="api-token"))
+            )
 
         self.assertEqual(result, {"groups": []})
         account_model.authenticate_token.assert_called_once_with("api-token")

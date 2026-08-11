@@ -17,7 +17,9 @@ def upgrade() -> None:
     tables = set(inspector.get_table_names())
     if "library_watch_state" not in tables:
         return
-    columns = {column["name"] for column in inspector.get_columns("library_watch_state")}
+    columns = {
+        column["name"] for column in inspector.get_columns("library_watch_state")
+    }
     if "phase" not in columns:
         op.add_column(
             "library_watch_state",
@@ -31,7 +33,9 @@ def upgrade() -> None:
     if not {"libraries", "library_entities", "media_files"}.issubset(tables):
         return
 
-    rows = bind.execute(sa.text("SELECT id FROM libraries WHERE directory IS NOT NULL")).fetchall()
+    rows = bind.execute(
+        sa.text("SELECT id FROM libraries WHERE directory IS NOT NULL")
+    ).fetchall()
     for (library_id,) in rows:
         bind.execute(
             sa.text(
@@ -50,7 +54,11 @@ def upgrade() -> None:
         ).fetchall()
         directories: set[tuple[str, str]] = {("", "")}
         for (relative_path,) in media_rows:
-            parts = [part for part in PurePosixPath(str(relative_path).replace("\\", "/")).parts if part not in {"", "."}]
+            parts = [
+                part
+                for part in PurePosixPath(str(relative_path).replace("\\", "/")).parts
+                if part not in {"", "."}
+            ]
             for index in range(max(0, len(parts) - 1)):
                 directories.add(("/".join(parts[: index + 1]), parts[0]))
         bind.execute(
@@ -70,8 +78,8 @@ def upgrade() -> None:
         )
         bind.execute(
             sa.text(
-                "UPDATE library_watch_state SET cursor=0,generation=0," 
-                "last_complete_at=NULL,phase='media',last_batch_at=NULL," 
+                "UPDATE library_watch_state SET cursor=0,generation=0,"
+                "last_complete_at=NULL,phase='media',last_batch_at=NULL,"
                 "last_error_code=NULL WHERE library_id=:library_id"
             ),
             {"library_id": library_id},
@@ -80,7 +88,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     inspector = sa.inspect(op.get_bind())
-    columns = {column["name"] for column in inspector.get_columns("library_watch_state")}
+    columns = {
+        column["name"] for column in inspector.get_columns("library_watch_state")
+    }
     for name in ("last_error_code", "last_batch_at", "phase"):
         if name in columns:
             op.drop_column("library_watch_state", name)

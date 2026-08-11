@@ -4220,7 +4220,10 @@ class LibraryRuntime:
             cursor.execute(
                 "CREATE TABLE IF NOT EXISTS library_watch_pending_roots (library_id TEXT NOT NULL, top_level_root TEXT NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, reason TEXT NOT NULL, event_count INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(library_id,top_level_root))"
             )
-            columns = {row[1] for row in cursor.execute("PRAGMA table_info(library_watch_state)")}
+            columns = {
+                row[1]
+                for row in cursor.execute("PRAGMA table_info(library_watch_state)")
+            }
             if "phase" not in columns:
                 cursor.execute(
                     "ALTER TABLE library_watch_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'media'"
@@ -4261,7 +4264,10 @@ class LibraryRuntime:
                         directories.add((relative_dir, parts[0]))
                 cursor.executemany(
                     "INSERT OR IGNORE INTO library_watch_directories(library_id,relative_path,top_level_root,complete) VALUES(?,?,?,0)",
-                    [(library_id, relative_dir, top_root) for relative_dir, top_root in directories],
+                    [
+                        (library_id, relative_dir, top_root)
+                        for relative_dir, top_root in directories
+                    ],
                 )
                 cursor.execute(
                     "UPDATE library_watch_state SET cursor=CASE WHEN ? > 0 THEN 0 ELSE cursor END, generation=CASE WHEN ? > 0 THEN 0 ELSE generation END, last_complete_at=CASE WHEN ? > 0 THEN NULL ELSE last_complete_at END, phase=CASE WHEN ? > 0 THEN 'media' ELSE phase END WHERE library_id=?",
@@ -4311,7 +4317,8 @@ class LibraryRuntime:
                 left = self._run_probe_batch(root, [], files[:midpoint])
                 right = self._run_probe_batch(root, [], files[midpoint:])
             return {
-                "directories": left.get("directories", []) + right.get("directories", []),
+                "directories": left.get("directories", [])
+                + right.get("directories", []),
                 "files": left.get("files", []) + right.get("files", []),
                 "timed_out": bool(left.get("timed_out") or right.get("timed_out")),
             }
@@ -4381,7 +4388,9 @@ class LibraryRuntime:
                     ),
                     separators=(",", ":"),
                 )
-                current_top = top_level_root or (relative_path.split("/", 1)[0] if relative_path else "")
+                current_top = top_level_root or (
+                    relative_path.split("/", 1)[0] if relative_path else ""
+                )
                 if complete and old_signature != signature:
                     if current_top:
                         changed.add(current_top)
@@ -4389,8 +4398,12 @@ class LibraryRuntime:
                         changed.update(known_top_roots)
                 for entry in entries:
                     name = str(entry.get("name") or "")
-                    entry_relative = "/".join(part for part in (relative_path, name) if part)
-                    entry_top = entry_relative.split("/", 1)[0] if entry_relative else ""
+                    entry_relative = "/".join(
+                        part for part in (relative_path, name) if part
+                    )
+                    entry_top = (
+                        entry_relative.split("/", 1)[0] if entry_relative else ""
+                    )
                     if entry.get("kind") == "f" and entry_relative not in known_paths:
                         changed.add(entry_top)
                     if entry.get("kind") == "d":
@@ -4415,11 +4428,18 @@ class LibraryRuntime:
                 )
                 cursor.executemany(
                     "INSERT OR IGNORE INTO library_watch_directories(library_id,relative_path,top_level_root,complete) VALUES(?,?,?,0)",
-                    [(library_id, relative_path, top_root) for relative_path, top_root in new_dirs],
+                    [
+                        (library_id, relative_path, top_root)
+                        for relative_path, top_root in new_dirs
+                    ],
                 )
                 cursor.execute(
                     "UPDATE library_watch_state SET last_batch_at=?,last_error_code=? WHERE library_id=?",
-                    (now(), "delta_batch_timeout" if result.get("timed_out") else None, library_id),
+                    (
+                        now(),
+                        "delta_batch_timeout" if result.get("timed_out") else None,
+                        library_id,
+                    ),
                 )
 
         media_paths = list(known_media)
@@ -4439,11 +4459,13 @@ class LibraryRuntime:
                 if not relative_path:
                     continue
                 old_size, old_mtime = known_media.get(relative_path, (None, None))
-                if observation.get("kind") == "missing":
-                    changed.add(relative_path.split("/", 1)[0])
-                elif observation.get("kind") == "ok" and (
-                    observation.get("size") != old_size
-                    or observation.get("mtime_ns") != old_mtime
+                if (
+                    observation.get("kind") == "missing"
+                    or observation.get("kind") == "ok"
+                    and (
+                        observation.get("size") != old_size
+                        or observation.get("mtime_ns") != old_mtime
+                    )
                 ):
                     changed.add(relative_path.split("/", 1)[0])
             next_cursor = cursor + len(batch_paths)
@@ -4451,7 +4473,14 @@ class LibraryRuntime:
             with self.store.db.transaction() as db_cursor:
                 db_cursor.execute(
                     "UPDATE library_watch_state SET cursor=?,generation=generation+1,last_complete_at=CASE WHEN ? THEN ? ELSE last_complete_at END,last_batch_at=?,last_error_code=? WHERE library_id=?",
-                    (0 if cycle_complete else next_cursor, int(cycle_complete), now(), now(), "delta_batch_timeout" if result.get("timed_out") else None, library_id),
+                    (
+                        0 if cycle_complete else next_cursor,
+                        int(cycle_complete),
+                        now(),
+                        now(),
+                        "delta_batch_timeout" if result.get("timed_out") else None,
+                        library_id,
+                    ),
                 )
         else:
             with self.store.db.transaction() as db_cursor:
@@ -4560,7 +4589,9 @@ class LibraryRuntime:
         if kind == "reconcile":
             # Pending roots are durable and are also retained when a manual
             # full scan currently owns the library.
-            self._persist_pending_roots(library_id, set(targets or ()), "filesystem_change")
+            self._persist_pending_roots(
+                library_id, set(targets or ()), "filesystem_change"
+            )
             with self.condition:
                 pending = self._reconcile_targets.setdefault(library_id, set())
                 pending.update(targets or ())
@@ -4910,7 +4941,9 @@ class LibraryRuntime:
             with self.condition:
                 pending = {row[0] for row in rows if row[0]}
                 if pending:
-                    self._reconcile_targets.setdefault(library_id, set()).update(pending)
+                    self._reconcile_targets.setdefault(library_id, set()).update(
+                        pending
+                    )
                     deadlines = self._reconcile_deadlines.setdefault(library_id, {})
                     for target in pending:
                         deadlines[target] = time.monotonic()

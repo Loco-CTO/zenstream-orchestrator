@@ -51,9 +51,17 @@ def _directory(root: Path, record: dict) -> dict:
                     )
                 except OSError:
                     # An incomplete shallow listing is not a safe basis for cleanup.
-                    return {"relative_path": relative, "kind": "error", "error": "entry_stat"}
+                    return {
+                        "relative_path": relative,
+                        "kind": "error",
+                        "error": "entry_stat",
+                    }
     except OSError as error:
-        return {"relative_path": relative, "kind": "error", "error": type(error).__name__}
+        return {
+            "relative_path": relative,
+            "kind": "error",
+            "error": type(error).__name__,
+        }
     result["entries"] = entries
     return result
 
@@ -67,7 +75,9 @@ def _file(root: Path, relative: str) -> dict:
 def main() -> int:
     request = json.load(sys.stdin)
     root = Path(request["root"])
-    directories = [_directory(root, record) for record in request.get("directories", [])]
+    directories = [
+        _directory(root, record) for record in request.get("directories", [])
+    ]
     files = [_file(root, relative) for relative in request.get("files", [])]
     json.dump({"directories": directories, "files": files}, sys.stdout)
     sys.stdout.flush()

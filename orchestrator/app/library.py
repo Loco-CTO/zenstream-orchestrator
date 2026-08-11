@@ -4235,11 +4235,11 @@ class LibraryRuntime:
                         relative_dir = "/".join(parts[:index])
                         cursor.execute(
                             "INSERT OR IGNORE INTO library_watch_directories(library_id,relative_path,top_level_root,complete) VALUES(?,?,?,0)",
-                            (library_id, relative_dir, parts[0], 0),
+                            (library_id, relative_dir, parts[0]),
                         )
                 cursor.execute(
                     "INSERT OR IGNORE INTO library_watch_directories(library_id,relative_path,top_level_root,complete) VALUES(?,?,?,0)",
-                    (library_id, "", "", 0),
+                    (library_id, "", ""),
                 )
 
     def _delta_probe(self, library_id: str, root: Path, reason: str) -> tuple[str, ...]:

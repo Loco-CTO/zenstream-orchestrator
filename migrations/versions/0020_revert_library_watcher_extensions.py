@@ -53,8 +53,7 @@ def upgrade() -> None:
             else:
                 bind.execute(
                     sa.text(
-                        "UPDATE job_definitions SET kind='library_scan' "
-                        "WHERE id=:id"
+                        "UPDATE job_definitions SET kind='library_scan' WHERE id=:id"
                     ),
                     {"id": definition_id},
                 )
@@ -116,7 +115,9 @@ def downgrade() -> None:
             sa.Column("observed_at", sa.Text()),
             sa.Column("complete", sa.Integer(), nullable=False, server_default="0"),
             sa.PrimaryKeyConstraint("library_id", "relative_path"),
-            sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(
+                ["library_id"], ["libraries.id"], ondelete="CASCADE"
+            ),
         )
         op.create_index(
             "idx_library_watch_directories_root",
@@ -135,9 +136,13 @@ def downgrade() -> None:
             sa.Column("phase", sa.Text(), nullable=False, server_default="media"),
             sa.Column("last_batch_at", sa.Text()),
             sa.Column("last_error_code", sa.Text()),
-            sa.Column("directory_cursor", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column(
+                "directory_cursor", sa.Integer(), nullable=False, server_default="0"
+            ),
             sa.PrimaryKeyConstraint("library_id"),
-            sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(
+                ["library_id"], ["libraries.id"], ondelete="CASCADE"
+            ),
         )
     if "library_watch_pending_roots" not in tables:
         op.create_table(
@@ -149,5 +154,7 @@ def downgrade() -> None:
             sa.Column("reason", sa.Text(), nullable=False),
             sa.Column("event_count", sa.Integer(), nullable=False, server_default="1"),
             sa.PrimaryKeyConstraint("library_id", "top_level_root"),
-            sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(
+                ["library_id"], ["libraries.id"], ondelete="CASCADE"
+            ),
         )

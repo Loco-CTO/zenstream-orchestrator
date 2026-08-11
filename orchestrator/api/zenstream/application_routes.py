@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from app.client_auth import cookie_secure, require_account, websocket_account
+from app.paths import PROJECT_ROOT
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite
@@ -166,11 +167,13 @@ async def _disconnect_cleanup(user, participant, epoch):
 
 
 def _static_roots():
-    root = Path(__file__).resolve().parents[2]
-    web = root / "web"
-    if not web.is_dir():
-        web = root.parent / "frontend" / "out"
-    return web, root.parent / "assets"
+    candidates = (
+        PROJECT_ROOT / "web",
+        PROJECT_ROOT / "orchestrator" / "web",
+        PROJECT_ROOT / "frontend" / "out",
+    )
+    web = next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
+    return web, PROJECT_ROOT / "assets"
 
 
 def _header_error(message: str, status: int):

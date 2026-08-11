@@ -12,7 +12,11 @@ class DockerLayoutTest(unittest.TestCase):
 
         self.assertIn(
             web_root,
-            {PROJECT_ROOT / "orchestrator" / "web", PROJECT_ROOT / "frontend" / "out"},
+            {
+                PROJECT_ROOT / "web",
+                PROJECT_ROOT / "orchestrator" / "web",
+                PROJECT_ROOT / "frontend" / "out",
+            },
         )
         self.assertEqual(assets_root, PROJECT_ROOT / "assets")
 

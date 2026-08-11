@@ -7,12 +7,22 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 
-def _request(method="GET", origin="https://example.test", cookie=True):
+def _request(
+    method="GET",
+    origin="https://example.test",
+    cookie=True,
+    forwarded_host=None,
+    forwarded_proto=None,
+):
     headers = [(b"host", b"example.test")]
     if origin is not None:
         headers.append((b"origin", origin.encode("ascii")))
     if cookie:
         headers.append((b"cookie", b"__Host-zenstream-admin=server-owned-session"))
+    if forwarded_host is not None:
+        headers.append((b"x-forwarded-host", forwarded_host.encode("ascii")))
+    if forwarded_proto is not None:
+        headers.append((b"x-forwarded-proto", forwarded_proto.encode("ascii")))
     return Request(
         {
             "type": "http",
@@ -44,6 +54,25 @@ class AdminProfileRouteTest(unittest.TestCase):
                 _request(method="POST", origin="https://attacker.test")
             )
         self.assertEqual(raised.exception.status_code, 403)
+
+    def test_cookie_authenticated_mutation_accepts_frontend_origin_through_proxy(self):
+        authenticated = MagicMock(username="root")
+        with patch.object(app_module.Admin, "from_token", return_value=authenticated):
+            username, token = app_module._admin_request(
+                _request(
+                    method="POST",
+                    origin="http://localhost:3001",
+                    forwarded_host="localhost:3001",
+                    forwarded_proto="http",
+                )
+            )
+        self.assertEqual((username, token), ("root", "server-owned-session"))
+
+    def test_invalid_admin_session_is_unauthorized(self):
+        with patch.object(app_module.Admin, "from_token", return_value=None):
+            with self.assertRaises(HTTPException) as raised:
+                app_module._admin_request(_request())
+        self.assertEqual(raised.exception.status_code, 401)
 
     def test_root_boundary_rejects_non_root_administrator(self):
         admin = MagicMock()

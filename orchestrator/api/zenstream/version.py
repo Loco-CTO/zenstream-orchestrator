@@ -1,7 +1,6 @@
 import json
 
 from app.paths import PROJECT_ROOT
-
 from version import __version__
 
 

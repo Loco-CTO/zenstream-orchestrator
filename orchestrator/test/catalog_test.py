@@ -1328,7 +1328,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(metadata["title"], "Japanese")
         self.assertEqual(metadata["overview"], "English overview")
         self.assertEqual(metadata["trailers"][0]["url"], "https://youtube.com/ja")
-        self.assertEqual(metadata["images"]["Primary"]["language"], None)
+        # Provider metadata alone is not publishable: image endpoints expose
+        # only artwork with a verified local cache file.
+        self.assertNotIn("Primary", metadata["images"])
         with self.assertRaises(HTTPException) as hidden:
             self.catalog().require_library(account["id"], "hidden")
         self.assertEqual(hidden.exception.status_code, 404)

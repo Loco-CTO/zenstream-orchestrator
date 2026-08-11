@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 
@@ -214,6 +215,37 @@ def _remove_cached_files(db, tables: set[str], paths: set[str]) -> None:
             continue
 
 
+def _sweep_metadata_cache_files(db, tables: set[str], grace_seconds: int = 86400) -> None:
+    """Remove old crash leftovers and unregistered metadata image files."""
+    if "metadata_images" not in tables or not db.db_file:
+        return
+    root = (Path(db.db_file).parent / "metadata-cache" / "images").resolve()
+    if not root.is_dir():
+        return
+    from app.metadata_services import MetadataImageIngestService
+
+    cutoff = time.time() - grace_seconds
+    for path in root.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime > cutoff:
+                continue
+            path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        with MetadataImageIngestService._file_lock(path):
+            if db.execute(
+                "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1",
+                (str(path),),
+            ):
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+
 def _remove_person_cached_files(db, tables: set[str], paths: set[str]) -> None:
     if not paths or "people" not in tables or not db.db_file:
         return
@@ -301,6 +333,7 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
     _remove_cached_files(db, tables, image_paths)
     _remove_person_cached_files(db, tables, person_image_paths)
     _remove_trickplay_files(db, trickplay_media_ids)
+    _sweep_metadata_cache_files(db, tables)
     from app.images import LocalArtworkCache
 
     LocalArtworkCache(db).prune()

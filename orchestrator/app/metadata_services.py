@@ -17,12 +17,14 @@ from urllib.parse import urljoin, urlparse
 from app.images import blurhash_for_image, encode_webp_bytes
 from app.logging_config import get_logger
 from app.metadata_domain import (
+    ARTWORK_CATEGORIES,
     ARTWORK_CATEGORY_SET,
     choose_artwork,
     fallback_tiers,
     language_family,
     locale_variants,
     nonempty,
+    rank_artwork_candidates,
     usable_text,
 )
 from app.models.metadata import (
@@ -35,6 +37,14 @@ from app.search_scoring import normalize_search_text, search_grams
 from app.worker_config import configured_worker_limit
 
 logger = get_logger("metadata")
+
+
+def _ready_file(path: Path | str | None) -> bool:
+    try:
+        value = Path(path) if path is not None else None
+        return bool(value and value.is_file() and value.stat().st_size > 0)
+    except OSError:
+        return False
 
 CATALOG_ITEM_PROJECTION_SCHEMA = 2
 
@@ -259,6 +269,47 @@ class MetadataSearchProjection:
     def __init__(self, db):
         self.db = db
 
+    def _ready_artwork(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        images: list[dict],
+        locale: str,
+        image_type: str,
+        original: str | None,
+        columns: set[str],
+    ) -> tuple[dict, tuple] | None:
+        """Return the first provider-ordered candidate with a ready file."""
+        for candidate in rank_artwork_candidates(
+            images, locale, image_type, original, [provider]
+        ):
+            path_column = "local_path" in columns
+            selected = self.db.execute(
+                "SELECT " + ("local_path" if path_column else "NULL")
+                + (",blur_hash" if "blur_hash" in columns else ",NULL")
+                + (",fetched_at" if "fetched_at" in columns else ",NULL")
+                + " FROM metadata_images WHERE provider=? AND entity_type=? "
+                "AND provider_id=? AND image_type=? AND image_url=? "
+                + ("AND local_path IS NOT NULL " if path_column else "")
+                + ("ORDER BY fetched_at DESC " if "fetched_at" in columns else "")
+                + "LIMIT 1",
+                (
+                    provider,
+                    entity_type,
+                    provider_id,
+                    image_type,
+                    candidate.get("url"),
+                ),
+            )
+            if not selected:
+                continue
+            row = selected[0]
+            if path_column and not _ready_file(row[0]):
+                continue
+            return candidate, row
+        return None
+
     def project(
         self,
         provider: str,
@@ -266,6 +317,8 @@ class MetadataSearchProjection:
         provider_id: str,
         locale: str,
         payload: dict,
+        *,
+        preserve_artwork: set[str] | None = None,
     ) -> None:
         tables = {
             row[0]
@@ -314,6 +367,7 @@ class MetadataSearchProjection:
                 gram_rows = []
                 genre_rows = []
                 artwork_rows = []
+                artwork_removals = []
                 if has_projection:
                     entity_rows = self.db.execute(
                         "SELECT parent_id,entity_type FROM library_entities WHERE id=?",
@@ -385,14 +439,27 @@ class MetadataSearchProjection:
                     # categories without disturbing primary-owned artwork.
                     if artwork_selection_has_provider:
                         selected_rows = self.db.execute(
-                            "SELECT image_type,provider FROM catalog_artwork_selection "
+                            "SELECT image_type,provider,local_path FROM catalog_artwork_selection "
                             "WHERE entity_id=? AND locale=? AND provider<>''",
                             (entity_id, locale),
                         )
-                        for selected_type, selected_provider in selected_rows:
-                            artwork_providers.setdefault(
-                                selected_type, selected_provider
-                            )
+                        selected_types: set[str] = set()
+                        for selected_type, selected_provider, selected_path in selected_rows:
+                            if _ready_file(selected_path):
+                                selected_types.add(selected_type)
+                                artwork_providers.setdefault(
+                                    selected_type, selected_provider
+                                )
+                            elif artwork_providers.get(selected_type) == selected_provider:
+                                current_images.pop(selected_type, None)
+                                artwork_providers.pop(selected_type, None)
+                        for owned_type in [
+                            image_type
+                            for image_type, owner in artwork_providers.items()
+                            if owner == provider and image_type not in selected_types
+                        ]:
+                            current_images.pop(owned_type, None)
+                            artwork_providers.pop(owned_type, None)
                     artwork_fallbacks = merged.get("_catalogArtworkFallbacks")
                     if not isinstance(artwork_fallbacks, dict):
                         artwork_fallbacks = {}
@@ -412,25 +479,22 @@ class MetadataSearchProjection:
                         else:
                             current_images.pop(local_type, None)
                             artwork_providers.pop(local_type, None)
-                    if is_primary:
-                        for owned_type in [
-                            image_type
-                            for image_type, owner in artwork_providers.items()
-                            if owner == provider
-                        ]:
-                            current_images.pop(owned_type, None)
-                            artwork_providers.pop(owned_type, None)
                     images = payload.get("images")
                     if isinstance(images, list):
                         for image_type in ARTWORK_CATEGORY_SET:
-                            choice = choose_artwork(
+                            if preserve_artwork and image_type in preserve_artwork:
+                                continue
+                            candidates = rank_artwork_candidates(
                                 images,
                                 locale,
                                 image_type,
                                 payload.get("originalLanguage"),
                                 [provider],
                             )
-                            if not choice:
+                            if not candidates:
+                                # An empty provider response is not a reason to
+                                # withdraw a working asset. Keep the previous
+                                # ready selection until a replacement is ready.
                                 continue
                             if not (
                                 is_primary
@@ -438,34 +502,27 @@ class MetadataSearchProjection:
                                 or artwork_providers.get(image_type) == provider
                             ):
                                 continue
+                            ready = self._ready_artwork(
+                                provider,
+                                entity_type,
+                                provider_id,
+                                images,
+                                locale,
+                                image_type,
+                                payload.get("originalLanguage"),
+                                metadata_image_columns,
+                            )
+                            if ready is None:
+                                # Keep the existing ready selection until the
+                                # replacement has been materialized.
+                                continue
+                            choice, cached_row = ready
                             projected = {
                                 "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}",
                                 "language": choice.get("language"),
                                 "width": choice.get("width") or 0,
                                 "height": choice.get("height") or 0,
                             }
-                            cached_image = self.db.execute(
-                                "SELECT local_path"
-                                + (",blur_hash" if has_blur_hash else ",NULL")
-                                + (",fetched_at" if has_fetched_at else ",NULL")
-                                + " FROM metadata_images "
-                                "WHERE provider=? AND entity_type=? AND provider_id=? "
-                                "AND image_type=? AND image_url=? AND local_path IS NOT NULL "
-                                + (
-                                    "ORDER BY fetched_at DESC "
-                                    if has_fetched_at
-                                    else ""
-                                )
-                                + "LIMIT 1",
-                                (
-                                    provider,
-                                    entity_type,
-                                    provider_id,
-                                    image_type,
-                                    choice.get("url"),
-                                ),
-                            )
-                            cached_row = cached_image[0] if cached_image else None
                             version = _asset_version(
                                 cached_row[0] if cached_row else None,
                                 f"{choice.get('url') or ''}:{cached_row[2] if cached_row else ''}",
@@ -671,10 +728,14 @@ class MetadataSearchProjection:
                                     ],
                                 )
                         if has_artwork_selection:
-                            cursor.execute(
-                                "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND provider=?",
-                                (entity_id, locale, provider),
-                            )
+                            if artwork_removals:
+                                cursor.executemany(
+                                    "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND provider=? AND image_type=?",
+                                    [
+                                        (entity_id, locale, provider, image_type)
+                                        for image_type in set(artwork_removals)
+                                    ],
+                                )
                             cursor.executemany(
                                 "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,provider,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP) "
                                 "ON CONFLICT(entity_id,locale,image_type) DO UPDATE SET provider=excluded.provider,local_path=excluded.local_path,blur_hash=excluded.blur_hash,version=excluded.version,updated_at=excluded.updated_at",
@@ -849,8 +910,14 @@ class MetadataReadService:
         providers = self.providers(entity_type)
         selected = {}
         for image_type in sorted(ARTWORK_CATEGORY_SET):
-            choice = choose_artwork(
-                raw.get("images", []), requested, image_type, original, providers
+            choice = self.ready_artwork(
+                entity_type,
+                provider_ids,
+                raw.get("images", []),
+                requested,
+                image_type,
+                original,
+                providers,
             )
             if choice:
                 image = {
@@ -885,6 +952,60 @@ class MetadataReadService:
         }
         self._public_resolutions[cache_key] = copy.deepcopy(resolved)
         return resolved
+
+    def ready_artwork(
+        self,
+        entity_type: str,
+        provider_ids: Iterable[dict],
+        images: Iterable[dict],
+        requested: str,
+        image_type: str,
+        original: str | None,
+        providers: list[str] | None = None,
+    ) -> dict | None:
+        """Select the first provider-ordered candidate with a ready file."""
+        identities = {
+            str(identity.get("provider")): str(identity.get("id"))
+            for identity in provider_ids
+            if identity.get("provider") and identity.get("id")
+        }
+        provider_order = providers or self.providers(entity_type)
+        columns = self._metadata_image_columns
+        if columns is None:
+            columns = self._metadata_image_columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")
+            }
+        if "metadata_images" not in {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }:
+            return None
+        for candidate in rank_artwork_candidates(
+            images, requested, image_type, original, provider_order
+        ):
+            provider = str(candidate.get("provider") or "")
+            provider_id = identities.get(provider)
+            url = candidate.get("url")
+            if not provider_id or not isinstance(url, str):
+                continue
+            path_sql = ",local_path" if "local_path" in columns else ""
+            rows = self.db.execute(
+                "SELECT 1" + path_sql + " FROM metadata_images WHERE provider=? "
+                "AND entity_type=? AND provider_id=? AND image_type=? "
+                "AND image_url=? "
+                + ("AND local_path IS NOT NULL " if "local_path" in columns else "")
+                + ("ORDER BY fetched_at DESC " if "fetched_at" in columns else "")
+                + "LIMIT 1",
+                (provider, entity_type, provider_id, image_type, url),
+            )
+            if rows and (
+                "local_path" not in columns
+                or _ready_file(rows[0][1])
+            ):
+                return candidate
+        return None
 
     def _image_blur_hash(
         self,
@@ -1084,17 +1205,78 @@ class MetadataIngestService:
                     )
                     for locale in locales
                 }
-        return {
-            locale: self.ingest_document(
-                provider,
-                entity_type,
-                provider_id,
-                locale,
-                values[locale],
-                force_assets=force_assets,
-            )
-            for locale in locales
-        }
+        if len(locales) == 1:
+            locale = locales[0]
+            return {
+                locale: self.ingest_document(
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    values[locale],
+                    force_assets=force_assets,
+                )
+            }
+
+        cache = getattr(self.metadata_service, "cache", None)
+        db = getattr(cache, "db", None)
+        if db is not None:
+            for locale in locales:
+                MetadataSearchProjection(db).project(
+                    provider, entity_type, provider_id, locale, values[locale]
+                )
+
+        def materialize_assets() -> None:
+            if self.image_ingest is not None:
+                batch_ingest = getattr(self.image_ingest, "ingest_documents", None)
+                if batch_ingest is not None:
+                    batch_ingest(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        values,
+                        force=force_assets,
+                    )
+                else:
+                    for locale in locales:
+                        self.image_ingest.ingest(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            locale,
+                            values[locale],
+                            force=force_assets,
+                        )
+            if self.credit_ingest is not None:
+                for locale in locales:
+                    self.credit_ingest.ingest(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        values[locale],
+                        force_images=force_assets,
+                    )
+
+        if self.image_ingest is not None or self.credit_ingest is not None:
+            digest = hashlib.sha256(
+                json.dumps(values, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            if self.background_assets:
+                asset_executor.submit(
+                    (
+                        provider,
+                        entity_type,
+                        provider_id,
+                        tuple(locales),
+                        digest,
+                        int(force_assets),
+                    ),
+                    materialize_assets,
+                )
+            else:
+                materialize_assets()
+        return values
 
     def ingest_locale(
         self,
@@ -1181,7 +1363,7 @@ class MetadataIngestService:
 
 
 class MetadataImageIngestService:
-    """Download every normalized artwork item during scan/refresh ingestion."""
+    """Materialize provider-ordered artwork winners during scan/refresh."""
 
     MAX_IMAGE_BYTES = 20 * 1024 * 1024
     _http_local = threading.local()
@@ -1327,6 +1509,299 @@ class MetadataImageIngestService:
         if not target.is_file() or not target.stat().st_size:
             raise RuntimeError("WebP encoder did not produce an image.")
 
+    def _persist(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        image: dict,
+        target: Path,
+        blur_hash: str | None,
+    ) -> None:
+        record = (
+            provider,
+            entity_type,
+            provider_id,
+            image.get("language"),
+            image.get("type"),
+            image.get("url"),
+            blur_hash,
+            str(target),
+        )
+        if hasattr(self.cache, "put_images"):
+            self.cache.put_images([record])
+        else:
+            self.cache.put_image(*record)
+
+    def _blur_hash(self, url: str, target: Path, image_type: str) -> str | None:
+        columns = {
+            row[1]
+            for row in self.db.execute(
+                "PRAGMA table_info(metadata_images)"
+            )
+        }
+        existing = (
+            self.db.execute(
+                "SELECT blur_hash FROM metadata_images WHERE image_url=? "
+                "AND local_path=? AND blur_hash IS NOT NULL LIMIT 1",
+                (url, str(target)),
+            )
+            if "metadata_images" in {
+                row[0]
+                for row in self.db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            and "blur_hash" in columns
+            else []
+        )
+        blur_hash = existing[0][0] if existing else None
+        if blur_hash is None:
+            try:
+                blur_hash = self.hasher(target)
+            except Exception as error:
+                logger.warning(
+                    "metadata image BlurHash encoding failed type=%s url=%s error=%s",
+                    image_type,
+                    url,
+                    error,
+                )
+        return blur_hash
+
+    def _has_ready_category(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        image_type: str,
+        locale: str,
+    ) -> bool:
+        """Whether this provider identity still has a usable cached image."""
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "metadata_images" not in tables:
+            return False
+        if "catalog_artwork_selection" in tables:
+            selection_columns = {
+                row[1]
+                for row in self.db.execute("PRAGMA table_info(catalog_artwork_selection)")
+            }
+            if {"entity_id", "locale", "image_type", "local_path"}.issubset(
+                selection_columns
+            ):
+                selected = self.db.execute(
+                    "SELECT s.local_path FROM catalog_artwork_selection s "
+                    "JOIN entity_provider_ids p ON p.entity_id=s.entity_id "
+                    "WHERE p.provider=? AND p.provider_id=? AND s.locale=? "
+                    "AND s.image_type=? AND s.local_path IS NOT NULL LIMIT 8",
+                    (provider, provider_id, locale, image_type),
+                )
+                if any(_ready_file(row[0]) for row in selected):
+                    return True
+        columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(metadata_images)")
+        }
+        path_clause = " AND local_path IS NOT NULL" if "local_path" in columns else ""
+        rows = self.db.execute(
+            "SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? "
+            "AND provider_id=? AND image_type=?" + path_clause + " LIMIT 32",
+            (provider, entity_type, provider_id, image_type),
+        )
+        if "local_path" not in columns:
+            return bool(rows)
+        return any(_ready_file(row[0]) for row in rows)
+
+    def _prune_replaced(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        documents: dict[str, dict],
+        outcomes: dict[str, str],
+    ) -> None:
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "metadata_images" not in tables:
+            return
+        for image_type in ARTWORK_CATEGORIES:
+            winners: set[str] = set()
+            complete = True
+            for locale, document in documents.items():
+                images = document.get("images", []) if isinstance(document, dict) else []
+                choice = choose_artwork(
+                    images,
+                    locale,
+                    image_type,
+                    document.get("originalLanguage"),
+                    [provider],
+                )
+                if not choice or not choice.get("url"):
+                    continue
+                url = str(choice["url"])
+                winners.add(url)
+                if outcomes.get(url) != "ready":
+                    complete = False
+            if not winners or not complete:
+                continue
+            rows = self.db.execute(
+                "SELECT DISTINCT local_path FROM metadata_images WHERE provider=? "
+                "AND entity_type=? AND provider_id=? AND image_type=? "
+                "AND image_url NOT IN ("
+                + ",".join("?" for _ in winners)
+                + ") AND local_path IS NOT NULL",
+                [provider, entity_type, provider_id, image_type, *sorted(winners)],
+            )
+            self.db.execute(
+                "DELETE FROM metadata_images WHERE provider=? AND entity_type=? "
+                "AND provider_id=? AND image_type=? AND image_url NOT IN ("
+                + ",".join("?" for _ in winners)
+                + ")",
+                [provider, entity_type, provider_id, image_type, *sorted(winners)],
+            )
+            for (raw_path,) in rows:
+                if not raw_path:
+                    continue
+                path = Path(str(raw_path))
+                try:
+                    path.resolve().relative_to(self.image_root.resolve())
+                except (OSError, ValueError):
+                    continue
+                with self._file_lock(path):
+                    still_referenced = self.db.execute(
+                        "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1",
+                        (str(path),),
+                    )
+                    if not still_referenced:
+                        path.unlink(missing_ok=True)
+
+    def ingest_documents(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        documents: dict[str, dict],
+        *,
+        force: bool = False,
+    ) -> dict[str, int]:
+        """Materialize one provider winner per locale/category.
+
+        The first provider-ordered candidate is attempted.  A single next
+        candidate may be attempted after a failure, while the preferred
+        candidate remains eligible for a later repair run.
+        """
+        if self.image_root is None:
+            return {"ready": 0, "failed": 0, "skipped": 0}
+        ready = failed = skipped = 0
+        outcomes: dict[str, str] = {}
+        preserved: dict[str, set[str]] = {}
+        for locale, document in documents.items():
+            images = document.get("images", []) if isinstance(document, dict) else []
+            if not isinstance(images, list):
+                continue
+            for image_type in ARTWORK_CATEGORIES:
+                candidates = rank_artwork_candidates(
+                    images,
+                    locale,
+                    image_type,
+                    document.get("originalLanguage"),
+                    [provider],
+                )
+                if not candidates:
+                    continue
+                had_ready = self._has_ready_category(
+                    provider, entity_type, provider_id, image_type, locale
+                )
+                for candidate in candidates[:2]:
+                    url = candidate.get("url")
+                    if not isinstance(url, str):
+                        continue
+                    parsed = urlparse(url)
+                    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                        continue
+                    outcome = outcomes.get(url)
+                    if outcome == "failed":
+                        if candidate is candidates[0] and had_ready:
+                            preserved.setdefault(locale, set()).add(image_type)
+                        continue
+                    target = self._target(url)
+                    if target is None:
+                        continue
+                    if outcome == "ready" and target.is_file() and target.stat().st_size > 0:
+                        skipped += 1
+                        self._persist(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            candidate,
+                            target,
+                            self._blur_hash(
+                                url, target, str(candidate.get("type") or image_type)
+                            ),
+                        )
+                        break
+                    try:
+                        with self._file_lock(target):
+                            exists = target.is_file() and target.stat().st_size > 0
+                            if not force and exists:
+                                skipped += 1
+                            else:
+                                self._download(url, target)
+                                ready += 1
+                        blur_hash = self._blur_hash(
+                            url, target, str(candidate.get("type") or image_type)
+                        )
+                        self._persist(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            candidate,
+                            target,
+                            blur_hash,
+                        )
+                        outcomes[url] = "ready"
+                        break
+                    except Exception as error:
+                        outcomes[url] = "failed"
+                        failed += 1
+                        if candidate is candidates[0] and had_ready:
+                            preserved.setdefault(locale, set()).add(image_type)
+                        logger.warning(
+                            "metadata image ingest failed provider=%s entity_type=%s provider_id=%s locale=%s type=%s url=%s error=%s",
+                            provider,
+                            entity_type,
+                            provider_id,
+                            locale,
+                            image_type,
+                            url,
+                            error,
+                        )
+                # A failed preferred candidate may have a ready fallback, but
+                # never fan out through the full provider candidate list.
+
+        projection = MetadataSearchProjection(self.db)
+        for locale, document in documents.items():
+            projection.project(
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                document,
+                preserve_artwork=preserved.get(locale),
+            )
+        self._prune_replaced(
+            provider, entity_type, provider_id, documents, outcomes
+        )
+        return {"ready": ready, "failed": failed, "skipped": skipped}
+
     def ingest(
         self,
         provider: str,
@@ -1337,93 +1812,13 @@ class MetadataImageIngestService:
         *,
         force: bool = False,
     ) -> dict[str, int]:
-        """Persist local files and image rows for all artwork in a document.
-
-        A failed image does not fail the metadata document. The next scan or
-        refresh retries it because only successfully downloaded files are
-        recorded as ready.
-        """
-        if self.image_root is None:
-            return {"ready": 0, "failed": 0, "skipped": 0}
-        ready = failed = skipped = 0
-        records = []
-        images = document.get("images", []) if isinstance(document, dict) else []
-        for image in images if isinstance(images, list) else []:
-            if not isinstance(image, dict):
-                continue
-            image_type = image.get("type")
-            url = image.get("url")
-            if image_type not in ARTWORK_CATEGORY_SET or not isinstance(url, str):
-                continue
-            parsed = urlparse(url)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                continue
-            target = self._target(url)
-            if target is None:
-                continue
-            try:
-                with self._file_lock(target):
-                    if not force and target.is_file() and target.stat().st_size > 0:
-                        skipped += 1
-                    else:
-                        self._download(url, target)
-                        ready += 1
-                existing = (
-                    self.db.execute(
-                        "SELECT blur_hash FROM metadata_images WHERE image_url=? AND local_path=? AND blur_hash IS NOT NULL LIMIT 1",
-                        (url, str(target)),
-                    )
-                    if hasattr(self.cache, "put_images")
-                    else []
-                )
-                blur_hash = existing[0][0] if existing else None
-                if blur_hash is None:
-                    try:
-                        blur_hash = self.hasher(target)
-                    except Exception as error:
-                        logger.warning(
-                            "metadata image BlurHash encoding failed type=%s url=%s error=%s",
-                            image_type,
-                            url,
-                            error,
-                        )
-                records.append(
-                    (
-                        provider,
-                        entity_type,
-                        provider_id,
-                        image.get("language"),
-                        image_type,
-                        url,
-                        blur_hash,
-                        str(target),
-                    )
-                )
-            except Exception as error:
-                failed += 1
-                logger.warning(
-                    "metadata image ingest failed provider=%s entity_type=%s provider_id=%s locale=%s type=%s url=%s error=%s",
-                    provider,
-                    entity_type,
-                    provider_id,
-                    locale,
-                    image_type,
-                    url,
-                    error,
-                )
-        if records:
-            if hasattr(self.cache, "put_images"):
-                self.cache.put_images(records)
-            else:
-                for record in records:
-                    self.cache.put_image(*record)
-            # Image ingestion can create the hash after the metadata projection
-            # was written. Rebuild the affected projection from the now-ready
-            # cache so normal catalog reads expose it immediately.
-            MetadataSearchProjection(self.db).project(
-                provider, entity_type, provider_id, locale, document
-            )
-        return {"ready": ready, "failed": failed, "skipped": skipped}
+        return self.ingest_documents(
+            provider,
+            entity_type,
+            provider_id,
+            {locale: document},
+            force=force,
+        )
 
 
 class PersonCreditIngestService:

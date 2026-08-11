@@ -72,14 +72,17 @@ def _metadata_document_gaps(
         return {"identity:orphaned"}, []
 
     projected_fields = TEXT_FIELDS | FACT_FIELDS
-    source_images = {
-        (str(image.get("type")), str(image.get("url")))
-        for image in document.get("images", [])
-        if isinstance(image, dict)
-        and image.get("type") in ARTWORK_TYPES
-        and isinstance(image.get("url"), str)
-        and image.get("url")
-    }
+    source_images = set()
+    for image_type in ARTWORK_TYPES:
+        expected = choose_artwork(
+            document.get("images", []),
+            locale,
+            image_type,
+            document.get("originalLanguage"),
+            [provider],
+        )
+        if expected and expected.get("url"):
+            source_images.add((image_type, str(expected["url"])))
     image_columns = {row[1] for row in db.execute("PRAGMA table_info(metadata_images)")}
     blur_hash_column = ",blur_hash" if "blur_hash" in image_columns else ""
     image_rows = db.execute(

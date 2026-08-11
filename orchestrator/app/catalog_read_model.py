@@ -32,6 +32,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _artwork_version(path: object) -> str:
+    digest = hashlib.sha256()
+    try:
+        with open(str(path), "rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()[:12]
+    except (OSError, TypeError, ValueError):
+        return hashlib.sha256(str(path or "").encode("utf-8")).hexdigest()[:12]
+
+
+def _ready_artwork_file(path: object) -> bool:
+    try:
+        value = Path(path) if path else None
+        return bool(value and value.is_file() and value.stat().st_size > 0)
+    except OSError:
+        return False
+
+
 def _created_ns(value: str | None) -> int:
     if not value:
         return 0
@@ -624,41 +643,127 @@ class CatalogReadModel:
         if not all(self._has_table(table) for table in required):
             return []
         placeholders = ",".join("?" for _ in locales)
-        result = (execute or self.db.read_execute)(
-            "WITH candidates AS ("
-            "SELECT p.entity_id,p.locale,mi.image_type,ep.provider,mi.local_path,mi.blur_hash,mi.fetched_at,"
-            "ROW_NUMBER() OVER (PARTITION BY p.entity_id,p.locale,mi.image_type ORDER BY "
-            "ep.is_primary DESC,CASE WHEN mi.locale=p.locale THEN 0 WHEN mi.locale='' THEN 1 "
-            "WHEN mi.locale='en' THEN 2 ELSE 3 END,mi.fetched_at DESC) AS choice "
-            "FROM catalog_item_projection p "
-            "JOIN library_entities e ON e.id=p.entity_id "
-            "JOIN entity_provider_ids ep ON ep.entity_id=e.id "
-            "JOIN metadata_images mi ON mi.provider=ep.provider AND mi.provider_id=ep.provider_id "
-            "AND mi.entity_type=e.entity_type "
-            f"WHERE p.locale IN ({placeholders}) AND mi.local_path IS NOT NULL "
-            "AND mi.image_type IN ('Primary','Backdrop','Logo','Banner') "
-            "AND (mi.locale=p.locale OR mi.locale='' OR mi.locale='en' "
-            "OR mi.locale=COALESCE(json_extract(p.payload,'$.originalLanguage'),''))"
-            ") SELECT entity_id,locale,image_type,provider,local_path,blur_hash,fetched_at "
-            "FROM candidates WHERE choice=1",
+        runner = execute or self.db.read_execute
+        projection_rows = runner(
+            "SELECT entity_id,locale,entity_type,payload FROM catalog_item_projection "
+            f"WHERE locale IN ({placeholders})",
             locales,
         )
-        rows = result.fetchall() if hasattr(result, "fetchall") else result
-        return [
-            (
-                entity_id,
-                locale,
-                image_type,
-                provider,
-                local_path,
-                blur_hash,
-                hashlib.sha256(f"{local_path}:{fetched_at or ''}".encode()).hexdigest()[
-                    :12
-                ],
-                now,
+        projection_rows = (
+            projection_rows.fetchall()
+            if hasattr(projection_rows, "fetchall")
+            else projection_rows
+        )
+        from app.metadata_services import MetadataReadService
+
+        reader = MetadataReadService(self.db)
+        values: list[tuple] = []
+        for entity_id, locale, entity_type, payload_text in projection_rows:
+            try:
+                payload = json.loads(payload_text or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            identities = [
+                {"provider": row[0], "id": row[1]}
+                for row in self.db.read_execute(
+                    "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                    (entity_id,),
+                )
+            ]
+            raw = (
+                reader.resolve_raw(entity_type, identities, locale)
+                if self._has_table("metadata_cache")
+                else {}
             )
-            for entity_id, locale, image_type, provider, local_path, blur_hash, fetched_at in rows
-        ]
+            original = raw.get("originalLanguage")
+            providers = reader.providers(entity_type)
+            for image_type in ("Primary", "Backdrop", "Logo", "Banner"):
+                choice = reader.ready_artwork(
+                    entity_type,
+                    identities,
+                    raw.get("images", []),
+                    locale,
+                    image_type,
+                    original,
+                    providers,
+                )
+                if choice:
+                    provider = str(choice.get("provider") or "")
+                    provider_id = next(
+                        (
+                            identity["id"]
+                            for identity in identities
+                            if identity.get("provider") == provider
+                        ),
+                        None,
+                    )
+                    rows = self.db.read_execute(
+                        "SELECT local_path,blur_hash FROM metadata_images WHERE provider=? "
+                        "AND entity_type=? AND provider_id=? AND image_type=? "
+                        "AND image_url=? AND local_path IS NOT NULL ORDER BY fetched_at DESC LIMIT 1",
+                        (provider, entity_type, provider_id, image_type, choice["url"]),
+                    )
+                    if rows:
+                        local_path, blur_hash = rows[0]
+                        values.append(
+                            (
+                                entity_id,
+                                locale,
+                                image_type,
+                                provider,
+                                local_path,
+                                blur_hash,
+                                _artwork_version(local_path),
+                                now,
+                            )
+                        )
+                        continue
+
+                # Legacy projections without metadata_cache documents can
+                # still be rebuilt from their existing selected row.
+                selected = self.db.read_execute(
+                    "SELECT provider,local_path,blur_hash FROM catalog_artwork_selection "
+                    "WHERE entity_id=? AND locale=? AND image_type=? LIMIT 1",
+                    (entity_id, locale, image_type),
+                )
+                if selected and _ready_artwork_file(selected[0][1]):
+                    provider, local_path, blur_hash = selected[0]
+                    values.append(
+                        (
+                            entity_id,
+                            locale,
+                            image_type,
+                            provider,
+                            local_path,
+                            blur_hash,
+                            _artwork_version(local_path),
+                            now,
+                        )
+                    )
+                    continue
+                legacy = self.db.read_execute(
+                    "SELECT ep.provider,mi.local_path,mi.blur_hash FROM entity_provider_ids ep "
+                    "JOIN metadata_images mi ON mi.provider=ep.provider AND mi.provider_id=ep.provider_id "
+                    "AND mi.entity_type=? WHERE ep.entity_id=? AND mi.image_type=? "
+                    "AND mi.local_path IS NOT NULL ORDER BY ep.is_primary DESC, "
+                    "CASE WHEN mi.locale=? THEN 0 WHEN mi.locale='' THEN 1 ELSE 2 END, mi.rowid LIMIT 1",
+                    (entity_type, entity_id, image_type, locale),
+                )
+                if legacy and _ready_artwork_file(legacy[0][1]):
+                    provider, local_path, blur_hash = legacy[0]
+                    values.append(
+                        (
+                            entity_id,
+                            locale,
+                            image_type,
+                            provider,
+                            local_path,
+                            blur_hash,
+                            _artwork_version(local_path),
+                            now,
+                        )
+                    )
+        return values
 
     def _coverage_gaps(
         self, configured: list[str]

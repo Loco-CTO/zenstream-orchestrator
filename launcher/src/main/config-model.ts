@@ -30,6 +30,7 @@ export function defaultEnvironment(localAppData: string): EnvironmentConfig {
     METADATA_ROOT_WORKERS: "12",
     METADATA_FETCH_WORKERS: "12",
     METADATA_ASSET_WORKERS: "12",
+    METADATA_IMAGE_CONVERSION_WORKERS: "4",
     METADATA_PROVIDER_TIMEOUT_SECONDS: "20",
     METADATA_IMAGE_TIMEOUT_SECONDS: "20",
     METADATA_IMAGE_HOST_ALLOWLIST: DEFAULT_IMAGE_HOST_ALLOWLIST,
@@ -44,6 +45,7 @@ const integerBounds: Partial<Record<EnvironmentKey, [number, number]>> = {
   METADATA_ROOT_WORKERS: [1, 64],
   METADATA_FETCH_WORKERS: [1, 64],
   METADATA_ASSET_WORKERS: [1, 64],
+  METADATA_IMAGE_CONVERSION_WORKERS: [1, 16],
 };
 
 const decimalBounds: Partial<Record<EnvironmentKey, [number, number]>> = {

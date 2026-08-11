@@ -715,7 +715,9 @@ class Catalog:
         raw = service.resolve_raw(
             row[3], self._provider_ids(entity_id, row[3]), language
         )
-        return choose_artwork(
+        return service.ready_artwork(
+            row[3],
+            self._provider_ids(entity_id, row[3]),
             raw.get("images", []),
             language,
             image_type,

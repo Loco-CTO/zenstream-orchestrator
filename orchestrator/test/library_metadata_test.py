@@ -1578,6 +1578,25 @@ class LibraryMetadataTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             choose_image(images, "en", "Thumb")
 
+    def test_image_selection_preserves_provider_order_over_local_score(self):
+        images = [
+            {
+                "type": PRIMARY,
+                "language": "en",
+                "url": "first",
+                "score": 0,
+                "width": 100,
+            },
+            {
+                "type": PRIMARY,
+                "language": "en",
+                "url": "second",
+                "score": 100,
+                "width": 4000,
+            },
+        ]
+        self.assertEqual(choose_image(images, "en", PRIMARY)["url"], "first")
+
     def test_image_fallback_does_not_prefer_an_unrequested_language(self):
         images = [
             {"type": PRIMARY, "language": "fr", "url": "fr"},

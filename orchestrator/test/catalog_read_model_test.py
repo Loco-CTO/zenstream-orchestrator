@@ -110,11 +110,13 @@ class CatalogReadModelTest(unittest.TestCase):
             "INSERT INTO metadata_images VALUES('tvdb','series','1','en','Primary','url','cached.webp','2026','blur')"
         )
         CatalogReadModel(self.db).rebuild(["en"])
+        # A metadata row is not publishable unless its cache file exists and
+        # is non-empty.
         self.assertEqual(
             self.db.read_execute(
                 "SELECT provider,local_path,blur_hash FROM catalog_artwork_selection WHERE entity_id='series' AND locale='en' AND image_type='Primary'"
             ),
-            [("tvdb", "cached.webp", "blur")],
+            [],
         )
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])

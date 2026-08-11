@@ -198,6 +198,13 @@ const groups: FieldGroup[] = [
         description: "Concurrent artwork and portrait operations (1–64).",
         type: "number",
       },
+      {
+        key: "METADATA_IMAGE_CONVERSION_WORKERS",
+        label: "Image conversion workers",
+        description:
+          "Concurrent WebP and BlurHash FFmpeg conversions (1-16).",
+        type: "number",
+      },
     ],
   },
 ];

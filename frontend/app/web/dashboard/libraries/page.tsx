@@ -28,6 +28,11 @@ type Library = {
 	watcherStatus?: {
 		state: string;
 		backend?: string | null;
+		capability?: string;
+		nativeImplementation?: string | null;
+		lastEventAt?: string | null;
+		catchupState?: string;
+		pendingRootCount?: number;
 		pollIntervalSeconds?: number;
 	};
 	scanIntervalMinutes: number;
@@ -57,6 +62,7 @@ export default function LibrariesPage() {
 	const [interval, setIntervalValue] = useState(1440);
 	const [message, setMessage] = useState("");
 	const [libraryToRemove, setLibraryToRemove] = useState<Library | null>(null);
+	const [watcherTest, setWatcherTest] = useState<string | null>(null);
 
 	async function load(current = session) {
 		if (!current) return;
@@ -151,6 +157,30 @@ export default function LibrariesPage() {
 		setLibraryToRemove(null);
 		load();
 	}
+	async function testWatcher(library: Library) {
+		if (!session) return;
+		const response = await adminFetch(`/api/admin/libraries/${library.id}/watcher-test`, session, { method: "POST" });
+		if (!response.ok) return setMessage("Could not start the real-time test.");
+		const value = await response.json();
+		setWatcherTest(value.testId);
+		setMessage("Add or rename a harmless file in this library within 30 seconds.");
+		const started = Date.now();
+		const poll = async () => {
+			if (!session || !value.testId) return;
+			const result = await adminFetch(`/api/admin/libraries/${library.id}/watcher-test/${value.testId}`, session);
+			const body = await result.json().catch(() => null);
+			if (body?.status === "verified") {
+				setMessage("Real-time event received.");
+				setWatcherTest(null);
+				load();
+				return;
+			}
+			if (Date.now() - started < 30000) return void setTimeout(poll, 1500);
+			setMessage("No event observed; delta verification remains active.");
+			setWatcherTest(null);
+		};
+		void poll();
+	}
 
 	return (
 		<div className="max-w-6xl">
@@ -213,13 +243,25 @@ export default function LibrariesPage() {
 													: "Waiting for first scan"}{" "}
 										·{" "}
 										{library.watcherStatus?.state === "active"
-											? library.watcherStatus.backend === "polling"
-												? `polling (${library.watcherStatus.pollIntervalSeconds || 60}s)`
-												: "native watcher"
+											? library.watcherStatus.capability === "verified"
+												? "Verified real-time"
+												: library.watcherStatus.backend === "delta"
+													? `Delta-only verification (${library.watcherStatus.pollIntervalSeconds || 60}s)`
+													: "Listening — unverified"
 											: library.watchEnabled
 												? library.watcherStatus?.state || "starting"
 												: "watch disabled"}
 									</p>
+									{library.type !== "collection" && library.watchEnabled && (
+										<div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] console-muted">
+											<span>{library.watcherStatus?.nativeImplementation || "Native backend pending"}</span>
+											<span>· catch-up {library.watcherStatus?.catchupState || "pending"}</span>
+											<span>· {library.watcherStatus?.pendingRootCount || 0} pending roots</span>
+											<button className="text-[#aeb9ff]" onClick={() => void testWatcher(library)} disabled={Boolean(watcherTest)}>
+												{watcherTest ? "Listening…" : "Test real-time"}
+											</button>
+										</div>
+									)}
 									{library.type !== "collection" && (
 										<div className="mt-3 flex flex-wrap items-center gap-3 text-xs console-muted">
 											<label className="flex items-center gap-2">
@@ -246,7 +288,7 @@ export default function LibrariesPage() {
 											>
 												<option value="auto">Automatic backend</option>
 												<option value="native">Native events</option>
-												<option value="polling">Polling backend</option>
+								<option value="polling">Delta-only verification</option>
 											</select>
 											<label className="flex items-center gap-2">
 												<input
@@ -258,7 +300,7 @@ export default function LibrariesPage() {
 														})
 													}
 												/>
-												Safety scan
+														Periodic change verification
 											</label>
 										</div>
 									)}
@@ -372,12 +414,12 @@ export default function LibrariesPage() {
 							>
 								<option value="auto">Automatic (recommended)</option>
 								<option value="native">Native events</option>
-								<option value="polling">Poll every 60 seconds</option>
+						<option value="polling">Delta verification every 60 seconds</option>
 							</select>
 						</label>
 					)}
 					<label className="mt-4 flex items-center justify-between text-sm">
-						<span className="console-muted">Periodic safety scan</span>
+						<span className="console-muted">Periodic change verification</span>
 						<input
 							type="checkbox"
 							checked={safetyScan}

@@ -14,6 +14,17 @@ from fastapi import HTTPException, Request, WebSocket
 _TICKET_TTL_LIMITS = {"resource": 15 * 60, "socket": 60}
 _RESERVED_TICKET_CLAIMS = {"uid", "kind", "iat", "exp"}
 CLIENT_SESSION_COOKIE = "__Host-zenstream-session"
+DEV_CLIENT_SESSION_COOKIE = "zenstream-session"
+
+
+def cookie_secure(request: Request) -> bool:
+    """Use secure cookies in production; permit explicit loopback HTTP development."""
+    host = (request.headers.get("host") or request.url.hostname or "").split(":", 1)[0].lower()
+    return request.url.scheme == "https" or host not in {"localhost", "127.0.0.1", "::1"}
+
+
+def session_cookie_name(request: Request) -> str:
+    return CLIENT_SESSION_COOKIE if cookie_secure(request) else DEV_CLIENT_SESSION_COOKIE
 
 
 def _token_hash(token: str) -> str:
@@ -29,7 +40,7 @@ def bearer_token(value: str | None) -> str | None:
 
 def require_account(request: Request) -> tuple[dict, str]:
     token = bearer_token(request.headers.get("authorization")) or request.cookies.get(
-        CLIENT_SESSION_COOKIE
+        session_cookie_name(request)
     )
     account = getattr(request.state, "authenticated", None)
     if account is None:
@@ -58,7 +69,7 @@ def _iso_now() -> str:
 
 def optional_account(request: Request) -> tuple[dict, str] | None:
     token = bearer_token(request.headers.get("authorization")) or request.cookies.get(
-        CLIENT_SESSION_COOKIE
+        session_cookie_name(request)
     )
     account = getattr(request.state, "authenticated", None)
     if account is None:

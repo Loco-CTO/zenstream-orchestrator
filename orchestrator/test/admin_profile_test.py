@@ -49,23 +49,17 @@ class AdminProfileRouteTest(unittest.TestCase):
         self.assertEqual((username, token), ("root", "server-owned-session"))
         from_token.assert_called_once_with("server-owned-session")
 
-    def test_cookie_authenticated_mutation_does_not_require_same_origin(self):
-        authenticated = MagicMock(username="root")
-        with patch.object(app_module.Admin, "from_token", return_value=authenticated):
-            username, token = app_module._admin_request(
-                _request(method="POST", origin="https://attacker.test")
-            )
-        self.assertEqual((username, token), ("root", "server-owned-session"))
+    def test_cookie_authenticated_mutation_rejects_cross_origin(self):
+        with self.assertRaises(HTTPException) as raised:
+            app_module._admin_request(_request(method="POST", origin="https://attacker.test"))
+        self.assertEqual(raised.exception.status_code, 403)
 
-    def test_library_admin_mutation_does_not_require_same_origin(self):
-        authenticated = MagicMock(username="root")
-        with patch.object(
-            library_module.Admin, "from_token", return_value=authenticated
-        ):
-            username = library_module.authenticate_admin_request(
+    def test_library_admin_mutation_rejects_cross_origin(self):
+        with self.assertRaises(HTTPException) as raised:
+            library_module.authenticate_admin_request(
                 _request(method="POST", origin="https://attacker.test")
             )
-        self.assertEqual(username, "root")
+        self.assertEqual(raised.exception.status_code, 403)
 
     def test_cookie_authenticated_mutation_accepts_frontend_origin_through_proxy(self):
         authenticated = MagicMock(username="root")

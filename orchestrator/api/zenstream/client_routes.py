@@ -16,8 +16,10 @@ from app.catalog_read_model import CatalogReadModel
 from app.client_auth import (
     CLIENT_SESSION_COOKIE,
     account_from_access,
+    cookie_secure,
     issue_ticket,
     require_account,
+    session_cookie_name,
     session_id_for_token,
     websocket_account,
 )
@@ -202,10 +204,10 @@ async def browser_login(request: Request):
     session = Account().create_session(account["id"])
     response = JSONResponse({"user": account}, status_code=200)
     response.set_cookie(
-        CLIENT_SESSION_COOKIE,
+        session_cookie_name(request),
         session["token"],
         max_age=7 * 24 * 60 * 60,
-        secure=True,
+        secure=cookie_secure(request),
         httponly=True,
         samesite="strict",
         path="/",
@@ -219,8 +221,14 @@ async def logout(request: Request):
     Account().revoke(token)
     response = Response(status_code=204)
     response.delete_cookie(
-        CLIENT_SESSION_COOKIE, secure=True, httponly=True, samesite="strict", path="/"
+        session_cookie_name(request),
+        secure=cookie_secure(request),
+        httponly=True,
+        samesite="strict",
+        path="/",
     )
+    if session_cookie_name(request) != CLIENT_SESSION_COOKIE:
+        response.delete_cookie(CLIENT_SESSION_COOKIE, path="/")
     return response
 
 
@@ -310,23 +318,22 @@ async def catalog_socket(websocket: WebSocket):
 @router.get("/api/metadata/languages")
 async def metadata_languages(request: Request):
     require_account(request)
-    return {"languages": await run_foreground(MetadataLanguageSettings().get)}
+    return {"languages": MetadataLanguageSettings().get()}
 
 
 @router.get("/api/preferences/locale")
 async def get_locale(request: Request):
     account, _ = require_account(request)
-    return {"locale": await run_foreground(AccountPreference(account["id"]).locale)}
+    return {"locale": AccountPreference(account["id"]).locale()}
 
 
 @router.patch("/api/preferences/locale")
 async def set_locale(request: Request):
     account, _ = require_account(request)
     try:
-        value = (await request.json()).get("locale")
         return {
-            "locale": await run_foreground(
-                AccountPreference(account["id"]).set_locale, value
+            "locale": AccountPreference(account["id"]).set_locale(
+                (await request.json()).get("locale")
             )
         }
     except ValueError as error:
@@ -336,16 +343,15 @@ async def set_locale(request: Request):
 @router.get("/api/preferences/metadata-language")
 async def get_metadata_language(request: Request):
     account, _ = require_account(request)
-    return await run_foreground(AccountPreference(account["id"]).metadata_language)
+    return AccountPreference(account["id"]).metadata_language()
 
 
 @router.patch("/api/preferences/metadata-language")
 async def set_metadata_language(request: Request):
     account, _ = require_account(request)
     try:
-        value = (await request.json()).get("language")
-        return await run_foreground(
-            AccountPreference(account["id"]).set_metadata_language, value
+        return AccountPreference(account["id"]).set_metadata_language(
+            (await request.json()).get("language")
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -354,17 +360,14 @@ async def set_metadata_language(request: Request):
 @router.get("/api/preferences/subtitles")
 async def get_subtitles(request: Request):
     account, _ = require_account(request)
-    return await run_foreground(AccountPreference(account["id"]).subtitle_style)
+    return AccountPreference(account["id"]).subtitle_style()
 
 
 @router.patch("/api/preferences/subtitles")
 async def set_subtitles(request: Request):
     account, _ = require_account(request)
     try:
-        value = await request.json()
-        return await run_foreground(
-            AccountPreference(account["id"]).set_subtitle_style, value
-        )
+        return AccountPreference(account["id"]).set_subtitle_style(await request.json())
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 

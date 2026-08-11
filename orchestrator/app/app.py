@@ -95,16 +95,16 @@ async def request_timing(request, call_next):
     authorization = request.headers.get("authorization")
     auth_started = time.perf_counter()
     auth_ms = 0.0
-    from app.client_auth import CLIENT_SESSION_COOKIE, bearer_token
-
-    token = bearer_token(authorization) or request.cookies.get(CLIENT_SESSION_COOKIE)
-    if token:
+    if authorization:
+        from app.client_auth import bearer_token
         from app.models.account import Account
 
-        request.state.authenticated = await run_foreground(
-            Account().authenticate_token, token
-        )
-        auth_ms = (time.perf_counter() - auth_started) * 1000
+        token = bearer_token(authorization)
+        if token:
+            request.state.authenticated = await run_foreground(
+                Account().authenticate_token, token
+            )
+            auth_ms = (time.perf_counter() - auth_started) * 1000
     response = await call_next(request)
     duration_ms = (time.perf_counter() - started) * 1000
     log = request_logger.warning if duration_ms >= 500 else request_logger.debug

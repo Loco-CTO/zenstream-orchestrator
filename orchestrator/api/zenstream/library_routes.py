@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,13 +86,22 @@ _admin_identity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 def authenticate_admin_request(
     request: Request, token_header: str | None = None
 ) -> str:
-    cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
+    cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE) or request.cookies.get(
+        "zenstream-admin-session"
+    )
     # Administrator sessions are browser-only and must never be supplied via a
     # client-controlled bearer/header value.  `require_admin` retains its
     # direct-call fallback for internal jobs/tests, but HTTP routes require the
     # HttpOnly cookie boundary here.
     if not cookie_token:
         raise HTTPException(403, "Administrator cookie authentication is required.")
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origin = request.headers.get("origin")
+        forwarded_proto = request.headers.get("x-forwarded-proto")
+        forwarded_host = request.headers.get("x-forwarded-host")
+        expected = f"{forwarded_proto or request.url.scheme}://{forwarded_host or request.headers.get('host', request.url.netloc)}"
+        if not origin or urlsplit(origin).scheme + "://" + urlsplit(origin).netloc != expected:
+            raise HTTPException(403, "Cross-site administrator request rejected.")
     admin = Admin.from_token(cookie_token)
     if admin is None:
         raise HTTPException(403, "Invalid administrator credentials.")

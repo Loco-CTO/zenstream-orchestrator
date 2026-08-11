@@ -2,8 +2,9 @@ import asyncio
 import math
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from app.client_auth import require_account, websocket_account
+from app.client_auth import cookie_secure, require_account, websocket_account
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite
@@ -192,7 +193,13 @@ def _admin_headers(username: str | None, token: str | None):
 def _admin_request(
     request: Request, username: str | None = None, token: str | None = None
 ):
-    cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origin = request.headers.get("origin")
+        expected = f"{request.headers.get('x-forwarded-proto', request.url.scheme)}://{request.headers.get('x-forwarded-host', request.headers.get('host', request.url.netloc))}"
+        if not origin or f"{urlsplit(origin).scheme}://{urlsplit(origin).netloc}" != expected:
+            raise HTTPException(403, "Cross-site administrator request rejected.")
+    cookie_name = ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session"
+    cookie_token = request.cookies.get(cookie_name)
     return _admin_headers(username, cookie_token or token)
 
 
@@ -268,6 +275,7 @@ async def dashboard(path: str = ""):
 
 @router.post("/api/admin/login")
 async def admin_login(
+    request: Request,
     Username: str | None = Header(None), Password: str | None = Header(None)
 ):
     username, password = _user_headers(Username, Password)
@@ -276,10 +284,10 @@ async def admin_login(
         raise HTTPException(403, "Invalid administrator credentials.")
     response = JSONResponse({"username": username}, status_code=202)
     response.set_cookie(
-        ADMIN_SESSION_COOKIE,
+        ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session",
         token,
         max_age=7 * 24 * 60 * 60,
-        secure=True,
+        secure=cookie_secure(request),
         httponly=True,
         samesite="strict",
         path="/",
@@ -297,12 +305,14 @@ async def admin_logout(
     Admin(username).logout(token)
     response = Response(status_code=204)
     response.delete_cookie(
-        ADMIN_SESSION_COOKIE,
-        secure=True,
+        ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session",
+        secure=cookie_secure(request),
         httponly=True,
         samesite="strict",
         path="/",
     )
+    if not cookie_secure(request):
+        response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
     return response
 
 

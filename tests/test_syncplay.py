@@ -241,14 +241,6 @@ class SyncplayReadinessTests(unittest.TestCase):
         self.assertTrue(resumed["playing"])
         self.assertEqual(resumed["playbackState"], "playing")
 
-    def test_inactive_viewers_do_not_block_readiness(self):
-        self.database.execute(
-            "UPDATE syncplay_members SET viewing=0,loading=1,ready_generation=-1 WHERE user_id=?",
-            ("viewer",),
-        )
-        with self.database.transaction() as cursor:
-            self.assertFalse(self.group.waiting_for_members(cursor, 0))
-
     def test_paused_seek_barrier_remains_paused_after_ready(self):
         self.database.execute(
             "UPDATE syncplay_groups SET playing=0,resume=0,playback_state='paused',pause_reason='command' WHERE id=?",

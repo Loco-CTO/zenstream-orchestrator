@@ -36,12 +36,6 @@ Docker Compose uses two separate persistent mounts:
 - `METADATA_PATH` holds the SQLite database, rotating logs, and generated
   metadata, artwork, people, and trickplay caches. It is mounted at
   `/app/sqlite`; native runs use the configured path directly.
-- Library watching uses Watchdog native events by default (inotify in
-  Linux/Docker and
-  ReadDirectoryChangesW on Windows). Offline and degraded recovery uses a
-  lightweight delta verification, defaulting to 60 seconds; configure it with
-  `LIBRARY_WATCH_DELTA_SECONDS` (`LIBRARY_WATCH_POLL_SECONDS` remains an alias)
-  or force a backend with `LIBRARY_WATCH_BACKEND=auto|native|polling`.
 
 These are host bind mounts, so you can use an existing directory on the host;
 no Docker named volume is required. Docker calls this a volume mount, but the
@@ -74,12 +68,6 @@ The image includes `ffmpeg` and `ffprobe`, so host media tools are not required.
    printed in the first container startup logs, and add a physical library with
    directory `/media` (or a subdirectory such as `/media/Movies`). Do not enter
    the Windows host path in the dashboard.
-
-   Leave the watcher backend set to `auto`. ZenStream attempts the native
-   Watchdog observer for the `/media` bind mount and uses the lightweight delta
-   verifier for startup/offline recovery or if native delivery fails. The
-   dashboard shows whether native delivery has been verified and exposes a
-   short real-time test.
 
 ### Linux
 

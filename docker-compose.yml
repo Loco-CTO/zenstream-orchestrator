@@ -17,9 +17,6 @@ services:
       # The host METADATA_PATH is mounted here; application paths must use the
       # writable in-container destination rather than the host source path.
       METADATA_PATH: /app/sqlite
-      LIBRARY_WATCH_BACKEND: "${LIBRARY_WATCH_BACKEND:-auto}"
-      LIBRARY_WATCH_POLL_SECONDS: "${LIBRARY_WATCH_POLL_SECONDS:-60}"
-      LIBRARY_WATCH_DELTA_SECONDS: "${LIBRARY_WATCH_DELTA_SECONDS:-60}"
       ORCHESTRATOR_HOST: 0.0.0.0
       ORCHESTRATOR_PORT: 9088
     volumes:

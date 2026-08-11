@@ -516,17 +516,23 @@ class JobStore:
             )
 
     def ensure_library(self, library: dict) -> dict:
-        description = "Index the library without moving or renaming files."
+        description = "Verify filesystem changes since the last native watcher event."
         definition = self.ensure(
             f"library_scan:{library['id']}",
-            f"Scan {library['name']}",
+            f"Verify changes in {library['name']}",
             description,
-            "library_scan",
+            "library_delta_verify",
             library.get("scanIntervalMinutes") or 1440,
             {"libraryId": library["id"]},
             library.get("safetyScanEnabled", True),
         )
-        # The persistent daily safety scan is intentionally independent from
+        if definition.get("kind") == "library_scan":
+            self.db.execute(
+                "UPDATE job_definitions SET kind='library_delta_verify',updated_at=? WHERE id=?",
+                (now(), definition["id"]),
+            )
+            definition = self.definition(definition["id"]) or definition
+        # The persistent change verification is intentionally independent from
         # the immediate filesystem watcher.  Existing definitions must follow
         # the library setting too; ``ensure`` only creates missing rows.
         desired_enabled = int(bool(library.get("safetyScanEnabled", True)))
@@ -539,7 +545,7 @@ class JobStore:
         self.db.execute(
             "UPDATE job_definitions SET name=?,description=?,config=?,updated_at=? WHERE id=?",
             (
-                f"Scan {library['name']}",
+                f"Verify changes in {library['name']}",
                 description,
                 json.dumps({"libraryId": library["id"]}),
                 now(),
@@ -1148,9 +1154,13 @@ class JobScheduler:
         definition = self.store.definition(definition_id)
         if not definition:
             raise KeyError("Job definition not found")
-        if definition["kind"] == "library_scan":
+        if definition["kind"] in {"library_scan", "library_delta_verify"}:
             library_id = (definition.get("config") or {}).get("libraryId")
-            job = self.library_runtime.enqueue(library_id, "scan")
+            if definition["kind"] == "library_delta_verify":
+                self.library_runtime.request_delta_verification(library_id)
+                job = {"state": "queued", "message": "Library change verification queued"}
+            else:
+                job = self.library_runtime.enqueue(library_id, "scan")
             self.store.db.execute(
                 "UPDATE job_definitions SET last_state=?,last_run_at=?,last_message=?,updated_at=? WHERE id=?",
                 (
@@ -1277,11 +1287,14 @@ class JobScheduler:
         for definition in self.store.due():
             if self.store.queued_or_running(definition["id"]):
                 continue
-            if definition["kind"] == "library_scan":
+            if definition["kind"] in {"library_scan", "library_delta_verify"}:
                 library_id = (definition.get("config") or {}).get("libraryId")
                 if library_id:
-                    self.library_runtime.enqueue(library_id, "scan")
-                self.store.mark_scheduled(definition["id"], None, "Library scan queued")
+                    if definition["kind"] == "library_delta_verify":
+                        self.library_runtime.request_delta_verification(library_id)
+                    else:
+                        self.library_runtime.enqueue(library_id, "scan")
+                self.store.mark_scheduled(definition["id"], None, "Library change verification queued")
             else:
                 run, created = self.store.create_or_get_active_run(definition)
                 if not created:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -62,9 +63,55 @@ def _windows_remote_drive(path: Path) -> bool:
         return False
 
 
-def _linux_mount_type(_path: Path) -> str | None:
-    """Compatibility probe retained for callers; auto selection is native-first."""
-    return None
+_MOUNT_OCTAL = re.compile(r"\\([0-7]{3})")
+_DELTA_MOUNT_TYPES = {
+    "9p",
+    "cifs",
+    "smb3",
+    "nfs",
+    "nfs4",
+    "fuse.sshfs",
+    "fuse.rclone",
+    "fuseblk",
+    "davfs",
+    "vboxsf",
+    "hgfs",
+}
+
+
+def _decode_mount_field(value: str) -> str:
+    return _MOUNT_OCTAL.sub(lambda match: chr(int(match.group(1), 8)), value)
+
+
+def _linux_mount_type(path: Path) -> str | None:
+    """Return the filesystem type for the longest matching Linux mountpoint."""
+    if os.name == "nt":
+        return None
+    try:
+        target = os.path.abspath(os.fspath(path))
+        best_length = -1
+        best_type: str | None = None
+        with open("/proc/self/mountinfo", encoding="utf-8") as mounts:
+            for line in mounts:
+                left, separator, right = line.rstrip("\n").partition(" - ")
+                if not separator:
+                    continue
+                fields = left.split()
+                if len(fields) < 5:
+                    continue
+                mountpoint = os.path.abspath(_decode_mount_field(fields[4]))
+                if target != mountpoint and not target.startswith(
+                    mountpoint.rstrip(os.sep) + os.sep
+                ):
+                    continue
+                right_fields = right.split()
+                if not right_fields or len(mountpoint) <= best_length:
+                    continue
+                best_length = len(mountpoint)
+                best_type = right_fields[0]
+        return best_type
+    except (OSError, UnicodeError):
+        return None
 
 
 def _in_container() -> bool:
@@ -72,16 +119,22 @@ def _in_container() -> bool:
 
 
 def choose_backend(path: str | Path, requested: str = "auto") -> tuple[str, str]:
-    """Use Watchdog native events first; polling means delta-only compatibility mode."""
+    """Select native events only where the mounted filesystem can deliver them."""
     requested = requested if requested in {"auto", "native", "polling"} else "auto"
     if requested != "auto":
         return requested, "explicit"
     override = _configured_backend()
     if override != "auto":
         return override, "environment_override"
-    return "native", "native_first_remote" if _windows_remote_drive(
-        Path(path)
-    ) else "native_first"
+    path = Path(path)
+    if _windows_remote_drive(path):
+        return "polling", "windows_remote_mount"
+    mount_type = _linux_mount_type(path)
+    if mount_type in _DELTA_MOUNT_TYPES or (
+        mount_type is not None and mount_type.startswith("fuse.")
+    ):
+        return "polling", f"unreliable_mount:{mount_type}"
+    return "native", "native_local_filesystem"
 
 
 @dataclass
@@ -91,6 +144,7 @@ class WatchStatus:
     state: str = "starting"
     capability: str = "unknown"
     native_implementation: str | None = None
+    mount_type: str | None = None
     reason: str | None = None
     delta_interval_seconds: float = DELTA_INTERVAL_SECONDS
     last_event_at: str | None = None
@@ -101,6 +155,8 @@ class WatchStatus:
     restart_count: int = 0
     last_error_code: str | None = None
     catchup_state: str = "pending"
+    delta_phase: str = "idle"
+    delta_progress: dict | None = None
     last_delta_changed_roots: int = 0
 
     def payload(self) -> dict:
@@ -110,6 +166,7 @@ class WatchStatus:
             "state": self.state,
             "capability": self.capability,
             "nativeImplementation": self.native_implementation,
+            "mountType": self.mount_type,
             "reason": self.reason,
             "pollIntervalSeconds": int(self.delta_interval_seconds),
             "deltaIntervalSeconds": int(self.delta_interval_seconds),
@@ -123,6 +180,8 @@ class WatchStatus:
             "restartCount": self.restart_count,
             "lastErrorCode": self.last_error_code,
             "catchupState": self.catchup_state,
+            "deltaPhase": self.delta_phase,
+            "deltaProgress": self.delta_progress,
             "lastDeltaChangedRoots": self.last_delta_changed_roots,
         }
 
@@ -200,6 +259,9 @@ class LibraryWatcherManager:
             state="disabled" if not library.get("watchEnabled") else "starting",
             capability="disabled" if not library.get("watchEnabled") else "unknown",
             delta_interval_seconds=self.delta_interval,
+            mount_type=_linux_mount_type(Path(library["directory"]))
+            if library.get("directory")
+            else None,
             reason="not_registered",
         ).payload()
 
@@ -345,6 +407,7 @@ class LibraryWatcherManager:
             backend=backend,
             reason=reason,
             delta_interval_seconds=self.delta_interval,
+            mount_type=_linux_mount_type(root),
         )
         registration = _Registration(library_id, root, status)
         with self._lock:
@@ -410,7 +473,7 @@ class LibraryWatcherManager:
                 "active",
                 "delta_only",
             )
-            status.reason = "explicit_delta_mode"
+            status.reason = reason if requested == "auto" else "explicit_delta_mode"
         registration.next_delta = time.monotonic()
 
     def _unregister(self, library_id: str) -> None:
@@ -463,6 +526,7 @@ class LibraryWatcherManager:
                         continue
                     registration.status.last_delta_started_at = _now_iso()
                     registration.status.catchup_state = "running"
+                    registration.status.delta_phase = "running"
                     registration.future = self._executor.submit(
                         self._run_delta, registration.library_id, registration.root
                     )
@@ -521,7 +585,16 @@ class LibraryWatcherManager:
             status = registration.status
             status.last_delta_finished_at = _now_iso()
             status.catchup_state = "complete"
+            status.delta_phase = "complete"
             status.last_delta_changed_roots = len(paths)
+            native_missed = bool(paths and registration.observer is not None)
+            if native_missed:
+                status.capability = "degraded"
+                status.state = "degraded"
+                status.reason = "native_event_not_delivered"
+                status.last_error_code = "native_event_not_delivered"
+                if status.requested_mode == "auto":
+                    self._stop_observer(registration)
             if registration.observer is None:
                 status.backend = "delta"
                 status.state = "degraded" if status.last_error_code else "active"
@@ -538,6 +611,7 @@ class LibraryWatcherManager:
             registration.status.state = "degraded"
             registration.status.capability = "degraded"
             registration.status.catchup_state = "failed"
+            registration.status.delta_phase = "failed"
             registration.status.last_error_code = "delta_probe_failed"
             logger.exception(
                 "library_watcher_delta_failed library_id=%s", registration.library_id

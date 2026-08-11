@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
-from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore, render_audio_preview
@@ -100,7 +100,10 @@ def authenticate_admin_request(
         forwarded_proto = request.headers.get("x-forwarded-proto")
         forwarded_host = request.headers.get("x-forwarded-host")
         expected = f"{forwarded_proto or request.url.scheme}://{forwarded_host or request.headers.get('host', request.url.netloc)}"
-        if not origin or urlsplit(origin).scheme + "://" + urlsplit(origin).netloc != expected:
+        if (
+            not origin
+            or urlsplit(origin).scheme + "://" + urlsplit(origin).netloc != expected
+        ):
             raise HTTPException(403, "Cross-site administrator request rejected.")
     admin = Admin.from_token(cookie_token)
     if admin is None:

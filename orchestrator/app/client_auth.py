@@ -19,12 +19,22 @@ DEV_CLIENT_SESSION_COOKIE = "zenstream-session"
 
 def cookie_secure(request: Request) -> bool:
     """Use secure cookies in production; permit explicit loopback HTTP development."""
-    host = (request.headers.get("host") or request.url.hostname or "").split(":", 1)[0].lower()
-    return request.url.scheme == "https" or host not in {"localhost", "127.0.0.1", "::1"}
+    host = (
+        (request.headers.get("host") or request.url.hostname or "")
+        .split(":", 1)[0]
+        .lower()
+    )
+    return request.url.scheme == "https" or host not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }
 
 
 def session_cookie_name(request: Request) -> str:
-    return CLIENT_SESSION_COOKIE if cookie_secure(request) else DEV_CLIENT_SESSION_COOKIE
+    return (
+        CLIENT_SESSION_COOKIE if cookie_secure(request) else DEV_CLIENT_SESSION_COOKIE
+    )
 
 
 def _token_hash(token: str) -> str:

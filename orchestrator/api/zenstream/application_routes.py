@@ -196,9 +196,14 @@ def _admin_request(
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         origin = request.headers.get("origin")
         expected = f"{request.headers.get('x-forwarded-proto', request.url.scheme)}://{request.headers.get('x-forwarded-host', request.headers.get('host', request.url.netloc))}"
-        if not origin or f"{urlsplit(origin).scheme}://{urlsplit(origin).netloc}" != expected:
+        if (
+            not origin
+            or f"{urlsplit(origin).scheme}://{urlsplit(origin).netloc}" != expected
+        ):
             raise HTTPException(403, "Cross-site administrator request rejected.")
-    cookie_name = ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session"
+    cookie_name = (
+        ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session"
+    )
     cookie_token = request.cookies.get(cookie_name)
     return _admin_headers(username, cookie_token or token)
 
@@ -276,7 +281,8 @@ async def dashboard(path: str = ""):
 @router.post("/api/admin/login")
 async def admin_login(
     request: Request,
-    Username: str | None = Header(None), Password: str | None = Header(None)
+    Username: str | None = Header(None),
+    Password: str | None = Header(None),
 ):
     username, password = _user_headers(Username, Password)
     token = Admin(username).login(password)

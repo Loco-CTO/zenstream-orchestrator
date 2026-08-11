@@ -51,7 +51,9 @@ class AdminProfileRouteTest(unittest.TestCase):
 
     def test_cookie_authenticated_mutation_rejects_cross_origin(self):
         with self.assertRaises(HTTPException) as raised:
-            app_module._admin_request(_request(method="POST", origin="https://attacker.test"))
+            app_module._admin_request(
+                _request(method="POST", origin="https://attacker.test")
+            )
         self.assertEqual(raised.exception.status_code, 403)
 
     def test_library_admin_mutation_rejects_cross_origin(self):

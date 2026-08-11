@@ -69,6 +69,12 @@ The image includes `ffmpeg` and `ffprobe`, so host media tools are not required.
    directory `/media` (or a subdirectory such as `/media/Movies`). Do not enter
    the Windows host path in the dashboard.
 
+   Native Watchdog events work when the mounted storage forwards inotify. A
+   Docker Desktop Windows bind such as `C:\Media` does not reliably
+   forward those events into the Linux container, so the existing periodic
+   library scan job is the safety net. Move the media into Linux-host storage
+   if immediate events through Docker are required.
+
 ### Linux
 
 1. Install Docker Engine with the Docker Compose plugin, then copy

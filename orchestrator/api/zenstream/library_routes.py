@@ -92,15 +92,6 @@ _admin_identity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
-def _require_same_origin(request: Request) -> None:
-    if request.method.upper() in {"GET", "HEAD", "OPTIONS"}:
-        return
-    origin = request.headers.get("origin")
-    expected = f"{request.url.scheme}://{request.url.netloc}"
-    if not origin or origin.rstrip("/").casefold() != expected.rstrip("/").casefold():
-        raise HTTPException(403, "A same-origin administrator request is required.")
-
-
 def authenticate_admin_request(
     request: Request, token_header: str | None = None
 ) -> str:
@@ -114,8 +105,6 @@ def authenticate_admin_request(
     admin = Admin.from_token(cookie_token)
     if admin is None:
         raise HTTPException(403, "Invalid administrator credentials.")
-    if cookie_token:
-        _require_same_origin(request)
     return admin.username
 
 

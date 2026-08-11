@@ -4331,7 +4331,7 @@ class LibraryRuntime:
                     or (relative_path.split("/", 1)[0] if relative_path else ""),
                     mtime,
                     signature,
-                    _now_iso(),
+                    now(),
                     1,
                 )
             )
@@ -4359,7 +4359,7 @@ class LibraryRuntime:
                 )
             cursor.execute(
                 "INSERT INTO library_watch_state(library_id,generation,last_complete_at) VALUES(?,?,?) ON CONFLICT(library_id) DO UPDATE SET generation=generation+1,last_complete_at=excluded.last_complete_at",
-                (library_id, 1, _now_iso()),
+                (library_id, 1, now()),
             )
         return tuple(
             str(root / target) if target else str(root) for target in sorted(changed)

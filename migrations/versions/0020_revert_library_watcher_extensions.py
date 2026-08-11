@@ -27,7 +27,7 @@ def upgrade() -> None:
                 "FROM job_definitions WHERE kind='library_delta_verify'"
             )
         ).fetchall()
-        for definition_id, job_key, _kind, config, _enabled in definitions:
+        for definition_id, _job_key, _kind, config, _enabled in definitions:
             try:
                 library_id = json.loads(config or "{}").get("libraryId")
             except (TypeError, ValueError):

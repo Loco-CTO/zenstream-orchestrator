@@ -16,7 +16,10 @@ class WindowsWatchdogTest(unittest.TestCase):
 
         class Handler(FileSystemEventHandler):
             def on_created(self, event):
-                if not event.is_directory and Path(event.src_path).name == "episode.mkv":
+                if (
+                    not event.is_directory
+                    and Path(event.src_path).name == "episode.mkv"
+                ):
                     received.set()
 
         with TemporaryDirectory() as directory:
@@ -26,7 +29,9 @@ class WindowsWatchdogTest(unittest.TestCase):
             try:
                 time.sleep(0.25)
                 (Path(directory) / "episode.mkv").write_bytes(b"watchdog-smoke")
-                self.assertTrue(received.wait(10), "Watchdog did not receive the file event")
+                self.assertTrue(
+                    received.wait(10), "Watchdog did not receive the file event"
+                )
             finally:
                 observer.stop()
                 observer.join(5)

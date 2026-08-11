@@ -189,34 +189,10 @@ def _admin_headers(username: str | None, token: str | None):
     return admin.username, token
 
 
-def _request_origins(request: Request) -> set[str]:
-    """Return the direct and proxy-visible origins for this request.
-
-    The dashboard is served through the Next.js development proxy. In that
-    setup the browser Origin is the frontend origin while the ASGI request URL
-    points at the internal Orchestrator destination. Trust the standard
-    forwarded host/proto pair so same-origin dashboard mutations pass CSRF
-    validation without weakening the check for unrelated origins.
-    """
-    origins = {f"{request.url.scheme}://{request.url.netloc}"}
-    forwarded_host = request.headers.get("x-forwarded-host")
-    if forwarded_host:
-        forwarded_proto = request.headers.get("x-forwarded-proto")
-        scheme = (forwarded_proto or request.url.scheme).split(",", 1)[0].strip()
-        host = forwarded_host.split(",", 1)[0].strip()
-        if scheme and host:
-            origins.add(f"{scheme}://{host}")
-    return {origin.rstrip("/").casefold() for origin in origins}
-
-
 def _admin_request(
     request: Request, username: str | None = None, token: str | None = None
 ):
     cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
-    if cookie_token and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
-        origin = request.headers.get("origin")
-        if not origin or origin.rstrip("/").casefold() not in _request_origins(request):
-            raise HTTPException(403, "A same-origin administrator request is required.")
     return _admin_headers(username, cookie_token or token)
 
 

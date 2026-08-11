@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,6 +46,7 @@ credentials = MetadataCredentials()
 _admin_hydration: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "admin_catalog_hydration", default=None
 )
+_watcher_tests: dict[str, dict] = {}
 
 
 def _trickplay_asset(entity_id: str) -> dict | None:
@@ -583,6 +586,50 @@ async def get_library(
     return _with_watcher_status(library)
 
 
+@router.post("/libraries/{library_id}/watcher-test")
+async def start_watcher_test(
+    library_id: str,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    library = store.get(library_id)
+    if not library or library.get("type") == "collection":
+        raise HTTPException(404, "Physical library not found.")
+    test_id = uuid.uuid4().hex
+    current = runtime.watcher.status(library)
+    _watcher_tests[test_id] = {
+        "libraryId": library_id,
+        "startedAt": time.time(),
+        "expiresAt": time.time() + 30,
+        "eventAt": current.get("lastEventAt"),
+    }
+    return {"testId": test_id, "expiresAt": _watcher_tests[test_id]["expiresAt"], "status": "pending"}
+
+
+@router.get("/libraries/{library_id}/watcher-test/{test_id}")
+async def get_watcher_test(
+    library_id: str,
+    test_id: str,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    test = _watcher_tests.get(test_id)
+    if not test or test["libraryId"] != library_id:
+        raise HTTPException(404, "Watcher test not found.")
+    library = store.get(library_id)
+    status = runtime.watcher.status(library or {"id": library_id})
+    event_at = status.get("lastEventAt")
+    if event_at and event_at != test.get("eventAt") and time.time() <= test["expiresAt"]:
+        result = {"status": "verified", "eventAt": event_at}
+    elif time.time() > test["expiresAt"]:
+        result = {"status": "expired", "eventAt": event_at}
+    else:
+        result = {"status": "pending", "expiresAt": test["expiresAt"]}
+    return result
+
+
 @router.patch("/libraries/{library_id}")
 async def update_library(
     library_id: str,
@@ -591,17 +638,24 @@ async def update_library(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
+    payload = await request.json()
+    before = store.get(library_id)
     try:
-        library = store.update(library_id, await request.json())
+        library = store.update(library_id, payload)
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except (ValueError, TypeError) as error:
         raise HTTPException(400, str(error)) from error
-    runtime.enqueue(
-        library_id, "collection_rebuild" if library["type"] == "collection" else "scan"
-    )
+    source_changed = "sourceLibraryIds" in payload
+    directory_changed = "directory" in payload and (before or {}).get("directory") != library.get("directory")
+    settings_only = set(payload).issubset({"watchEnabled", "watchMode", "safetyScanEnabled", "scanIntervalMinutes", "name"})
+    if library["type"] == "collection" and source_changed:
+        runtime.enqueue(library_id, "collection_rebuild")
+    elif library["type"] != "collection" and directory_changed:
+        runtime.enqueue(library_id, "scan")
     scheduler.refresh_library_definition(library)
-    await asyncio.to_thread(runtime.refresh_watchers)
+    if not settings_only or any(key in payload for key in ("watchEnabled", "watchMode")):
+        await asyncio.to_thread(runtime.refresh_watchers)
     library["sourceLibraryIds"] = store.sources(library_id)
     return _with_watcher_status(library)
 
@@ -656,7 +710,7 @@ async def list_jobs(
     values = []
     for definition in definitions:
         recent = scheduler.store.runs(definition["id"], 10)
-        if definition["kind"] == "library_scan":
+        if definition["kind"] in {"library_scan", "library_delta_verify"}:
             recent = scheduler.store.library_runs(
                 (definition.get("config") or {}).get("libraryId"), 10
             )

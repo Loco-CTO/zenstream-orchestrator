@@ -598,6 +598,12 @@ async def start_watcher_test(
         raise HTTPException(404, "Physical library not found.")
     test_id = uuid.uuid4().hex
     current = runtime.watcher.status(library)
+    if current.get("backend") == "delta":
+        return {
+            "status": "unavailable",
+            "reason": current.get("reason") or "delta_only",
+            "capability": current.get("capability"),
+        }
     _watcher_tests[test_id] = {
         "libraryId": library_id,
         "startedAt": time.time(),
@@ -632,7 +638,11 @@ async def get_watcher_test(
     ):
         result = {"status": "verified", "eventAt": event_at}
     elif time.time() > test["expiresAt"]:
-        result = {"status": "expired", "eventAt": event_at}
+        result = {
+            "status": "unverified",
+            "reason": "no_event_observed",
+            "eventAt": event_at,
+        }
     else:
         result = {"status": "pending", "expiresAt": test["expiresAt"]}
     return result

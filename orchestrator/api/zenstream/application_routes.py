@@ -5,7 +5,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from app.client_auth import cookie_secure, require_account, websocket_account
-from app.paths import PROJECT_ROOT
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite
@@ -19,6 +18,7 @@ from app.models.syncplay import (
     pause,
     schedule,
 )
+from app.paths import PROJECT_ROOT
 from app.playback import ffmpeg_path, ffprobe_path
 from fastapi import (
     APIRouter,
@@ -172,7 +172,9 @@ def _static_roots():
         PROJECT_ROOT / "orchestrator" / "web",
         PROJECT_ROOT / "frontend" / "out",
     )
-    web = next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
+    web = next(
+        (candidate for candidate in candidates if candidate.is_dir()), candidates[0]
+    )
     return web, PROJECT_ROOT / "assets"
 
 

@@ -281,7 +281,10 @@ export default function LibrariesPage() {
 														: "Native backend pending")}
 											</span>
 											<span>
-												· delta {library.watcherStatus?.deltaPhase || library.watcherStatus?.catchupState || "pending"}
+												· delta{" "}
+												{library.watcherStatus?.deltaPhase ||
+													library.watcherStatus?.catchupState ||
+													"pending"}
 											</span>
 											<span>
 												· {library.watcherStatus?.pendingRootCount || 0} pending roots

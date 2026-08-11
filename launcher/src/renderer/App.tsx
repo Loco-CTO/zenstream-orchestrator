@@ -1,5 +1,6 @@
 import {
   IconAlertTriangle,
+  IconArrowDown,
   IconBrandWindows,
   IconCheck,
   IconChevronRight,
@@ -30,7 +31,8 @@ import type {
   EnvironmentKey,
   LauncherState,
   LifecycleStatus,
-  LogEntry,
+  LogPage,
+  PagedLogEntry,
   LogSource,
   SecretChange,
 } from "../shared";
@@ -201,8 +203,7 @@ const groups: FieldGroup[] = [
       {
         key: "METADATA_IMAGE_CONVERSION_WORKERS",
         label: "Image conversion workers",
-        description:
-          "Concurrent WebP and BlurHash FFmpeg conversions (1-16).",
+        description: "Concurrent WebP and BlurHash FFmpeg conversions (1-16).",
         type: "number",
       },
     ],
@@ -233,7 +234,7 @@ export default function App() {
   const [config, setConfig] = useState<EditableConfig | null>(null);
   const [draft, setDraft] = useState<EnvironmentConfig | null>(null);
   const [state, setState] = useState<LauncherState>(emptyState);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [unseenLogs, setUnseenLogs] = useState(0);
   const [credentials, setCredentials] = useState<BootstrapCredentials | null>(
     null,
   );
@@ -250,9 +251,6 @@ export default function App() {
 
   useEffect(() => {
     const stopState = window.zenstreamLauncher.onState(setState);
-    const stopLog = window.zenstreamLauncher.onLog((entry) =>
-      setLogs((current) => [...current, entry].slice(-10_000)),
-    );
     const stopCredentials =
       window.zenstreamLauncher.onCredentials(setCredentials);
     void window.zenstreamLauncher
@@ -262,13 +260,11 @@ export default function App() {
         setDraft(initial.config.environment);
         setStartWithWindows(initial.config.startWithWindows);
         setState(initial.state);
-        setLogs(initial.logs);
         setCredentials(initial.credentials);
       })
       .catch((reason) => setError(messageFor(reason)));
     return () => {
       stopState();
-      stopLog();
       stopCredentials();
     };
   }, []);
@@ -409,9 +405,9 @@ export default function App() {
           )}
           <button
             className="icon-button danger"
-            aria-label="Quit launcher and stop Orchestrator"
-            title="Quit launcher and stop Orchestrator"
-            onClick={() => void window.zenstreamLauncher.quit()}
+            aria-label="Close launcher window"
+            title="Close launcher window; Orchestrator remains running in the tray"
+            onClick={() => void window.zenstreamLauncher.hideWindow()}
           >
             <IconX size={19} />
           </button>
@@ -449,22 +445,31 @@ export default function App() {
               or exported logs.
             </p>
             <div className="credential-values">
-              <code>Username: {credentials.username}</code>
-              <code>Password: {credentials.password}</code>
+              <label className="credential-value">
+                <span>Username</span>
+                <input
+                  readOnly
+                  value={credentials.username}
+                  aria-label="Bootstrap username"
+                />
+              </label>
+              <label className="credential-value">
+                <span>Password</span>
+                <input
+                  readOnly
+                  value={credentials.password}
+                  aria-label="Bootstrap password"
+                />
+              </label>
             </div>
           </div>
           <button
             className="button primary"
             onClick={() =>
-              void navigator.clipboard
-                .writeText(
-                  `Username: ${credentials.username}\nPassword: ${credentials.password}`,
-                )
-                .then(async () => {
-                  await window.zenstreamLauncher.acknowledgeCredentials();
-                  setCredentials(null);
-                  setNotice("Credentials copied. Store them somewhere safe.");
-                })
+              void run(async () => {
+                await window.zenstreamLauncher.copyAndAcknowledgeCredentials();
+                setCredentials(null);
+              }, "Credentials copied. Store them somewhere safe.")
             }
           >
             <IconClipboard size={17} /> Copy and dismiss
@@ -501,7 +506,9 @@ export default function App() {
           onClick={() => setTab("logs")}
         >
           <IconTerminal2 size={18} /> Logs{" "}
-          <span className="tab-count">{logs.length.toLocaleString()}</span>
+          {unseenLogs > 0 && (
+            <span className="tab-count">{unseenLogs.toLocaleString()}</span>
+          )}
         </button>
       </nav>
 
@@ -530,8 +537,7 @@ export default function App() {
         />
       ) : (
         <LogsView
-          logs={logs}
-          onClear={() => setLogs([])}
+          onUnseenChange={setUnseenLogs}
           onError={setError}
           onNotice={setNotice}
         />
@@ -742,53 +748,214 @@ function ConfigurationView({
 }
 
 function LogsView({
-  logs,
-  onClear,
+  onUnseenChange,
   onError,
   onNotice,
 }: {
-  logs: LogEntry[];
-  onClear: () => void;
+  onUnseenChange: (count: number) => void;
   onError: (message: string | null) => void;
   onNotice: (message: string | null) => void;
 }) {
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<LogSource | "all">("all");
+  const [entries, setEntries] = useState<PagedLogEntry[]>([]);
+  const [olderCursor, setOlderCursor] = useState<string | null>(null);
+  const [newerCursor, setNewerCursor] = useState<string | null>(null);
+  const [hasOlder, setHasOlder] = useState(false);
+  const [hasNewer, setHasNewer] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [autoScroll, setAutoScroll] = useState(true);
-  const [frozenLogs, setFrozenLogs] = useState<LogEntry[]>([]);
-  const endRef = useRef<HTMLDivElement>(null);
-  const visibleBase = paused ? frozenLogs : logs;
-  const filtered = useMemo(() => {
-    const needle = query.toLowerCase();
-    return visibleBase.filter(
-      (entry) =>
-        (source === "all" || entry.source === source) &&
-        (!needle || entry.message.toLowerCase().includes(needle)),
-    );
-  }, [query, source, visibleBase]);
+  const [follow, setFollow] = useState(true);
+  const [unseen, setUnseen] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const consoleRef = useRef<HTMLElement>(null);
+  const requestGeneration = useRef(0);
+
+  useEffect(() => onUnseenChange(unseen), [onUnseenChange, unseen]);
 
   useEffect(() => {
-    if (autoScroll && !paused) endRef.current?.scrollIntoView({ block: "end" });
-  }, [autoScroll, filtered.length, paused]);
+    const generation = ++requestGeneration.current;
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      void window.zenstreamLauncher
+        .readLogs({ direction: "older", limit: 250, source, query })
+        .then((page) => {
+          if (generation !== requestGeneration.current) return;
+          applyPage(
+            page,
+            setEntries,
+            setOlderCursor,
+            setNewerCursor,
+            setHasOlder,
+            setHasNewer,
+          );
+          setUnseen(0);
+          requestAnimationFrame(() => {
+            if (consoleRef.current)
+              consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+          });
+        })
+        .catch((reason) => onError(messageFor(reason)))
+        .finally(() => setLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [onError, query, source]);
 
-  function togglePause() {
-    if (!paused) setFrozenLogs(logs);
-    setPaused((value) => !value);
+  useEffect(() => {
+    const stopLog = window.zenstreamLauncher.onPersistedLog((entry) => {
+      if (source !== "all" && entry.source !== source) return;
+      if (query && !entry.message.toLowerCase().includes(query.toLowerCase()))
+        return;
+      if (paused || !follow) {
+        setUnseen((value) => value + 1);
+        return;
+      }
+      setEntries((current) => appendBounded(current, entry));
+      setNewerCursor(entry.afterCursor);
+      requestAnimationFrame(() => {
+        if (consoleRef.current)
+          consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+      });
+    });
+    const stopReset = window.zenstreamLauncher.onLogsReset(() => {
+      setEntries([]);
+      setOlderCursor(null);
+      setNewerCursor(null);
+      setHasOlder(false);
+      setHasNewer(false);
+      setUnseen(0);
+      onNotice("Launcher log history was reset.");
+    });
+    return () => {
+      stopLog();
+      stopReset();
+    };
+  }, [follow, onNotice, paused, query, source]);
+
+  async function loadOlder() {
+    if (loading || !hasOlder || !olderCursor || !consoleRef.current) return;
+    const consoleElement = consoleRef.current;
+    const oldHeight = consoleElement.scrollHeight;
+    const generation = requestGeneration.current;
+    setLoading(true);
+    try {
+      const page = await window.zenstreamLauncher.readLogs({
+        direction: "older",
+        cursor: olderCursor,
+        limit: 250,
+        source,
+        query,
+      });
+      if (generation !== requestGeneration.current) return;
+      if (page.cursorExpired) {
+        onNotice(
+          "Older launcher log history has rotated out; showing the latest output.",
+        );
+        await scrollToLatest();
+        return;
+      }
+      setEntries((current) => prependBounded(current, page.entries));
+      setOlderCursor(page.olderCursor);
+      setNewerCursor((current) => current ?? page.newerCursor);
+      setHasOlder(page.hasOlder);
+      setHasNewer(true);
+      requestAnimationFrame(() => {
+        consoleElement.scrollTop += consoleElement.scrollHeight - oldHeight;
+      });
+    } catch (reason) {
+      onError(messageFor(reason));
+    } finally {
+      setLoading(false);
+    }
   }
 
-  async function copyVisible() {
+  async function loadNewer() {
+    if (loading || !hasNewer || !newerCursor) return;
+    const generation = requestGeneration.current;
+    setLoading(true);
     try {
-      await navigator.clipboard.writeText(
-        filtered
+      const page = await window.zenstreamLauncher.readLogs({
+        direction: "newer",
+        cursor: newerCursor,
+        limit: 250,
+        source,
+        query,
+      });
+      if (generation !== requestGeneration.current) return;
+      if (page.cursorExpired) {
+        onNotice(
+          "Newer launcher log history has rotated out; showing the latest output.",
+        );
+        await scrollToLatest();
+        return;
+      }
+      setEntries((current) => appendManyBounded(current, page.entries));
+      setOlderCursor((current) => current ?? page.olderCursor);
+      setNewerCursor(page.newerCursor);
+      setHasOlder(true);
+      setHasNewer(page.hasNewer);
+    } catch (reason) {
+      onError(messageFor(reason));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function scrollToLatest() {
+    try {
+      const page = await window.zenstreamLauncher.readLogs({
+        direction: "older",
+        limit: 250,
+        source,
+        query,
+      });
+      setEntries(page.entries);
+      setOlderCursor(page.olderCursor);
+      setNewerCursor(page.newerCursor);
+      setHasOlder(page.hasOlder);
+      setHasNewer(page.hasNewer);
+      setUnseen(0);
+      if (!paused) setFollow(true);
+      requestAnimationFrame(() => {
+        if (consoleRef.current)
+          consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+      });
+    } catch (reason) {
+      onError(messageFor(reason));
+    }
+  }
+
+  async function copyLoaded() {
+    try {
+      await window.zenstreamLauncher.copyLogText(
+        entries
           .map(
             (entry) => `${entry.timestamp} [${entry.source}] ${entry.message}`,
           )
           .join("\n"),
       );
-      onNotice("Visible log lines copied.");
+      onNotice("Loaded log lines copied.");
     } catch (reason) {
       onError(messageFor(reason));
+    }
+  }
+
+  function handleScroll() {
+    const element = consoleRef.current;
+    if (!element) return;
+    const atBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+    if (!atBottom) setFollow(false);
+    if (element.scrollTop < 48) void loadOlder();
+    if (atBottom) void loadNewer();
+  }
+
+  function togglePause() {
+    if (paused) {
+      setPaused(false);
+      setFollow(true);
+      void scrollToLatest();
+    } else {
+      setPaused(true);
     }
   }
 
@@ -799,8 +966,8 @@ function LogsView({
           <p className="kicker">Live process output</p>
           <h2>Logs</h2>
           <p>
-            stdout, stderr, and launcher lifecycle messages are kept in memory
-            for this session.
+            stdout, stderr, and launcher lifecycle messages are loaded from disk
+            as you browse.
           </p>
         </div>
         <div className="toolbar">
@@ -815,8 +982,8 @@ function LogsView({
             )}
             {paused ? "Resume view" : "Pause view"}
           </button>
-          <button className="button ghost" onClick={() => void copyVisible()}>
-            <IconClipboard size={17} /> Copy visible
+          <button className="button ghost" onClick={() => void copyLoaded()}>
+            <IconClipboard size={17} /> Copy loaded
           </button>
           <button
             className="button secondary"
@@ -837,14 +1004,13 @@ function LogsView({
           </button>
           <button
             className="icon-button"
-            aria-label="Clear in-memory logs"
-            title="Clear in-memory logs"
-            onClick={() => {
-              void window.zenstreamLauncher.clearLogs();
-              onClear();
-              setFrozenLogs([]);
-              onNotice("In-memory launcher logs cleared.");
-            }}
+            aria-label="Clear launcher logs"
+            title="Clear launcher logs"
+            onClick={() =>
+              void window.zenstreamLauncher
+                .clearLogs()
+                .catch((reason) => onError(messageFor(reason)))
+            }
           >
             <IconTrash size={18} />
           </button>
@@ -873,38 +1039,96 @@ function LogsView({
         <label className="auto-scroll-toggle">
           <input
             type="checkbox"
-            checked={autoScroll}
-            onChange={(event) => setAutoScroll(event.target.checked)}
+            checked={follow}
+            onChange={(event) => setFollow(event.target.checked)}
           />
           Follow output
         </label>
         <span className="log-count">
-          {filtered.length.toLocaleString()} lines
+          {entries.length.toLocaleString()} loaded
+          {unseen ? ` · ${unseen.toLocaleString()} new` : ""}
         </span>
       </div>
-      <section
-        className="log-console"
-        aria-label="Backend process output"
-        aria-live={paused ? "off" : "polite"}
-      >
-        {filtered.length === 0 ? (
-          <div className="empty-logs">
-            <IconTerminal2 size={28} />
-            <p>No matching output.</p>
-          </div>
-        ) : (
-          filtered.map((entry) => (
-            <div className={`log-line ${entry.source}`} key={entry.id}>
-              <time>{new Date(entry.timestamp).toLocaleTimeString()}</time>
-              <span className="log-source">{entry.source}</span>
-              <span>{entry.message || " "}</span>
+      <div className="log-console-shell">
+        <section
+          ref={consoleRef}
+          className="log-console"
+          aria-label="Backend process output"
+          aria-live={paused ? "off" : "polite"}
+          onScroll={handleScroll}
+        >
+          {entries.length === 0 ? (
+            <div className="empty-logs">
+              <IconTerminal2 size={28} />
+              <p>No matching output.</p>
             </div>
-          ))
+          ) : (
+            entries.map((entry) => (
+              <div className={`log-line ${entry.source}`} key={entry.id}>
+                <time>{new Date(entry.timestamp).toLocaleTimeString()}</time>
+                <span className="log-source">{entry.source}</span>
+                <span>{entry.message || " "}</span>
+              </div>
+            ))
+          )}
+        </section>
+        {(unseen > 0 || !follow || hasNewer) && (
+          <button
+            className="scroll-latest"
+            aria-label="Scroll to latest logs"
+            title="Scroll to latest logs"
+            onClick={() => void scrollToLatest()}
+          >
+            <IconArrowDown size={18} />
+          </button>
         )}
-        <div ref={endRef} />
-      </section>
+      </div>
     </main>
   );
+}
+
+function applyPage(
+  page: LogPage,
+  setEntries: (value: PagedLogEntry[]) => void,
+  setOlderCursor: (value: string | null) => void,
+  setNewerCursor: (value: string | null) => void,
+  setHasOlder: (value: boolean) => void,
+  setHasNewer: (value: boolean) => void,
+): void {
+  setEntries(page.entries);
+  setOlderCursor(page.olderCursor);
+  setNewerCursor(page.newerCursor);
+  setHasOlder(page.hasOlder);
+  setHasNewer(page.hasNewer);
+}
+
+function appendBounded(
+  current: PagedLogEntry[],
+  entry: PagedLogEntry,
+): PagedLogEntry[] {
+  return appendManyBounded(current, [entry]);
+}
+
+function appendManyBounded(
+  current: PagedLogEntry[],
+  additions: PagedLogEntry[],
+): PagedLogEntry[] {
+  const seen = new Set(current.map((entry) => entry.id));
+  return [
+    ...current,
+    ...additions.filter((entry) => !seen.has(entry.id)),
+  ].slice(-1_000);
+}
+
+function prependBounded(
+  current: PagedLogEntry[],
+  additions: PagedLogEntry[],
+): PagedLogEntry[] {
+  const seen = new Set(current.map((entry) => entry.id));
+  return [
+    ...additions.filter((entry) => !seen.has(entry.id)),
+    ...current,
+  ].slice(0, 1_000);
 }
 
 function messageFor(reason: unknown): string {

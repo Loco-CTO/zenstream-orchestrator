@@ -47,6 +47,9 @@ Python, Node.js, Docker, and host media tools are not required. The launcher:
 - stores SQLite and generated caches beneath
   `%LOCALAPPDATA%\ZenStream Orchestrator\metadata` by default;
 - shows live backend output and opens the persistent rotating log directory;
+- stores launcher stdout, stderr, and lifecycle output on demand as five
+  rotating 10 MiB `zenstream-launcher-*.ndjson` segments (50 MiB total),
+  without retaining the complete history in memory;
 - remains in the notification area when its window is closed; and
 - stops Orchestrator cleanly only when **Quit** is selected.
 

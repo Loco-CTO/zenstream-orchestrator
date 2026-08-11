@@ -6,6 +6,8 @@ import multiprocessing
 import os
 import re
 import stat
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -4218,6 +4220,19 @@ class LibraryRuntime:
             cursor.execute(
                 "CREATE TABLE IF NOT EXISTS library_watch_pending_roots (library_id TEXT NOT NULL, top_level_root TEXT NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, reason TEXT NOT NULL, event_count INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(library_id,top_level_root))"
             )
+            columns = {row[1] for row in cursor.execute("PRAGMA table_info(library_watch_state)")}
+            if "phase" not in columns:
+                cursor.execute(
+                    "ALTER TABLE library_watch_state ADD COLUMN phase TEXT NOT NULL DEFAULT 'media'"
+                )
+            if "last_batch_at" not in columns:
+                cursor.execute(
+                    "ALTER TABLE library_watch_state ADD COLUMN last_batch_at TEXT"
+                )
+            if "last_error_code" not in columns:
+                cursor.execute(
+                    "ALTER TABLE library_watch_state ADD COLUMN last_error_code TEXT"
+                )
             for library_id, directory in cursor.execute(
                 "SELECT id,directory FROM libraries WHERE directory IS NOT NULL"
             ).fetchall():
@@ -4225,25 +4240,86 @@ class LibraryRuntime:
                     "INSERT OR IGNORE INTO library_watch_state(library_id) VALUES(?)",
                     (library_id,),
                 )
-                rows = cursor.execute(
-                    "SELECT relative_path FROM library_entities WHERE library_id=? AND relative_path IS NOT NULL",
+                # 0016 accidentally treated every entity path as a directory.
+                # Remove known media-file paths and rebuild only actual parent
+                # directories.  This is watcher-only repair; catalog data is
+                # deliberately untouched.
+                removed = cursor.execute(
+                    "DELETE FROM library_watch_directories WHERE library_id=? AND relative_path<>'' AND EXISTS (SELECT 1 FROM media_files mf JOIN library_entities e ON e.id=mf.entity_id WHERE e.library_id=? AND mf.relative_path=library_watch_directories.relative_path)",
+                    (library_id, library_id),
+                ).rowcount
+                media_rows = cursor.execute(
+                    "SELECT mf.relative_path FROM media_files mf JOIN library_entities e ON e.id=mf.entity_id WHERE e.library_id=? AND mf.relative_path IS NOT NULL",
                     (library_id,),
                 ).fetchall()
-                for (relative_path,) in rows:
-                    parts = Path(relative_path).parts
-                    for index in range(1, len(parts) + 1):
-                        relative_dir = "/".join(parts[:index])
-                        cursor.execute(
-                            "INSERT OR IGNORE INTO library_watch_directories(library_id,relative_path,top_level_root,complete) VALUES(?,?,?,0)",
-                            (library_id, relative_dir, parts[0]),
-                        )
-                cursor.execute(
+                directories: set[tuple[str, str]] = {("", "")}
+                for (relative_path,) in media_rows:
+                    normalized = str(relative_path).replace("\\", "/").strip("/")
+                    parts = [part for part in normalized.split("/") if part]
+                    for index in range(max(0, len(parts) - 1)):
+                        relative_dir = "/".join(parts[: index + 1])
+                        directories.add((relative_dir, parts[0]))
+                cursor.executemany(
                     "INSERT OR IGNORE INTO library_watch_directories(library_id,relative_path,top_level_root,complete) VALUES(?,?,?,0)",
-                    (library_id, "", ""),
+                    [(library_id, relative_dir, top_root) for relative_dir, top_root in directories],
+                )
+                cursor.execute(
+                    "UPDATE library_watch_state SET cursor=CASE WHEN ? > 0 THEN 0 ELSE cursor END, generation=CASE WHEN ? > 0 THEN 0 ELSE generation END, last_complete_at=CASE WHEN ? > 0 THEN NULL ELSE last_complete_at END, phase=CASE WHEN ? > 0 THEN 'media' ELSE phase END WHERE library_id=?",
+                    (removed, removed, removed, removed, library_id),
                 )
 
+    def _run_probe_batch(
+        self,
+        root: Path,
+        directories: list[tuple[str, int | None, str | None, int, str]],
+        files: list[str],
+    ) -> dict:
+        """Probe one bounded batch in a killable process."""
+        payload = {
+            "root": os.fspath(root),
+            "directories": [
+                {
+                    "relative_path": relative,
+                    "mtime_ns": mtime,
+                    "entry_signature": signature,
+                    "complete": complete,
+                }
+                for relative, mtime, signature, complete, _top in directories
+            ],
+            "files": files,
+        }
+        worker = Path(__file__).with_name("library_probe_worker.py")
+        try:
+            completed = subprocess.run(
+                [sys.executable, os.fspath(worker)],
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                timeout=20,
+                check=True,
+            )
+            return json.loads(completed.stdout or "{}")
+        except subprocess.TimeoutExpired:
+            if len(directories) + len(files) <= 1:
+                return {"directories": [], "files": [], "timed_out": True}
+            if directories:
+                midpoint = max(1, len(directories) // 2)
+                left = self._run_probe_batch(root, directories[:midpoint], [])
+                right = self._run_probe_batch(root, directories[midpoint:], [])
+            else:
+                midpoint = max(1, len(files) // 2)
+                left = self._run_probe_batch(root, [], files[:midpoint])
+                right = self._run_probe_batch(root, [], files[midpoint:])
+            return {
+                "directories": left.get("directories", []) + right.get("directories", []),
+                "files": left.get("files", []) + right.get("files", []),
+                "timed_out": bool(left.get("timed_out") or right.get("timed_out")),
+            }
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"directories": [], "files": [], "failed": True}
+
     def _delta_probe(self, library_id: str, root: Path, reason: str) -> tuple[str, ...]:
-        """Compare only known directories/files; never recursively walk a tree."""
+        """Compare bounded directory and media batches; never recursively snapshot."""
         library = self.store.get(library_id)
         if not library or not root.is_dir():
             return ()
@@ -4261,8 +4337,7 @@ class LibraryRuntime:
             )
         }
         changed: set[str] = set()
-        updates: list[tuple[str, str, str, int | None, str | None, str, int]] = []
-        new_dirs: list[tuple[str, str]] = []
+        new_dirs: set[tuple[str, str]] = set()
         known_paths = set(known_media)
         known_top_roots = {row[4] for row in directory_rows if row[4]}
         known_top_roots.update(
@@ -4273,94 +4348,117 @@ class LibraryRuntime:
             )
             if Path(row[0]).parts
         )
-        for (
-            relative_path,
-            old_mtime,
-            old_signature,
-            complete,
-            top_level_root,
-        ) in directory_rows:
-            directory = root / relative_path if relative_path else root
-            try:
-                info = directory.stat()
-                mtime = getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))
-            except OSError:
-                if complete:
-                    changed.add(top_level_root or "")
-                continue
-            if complete and old_mtime == mtime:
-                continue
-            entries = []
-            try:
-                for entry in directory.iterdir():
-                    try:
-                        entry_info = entry.stat()
-                        kind = "d" if entry.is_dir() else "f"
-                        entry_relative = "/".join(entry.relative_to(root).parts)
-                        entries.append(
-                            (
-                                entry.name,
-                                kind,
-                                entry_info.st_size,
-                                getattr(entry_info, "st_mtime_ns", 0),
-                            )
+        directory_batch_size = 128
+        for offset in range(0, len(directory_rows), directory_batch_size):
+            batch = directory_rows[offset : offset + directory_batch_size]
+            result = self._run_probe_batch(root, batch, [])
+            updates: list[tuple[str, str, str, int, str, str, int]] = []
+            for observation in result.get("directories", []):
+                relative_path = str(observation.get("relative_path") or "")
+                record = next((row for row in batch if row[0] == relative_path), None)
+                if record is None:
+                    continue
+                _relative, old_mtime, old_signature, complete, top_level_root = record
+                kind = observation.get("kind")
+                if kind == "missing":
+                    if complete:
+                        changed.add(top_level_root or "")
+                    continue
+                if kind != "ok" or not observation.get("is_dir"):
+                    continue
+                entries = observation.get("entries")
+                if entries is None:
+                    continue
+                signature = json.dumps(
+                    sorted(
+                        (
+                            entry.get("name"),
+                            entry.get("kind"),
+                            entry.get("size"),
+                            entry.get("mtime_ns"),
                         )
-                        if (
-                            kind == "f"
-                            and entry_relative not in known_paths
-                            or kind == "d"
-                            and entry_relative.split("/", 1)[0] not in known_top_roots
-                        ):
-                            changed.add(entry_relative.split("/", 1)[0])
-                        if kind == "d":
-                            new_dirs.append(
-                                (entry_relative, entry_relative.split("/", 1)[0])
-                            )
-                    except OSError:
-                        continue
-            except OSError:
-                continue
-            signature = json.dumps(sorted(entries), separators=(",", ":"))
-            if complete and old_signature != signature:
-                changed.add(top_level_root or "")
-            updates.append(
-                (
-                    library_id,
-                    relative_path,
-                    top_level_root
-                    or (relative_path.split("/", 1)[0] if relative_path else ""),
-                    mtime,
-                    signature,
-                    now(),
-                    1,
+                        for entry in entries
+                    ),
+                    separators=(",", ":"),
                 )
-            )
-        for relative_path, (old_size, old_mtime) in known_media.items():
-            path = root / relative_path
-            try:
-                info = path.stat()
-                if (
-                    info.st_size != old_size
-                    or getattr(info, "st_mtime_ns", 0) != old_mtime
+                current_top = top_level_root or (relative_path.split("/", 1)[0] if relative_path else "")
+                if complete and old_signature != signature:
+                    if current_top:
+                        changed.add(current_top)
+                    else:
+                        changed.update(known_top_roots)
+                for entry in entries:
+                    name = str(entry.get("name") or "")
+                    entry_relative = "/".join(part for part in (relative_path, name) if part)
+                    entry_top = entry_relative.split("/", 1)[0] if entry_relative else ""
+                    if entry.get("kind") == "f" and entry_relative not in known_paths:
+                        changed.add(entry_top)
+                    if entry.get("kind") == "d":
+                        new_dirs.add((entry_relative, entry_top))
+                        if entry_top not in known_top_roots:
+                            changed.add(entry_top)
+                updates.append(
+                    (
+                        library_id,
+                        relative_path,
+                        current_top,
+                        int(observation.get("mtime_ns") or 0),
+                        signature,
+                        now(),
+                        1,
+                    )
+                )
+            with self.store.db.transaction() as cursor:
+                cursor.executemany(
+                    "INSERT INTO library_watch_directories(library_id,relative_path,top_level_root,mtime_ns,entry_signature,observed_at,complete) VALUES(?,?,?,?,?,?,?) ON CONFLICT(library_id,relative_path) DO UPDATE SET top_level_root=excluded.top_level_root,mtime_ns=excluded.mtime_ns,entry_signature=excluded.entry_signature,observed_at=excluded.observed_at,complete=excluded.complete",
+                    updates,
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO library_watch_directories(library_id,relative_path,top_level_root,complete) VALUES(?,?,?,0)",
+                    [(library_id, relative_path, top_root) for relative_path, top_root in new_dirs],
+                )
+                cursor.execute(
+                    "UPDATE library_watch_state SET last_batch_at=?,last_error_code=? WHERE library_id=?",
+                    (now(), "delta_batch_timeout" if result.get("timed_out") else None, library_id),
+                )
+
+        media_paths = list(known_media)
+        state_rows = self.store.db.execute(
+            "SELECT cursor FROM library_watch_state WHERE library_id=?", (library_id,)
+        )
+        cursor = int(state_rows[0][0] or 0) if state_rows else 0
+        media_batch_size = 4096
+        if media_paths:
+            batch_paths = media_paths[cursor : cursor + media_batch_size]
+            if not batch_paths:
+                cursor = 0
+                batch_paths = media_paths[:media_batch_size]
+            result = self._run_probe_batch(root, [], batch_paths)
+            for observation in result.get("files", []):
+                relative_path = observation.get("relative_path")
+                if not relative_path:
+                    continue
+                old_size, old_mtime = known_media.get(relative_path, (None, None))
+                if observation.get("kind") == "missing":
+                    changed.add(relative_path.split("/", 1)[0])
+                elif observation.get("kind") == "ok" and (
+                    observation.get("size") != old_size
+                    or observation.get("mtime_ns") != old_mtime
                 ):
                     changed.add(relative_path.split("/", 1)[0])
-            except OSError:
-                changed.add(relative_path.split("/", 1)[0])
-        with self.store.db.transaction() as cursor:
-            for row in updates:
-                cursor.execute(
-                    "INSERT INTO library_watch_directories(library_id,relative_path,top_level_root,mtime_ns,entry_signature,observed_at,complete) VALUES(?,?,?,?,?,?,?) ON CONFLICT(library_id,relative_path) DO UPDATE SET top_level_root=excluded.top_level_root,mtime_ns=excluded.mtime_ns,entry_signature=excluded.entry_signature,observed_at=excluded.observed_at,complete=excluded.complete",
-                    row,
+            next_cursor = cursor + len(batch_paths)
+            cycle_complete = next_cursor >= len(media_paths)
+            with self.store.db.transaction() as db_cursor:
+                db_cursor.execute(
+                    "UPDATE library_watch_state SET cursor=?,generation=generation+1,last_complete_at=CASE WHEN ? THEN ? ELSE last_complete_at END,last_batch_at=?,last_error_code=? WHERE library_id=?",
+                    (0 if cycle_complete else next_cursor, int(cycle_complete), now(), now(), "delta_batch_timeout" if result.get("timed_out") else None, library_id),
                 )
-            for relative_path, top_level_root in new_dirs:
-                cursor.execute(
-                    "INSERT OR IGNORE INTO library_watch_directories(library_id,relative_path,top_level_root,complete) VALUES(?,?,?,0)",
-                    (library_id, relative_path, top_level_root),
+        else:
+            with self.store.db.transaction() as db_cursor:
+                db_cursor.execute(
+                    "UPDATE library_watch_state SET cursor=0,generation=generation+1,last_complete_at=?,last_batch_at=?,last_error_code=NULL WHERE library_id=?",
+                    (now(), now(), library_id),
                 )
-            cursor.execute(
-                "INSERT INTO library_watch_state(library_id,generation,last_complete_at) VALUES(?,?,?) ON CONFLICT(library_id) DO UPDATE SET generation=generation+1,last_complete_at=excluded.last_complete_at",
-                (library_id, 1, now()),
-            )
         return tuple(
             str(root / target) if target else str(root) for target in sorted(changed)
         )
@@ -4440,7 +4538,7 @@ class LibraryRuntime:
             if not cursor.fetchone():
                 return None
             cursor.execute(
-                "SELECT id FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1",
+                "SELECT id,kind FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1",
                 (library_id,),
             )
             existing = cursor.fetchone()
@@ -4452,37 +4550,27 @@ class LibraryRuntime:
                     "INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)",
                     (job_id, library_id, kind, now()),
                 )
+        if kind == "reconcile" and (full_scan or not targets):
+            logger.warning(
+                "library_reconcile_without_targets_ignored library_id=%s full_scan=%s",
+                library_id,
+                full_scan,
+            )
+            return self.store.job(job_id)
         if kind == "reconcile":
+            # Pending roots are durable and are also retained when a manual
+            # full scan currently owns the library.
+            self._persist_pending_roots(library_id, set(targets or ()), "filesystem_change")
             with self.condition:
-                if existing:
-                    if full_scan or not targets:
-                        self._reconcile_full_scan.add(library_id)
-                        self._reconcile_full_deadline[library_id] = time.monotonic()
-                        self._reconcile_targets.pop(library_id, None)
-                        self._reconcile_deadlines.pop(library_id, None)
-                    else:
-                        pending = self._reconcile_targets.setdefault(library_id, set())
-                        pending.update(targets)
-                        deadlines = self._reconcile_deadlines.setdefault(library_id, {})
-                        due = time.monotonic()
-                        for target in targets:
-                            deadlines[target] = due
-                    pending_deadlines = self._reconcile_deadlines.get(library_id, {})
-                    if library_id in self._reconcile_full_scan:
-                        self._reconcile_due[library_id] = self._reconcile_full_deadline[
-                            library_id
-                        ]
-                    elif pending_deadlines:
-                        self._reconcile_due[library_id] = min(
-                            pending_deadlines.values()
-                        )
-                    else:
-                        self._reconcile_due.pop(library_id, None)
-                else:
-                    if full_scan or not targets:
-                        self._job_full_scan.add(job_id)
-                    else:
-                        self._job_targets[job_id] = set(targets)
+                pending = self._reconcile_targets.setdefault(library_id, set())
+                pending.update(targets or ())
+                deadlines = self._reconcile_deadlines.setdefault(library_id, {})
+                due = time.monotonic()
+                for target in targets or ():
+                    deadlines[target] = due
+                self._reconcile_due[library_id] = min(deadlines.values())
+                if not existing:
+                    self._job_targets[job_id] = set(targets or ())
                 self._mark_watcher_pending(
                     library_id,
                     len(self._reconcile_targets.get(library_id, set())),
@@ -4669,33 +4757,23 @@ class LibraryRuntime:
                     for library_id, deadline in list(self._reconcile_due.items()):
                         if now_monotonic < deadline:
                             continue
-                        full_scan = library_id in self._reconcile_full_scan
                         targets = set()
-                        if full_scan:
-                            self._reconcile_full_scan.discard(library_id)
-                            self._reconcile_full_deadline.pop(library_id, None)
+                        deadlines = self._reconcile_deadlines.get(library_id, {})
+                        targets = {
+                            target
+                            for target, target_deadline in deadlines.items()
+                            if target_deadline <= now_monotonic
+                        }
+                        for target in targets:
+                            deadlines.pop(target, None)
+                        pending = self._reconcile_targets.get(library_id, set())
+                        pending.difference_update(targets)
+                        if not pending:
                             self._reconcile_targets.pop(library_id, None)
+                        if not deadlines:
                             self._reconcile_deadlines.pop(library_id, None)
                             self._reconcile_event_counts.pop(library_id, None)
-                        else:
-                            deadlines = self._reconcile_deadlines.get(library_id, {})
-                            targets = {
-                                target
-                                for target, target_deadline in deadlines.items()
-                                if target_deadline <= now_monotonic
-                            }
-                            for target in targets:
-                                deadlines.pop(target, None)
-                            pending = self._reconcile_targets.get(library_id, set())
-                            pending.difference_update(targets)
-                            if not pending:
-                                self._reconcile_targets.pop(library_id, None)
-                            if not deadlines:
-                                self._reconcile_deadlines.pop(library_id, None)
-                                self._reconcile_event_counts.pop(library_id, None)
                         remaining = []
-                        if library_id in self._reconcile_full_scan:
-                            remaining.append(self._reconcile_full_deadline[library_id])
                         remaining.extend(
                             self._reconcile_deadlines.get(library_id, {}).values()
                         )
@@ -4703,13 +4781,14 @@ class LibraryRuntime:
                             self._reconcile_due[library_id] = min(remaining)
                         else:
                             self._reconcile_due.pop(library_id, None)
-                        due_jobs.append((library_id, targets, full_scan))
-                for library_id, targets, full_scan in due_jobs:
-                    if targets and not full_scan:
+                        if targets:
+                            due_jobs.append((library_id, targets))
+                for library_id, targets in due_jobs:
+                    if targets:
                         self._persist_pending_roots(
                             library_id, targets, "filesystem_change"
                         )
-                    self.enqueue(library_id, "reconcile", targets, full_scan=full_scan)
+                        self.enqueue(library_id, "reconcile", targets)
                 rows = self.store.db.execute(
                     "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
                 )
@@ -4769,11 +4848,25 @@ class LibraryRuntime:
         try:
             if kind in {"scan", "reconcile", "collection_rebuild"}:
                 with self.condition:
-                    full_scan = kind != "reconcile" or job_id in self._job_full_scan
-                    self._job_full_scan.discard(job_id)
+                    full_scan = kind != "reconcile"
                     targets = self._job_targets.pop(job_id, None)
-                    completed_targets = set(targets or ())
-                    was_targeted = kind == "reconcile" and not full_scan
+                if kind == "reconcile":
+                    rows = self.store.db.execute(
+                        "SELECT top_level_root FROM library_watch_pending_roots WHERE library_id=? ORDER BY first_seen_at",
+                        (library_id,),
+                    )
+                    durable_targets = {row[0] for row in rows if row[0]}
+                    targets = set(targets or ()) | durable_targets
+                    if not targets:
+                        self.store.update_job(
+                            job_id,
+                            state="failed",
+                            error="Targeted reconcile had no durable roots",
+                            finished_at=now(),
+                        )
+                        return
+                completed_targets = set(targets or ())
+                was_targeted = kind == "reconcile"
                 # A scan owns mutable traversal state and diagnostics.  Do not
                 # share one scanner between concurrent library workers: a movie
                 # scan could otherwise overwrite a TV scan's stage, delta, and
@@ -4810,12 +4903,18 @@ class LibraryRuntime:
             with self._active_lock:
                 self._active_jobs.discard(job_id)
                 self._cancel_events.pop(job_id, None)
+            rows = self.store.db.execute(
+                "SELECT top_level_root FROM library_watch_pending_roots WHERE library_id=?",
+                (library_id,),
+            )
             with self.condition:
-                if library_id in self._reconcile_full_scan:
-                    self._reconcile_full_deadline[library_id] = time.monotonic()
-                    self._reconcile_due[library_id] = self._reconcile_full_deadline[
-                        library_id
-                    ]
+                pending = {row[0] for row in rows if row[0]}
+                if pending:
+                    self._reconcile_targets.setdefault(library_id, set()).update(pending)
+                    deadlines = self._reconcile_deadlines.setdefault(library_id, {})
+                    for target in pending:
+                        deadlines[target] = time.monotonic()
+                    self._reconcile_due[library_id] = time.monotonic()
                 elif self._reconcile_deadlines.get(library_id):
                     self._reconcile_due[library_id] = time.monotonic()
                 else:

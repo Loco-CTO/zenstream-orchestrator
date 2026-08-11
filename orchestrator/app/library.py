@@ -4676,6 +4676,10 @@ class LibraryRuntime:
             by_library.setdefault(library_id, []).append((job_id, state))
         timestamp = now()
         with self.store.db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE library_jobs SET state='completed',message='No durable targeted roots; skipped',error=NULL,error_details=NULL,finished_at=? WHERE kind='reconcile' AND state='failed' AND error='Targeted reconcile had no durable roots'",
+                (timestamp,),
+            )
             for library_id, jobs in by_library.items():
                 keep_id = next(
                     (job_id for job_id, state in jobs if state != "terminating"),
@@ -4891,8 +4895,9 @@ class LibraryRuntime:
                     if not targets:
                         self.store.update_job(
                             job_id,
-                            state="failed",
-                            error="Targeted reconcile had no durable roots",
+                            state="completed",
+                            message="No durable targeted roots; skipped",
+                            error=None,
                             finished_at=now(),
                         )
                         return

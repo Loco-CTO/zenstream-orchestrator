@@ -19,7 +19,9 @@ def upgrade() -> None:
     if "directory_cursor" not in columns:
         op.add_column(
             "library_watch_state",
-            sa.Column("directory_cursor", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column(
+                "directory_cursor", sa.Integer(), nullable=False, server_default="0"
+            ),
         )
 
 

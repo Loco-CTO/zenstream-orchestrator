@@ -4473,16 +4473,17 @@ class LibraryRuntime:
                         next_directory_cursor,
                         "media" if directories_complete else "directories",
                         now(),
-                        "delta_batch_timeout" if result.get("timed_out") else (
-                            "delta_batch_failed" if result.get("failed") else None
-                        ),
+                        "delta_batch_timeout"
+                        if result.get("timed_out")
+                        else ("delta_batch_failed" if result.get("failed") else None),
                         library_id,
                     ),
                 )
 
         media_paths = list(known_media)
         state_rows = self.store.db.execute(
-            "SELECT cursor,phase FROM library_watch_state WHERE library_id=?", (library_id,)
+            "SELECT cursor,phase FROM library_watch_state WHERE library_id=?",
+            (library_id,),
         )
         cursor = int(state_rows[0][0] or 0) if state_rows else 0
         if state_rows and state_rows[0][1] not in {"media", "directories"}:

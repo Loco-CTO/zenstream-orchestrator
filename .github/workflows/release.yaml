@@ -21,8 +21,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - name: Check out main
         uses: actions/checkout@v7
@@ -30,7 +34,12 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Bump orchestrator version
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Bump Orchestrator and launcher versions
         id: version
         env:
           BUMP: ${{ inputs.bump }}
@@ -51,6 +60,7 @@ jobs:
             exit 1
           fi
           sed -i "s/^__version__ = \"$version\"$/__version__ = \"$new_version\"/" orchestrator/version.py
+          npm version "$new_version" --no-git-tag-version --allow-same-version --prefix launcher
           printf '{\n  "main": 0\n}\n' > .main-version.json
           echo "version=$new_version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -62,7 +72,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add orchestrator/version.py .main-version.json
+          git add orchestrator/version.py launcher/package.json launcher/package-lock.json .main-version.json
           git commit -m "chore: release v$VERSION"
           git push origin HEAD:main
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -73,15 +83,52 @@ jobs:
           stable_sha=$(git rev-parse refs/remotes/origin/stable 2>/dev/null || printf '%040d' 0)
           git push origin "HEAD:stable" --force-with-lease="refs/heads/stable:$stable_sha"
 
-      - name: Create GitHub release
-        uses: actions/github-script@v9
+  windows-package:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
         with:
-          script: |
-            await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: '${{ steps.version.outputs.tag }}',
-              target_commitish: '${{ steps.commit.outputs.sha }}',
-              generate_release_notes: true,
-              name: '${{ steps.version.outputs.tag }}'
-            });
+          ref: ${{ needs.version.outputs.sha }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            launcher/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Build signed-ready Windows artifacts
+        shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: ./scripts/build-windows.ps1 -PythonExecutable python
+      - name: Smoke-test packaged backend lifecycle
+        run: node scripts/smoke-windows-backend.mjs
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-windows-x64
+          path: |
+            launcher/release/*.exe
+            launcher/release/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish:
+    needs: [version, windows-package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-windows-x64
+          path: release-assets
+      - name: Create GitHub release and attach Windows artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          SHA: ${{ needs.version.outputs.sha }}
+        run: gh release create "$TAG" release-assets/* --target "$SHA" --title "$TAG" --generate-notes

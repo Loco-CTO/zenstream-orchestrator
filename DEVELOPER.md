@@ -1,5 +1,25 @@
 # Developer Guide
 
+## Windows launcher development
+
+The Electron launcher lives in `launcher/`. It supervises a single native
+Orchestrator process; the FastAPI process serves both the API and the exported
+administrator dashboard.
+
+```powershell
+cd launcher
+npm ci
+npm test
+npm run build
+```
+
+For interactive Electron development, set `ZENSTREAM_PYTHON` to a Python
+executable with `requirements.txt` installed, build `frontend/` once, and run
+`npm run dev`. Use `scripts/build-windows.ps1` for the complete x64
+source/virtual-environment and installer pipeline. Do not commit generated files
+beneath `assets/ffmpeg/windows`,
+`dist/`, `.build/`, or `launcher/release/`.
+
 ## 📜 Using the Swagger API
 
 The ZenStream Orchestrator provides a Swagger API for easy interaction with the backend services. Follow the steps below to access and use the Swagger API:

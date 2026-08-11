@@ -26,12 +26,6 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
@@ -252,6 +246,8 @@ config/config.yaml
 
 # Node.js dependencies
 node_modules/
+assets/ffmpeg/windows/*.exe
+.build/
 *.log
 *.tsbuildinfo
 *.tgz
@@ -288,6 +284,12 @@ pnpm-lock.yaml
 
 # The dashboard uses npm ci in its container image; keep its lockfile tracked.
 !frontend/package-lock.json
+!launcher/package-lock.json
+
+# Launcher build and packaging output
+launcher/dist/
+launcher/dist-electron/
+launcher/release/
 
 # Environment variables
 .env
@@ -304,6 +306,8 @@ coverage/
 *.d.ts
 *.map
 tsconfig.*.json
+!launcher/tsconfig.*.json
+!launcher/src/**/*.d.ts
 
 # Git specific
 .git/

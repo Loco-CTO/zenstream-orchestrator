@@ -34,6 +34,12 @@ jobs:
       - name: Format dashboard files
         working-directory: frontend
         run: npm run format
+      - name: Install launcher dependencies
+        working-directory: launcher
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Format launcher files
+        working-directory: launcher
+        run: npm run lint:fix
       - name: Apply Ruff lint fixes
         uses: astral-sh/ruff-action@v3
         with:

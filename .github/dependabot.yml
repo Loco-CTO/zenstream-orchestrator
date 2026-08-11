@@ -15,6 +15,11 @@ updates:
     schedule:
       interval: "daily"
 
+  - package-ecosystem: "npm"
+    directory: "/launcher"
+    schedule:
+      interval: "daily"
+
   - package-ecosystem: "docker"
     directory: "/"
     schedule:

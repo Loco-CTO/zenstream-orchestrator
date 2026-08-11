@@ -27,6 +27,35 @@
 ZenStream Orchestrator is the backend for ZenStream. It manages accounts,
 libraries, metadata, playback, and Syncplay.
 
+## 🪟 Windows native launcher
+
+Windows 10/11 x64 users should use the **ZenStream Orchestrator** launcher when
+they need immediate media-library filesystem events. Docker Desktop bind mounts
+do not reliably forward Windows changes into a Linux container, while the native
+launcher lets Watchdog observe the Windows paths directly.
+
+Download either the installer or portable executable from the GitHub release.
+Both contain the backend source, a dedicated Python environment, administrator
+dashboard, FFmpeg, and FFprobe;
+Python, Node.js, Docker, and host media tools are not required. The launcher:
+
+- starts the API and dashboard together at `http://127.0.0.1:9088`;
+- stores configuration at
+  `%APPDATA%\ZenStream Orchestrator\launcher-config.json`, protects
+  `SECRET_KEY` with Windows secure storage, and prepares the versioned launcher
+  venv beneath `%APPDATA%\ZenStream Orchestrator\runtime`;
+- stores SQLite and generated caches beneath
+  `%LOCALAPPDATA%\ZenStream Orchestrator\metadata` by default;
+- shows live backend output and opens the persistent rotating log directory;
+- remains in the notification area when its window is closed; and
+- stops Orchestrator cleanly only when **Quit** is selected.
+
+The default binding is local-only. Set `ORCHESTRATOR_HOST` to `0.0.0.0` only
+when LAN clients need access, then configure Windows Firewall and the network
+accordingly. Installer and portable builds share the same per-user settings;
+moving a portable executable after enabling **Start with Windows** requires
+registering that setting again.
+
 ## 📦 Docker installation
 
 Docker Compose uses two separate persistent mounts:
@@ -104,6 +133,21 @@ service with `docker compose down`; this does not delete either host directory.
 When running outside Docker, no mount is needed: add the host filesystem path
 directly in the administrator dashboard. Install dependencies with
 `pip install -r requirements.txt`, then run `python orchestrator/init.py`.
+
+### Building the Windows launcher
+
+From a Windows x64 PowerShell prompt with Node.js and Python 3.14 available:
+
+```powershell
+./scripts/build-windows.ps1 -PythonExecutable python
+```
+
+The build verifies and stages the pinned FFmpeg binaries, exports the dashboard,
+stages the backend source with its isolated Python environment, runs launcher
+tests, and writes the
+NSIS installer, portable executable, and `SHA256SUMS.txt` beneath
+`launcher/release/`. Generated FFmpeg binaries, Python build directories, and
+release outputs are intentionally untracked.
 
 Database schema changes are managed with Alembic. The server automatically runs
 `alembic upgrade head` during startup; to apply migrations manually, run:

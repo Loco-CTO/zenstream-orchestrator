@@ -4215,7 +4215,7 @@ class LibraryRuntime:
                 "CREATE INDEX IF NOT EXISTS idx_library_watch_directories_root ON library_watch_directories(library_id,top_level_root)"
             )
             cursor.execute(
-                "CREATE TABLE IF NOT EXISTS library_watch_state (library_id TEXT PRIMARY KEY NOT NULL, mount_identity TEXT, cursor INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, last_complete_at TEXT, native_verified_at TEXT)"
+                "CREATE TABLE IF NOT EXISTS library_watch_state (library_id TEXT PRIMARY KEY NOT NULL, mount_identity TEXT, cursor INTEGER NOT NULL DEFAULT 0, directory_cursor INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, last_complete_at TEXT, native_verified_at TEXT)"
             )
             cursor.execute(
                 "CREATE TABLE IF NOT EXISTS library_watch_pending_roots (library_id TEXT NOT NULL, top_level_root TEXT NOT NULL, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, reason TEXT NOT NULL, event_count INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(library_id,top_level_root))"
@@ -4235,6 +4235,10 @@ class LibraryRuntime:
             if "last_error_code" not in columns:
                 cursor.execute(
                     "ALTER TABLE library_watch_state ADD COLUMN last_error_code TEXT"
+                )
+            if "directory_cursor" not in columns:
+                cursor.execute(
+                    "ALTER TABLE library_watch_state ADD COLUMN directory_cursor INTEGER NOT NULL DEFAULT 0"
                 )
             for library_id, directory in cursor.execute(
                 "SELECT id,directory FROM libraries WHERE directory IS NOT NULL"
@@ -4270,8 +4274,15 @@ class LibraryRuntime:
                     ],
                 )
                 cursor.execute(
-                    "UPDATE library_watch_state SET cursor=CASE WHEN ? > 0 THEN 0 ELSE cursor END, generation=CASE WHEN ? > 0 THEN 0 ELSE generation END, last_complete_at=CASE WHEN ? > 0 THEN NULL ELSE last_complete_at END, phase=CASE WHEN ? > 0 THEN 'media' ELSE phase END WHERE library_id=?",
-                    (removed, removed, removed, removed, library_id),
+                    "UPDATE library_watch_state SET cursor=CASE WHEN ? > 0 THEN 0 ELSE cursor END, directory_cursor=CASE WHEN ? > 0 THEN 0 ELSE directory_cursor END, generation=CASE WHEN ? > 0 THEN 0 ELSE generation END, last_complete_at=CASE WHEN ? > 0 THEN NULL ELSE last_complete_at END, phase=CASE WHEN ? > 0 THEN 'media' ELSE phase END WHERE library_id=?",
+                    (removed, removed, removed, removed, removed, library_id),
+                )
+                # Databases seeded by 0016/0017 may have no completed delta
+                # generation even though their phase was left at ``media``.
+                # Force the bounded directory catch-up before file batches.
+                cursor.execute(
+                    "UPDATE library_watch_state SET cursor=0,directory_cursor=0,phase='directories' WHERE library_id=? AND generation=0 AND last_complete_at IS NULL",
+                    (library_id,),
                 )
 
     def _run_probe_batch(
@@ -4355,9 +4366,25 @@ class LibraryRuntime:
             )
             if Path(row[0]).parts
         )
-        directory_batch_size = 128
-        for offset in range(0, len(directory_rows), directory_batch_size):
-            batch = directory_rows[offset : offset + directory_batch_size]
+        state_row = self.store.db.execute(
+            "SELECT cursor,directory_cursor,phase,last_complete_at FROM library_watch_state WHERE library_id=?",
+            (library_id,),
+        )
+        directory_cursor = int(state_row[0][1] or 0) if state_row else 0
+        # Always inspect a bounded directory slice, independently of the media
+        # cursor.  The root is included on every cycle so a new top-level
+        # series/movie is discovered promptly even while a large media ledger
+        # is still catching up.
+        directory_batch_size = 64
+        if directory_rows:
+            start = max(0, min(directory_cursor, len(directory_rows)))
+            batch = directory_rows[start : start + directory_batch_size]
+            if start and directory_rows[0] not in batch:
+                batch = [directory_rows[0], *batch[:-1]]
+        else:
+            start = 0
+            batch = []
+        if batch:
             result = self._run_probe_batch(root, batch, [])
             updates: list[tuple[str, str, str, int, str, str, int]] = []
             for observation in result.get("directories", []):
@@ -4421,6 +4448,13 @@ class LibraryRuntime:
                         1,
                     )
                 )
+            next_directory_cursor = start + len(batch)
+            if start:
+                # One slot is reserved for the root probe on every cycle.
+                next_directory_cursor -= 1
+            directories_complete = next_directory_cursor >= len(directory_rows)
+            if directories_complete:
+                next_directory_cursor = 0
             with self.store.db.transaction() as cursor:
                 cursor.executemany(
                     "INSERT INTO library_watch_directories(library_id,relative_path,top_level_root,mtime_ns,entry_signature,observed_at,complete) VALUES(?,?,?,?,?,?,?) ON CONFLICT(library_id,relative_path) DO UPDATE SET top_level_root=excluded.top_level_root,mtime_ns=excluded.mtime_ns,entry_signature=excluded.entry_signature,observed_at=excluded.observed_at,complete=excluded.complete",
@@ -4434,19 +4468,25 @@ class LibraryRuntime:
                     ],
                 )
                 cursor.execute(
-                    "UPDATE library_watch_state SET last_batch_at=?,last_error_code=? WHERE library_id=?",
+                    "UPDATE library_watch_state SET directory_cursor=?,phase=?,last_batch_at=?,last_error_code=? WHERE library_id=?",
                     (
+                        next_directory_cursor,
+                        "media" if directories_complete else "directories",
                         now(),
-                        "delta_batch_timeout" if result.get("timed_out") else None,
+                        "delta_batch_timeout" if result.get("timed_out") else (
+                            "delta_batch_failed" if result.get("failed") else None
+                        ),
                         library_id,
                     ),
                 )
 
         media_paths = list(known_media)
         state_rows = self.store.db.execute(
-            "SELECT cursor FROM library_watch_state WHERE library_id=?", (library_id,)
+            "SELECT cursor,phase FROM library_watch_state WHERE library_id=?", (library_id,)
         )
         cursor = int(state_rows[0][0] or 0) if state_rows else 0
+        if state_rows and state_rows[0][1] not in {"media", "directories"}:
+            cursor = 0
         media_batch_size = 4096
         if media_paths:
             batch_paths = media_paths[cursor : cursor + media_batch_size]
@@ -4472,9 +4512,10 @@ class LibraryRuntime:
             cycle_complete = next_cursor >= len(media_paths)
             with self.store.db.transaction() as db_cursor:
                 db_cursor.execute(
-                    "UPDATE library_watch_state SET cursor=?,generation=generation+1,last_complete_at=CASE WHEN ? THEN ? ELSE last_complete_at END,last_batch_at=?,last_error_code=? WHERE library_id=?",
+                    "UPDATE library_watch_state SET cursor=?,phase=?,generation=generation+1,last_complete_at=CASE WHEN ? THEN ? ELSE last_complete_at END,last_batch_at=?,last_error_code=? WHERE library_id=?",
                     (
                         0 if cycle_complete else next_cursor,
+                        "directories" if cycle_complete else "media",
                         int(cycle_complete),
                         now(),
                         now(),
@@ -4485,7 +4526,7 @@ class LibraryRuntime:
         else:
             with self.store.db.transaction() as db_cursor:
                 db_cursor.execute(
-                    "UPDATE library_watch_state SET cursor=0,generation=generation+1,last_complete_at=?,last_batch_at=?,last_error_code=NULL WHERE library_id=?",
+                    "UPDATE library_watch_state SET cursor=0,phase='directories',generation=generation+1,last_complete_at=?,last_batch_at=?,last_error_code=NULL WHERE library_id=?",
                     (now(), now(), library_id),
                 )
         return tuple(
@@ -4669,11 +4710,11 @@ class LibraryRuntime:
     def _recover_active_jobs(self) -> None:
         """Re-queue interrupted inventory jobs after an Orchestrator restart."""
         rows = self.store.db.execute(
-            "SELECT id,library_id,state FROM library_jobs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC"
+            "SELECT id,library_id,kind,state FROM library_jobs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC"
         )
-        by_library: dict[str, list[tuple[str, str]]] = {}
-        for job_id, library_id, state in rows:
-            by_library.setdefault(library_id, []).append((job_id, state))
+        by_library: dict[str, list[tuple[str, str, str]]] = {}
+        for job_id, library_id, kind, state in rows:
+            by_library.setdefault(library_id, []).append((job_id, kind, state))
         timestamp = now()
         with self.store.db.transaction() as cursor:
             cursor.execute(
@@ -4681,11 +4722,22 @@ class LibraryRuntime:
                 (timestamp,),
             )
             for library_id, jobs in by_library.items():
+                has_pending_roots = bool(
+                    cursor.execute(
+                        "SELECT 1 FROM library_watch_pending_roots WHERE library_id=? LIMIT 1",
+                        (library_id,),
+                    ).fetchone()
+                )
                 keep_id = next(
-                    (job_id for job_id, state in jobs if state != "terminating"),
+                    (
+                        job_id
+                        for job_id, kind, state in jobs
+                        if state != "terminating"
+                        and (kind != "reconcile" or has_pending_roots)
+                    ),
                     None,
                 )
-                for job_id, state in jobs:
+                for job_id, kind, state in jobs:
                     if job_id == keep_id:
                         cursor.execute(
                             "UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after Orchestrator restart',error=NULL,error_details=NULL,started_at=NULL,finished_at=NULL WHERE id=?",
@@ -4695,11 +4747,20 @@ class LibraryRuntime:
                         message = (
                             "Terminated during Orchestrator restart"
                             if state == "terminating"
-                            else "Superseded by the active library job"
+                            else (
+                                "No durable targeted roots; skipped"
+                                if kind == "reconcile" and not has_pending_roots
+                                else "Superseded by the active library job"
+                            )
+                        )
+                        terminal_state = (
+                            "completed"
+                            if kind == "reconcile" and not has_pending_roots
+                            else "terminated"
                         )
                         cursor.execute(
-                            "UPDATE library_jobs SET state='terminated',message=?,error=NULL,finished_at=? WHERE id=?",
-                            (message, timestamp, job_id),
+                            "UPDATE library_jobs SET state=?,message=?,error=NULL,finished_at=? WHERE id=?",
+                            (terminal_state, message, timestamp, job_id),
                         )
                 cursor.execute(
                     "UPDATE libraries SET scan_state='idle',scan_error=NULL,updated_at=? WHERE id=?",
@@ -4927,14 +4988,49 @@ class LibraryRuntime:
                     error=f"Unsupported job kind: {kind}",
                     finished_at=now(),
                 )
-        except Exception:
-            # The scanner records the durable error; keep the worker alive for later jobs.
+        except Exception as error:
+            # The scanner normally records its own failure, but exceptions
+            # raised before ``scanner.scan`` starts (for example a missing
+            # cancellation token or a database/schema error while claiming
+            # targets) used to leave the job stuck forever as "Starting scan".
+            # Always close an otherwise-active job here; this boundary is the
+            # last line of defence for the dispatcher thread.
             logger.exception(
                 "library worker failed job_id=%s library_id=%s kind=%s",
                 job_id,
                 library_id,
                 kind,
             )
+            summary = (
+                f"Library worker failed for '{library_id}': "
+                f"{type(error).__name__}: {error}"
+            )
+            try:
+                current = self.store.job(job_id)
+                if current and current.get("state") in ACTIVE_JOB_STATES:
+                    self.store.update_job(
+                        job_id,
+                        state="failed",
+                        message="Library worker failed",
+                        error=summary,
+                        error_details=json.dumps(
+                            {
+                                "libraryId": library_id,
+                                "jobId": job_id,
+                                "exception": type(error).__name__,
+                                "traceback": traceback.format_exc(),
+                            }
+                        ),
+                        finished_at=now(),
+                    )
+                    self.store.set_scan_state(
+                        library_id, "error", error=summary, finished=now()
+                    )
+            except Exception:
+                logger.exception(
+                    "library worker failure could not be persisted job_id=%s",
+                    job_id,
+                )
         finally:
             with self._active_lock:
                 self._active_jobs.discard(job_id)

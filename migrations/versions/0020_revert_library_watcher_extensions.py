@@ -132,6 +132,10 @@ def downgrade() -> None:
             sa.Column("generation", sa.Integer(), nullable=False, server_default="0"),
             sa.Column("last_complete_at", sa.Text()),
             sa.Column("native_verified_at", sa.Text()),
+            sa.Column("phase", sa.Text(), nullable=False, server_default="media"),
+            sa.Column("last_batch_at", sa.Text()),
+            sa.Column("last_error_code", sa.Text()),
+            sa.Column("directory_cursor", sa.Integer(), nullable=False, server_default="0"),
             sa.PrimaryKeyConstraint("library_id"),
             sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
         )

@@ -29,9 +29,12 @@ type Library = {
 		state: string;
 		backend?: string | null;
 		capability?: string;
+		mountType?: string | null;
+		reason?: string | null;
 		nativeImplementation?: string | null;
 		lastEventAt?: string | null;
 		catchupState?: string;
+		deltaPhase?: string;
 		pendingRootCount?: number;
 		pollIntervalSeconds?: number;
 	};
@@ -166,6 +169,12 @@ export default function LibrariesPage() {
 		);
 		if (!response.ok) return setMessage("Could not start the real-time test.");
 		const value = await response.json();
+		if (value.status === "unavailable") {
+			setMessage(
+				"Native real-time events are unavailable on this mount; delta verification remains active.",
+			);
+			return;
+		}
 		setWatcherTest(value.testId);
 		setMessage(
 			"Add or rename a harmless file in this library within 30 seconds.",
@@ -185,7 +194,9 @@ export default function LibrariesPage() {
 				return;
 			}
 			if (Date.now() - started < 30000) return void setTimeout(poll, 1500);
-			setMessage("No event observed; delta verification remains active.");
+			setMessage(
+				"No native event observed; the library remains protected by delta verification.",
+			);
 			setWatcherTest(null);
 		};
 		void poll();
@@ -265,10 +276,12 @@ export default function LibrariesPage() {
 										<div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] console-muted">
 											<span>
 												{library.watcherStatus?.nativeImplementation ||
-													"Native backend pending"}
+													(library.watcherStatus?.backend === "delta"
+														? `Delta fallback${library.watcherStatus.mountType ? ` (${library.watcherStatus.mountType})` : ""}`
+														: "Native backend pending")}
 											</span>
 											<span>
-												· catch-up {library.watcherStatus?.catchupState || "pending"}
+												· delta {library.watcherStatus?.deltaPhase || library.watcherStatus?.catchupState || "pending"}
 											</span>
 											<span>
 												· {library.watcherStatus?.pendingRootCount || 0} pending roots
@@ -278,7 +291,11 @@ export default function LibrariesPage() {
 												onClick={() => void testWatcher(library)}
 												disabled={Boolean(watcherTest)}
 											>
-												{watcherTest ? "Listening…" : "Test real-time"}
+												{watcherTest
+													? "Listening…"
+													: library.watcherStatus?.backend === "delta"
+														? "Test change verification"
+														: "Test real-time"}
 											</button>
 										</div>
 									)}

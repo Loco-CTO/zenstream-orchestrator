@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import time
@@ -15,26 +16,58 @@ _TICKET_TTL_LIMITS = {"resource": 15 * 60, "socket": 60}
 _RESERVED_TICKET_CLAIMS = {"uid", "kind", "iat", "exp"}
 CLIENT_SESSION_COOKIE = "__Host-zenstream-session"
 DEV_CLIENT_SESSION_COOKIE = "zenstream-session"
+DEV_CLIENT_SESSION_COOKIE_PREFIX = f"{DEV_CLIENT_SESSION_COOKIE}-"
+
+
+def _request_hostname(request: Request) -> str:
+    try:
+        return (request.url.hostname or "").rstrip(".").lower()
+    except (UnicodeError, ValueError):
+        return ""
+
+
+def _request_port(request: Request) -> int:
+    try:
+        port = request.url.port
+    except ValueError:
+        port = None
+    if port is not None:
+        return port
+    return 443 if request.url.scheme == "https" else 80
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def cookie_secure(request: Request) -> bool:
     """Use secure cookies in production; permit explicit loopback HTTP development."""
-    host = (
-        (request.headers.get("host") or request.url.hostname or "")
-        .split(":", 1)[0]
-        .lower()
+    return request.url.scheme == "https" or not _is_loopback_host(
+        _request_hostname(request)
     )
-    return request.url.scheme == "https" or host not in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    }
 
 
 def session_cookie_name(request: Request) -> str:
-    return (
-        CLIENT_SESSION_COOKIE if cookie_secure(request) else DEV_CLIENT_SESSION_COOKIE
-    )
+    if cookie_secure(request):
+        return CLIENT_SESSION_COOKIE
+    return f"{DEV_CLIENT_SESSION_COOKIE_PREFIX}{_request_port(request)}"
+
+
+def _session_cookie_token(request: Request) -> str | None:
+    primary = request.cookies.get(session_cookie_name(request))
+    if primary:
+        return primary
+    # Accept the unscoped loopback cookie during the migration window. Login and
+    # logout expire it so separate local Orchestrator ports stop overwriting one
+    # another as soon as the client next authenticates.
+    if not cookie_secure(request):
+        return request.cookies.get(DEV_CLIENT_SESSION_COOKIE)
+    return None
 
 
 def _token_hash(token: str) -> str:
@@ -49,8 +82,8 @@ def bearer_token(value: str | None) -> str | None:
 
 
 def require_account(request: Request) -> tuple[dict, str]:
-    token = bearer_token(request.headers.get("authorization")) or request.cookies.get(
-        session_cookie_name(request)
+    token = bearer_token(request.headers.get("authorization")) or _session_cookie_token(
+        request
     )
     account = getattr(request.state, "authenticated", None)
     if account is None:
@@ -78,8 +111,8 @@ def _iso_now() -> str:
 
 
 def optional_account(request: Request) -> tuple[dict, str] | None:
-    token = bearer_token(request.headers.get("authorization")) or request.cookies.get(
-        session_cookie_name(request)
+    token = bearer_token(request.headers.get("authorization")) or _session_cookie_token(
+        request
     )
     account = getattr(request.state, "authenticated", None)
     if account is None:

@@ -15,6 +15,7 @@ from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import (
     CLIENT_SESSION_COOKIE,
+    DEV_CLIENT_SESSION_COOKIE,
     account_from_access,
     cookie_secure,
     issue_ticket,
@@ -212,6 +213,13 @@ async def browser_login(request: Request):
         samesite="strict",
         path="/",
     )
+    response.delete_cookie(
+        DEV_CLIENT_SESSION_COOKIE,
+        secure=False,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
     return response
 
 
@@ -220,15 +228,30 @@ async def logout(request: Request):
     _, token = require_account(request)
     Account().revoke(token)
     response = Response(status_code=204)
+    primary_cookie = session_cookie_name(request)
     response.delete_cookie(
-        session_cookie_name(request),
+        primary_cookie,
         secure=cookie_secure(request),
         httponly=True,
         samesite="strict",
         path="/",
     )
-    if session_cookie_name(request) != CLIENT_SESSION_COOKIE:
-        response.delete_cookie(CLIENT_SESSION_COOKIE, path="/")
+    if primary_cookie != CLIENT_SESSION_COOKIE:
+        response.delete_cookie(
+            CLIENT_SESSION_COOKIE,
+            secure=True,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    if primary_cookie != DEV_CLIENT_SESSION_COOKIE:
+        response.delete_cookie(
+            DEV_CLIENT_SESSION_COOKIE,
+            secure=False,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
     return response
 
 
@@ -333,7 +356,7 @@ async def set_locale(request: Request):
     try:
         return {
             "locale": AccountPreference(account["id"]).set_locale(
-                (await request.json()).get("locale")
+                (await _bounded_json_object(request)).get("locale")
             )
         }
     except ValueError as error:
@@ -351,7 +374,7 @@ async def set_metadata_language(request: Request):
     account, _ = require_account(request)
     try:
         return AccountPreference(account["id"]).set_metadata_language(
-            (await request.json()).get("language")
+            (await _bounded_json_object(request)).get("language")
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -367,7 +390,9 @@ async def get_subtitles(request: Request):
 async def set_subtitles(request: Request):
     account, _ = require_account(request)
     try:
-        return AccountPreference(account["id"]).set_subtitle_style(await request.json())
+        return AccountPreference(account["id"]).set_subtitle_style(
+            await _bounded_json_object(request)
+        )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 

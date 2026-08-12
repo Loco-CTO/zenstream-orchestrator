@@ -231,7 +231,10 @@ export default function AdminShell({
 				</div>
 			)}
 
-			<main className="dashboard-content" style={{ marginLeft: 48, flex: 1, maxWidth: "none", padding: "44px 52px" }}>
+			<main
+				className="dashboard-content"
+				style={{ marginLeft: 48, flex: 1, maxWidth: "none", padding: "44px 52px" }}
+			>
 				{children}
 			</main>
 		</div>

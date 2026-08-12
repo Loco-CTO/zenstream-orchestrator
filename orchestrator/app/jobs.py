@@ -900,14 +900,22 @@ class MetadataMissingJob:
         )
         for entity_id, tvdb_id in tv_series_rows:
             try:
-                documents = ingest.ingest_locales(
-                    "tvdb",
-                    "series",
-                    str(tvdb_id),
-                    locales,
-                    force=force,
-                    force_assets=force_assets,
-                )
+                if force:
+                    documents = ingest.ingest_locales(
+                        "tvdb",
+                        "series",
+                        str(tvdb_id),
+                        locales,
+                        force=True,
+                        force_assets=force_assets,
+                    )
+                else:
+                    documents = {
+                        locale: ingest.metadata_service.cache.get(
+                            "tvdb", "series", str(tvdb_id), locale
+                        )
+                        for locale in locales
+                    }
             except (ProviderError, ValueError, OSError) as error:
                 logger.warning(
                     "TVDB series secondary-ID discovery failed entity_id=%s provider_id=%s: %s",
@@ -919,6 +927,7 @@ class MetadataMissingJob:
             linked_ids = {
                 str(value.get("id"))
                 for document in documents.values()
+                if isinstance(document, dict)
                 for value in document.get("ids", []) or []
                 if value.get("provider") == "tmdb" and value.get("id")
             }

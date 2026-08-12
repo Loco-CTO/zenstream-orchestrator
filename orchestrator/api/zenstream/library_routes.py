@@ -278,11 +278,19 @@ def _refresh_item_metadata_sync(entity_id: str) -> dict:
     locales = ingest.locales()
     refreshed = []
     failures = []
-    for identity in identities:
+    processed: set[tuple[str, str]] = set()
+    index = 0
+    while index < len(identities):
+        identity = identities[index]
+        index += 1
         provider = str(identity["provider"])
         provider_id = str(identity["id"])
+        key = (provider, provider_id)
+        if key in processed:
+            continue
+        processed.add(key)
         try:
-            ingest.ingest_locales(
+            documents = ingest.ingest_locales(
                 provider,
                 item["type"],
                 provider_id,
@@ -290,6 +298,31 @@ def _refresh_item_metadata_sync(entity_id: str) -> dict:
                 force=True,
             )
             refreshed.append(provider)
+            if item["type"] == "series" and provider == "tvdb":
+                # TVDB is the authoritative root provider.  Its normalized
+                # remote IDs may add TMDB as an optional secondary source;
+                # retain the link even when a later TMDB fetch is unavailable.
+                for document in documents.values():
+                    for linked in document.get("ids", []) or []:
+                        if (
+                            linked.get("provider") == "tmdb"
+                            and linked.get("id")
+                        ):
+                            store.db.execute(
+                                "INSERT OR IGNORE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
+                                (
+                                    entity_id,
+                                    "tmdb",
+                                    "series",
+                                    str(linked["id"]),
+                                ),
+                            )
+                            identities.append(
+                                {
+                                    "provider": "tmdb",
+                                    "id": str(linked["id"]),
+                                }
+                            )
         except (ProviderError, ValueError, OSError) as error:
             logger.exception(
                 "manual item metadata refresh failed entity_id=%s provider=%s provider_id=%s",

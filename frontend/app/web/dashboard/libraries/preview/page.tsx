@@ -47,6 +47,7 @@ type Item = {
 	primaryProvider?: string | null;
 	children?: Child[];
 	trickplay?: TrickplayAsset | null;
+	revision?: string;
 };
 
 type TrickplayAsset = {
@@ -123,6 +124,7 @@ type CardItem = Navigable & {
 	matchStatus?: string;
 	seasonNumber?: number;
 	episodeNumber?: number;
+	revision?: string;
 };
 type LanguageOption = { value: string; label: string };
 type ArtworkType = "Primary" | "Backdrop" | "Logo" | "Banner";
@@ -157,12 +159,27 @@ function LibraryViewPage() {
 	const [navigation, setNavigation] = useState<NavigationEntry[]>([]);
 	const requestId = useRef(0);
 	const abortRef = useRef<AbortController | null>(null);
+	const catalogGeneration = useRef<number | null>(null);
+	const backgroundRefresh = useRef(false);
+	const trailingRefresh = useRef(false);
+	const loadRef = useRef<
+		((current: Session | null, parentId: string | null, currentPage: number, background?: boolean) => Promise<void>) | null
+	>(null);
+
+	function mergeItems(previous: Item[], next: Item[]) {
+		const byId = new Map(previous.map((item) => [item.id, item]));
+		return next.map((item) => {
+			const old = byId.get(item.id);
+			return old && old.revision === item.revision ? old : item;
+		});
+	}
 
 	const load = useCallback(
 		async (
 			current: Session | null,
 			parentId: string | null,
 			currentPage: number,
+			background = false,
 		) => {
 			if (!current || !libraryId || !locale) return;
 			const id = ++requestId.current;
@@ -170,7 +187,7 @@ function LibraryViewPage() {
 			const controller = new AbortController();
 			abortRef.current = controller;
 			setError("");
-			setLoading(true);
+			if (!background) setLoading(true);
 			try {
 				const init = { signal: controller.signal };
 				const [libraryResponse, itemsResponse] = await Promise.all([
@@ -201,8 +218,12 @@ function LibraryViewPage() {
 				]);
 				if (id !== requestId.current) return;
 				setLibraryName(library.name || "Library");
-				setItems(value.items || []);
+				setItems((currentItems) =>
+					background ? mergeItems(currentItems, value.items || []) : value.items || [],
+				);
 				setTotal(value.total || 0);
+				if (typeof value.catalogGeneration === "number")
+					catalogGeneration.current = value.catalogGeneration;
 			} catch (caught) {
 				if ((caught as Error).name !== "AbortError" && id === requestId.current)
 					setError(
@@ -211,11 +232,12 @@ function LibraryViewPage() {
 							: "The library could not be loaded.",
 					);
 			} finally {
-				if (id === requestId.current) setLoading(false);
+				if (id === requestId.current && !background) setLoading(false);
 			}
 		},
 		[libraryId, locale, searchQuery],
 	);
+	loadRef.current = load;
 
 	useEffect(() => {
 		const current = readSession();
@@ -296,16 +318,9 @@ function LibraryViewPage() {
 	}, [libraryId]);
 
 	useEffect(() => {
-		if (session && locale && navigation.length === 0) void load(session, null, 1);
-	}, [locale, load, navigation.length, session]);
-
-	useEffect(() => {
-		if (session && locale && navigation.length === 0 && searchQuery !== undefined)
-			void load(session, parent, 1);
-		// Search reloads must never clear an open series/season navigation stack.
-		// The library/locale effect above owns the initial root load.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [searchQuery]);
+		if (session && locale && navigation.length === 0)
+			void load(session, parent, page, false);
+	}, [locale, load, navigation.length, page, parent, session]);
 
 	useEffect(() => {
 		const ids = urlEntityPathValue.split(",").filter(Boolean);
@@ -322,9 +337,50 @@ function LibraryViewPage() {
 	}, [urlEntityId, urlEntityPathValue]);
 
 	useEffect(() => {
-		if (session && page !== 1 && navigation.length === 0)
-			void load(session, parent, page);
-	}, [load, navigation.length, page, parent, session]);
+		if (!session || !locale || !libraryId || navigation.length !== 0) return;
+		let cancelled = false;
+		let timer: number | undefined;
+		const refresh = async () => {
+			if (document.visibilityState !== "visible") {
+				timer = window.setTimeout(refresh, 2000);
+				return;
+			}
+			try {
+				const response = await adminFetch(
+					`/api/admin/libraries/${libraryId}/catalog-status`,
+					session,
+					{ cache: "no-store" },
+				);
+				if (!response.ok) throw new Error("Catalog status unavailable.");
+				const status = await response.json();
+				const generation = Number(status.catalogGeneration || 0);
+				if (catalogGeneration.current == null) catalogGeneration.current = generation;
+				else if (generation > catalogGeneration.current) {
+					catalogGeneration.current = generation;
+					if (backgroundRefresh.current) trailingRefresh.current = true;
+					else {
+						backgroundRefresh.current = true;
+						await loadRef.current?.(session, parent, page, true);
+						backgroundRefresh.current = false;
+						if (trailingRefresh.current) {
+							trailingRefresh.current = false;
+							backgroundRefresh.current = true;
+							await loadRef.current?.(session, parent, page, true);
+							backgroundRefresh.current = false;
+						}
+					}
+				}
+			} catch {
+				// The current grid remains usable while status polling is unavailable.
+			}
+			if (!cancelled) timer = window.setTimeout(refresh, 2000);
+		};
+		void refresh();
+		return () => {
+			cancelled = true;
+			if (timer) window.clearTimeout(timer);
+		};
+	}, [libraryId, locale, navigation.length, page, parent, session]);
 
 	useEffect(() => {
 		const onKeyDown = (event: KeyboardEvent) => {
@@ -482,7 +538,7 @@ function LibraryViewPage() {
 							Loading entries…
 						</div>
 					)}
-					{!loading && !error && (
+					{!error && (
 						<>
 							<div
 								className="mt-7 grid w-full gap-4"
@@ -496,6 +552,7 @@ function LibraryViewPage() {
 										item={item}
 										session={session}
 										locale={locale}
+										revision={item.revision}
 										onOpen={() => openItem(item)}
 									/>
 								))}
@@ -560,11 +617,13 @@ function EntityCard({
 	item,
 	session,
 	locale,
+	revision,
 	onOpen,
 }: {
 	item: CardItem;
 	session: Session | null;
 	locale: string;
+	revision?: string;
 	onOpen: () => void;
 }) {
 	const label = item.displayName || item.relativePath || item.type;
@@ -579,6 +638,7 @@ function EntityCard({
 				entityId={item.id}
 				session={session}
 				locale={locale}
+				revision={revision}
 				alt={metadataPending ? "" : item.metadata?.title || label}
 			/>
 			<div className="p-3">
@@ -648,6 +708,7 @@ function EntityPoster({
 	entityId,
 	session,
 	locale,
+	revision,
 	alt,
 	imageType = "Primary",
 	landscape = false,
@@ -655,6 +716,7 @@ function EntityPoster({
 	entityId: string;
 	session: Session | null;
 	locale: string;
+	revision?: string;
 	alt: string;
 	imageType?: ArtworkType;
 	landscape?: boolean;
@@ -712,7 +774,7 @@ function EntityPoster({
 			if (timer) window.clearTimeout(timer);
 			if (objectUrl) URL.revokeObjectURL(objectUrl);
 		};
-	}, [entityId, imageType, locale, session]);
+	}, [entityId, imageType, locale, revision, session]);
 	return (
 		<div
 			className={`flex ${landscape ? "aspect-video" : "aspect-[2/3]"} items-center justify-center overflow-hidden bg-[#0d0d0e]`}

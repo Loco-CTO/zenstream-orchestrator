@@ -408,6 +408,7 @@ async def home(
     request: Request,
     language: str | None = Query(None),
     section: str | None = Query(None),
+    libraryId: str | None = Query(None),
 ):
     account, _ = require_account(request)
     preferred = await run_foreground(_preferred, account, language)
@@ -433,6 +434,15 @@ async def home(
         }
     if section == "derived":
         return await run_foreground(catalog.home_derived, account["id"], preferred)
+    if section == "library":
+        if not libraryId:
+            raise HTTPException(400, "libraryId is required for the library Home section.")
+        row = await run_foreground(
+            catalog.home_library, account["id"], preferred, libraryId
+        )
+        if row is None:
+            raise HTTPException(404, "Library not found.")
+        return {"libraryRows": [row]}
     else:
         raise HTTPException(400, "Unsupported home section.")
 

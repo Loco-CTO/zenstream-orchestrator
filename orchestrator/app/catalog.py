@@ -2785,6 +2785,66 @@ class Catalog:
             (library_id, entity_type),
         )
 
+    @_catalog_read
+    def home_library(self, user_id: str, language: str, library_id: str) -> dict | None:
+        if library_id not in self.allowed_libraries(user_id):
+            return None
+        library = next(
+            (value for value in self.libraries(user_id) if value["id"] == library_id),
+            None,
+        )
+        if library is None:
+            return None
+        return self._home_library_row(user_id, language, library)
+
+    def _home_library_row(
+        self,
+        user_id: str,
+        language: str,
+        library: dict,
+        series_names: dict[str, str] | None = None,
+    ) -> dict | None:
+        if not self._has_table("media_files") or library["type"] not in {
+            "movies",
+            "tv_series",
+        }:
+            return None
+        entity_type = "movie" if library["type"] == "movies" else "episode"
+        series_names = series_names if series_names is not None else {}
+        playable_rows = self._newly_added_rows(library["id"], entity_type)
+        dates = self._date_values("", {library["id"]}, {row[0] for row in playable_rows})
+        self._seed_hydration_rows(user_id, playable_rows, language)
+        items = []
+        for playable_row in playable_rows:
+            episode_series_id = None
+            if entity_type == "episode":
+                season = self._entity_row(playable_row[2])
+                episode_series_id = season[2] if season else None
+            items.append(
+                self._serialize(
+                    user_id,
+                    playable_row,
+                    self.metadata(user_id, playable_row[0], language)["metadata"],
+                    dates=dates.get(playable_row[0]),
+                    series_name=self._home_series_name(
+                        user_id, language, episode_series_id, series_names
+                    ),
+                    language=language,
+                )
+            )
+        items.sort(key=lambda value: (str(value.get("name") or "").casefold(), value["id"]))
+        items.sort(key=lambda value: value.get("lastAddedAt") or "", reverse=True)
+        items = items[:18]
+        if not items:
+            return None
+        return {
+            "libraryId": library["id"],
+            "libraryName": library["name"],
+            "titleKey": "newlyAddedOn",
+            "stackEpisodes": library["type"] == "tv_series",
+            "items": items,
+        }
+
     def home(self, user_id: str, language: str) -> dict:
         if not hasattr(self, "_home_cache_lock"):
             self._home_cache_lock = threading.Lock()
@@ -2882,92 +2942,9 @@ class Catalog:
             )
         }
         for library_id, library in by_library.items():
-            newly_added = []
-            if self._has_table("media_files") and library["type"] in {
-                "movies",
-                "tv_series",
-            }:
-                entity_type = "movie" if library["type"] == "movies" else "episode"
-                select_rows = lambda: self._newly_added_rows(library_id, entity_type)
-                playable_rows = (
-                    context.measure("home_newly_added_sql", select_rows)
-                    if context
-                    else select_rows()
-                )
-                dates = self._date_values(
-                    "", {library_id}, {row[0] for row in playable_rows}
-                )
-                self._seed_hydration_rows(user_id, playable_rows, language)
-                for playable_row in playable_rows:
-                    episode_series_id = None
-                    if entity_type == "episode":
-                        season = self._entity_row(playable_row[2])
-                        episode_series_id = season[2] if season else None
-                    newly_added.append(
-                        self._serialize(
-                            user_id,
-                            playable_row,
-                            self.metadata(user_id, playable_row[0], language)[
-                                "metadata"
-                            ],
-                            dates=dates.get(playable_row[0]),
-                            series_name=self._home_series_name(
-                                user_id, language, episode_series_id, series_names
-                            ),
-                            language=language,
-                        )
-                    )
-                newly_added.sort(
-                    key=lambda value: (
-                        str(value.get("name") or "").casefold(),
-                        value["id"],
-                    )
-                )
-                newly_added.sort(
-                    key=lambda value: value.get("lastAddedAt") or "", reverse=True
-                )
-                newly_added = newly_added[:18]
-            if newly_added:
-                library_rows.append(
-                    {
-                        "libraryId": library_id,
-                        "libraryName": library["name"],
-                        "titleKey": "newlyAddedOn",
-                        "stackEpisodes": library["type"] == "tv_series",
-                        "items": newly_added,
-                    }
-                )
-            library_items = [
-                value for value in items if value["libraryId"] == library_id
-            ]
-            rated = sorted(
-                library_items,
-                key=lambda value: value["metadata"].get("communityRating") or 0,
-                reverse=True,
-            )[:18]
-            released = sorted(
-                library_items,
-                key=lambda value: value["metadata"].get("date") or "",
-                reverse=True,
-            )[:18]
-            if rated:
-                library_rows.append(
-                    {
-                        "libraryId": library_id,
-                        "libraryName": library["name"],
-                        "titleKey": "topRated",
-                        "items": rated,
-                    }
-                )
-            if released:
-                library_rows.append(
-                    {
-                        "libraryId": library_id,
-                        "libraryName": library["name"],
-                        "titleKey": "newReleases",
-                        "items": released,
-                    }
-                )
+            row = self._home_library_row(user_id, language, library, series_names)
+            if row:
+                library_rows.append(row)
         context = self._context(user_id)
         derived = lambda: self.home_derived(user_id, language, items)
         derived_rows = (

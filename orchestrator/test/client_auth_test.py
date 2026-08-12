@@ -64,7 +64,12 @@ class ClientTicketTest(unittest.TestCase):
 
 class ClientSessionCookieTest(unittest.TestCase):
     def test_loopback_http_cookie_is_scoped_by_port(self):
-        for host in ("localhost:9098", "127.0.0.1:9098", "[::1]:9098"):
+        for host in (
+            "localhost:9098",
+            "127.0.0.1:9098",
+            "127.42.0.1:9098",
+            "[::1]:9098",
+        ):
             with self.subTest(host=host):
                 request = _request(host)
                 self.assertFalse(client_auth.cookie_secure(request))
@@ -72,6 +77,10 @@ class ClientSessionCookieTest(unittest.TestCase):
                     client_auth.session_cookie_name(request),
                     "zenstream-session-9098",
                 )
+        self.assertEqual(
+            client_auth.session_cookie_name(_request("localhost:9099")),
+            "zenstream-session-9099",
+        )
 
     def test_loopback_default_port_and_trailing_dot_are_supported(self):
         request = _request("localhost.")

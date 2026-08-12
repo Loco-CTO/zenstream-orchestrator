@@ -436,7 +436,9 @@ async def home(
         return await run_foreground(catalog.home_derived, account["id"], preferred)
     if section == "library":
         if not libraryId:
-            raise HTTPException(400, "libraryId is required for the library Home section.")
+            raise HTTPException(
+                400, "libraryId is required for the library Home section."
+            )
         row = await run_foreground(
             catalog.home_library, account["id"], preferred, libraryId
         )

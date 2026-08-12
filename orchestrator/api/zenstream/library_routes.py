@@ -304,10 +304,7 @@ def _refresh_item_metadata_sync(entity_id: str) -> dict:
                 # retain the link even when a later TMDB fetch is unavailable.
                 for document in documents.values():
                     for linked in document.get("ids", []) or []:
-                        if (
-                            linked.get("provider") == "tmdb"
-                            and linked.get("id")
-                        ):
+                        if linked.get("provider") == "tmdb" and linked.get("id"):
                             store.db.execute(
                                 "INSERT OR IGNORE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
                                 (

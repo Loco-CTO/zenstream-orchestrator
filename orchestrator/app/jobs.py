@@ -509,7 +509,12 @@ class JobStore:
         )
         self._replace_triggers(
             definition_id,
-            [{"type": "interval", "intervalSeconds": max(1, int(interval or 1440) * 60)}],
+            [
+                {
+                    "type": "interval",
+                    "intervalSeconds": max(1, int(interval or 1440) * 60),
+                }
+            ],
         )
         return self.definition(definition_id)  # type: ignore[return-value]
 
@@ -613,11 +618,16 @@ class JobStore:
             return {"type": "startup"}
         raise ValueError("Unsupported schedule trigger")
 
-    def _next_for_trigger(self, trigger: dict, base: datetime | None = None) -> str | None:
+    def _next_for_trigger(
+        self, trigger: dict, base: datetime | None = None
+    ) -> str | None:
         if trigger["type"] == "startup":
             return None
         if trigger["type"] == "interval":
-            return ((base or datetime.now(timezone.utc)) + timedelta(seconds=trigger["intervalSeconds"])).isoformat()
+            return (
+                (base or datetime.now(timezone.utc))
+                + timedelta(seconds=trigger["intervalSeconds"])
+            ).isoformat()
         if trigger["type"] == "daily":
             return _local_next(trigger["time"])
         return _local_next(trigger["time"], trigger["weekday"])
@@ -631,7 +641,9 @@ class JobStore:
             for trigger in triggers
         ]
         timestamp = now()
-        self.db.execute("DELETE FROM job_schedule_triggers WHERE definition_id=?", (definition_id,))
+        self.db.execute(
+            "DELETE FROM job_schedule_triggers WHERE definition_id=?", (definition_id,)
+        )
         for trigger in validated:
             self.db.execute(
                 "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",

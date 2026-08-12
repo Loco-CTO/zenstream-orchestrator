@@ -147,7 +147,7 @@ export default function AdminShell({
 						aria-label="Sign out"
 						className="admin-nav-item group relative flex h-11 w-full items-center justify-center rounded-xl console-muted transition hover:text-white"
 					>
-					<IconLogout size={21} stroke={1.8} />
+						<IconLogout size={21} stroke={1.8} />
 						<span className="admin-tooltip" role="tooltip">
 							Sign out
 						</span>
@@ -202,7 +202,7 @@ export default function AdminShell({
 								aria-label="Close dashboard navigation"
 								className="material-icon-button"
 							>
-							<IconX size={20} />
+								<IconX size={20} />
 							</button>
 						</div>
 						<nav aria-label="Dashboard" className="px-3 pb-4">

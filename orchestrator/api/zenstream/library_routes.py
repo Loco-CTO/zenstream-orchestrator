@@ -193,6 +193,8 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
         "matchMethod": row[12],
         "providerIds": _entity_ids(entity_id),
     }
+    if hydration is not None:
+        value["revision"] = hydration.get("revisions", {}).get(entity_id, "")
     value["displayName"] = (
         Path(row[4]).name if row[4] else row[3].replace("_", " ").title()
     )
@@ -798,6 +800,7 @@ def _list_admin_items_sync(
         "providers": {},
         "children": {},
         "metadata": {},
+        "revisions": {},
     }
     if entity_ids:
         placeholders = ",".join("?" for _ in entity_ids)
@@ -808,6 +811,38 @@ def _list_admin_items_sync(
                 entity_ids,
             )
         }
+        tables = {
+            row[0]
+            for row in store.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('catalog_item_projection','catalog_artwork_selection')"
+            )
+        }
+        projection_expr = (
+            "COALESCE((SELECT generation FROM catalog_item_projection p WHERE p.entity_id=e.id AND p.locale=?),0),"
+            "COALESCE((SELECT updated_at FROM catalog_item_projection p WHERE p.entity_id=e.id AND p.locale=?),'')"
+            if "catalog_item_projection" in tables
+            else "0,''"
+        )
+        artwork_expr = (
+            "COALESCE((SELECT GROUP_CONCAT(version, '|') FROM catalog_artwork_selection a WHERE a.entity_id=e.id AND a.locale=?),'') ,"
+            "COALESCE((SELECT MAX(updated_at) FROM catalog_artwork_selection a WHERE a.entity_id=e.id AND a.locale=?),'')"
+            if "catalog_artwork_selection" in tables
+            else "'',''"
+        )
+        revision_sql = (
+            f"SELECT e.id,e.updated_at,{projection_expr},{artwork_expr} "
+            f"FROM library_entities e WHERE e.id IN ({placeholders})"
+        )
+        revision_params = []
+        if "catalog_item_projection" in tables:
+            revision_params.extend([locale, locale])
+        if "catalog_artwork_selection" in tables:
+            revision_params.extend([locale, locale])
+        revision_params.extend(entity_ids)
+        for revision_row in store.db.execute(revision_sql, revision_params):
+            hydration["revisions"][revision_row[0]] = ":".join(
+                str(value or "") for value in revision_row[1:]
+            )
         provider_rows = store.db.execute(
             f"SELECT entity_id,provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id IN ({placeholders}) ORDER BY entity_id,provider",
             entity_ids,
@@ -878,10 +913,56 @@ def _list_admin_items_sync(
         _admin_hydration.reset(token)
     return {
         "items": items,
+        "catalogGeneration": _catalog_generation(library_id),
         "page": page,
         "pageSize": page_size,
         "total": total,
         "query": query,
+    }
+
+
+def _catalog_generation(library_id: str) -> int:
+    tables = {
+        row[0]
+        for row in store.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='catalog_library_summary'"
+        )
+    }
+    if not tables:
+        return 0
+    rows = store.db.execute(
+        "SELECT generation FROM catalog_library_summary WHERE library_id=?",
+        (library_id,),
+    )
+    return int(rows[0][0]) if rows else 0
+
+
+@router.get("/libraries/{library_id}/catalog-status")
+async def catalog_status(
+    library_id: str,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    if not store.get(library_id):
+        raise HTTPException(404, "Library not found.")
+    rows = store.db.execute(
+        """
+        SELECT
+            l.scan_state,
+            EXISTS(SELECT 1 FROM library_jobs j WHERE j.library_id=l.id AND j.kind IN ('scan','collection_rebuild') AND j.state IN ('queued','running','terminating')),
+            EXISTS(SELECT 1 FROM library_jobs j WHERE j.library_id=l.id AND j.kind='reconcile' AND j.state IN ('queued','running','terminating'))
+        FROM libraries l WHERE l.id=?
+        """,
+        (library_id,),
+    )
+    if not rows:
+        raise HTTPException(404, "Library not found.")
+    return {
+        "catalogGeneration": _catalog_generation(library_id),
+        "scanState": rows[0][0],
+        "activeScan": bool(rows[0][1]),
+        "activeReconcile": bool(rows[0][2]),
     }
 
 

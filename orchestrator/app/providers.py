@@ -1085,6 +1085,7 @@ class TVDBClient(ProviderClient):
         data = payload.get("data", payload)
         translation = payload.get("translation") or {}
         ids = []
+        linked_providers: set[str] = set()
         for remote in data.get("remoteIds", []) or data.get("remote_ids", []) or []:
             source = str(
                 remote.get("sourceName")
@@ -1104,6 +1105,9 @@ class TVDBClient(ProviderClient):
                 or "themoviedb" in source
                 or "movie database" in source
             ):
+                if "tmdb" in linked_providers:
+                    continue
+                linked_providers.add("tmdb")
                 ids.append(
                     {
                         "provider": "tmdb",
@@ -1112,6 +1116,9 @@ class TVDBClient(ProviderClient):
                     }
                 )
             elif "imdb" in source:
+                if "imdb" in linked_providers:
+                    continue
+                linked_providers.add("imdb")
                 ids.append(
                     {"provider": "imdb", "identifierType": "imdb", "id": str(value)}
                 )

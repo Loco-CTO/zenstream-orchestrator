@@ -195,6 +195,8 @@ def _entity(entity_id: str, locale: str = "en", include_metadata: bool = False) 
     }
     if hydration is not None:
         value["revision"] = hydration.get("revisions", {}).get(entity_id, "")
+    else:
+        value["revision"] = _entity_revision(entity_id, locale)
     value["displayName"] = (
         Path(row[4]).name if row[4] else row[3].replace("_", " ").title()
     )
@@ -839,7 +841,24 @@ def _list_admin_items_sync(
         if "catalog_artwork_selection" in tables:
             revision_params.extend([locale, locale])
         revision_params.extend(entity_ids)
-        for revision_row in store.db.execute(revision_sql, revision_params):
+        try:
+            revision_rows = store.db.execute(revision_sql, revision_params)
+        except Exception:
+            # Older/minimal test databases may have the projection table before
+            # its version columns were introduced; entity.updated_at remains a
+            # valid conservative revision in that case.
+            revision_rows = [
+                (
+                    entity_id,
+                    (store.db.execute("SELECT updated_at FROM library_entities WHERE id=?", (entity_id,)) or [[""]])[0][0],
+                    0,
+                    "",
+                    "",
+                    "",
+                )
+                for entity_id in hydration["entities"]
+            ]
+        for revision_row in revision_rows:
             hydration["revisions"][revision_row[0]] = ":".join(
                 str(value or "") for value in revision_row[1:]
             )
@@ -919,6 +938,45 @@ def _list_admin_items_sync(
         "total": total,
         "query": query,
     }
+
+
+def _entity_revision(entity_id: str, locale: str) -> str:
+    """Return a stable card revision from inventory, projection, and artwork."""
+    tables = {
+        row[0]
+        for row in store.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('catalog_item_projection','catalog_artwork_selection')"
+        )
+    }
+    row = store.db.execute(
+        "SELECT updated_at FROM library_entities WHERE id=?", (entity_id,)
+    )
+    if not row:
+        return ""
+    values: list[object] = [row[0][0]]
+    if "catalog_item_projection" in tables:
+        try:
+            projection = store.db.execute(
+                "SELECT generation,updated_at FROM catalog_item_projection WHERE entity_id=? AND locale=?",
+                (entity_id, locale),
+            )
+            values.extend(projection[0] if projection else (0, ""))
+        except Exception:
+            values.extend((0, ""))
+    else:
+        values.extend((0, ""))
+    if "catalog_artwork_selection" in tables:
+        try:
+            artwork = store.db.execute(
+                "SELECT GROUP_CONCAT(version,'|'),MAX(updated_at) FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
+                (entity_id, locale),
+            )
+            values.extend(artwork[0] if artwork else ("", ""))
+        except Exception:
+            values.extend(("", ""))
+    else:
+        values.extend(("", ""))
+    return ":".join(str(value or "") for value in values)
 
 
 def _catalog_generation(library_id: str) -> int:

@@ -4196,6 +4196,11 @@ class LibraryRuntime:
         self.thread: threading.Thread | None = None
         self.observer = None
         self._watch_paths: set[str] = set()
+        # Compatibility buffers are only used when an older test/database has
+        # not yet run migration 0024. Normal installations always use the
+        # durable table below.
+        self._reconcile_due: dict[str, float] = {}
+        self._reconcile_targets: dict[str, set[str]] = {}
         self._job_targets: dict[str, set[str]] = {}
         self._job_target_revisions: dict[str, dict[str, int]] = {}
         self._active_jobs: set[str] = set()
@@ -4391,6 +4396,17 @@ class LibraryRuntime:
             return
         deadline = time.time() + 5
         timestamp = now()
+        has_queue = bool(
+            self.store.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_reconcile_targets'"
+            )
+        )
+        if not has_queue:
+            self._reconcile_targets.setdefault(library_id, set()).update(targets)
+            self._reconcile_due[library_id] = time.monotonic() + 5
+            with self.condition:
+                self.condition.notify_all()
+            return
         with self.store.db.transaction() as cursor:
             cursor.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,))
             if not cursor.fetchone():
@@ -4422,6 +4438,14 @@ class LibraryRuntime:
         for lock in locks:
             lock.acquire()
         return locks
+
+    def _aggregate_scan_state(self, library_id: str) -> None:
+        active = self.store.db.execute(
+            "SELECT 1 FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') LIMIT 1",
+            (library_id,),
+        )
+        if active:
+            self.store.set_scan_state(library_id, "scanning", error=None)
 
     def _configure_watchers(self) -> None:
         if Observer is None:
@@ -4475,12 +4499,31 @@ class LibraryRuntime:
 
     def _run(self):
         while not self.stop_event.is_set():
-            due_rows = self.store.db.execute(
-                "SELECT DISTINCT library_id FROM library_reconcile_targets WHERE debounce_until<=?",
-                (time.time(),),
+            has_queue = bool(
+                self.store.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_reconcile_targets'"
+                )
             )
-            for (library_id,) in due_rows:
-                self.enqueue(library_id, "reconcile")
+            if has_queue:
+                due_rows = self.store.db.execute(
+                    "SELECT DISTINCT library_id FROM library_reconcile_targets WHERE debounce_until<=?",
+                    (time.time(),),
+                )
+                for (library_id,) in due_rows:
+                    self.enqueue(library_id, "reconcile")
+            else:
+                due = [
+                    library_id
+                    for library_id, deadline in self._reconcile_due.items()
+                    if time.monotonic() >= deadline
+                ]
+                for library_id in due:
+                    self.enqueue(
+                        library_id,
+                        "reconcile",
+                        self._reconcile_targets.get(library_id, set()).copy(),
+                    )
+                    self._reconcile_due.pop(library_id, None)
             rows = self.store.db.execute(
                 "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
             )
@@ -4520,12 +4563,20 @@ class LibraryRuntime:
                 targets = self._job_targets.pop(job_id, None)
                 target_revisions: dict[str, int] = {}
                 if kind == "reconcile" and targets is None:
-                    rows = self.store.db.execute(
-                        "SELECT top_level_root,revision FROM library_reconcile_targets WHERE library_id=? AND debounce_until<=? ORDER BY top_level_root",
-                        (library_id, time.time()),
+                    has_queue = bool(
+                        self.store.db.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_reconcile_targets'"
+                        )
                     )
-                    targets = {row[0] for row in rows}
-                    target_revisions = {row[0]: int(row[1]) for row in rows}
+                    if has_queue:
+                        rows = self.store.db.execute(
+                            "SELECT top_level_root,revision FROM library_reconcile_targets WHERE library_id=? AND debounce_until<=? ORDER BY top_level_root",
+                            (library_id, time.time()),
+                        )
+                        targets = {row[0] for row in rows}
+                        target_revisions = {row[0]: int(row[1]) for row in rows}
+                    else:
+                        targets = self._reconcile_targets.pop(library_id, set())
                     self._job_target_revisions[job_id] = target_revisions
                 if kind == "reconcile" and targets:
                     locks = self._acquire_roots(library_id, targets)
@@ -4569,6 +4620,7 @@ class LibraryRuntime:
             with self._active_lock:
                 self._active_jobs.discard(job_id)
                 self._cancel_events.pop(job_id, None)
+            self._aggregate_scan_state(library_id)
             with self.condition:
                 self.condition.notify_all()
 

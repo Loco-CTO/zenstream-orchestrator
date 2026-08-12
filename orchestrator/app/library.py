@@ -960,9 +960,28 @@ class LibraryScanner:
             self._set_stage(job_id, "Reconciling moved entities")
             self._reconcile_moved_entities(library_id, root, targets=targets)
             self._set_stage(job_id, "Pruning entities without playable media")
-            rejected = self._prune_rejected_entities(targets=targets)
+            concurrent_reconcile = targets is None and bool(
+                self.db.execute(
+                    "SELECT 1 FROM library_jobs WHERE library_id=? AND kind='reconcile' AND state IN ('queued','running','terminating') LIMIT 1",
+                    (library_id,),
+                )
+            )
+            # A full traversal cannot safely treat its own snapshot as
+            # authoritative while a targeted reconcile is mutating the same
+            # inventory. Leave cleanup to the root-scoped reconcile instead of
+            # deleting newer rows, then let the next complete scan repair any
+            # roots that were not part of that target.
+            rejected = (
+                set()
+                if concurrent_reconcile
+                else self._prune_rejected_entities(targets=targets)
+            )
             self._set_stage(job_id, "Pruning missing entities")
-            missing = self._prune_missing_entities(library_id, root, targets=targets)
+            missing = (
+                set()
+                if concurrent_reconcile
+                else self._prune_missing_entities(library_id, root, targets=targets)
+            )
             self._set_stage(job_id, "Refreshing catalog read model")
             removed = rejected | missing
             self._flush_publications()

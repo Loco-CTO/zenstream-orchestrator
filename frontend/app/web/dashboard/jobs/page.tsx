@@ -1,22 +1,84 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-	IconChevronRight,
 	IconClock,
 	IconPlayerPlay,
+	IconPlayerStop,
 	IconRefresh,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import {
-	EmptyState,
-	PageHeader,
-	StatusMessage,
-	SurfaceCard,
-} from "../components/dashboard-surface";
-import { Job, stateColor } from "./job-types";
+import { Job, activeStates } from "./job-types";
+
+type Group = { name: string; jobs: Job[] };
+
+function relativeTime(value?: string | null) {
+	if (!value) return "never";
+	const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000);
+	if (seconds < 60) return "just now";
+	if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+	if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`;
+	return `${Math.floor(seconds / 86400)} days ago`;
+}
+
+function duration(job: Job) {
+	const run = job.recentRuns?.[0];
+	if (!run?.startedAt) return "< 1 min";
+	const end = run.finishedAt ? new Date(run.finishedAt).getTime() : Date.now();
+	const seconds = Math.max(0, (end - new Date(run.startedAt).getTime()) / 1000);
+	return seconds < 60 ? "< 1 min" : `${Math.round(seconds / 60)} min`;
+}
+
+function groupFor(job: Job) {
+	if (job.kind.includes("metadata")) return "Metadata";
+	if (job.kind.includes("trickplay") || job.kind.includes("intro_outro"))
+		return "Media Analysis";
+	if (job.kind.includes("library")) return "Library";
+	return "Catalog";
+}
+
+function Progress({ job }: { job: Job }) {
+	const run = job.recentRuns?.find((item) => activeStates.has(item.state));
+	if (!run || !run.progressTotal) return null;
+	const value = Math.max(
+		0,
+		Math.min(100, (run.progressCurrent / run.progressTotal) * 100),
+	);
+	return (
+		<div style={{ paddingBottom: 12 }}>
+			<div
+				style={{
+					height: 2,
+					background: "#111",
+					borderRadius: 2,
+					overflow: "hidden",
+					marginBottom: 5,
+				}}
+			>
+				<div
+					style={{
+						height: "100%",
+						width: `${value}%`,
+						background: "var(--primary)",
+						borderRadius: 2,
+						transition: "width 0.4s ease",
+					}}
+				/>
+			</div>
+			<div
+				style={{
+					fontSize: 11,
+					color: "#555",
+					textAlign: "right",
+					fontFamily: '"DM Mono", monospace',
+				}}
+			>
+				{Math.round(value)}%
+			</div>
+		</div>
+	);
+}
 
 export default function JobsPage() {
 	const router = useRouter();
@@ -24,107 +86,216 @@ export default function JobsPage() {
 	const [session, setSession] = useState<Session | null>(null);
 	const [jobs, setJobs] = useState<Job[]>([]);
 	const [loading, setLoading] = useState(true);
-	const [message, setMessage] = useState("");
-
-	async function load(current = session) {
+	const [error, setError] = useState("");
+	const load = useCallback(async (current: Session | null) => {
 		if (!current) return;
 		setLoading(true);
 		const response = await adminFetch("/api/admin/jobs", current);
-		if (response.ok)
-			setJobs(((await response.json()) as { jobs?: Job[] }).jobs || []);
-		else setMessage("Scheduled tasks could not be loaded.");
+		if (!response.ok) setError("Scheduled tasks could not be loaded.");
+		else setJobs(((await response.json()) as { jobs?: Job[] }).jobs || []);
 		setLoading(false);
-	}
-	async function runNow(job: Job) {
-		if (!session) return;
-		const response = await adminFetch(`/api/admin/jobs/${job.id}/run`, session, {
-			method: "POST",
-		});
-		setMessage(
-			response.ok ? "Task queued in the background." : "Could not queue task.",
-		);
-		await load(session);
-	}
+	}, []);
 	useEffect(() => {
-		const legacyJobId = params.get("jobId");
-		if (legacyJobId) {
+		const legacyId = params.get("jobId");
+		if (legacyId) {
 			router.replace(
-				`/web/dashboard/jobs/detail?jobId=${encodeURIComponent(legacyJobId)}`,
+				`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(legacyId)}`,
 			);
 			return;
 		}
 		const current = readSession();
 		setSession(current);
-		if (current) void load(current);
-	}, [params, router]);
-
+		void load(current);
+	}, [load, params, router]);
+	const groups = useMemo<Group[]>(() => {
+		const order = ["Catalog", "Library", "Media Analysis", "Metadata"];
+		return order
+			.map((name) => ({
+				name,
+				jobs: jobs.filter((job) => groupFor(job) === name),
+			}))
+			.filter((group) => group.jobs.length);
+	}, [jobs]);
 	return (
-		<div className="dashboard-page">
-			<PageHeader
-				title="Tasks"
-				description="Review scheduled work, tune its cadence, and manage active runs."
-				actions={
-					<button
-						onClick={() => void load()}
-						className="material-icon-button"
-						aria-label="Refresh tasks"
+		<div className="dashboard-page dashboard-design" style={{ maxWidth: 1080 }}>
+			<header
+				style={{
+					display: "flex",
+					alignItems: "flex-start",
+					justifyContent: "space-between",
+					marginBottom: 36,
+					gap: 16,
+				}}
+			>
+				<div>
+					<h1
+						style={{
+							margin: 0,
+							fontSize: 22,
+							fontWeight: 600,
+							color: "#fff",
+							letterSpacing: "-0.02em",
+						}}
 					>
-						<IconRefresh size={17} />
-					</button>
-				}
-			/>
-			{message && <StatusMessage>{message}</StatusMessage>}
-			<SurfaceCard className="mt-7 overflow-hidden">
-				<div className="border-b console-divider px-5 py-4 text-xs uppercase tracking-[.16em] console-muted">
-					All tasks{" "}
-					<span className="ml-2 normal-case tracking-normal">{jobs.length}</span>
+						Tasks
+					</h1>
+					<p
+						style={{
+							margin: "5px 0 0",
+							fontSize: 13,
+							color: "#666",
+							lineHeight: 1.5,
+						}}
+					>
+						Review scheduled work, tune its cadence, and manage active runs.
+					</p>
 				</div>
-				{loading ? (
-					<div className="p-8 text-sm console-muted">Loading tasks…</div>
-				) : (
-					jobs.map((job) => (
-						<div
-							key={job.id}
-							className="flex items-center gap-4 border-b console-divider px-5 py-4 last:border-0 hover:bg-white/[.035]"
-						>
-							<span className="rounded-full border border-[#5ee3d8]/25 bg-[#5ee3d8]/[.08] p-2 text-[#5ee3d8]">
-								<IconClock size={16} />
-							</span>
-							<Link
-								href={`/web/dashboard/jobs/detail?jobId=${encodeURIComponent(job.id)}`}
-								className="min-w-0 flex-1 text-left"
+				<button
+					type="button"
+					onClick={() => void load(session)}
+					title="Refresh"
+					aria-label="Refresh tasks"
+					style={{
+						width: 32,
+						height: 32,
+						border: "none",
+						background: "none",
+						color: "#777",
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						borderRadius: 8,
+						cursor: "pointer",
+					}}
+				>
+					<IconRefresh size={15} />
+				</button>
+			</header>
+			{error && (
+				<p
+					role="alert"
+					style={{ color: "var(--danger)", fontSize: 12, marginBottom: 16 }}
+				>
+					{error}
+				</p>
+			)}
+			{loading ? (
+				<div
+					style={{
+						background: "#080808",
+						borderRadius: 12,
+						padding: 22,
+						color: "#666",
+						fontSize: 13,
+					}}
+				>
+					Loading tasks…
+				</div>
+			) : !groups.length ? (
+				<div
+					style={{
+						background: "#080808",
+						borderRadius: 12,
+						padding: 22,
+						color: "#666",
+						fontSize: 13,
+					}}
+				>
+					No scheduled tasks.
+				</div>
+			) : (
+				<div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+					{groups.map((group) => (
+						<section key={group.name}>
+							<div
+								style={{
+									fontSize: 13,
+									fontWeight: 600,
+									color: "#fff",
+									marginBottom: 10,
+								}}
 							>
-								<span className="block truncate text-sm font-medium">{job.name}</span>
-								<span className="mt-1 block truncate text-xs console-muted">
-									{job.description || job.kind}
-								</span>
-							</Link>
-							<span
-								className={`hidden text-xs capitalize sm:block ${stateColor[job.lastState] || "console-muted"}`}
+								{group.name}
+							</div>
+							<div
+								style={{ background: "#080808", borderRadius: 12, overflow: "hidden" }}
 							>
-								{job.enabled ? job.lastState : "paused"}
-							</span>
-							<button
-								onClick={() => void runNow(job)}
-								className="material-icon-button !h-9 !min-h-9 !w-9 !min-w-9"
-								aria-label={`Run ${job.name} now`}
-							>
-								<IconPlayerPlay size={15} />
-							</button>
-							<Link
-								href={`/web/dashboard/jobs/detail?jobId=${encodeURIComponent(job.id)}`}
-								aria-label={`Open ${job.name}`}
-								className="console-muted hover:text-white"
-							>
-								<IconChevronRight size={16} />
-							</Link>
-						</div>
-					))
-				)}
-				{!loading && !jobs.length && (
-					<EmptyState>No scheduled tasks are configured.</EmptyState>
-				)}
-			</SurfaceCard>
+								{group.jobs.map((job, index) => {
+									const running = activeStates.has(job.lastState);
+									return (
+										<div key={job.id}>
+											<div style={{ padding: "0 18px" }}>
+												<div
+													style={{
+														display: "flex",
+														alignItems: "center",
+														gap: 14,
+														paddingTop: 13,
+														paddingBottom: running ? 8 : 13,
+														cursor: "pointer",
+													}}
+													onClick={() =>
+														router.push(
+															`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(job.id)}`,
+														)
+													}
+												>
+													<div
+														style={{
+															width: 32,
+															height: 32,
+															borderRadius: "50%",
+															background: "var(--primary-dim)",
+															border: "1px solid rgba(94,227,216,0.15)",
+															display: "flex",
+															alignItems: "center",
+															justifyContent: "center",
+															flexShrink: 0,
+															color: "var(--primary)",
+														}}
+													>
+														<IconClock size={14} />
+													</div>
+													<div style={{ flex: 1, minWidth: 0 }}>
+														<div style={{ fontSize: 14, fontWeight: 500, color: "#ddd" }}>
+															{job.name}
+														</div>
+														<div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+															Last run {relativeTime(job.lastRunAt)} · {duration(job)}
+														</div>
+													</div>
+													<span
+														style={{
+															width: 28,
+															height: 28,
+															borderRadius: 6,
+															background: "none",
+															color: "#444",
+															display: "flex",
+															alignItems: "center",
+															justifyContent: "center",
+														}}
+													>
+														{running ? (
+															<IconPlayerStop size={12} />
+														) : (
+															<IconPlayerPlay size={12} />
+														)}
+													</span>
+												</div>
+												{running && <Progress job={job} />}
+											</div>
+											{index < group.jobs.length - 1 && (
+												<div style={{ height: 1, background: "#111" }} />
+											)}
+										</div>
+									);
+								})}
+							</div>
+						</section>
+					))}
+				</div>
+			)}
 		</div>
 	);
 }

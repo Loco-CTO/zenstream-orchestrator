@@ -107,6 +107,7 @@ export default function AdminShell({
 	}
 
 	async function logout() {
+		if (!session) return;
 		await adminFetch("/api/admin/logout", session, { method: "POST" });
 		clearSession();
 		router.replace("/web/login");

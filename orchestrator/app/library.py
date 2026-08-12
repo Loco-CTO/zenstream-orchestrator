@@ -960,7 +960,7 @@ class LibraryScanner:
             self._set_stage(job_id, "Reconciling moved entities")
             self._reconcile_moved_entities(library_id, root, targets=targets)
             self._set_stage(job_id, "Pruning entities without playable media")
-            rejected = self._prune_rejected_entities()
+            rejected = self._prune_rejected_entities(targets=targets)
             self._set_stage(job_id, "Pruning missing entities")
             missing = self._prune_missing_entities(library_id, root, targets=targets)
             self._set_stage(job_id, "Refreshing catalog read model")
@@ -1246,8 +1246,21 @@ class LibraryScanner:
                         f"DELETE FROM {table} WHERE {column} IN ({placeholders})", batch
                     )
 
-    def _prune_rejected_entities(self) -> set[str]:
+    def _prune_rejected_entities(self, targets: set[str] | None = None) -> set[str]:
         rejected = self._scan_rejected_ids - self._scan_reconciled_ids
+        if targets is not None and rejected:
+            rows = self.db.execute(
+                "SELECT id,relative_path FROM library_entities WHERE id IN (%s)"
+                % ",".join("?" for _ in rejected),
+                list(rejected),
+            )
+            rejected = {
+                entity_id
+                for entity_id, relative_path in rows
+                if relative_path
+                and Path(relative_path).parts
+                and Path(relative_path).parts[0] in targets
+            }
         closure = self._entity_closure(rejected)
         if not closure:
             return set()

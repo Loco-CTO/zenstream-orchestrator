@@ -623,14 +623,20 @@ class JobStore:
         return _local_next(trigger["time"], trigger["weekday"])
 
     def _replace_triggers(self, definition_id: str, triggers: list[dict]) -> None:
-        validated = [self._validate_trigger(trigger) for trigger in triggers]
+        validated = [
+            {
+                **self._validate_trigger(trigger),
+                "id": str(trigger.get("id") or new_id()),
+            }
+            for trigger in triggers
+        ]
         timestamp = now()
         self.db.execute("DELETE FROM job_schedule_triggers WHERE definition_id=?", (definition_id,))
         for trigger in validated:
             self.db.execute(
                 "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (
-                    new_id(),
+                    str(trigger.get("id") or new_id()),
                     definition_id,
                     trigger["type"],
                     trigger.get("intervalSeconds"),

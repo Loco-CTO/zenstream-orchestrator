@@ -570,15 +570,18 @@ async def create_library(
         )
     except (ValueError, TypeError) as error:
         raise HTTPException(400, str(error)) from error
-    job = runtime.enqueue(
-        library["id"],
-        "collection_rebuild" if library["type"] == "collection" else "scan",
-    )
     scheduler.refresh_library_definition(library)
     # Watchdog.stop()/join() and recursive scheduling can touch a large media
     # tree.  Keep that synchronous filesystem work away from the ASGI event
     # loop so a library change cannot make every request appear unavailable.
     await asyncio.to_thread(runtime.refresh_watchers)
+    # Install Watchdog before the initial traversal begins.  The initial scan
+    # remains authoritative for everything already present, while events for
+    # files arriving during setup are durably queued for the reconcile lane.
+    job = runtime.enqueue(
+        library["id"],
+        "collection_rebuild" if library["type"] == "collection" else "scan",
+    )
     library["sourceLibraryIds"] = store.sources(library["id"])
     library["jobId"] = job["id"]
     return library

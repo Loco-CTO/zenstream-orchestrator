@@ -545,6 +545,8 @@ async def item_metadata(entity_id: str, request: Request, language: str = Query(
 async def item_image(
     entity_id: str, image_type: str, request: Request, language: str = Query(...)
 ):
+    requested_version = request.query_params.get("v")
+
     def resolve_cached_image() -> Path | None:
         account = account_from_access(request)
         row = catalog.require_entity(account["id"], entity_id)
@@ -570,19 +572,50 @@ async def item_image(
                     raise HTTPException(404, "Image not found.")
         if catalog._has_table("catalog_artwork_selection"):
             projected = catalog.db.execute(
-                "SELECT local_path FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
+                "SELECT local_path,version FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
                 (entity_id, language, image_type),
             )
-            if projected and projected[0][0] and Path(projected[0][0]).is_file():
-                return Path(projected[0][0])
+            if projected:
+                selected_path, selected_version = projected[0]
+                if requested_version and requested_version != selected_version:
+                    # Versioned URLs are immutable.  Never substitute a
+                    # different fallback file under a stale client URL.
+                    raise HTTPException(404, "Image version is no longer available.")
+                if selected_path and Path(selected_path).is_file():
+                    if requested_version:
+                        digest = hashlib.sha256()
+                        with Path(selected_path).open("rb") as source:
+                            while chunk := source.read(1024 * 1024):
+                                digest.update(chunk)
+                        if digest.hexdigest()[:12] != requested_version:
+                            raise HTTPException(404, "Image version is no longer available.")
+                    return Path(selected_path)
+                if requested_version:
+                    raise HTTPException(404, "Image version is no longer available.")
         image = catalog.selected_image(account["id"], entity_id, language, image_type)
         if not image:
             raise HTTPException(404, "Image not found.")
+        provider = image.get("provider")
+        provider_id = next(
+            (
+                identity.get("id")
+                for identity in catalog._provider_ids(entity_id, row[3])
+                if identity.get("provider") == provider
+            ),
+            None,
+        )
         rows = catalog.db.execute(
-            "SELECT local_path FROM metadata_images WHERE image_type=? AND image_url=? ORDER BY fetched_at DESC",
-            (image_type, image.get("url")),
+            "SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=? AND local_path IS NOT NULL LIMIT 1",
+            (provider, row[3], provider_id, image_type, image.get("url")),
         )
         if rows and rows[0][0] and Path(rows[0][0]).is_file():
+            if requested_version:
+                digest = hashlib.sha256()
+                with Path(rows[0][0]).open("rb") as source:
+                    while chunk := source.read(1024 * 1024):
+                        digest.update(chunk)
+                if digest.hexdigest()[:12] != requested_version:
+                    raise HTTPException(404, "Image version is no longer available.")
             return Path(rows[0][0])
         return None
 

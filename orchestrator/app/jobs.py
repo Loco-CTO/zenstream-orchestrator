@@ -22,12 +22,18 @@ from app.metadata_services import (
     MetadataIngestService,
     metadata_task_results,
 )
+from app.metadata_domain import language_family
+from app.models.metadata import MetadataLanguageSettings
 from app.providers import ProviderError
 from app.trickplay import TrickplayExtractor
 
 logger = get_logger("jobs")
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
 ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
+
+
+def _english_configured() -> bool:
+    return any(language_family(value) == "en" for value in MetadataLanguageSettings().get())
 
 
 def now() -> str:
@@ -101,6 +107,7 @@ def _metadata_document_gaps(
             image_type,
             document.get("originalLanguage"),
             [provider],
+            include_english=_english_configured(),
         )
         if expected and expected.get("url"):
             source_images.add((image_type, str(expected["url"])))
@@ -180,6 +187,7 @@ def _metadata_document_gaps(
                 image_type,
                 document.get("originalLanguage"),
                 [provider],
+                include_english=_english_configured(),
             )
             if expected and image_type not in projected_images:
                 gaps.add(f"projection-artwork:{image_type}")

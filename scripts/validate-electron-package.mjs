@@ -6,13 +6,15 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const launcherRoot = path.join(projectRoot, "launcher");
 const requireFromLauncher = createRequire(path.join(launcherRoot, "package.json"));
 const asar = requireFromLauncher("@electron/asar");
-const archive = path.join(
-  launcherRoot,
-  "release",
-  "win-unpacked",
-  "resources",
-  "app.asar",
-);
+const archive = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(
+      launcherRoot,
+      "release",
+      "win-unpacked",
+      "resources",
+      "app.asar",
+    );
 
 const packageDocument = JSON.parse(
   asar.extractFile(archive, "package.json").toString("utf8"),

@@ -21,6 +21,10 @@ beneath `assets/ffmpeg/windows`,
 `dist/`, `.build/`, or `launcher/release/`.
 Windows packaging is serialized by `scripts/pack-windows.ps1`; never bypass its
 lock or publish artifacts unless `scripts/validate-electron-package.mjs` passes.
+Electron Builder writes its unpacked application to a unique temporary directory
+beneath `.build/`, while only the installer and portable executable are published
+to `launcher/release/`. This keeps a stale lock on an older unpacked `app.asar`
+from blocking later builds.
 
 ## Metadata artwork conversion
 

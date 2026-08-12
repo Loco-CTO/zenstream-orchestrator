@@ -19,7 +19,6 @@ from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORIES,
     ARTWORK_CATEGORY_SET,
-    choose_artwork,
     fallback_tiers,
     language_family,
     locale_variants,
@@ -627,7 +626,11 @@ class MetadataSearchProjection:
                         provider_ids,
                         provider,
                     )
-                    for image_type, (choice, cached_row, selected_provider) in global_artwork.items():
+                    for image_type, (
+                        choice,
+                        cached_row,
+                        selected_provider,
+                    ) in global_artwork.items():
                         if preserve_artwork and image_type in preserve_artwork:
                             continue
                         projected = {

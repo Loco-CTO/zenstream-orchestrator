@@ -185,7 +185,7 @@ def encode_webp(source: Path, target: Path) -> None:
 def _svg_dimension(value: str | None) -> float | None:
     if not value:
         return None
-    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:px)?\s*", value, re.I)
+    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:px)?\s*", value, re.IGNORECASE)
     return float(match.group(1)) if match else None
 
 
@@ -203,37 +203,47 @@ def _rasterize_svg(content: bytes) -> bytes:
             "<script",
             " onload=",
             "javascript:",
-            "href=\"http:",
+            'href="http:',
             "href='http:",
-            "href=\"https:",
+            'href="https:',
             "href='https:",
-            "href=\"file:",
+            'href="file:',
             "href='file:",
         )
     ):
         raise ValueError("SVG artwork contains unsupported or external content")
-    root = re.search(r"<svg\b([^>]*)>", markup, re.I | re.S)
+    root = re.search(r"<svg\b([^>]*)>", markup, re.IGNORECASE | re.DOTALL)
     if not root:
         raise ValueError("SVG artwork has no root element")
     attributes = root.group(1)
     width = _svg_dimension(
-        (re.search(r"\bwidth\s*=\s*['\"]([^'\"]+)['\"]", attributes, re.I) or [None, None])[1]
+        (
+            re.search(r"\bwidth\s*=\s*['\"]([^'\"]+)['\"]", attributes, re.IGNORECASE)
+            or [None, None]
+        )[1]
     )
     height = _svg_dimension(
-        (re.search(r"\bheight\s*=\s*['\"]([^'\"]+)['\"]", attributes, re.I) or [None, None])[1]
+        (
+            re.search(r"\bheight\s*=\s*['\"]([^'\"]+)['\"]", attributes, re.IGNORECASE)
+            or [None, None]
+        )[1]
     )
     view_box = re.search(
         r"\bviewBox\s*=\s*['\"]\s*([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s*['\"]",
         attributes,
-        re.I,
+        re.IGNORECASE,
     )
     if view_box:
         width = width or float(view_box.group(3))
         height = height or float(view_box.group(4))
-    if width and height and (
-        width > _SVG_MAX_DIMENSION
-        or height > _SVG_MAX_DIMENSION
-        or width * height > _SVG_MAX_PIXELS
+    if (
+        width
+        and height
+        and (
+            width > _SVG_MAX_DIMENSION
+            or height > _SVG_MAX_DIMENSION
+            or width * height > _SVG_MAX_PIXELS
+        )
     ):
         raise ValueError("SVG artwork dimensions exceed the supported limit")
     try:
@@ -267,9 +277,12 @@ def _rasterize_svg(content: bytes) -> bytes:
 def encode_webp_bytes(content: bytes, target: Path, suffix: str = ".image") -> None:
     normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
     target.parent.mkdir(parents=True, exist_ok=True)
-    if normalized_suffix.lower() in {".svg", ".svgz"} or content.lstrip().startswith(
-        b"<svg"
-    ) or content.lstrip().startswith(b"<?xml") and b"<svg" in content[:4096].lower():
+    if (
+        normalized_suffix.lower() in {".svg", ".svgz"}
+        or content.lstrip().startswith(b"<svg")
+        or content.lstrip().startswith(b"<?xml")
+        and b"<svg" in content[:4096].lower()
+    ):
         raster = tempfile.NamedTemporaryFile(
             dir=target.parent, prefix=".raster-", suffix=".png", delete=False
         )

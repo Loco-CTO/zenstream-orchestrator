@@ -1702,6 +1702,18 @@ class LibraryScanner:
                 (entity_id,),
             )
         ]
+        # A TVDB refresh is authoritative for the primary series identity, but
+        # its remote-ID list is optional.  Do not erase a previously discovered
+        # TMDB series link merely because a later filename/NFO pass only found
+        # the TVDB ID.
+        if entity_type == "series":
+            normalized_keys = set(normalized)
+            normalized.extend(
+                value
+                for value in current
+                if value[0] == "tmdb" and value not in normalized_keys
+            )
+            normalized = list(dict.fromkeys(normalized))
         if set(normalized) != set(current):
             self.db.execute(
                 "DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,)
@@ -2091,7 +2103,15 @@ class LibraryScanner:
             relative_path,
         )
         result = None
-        if self._needs_metadata(series_id):
+        # Revisit matched TVDB roots during an affected scan so the TVDB
+        # remote-ID list can add the optional TMDB secondary identity.
+        has_tmdb_identity = bool(
+            self.db.execute(
+                "SELECT 1 FROM entity_provider_ids WHERE entity_id=? AND provider='tmdb' AND identifier_type='series' LIMIT 1",
+                (series_id,),
+            )
+        )
+        if self._needs_metadata(series_id) or not has_tmdb_identity:
             query, year = _inventory_query(relative_path or "")
             explicit = [
                 {"provider": row[0], "id": row[2]}
@@ -2140,7 +2160,7 @@ class LibraryScanner:
                     value["provider"],
                     "series",
                     str(value["id"]),
-                    required=True,
+                    required=value["provider"] == "tvdb",
                     progress=lambda message: self.store.update_job(
                         job_id, message=message
                     ),

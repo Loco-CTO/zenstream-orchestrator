@@ -439,12 +439,12 @@ async def home(
             raise HTTPException(
                 400, "libraryId is required for the library Home section."
             )
-        row = await run_foreground(
-            catalog.home_library, account["id"], preferred, libraryId
+        rows = await run_foreground(
+            catalog.home_library_rows, account["id"], preferred, libraryId
         )
-        if row is None:
+        if rows is None:
             raise HTTPException(404, "Library not found.")
-        return {"libraryRows": [row]}
+        return {"libraryRows": rows}
     else:
         raise HTTPException(400, "Unsupported home section.")
 

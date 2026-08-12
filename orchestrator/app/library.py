@@ -4345,12 +4345,19 @@ class LibraryRuntime:
         rows = self.store.db.execute(
             "SELECT id,library_id,state FROM library_jobs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC"
         )
-        by_library: dict[str, list[tuple[str, str]]] = {}
+        by_lane: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for job_id, library_id, state in rows:
-            by_library.setdefault(library_id, []).append((job_id, state))
+            kind_row = self.store.db.execute(
+                "SELECT kind FROM library_jobs WHERE id=?", (job_id,)
+            )
+            kind = kind_row[0][0] if kind_row else "scan"
+            lane = "reconcile" if kind == "reconcile" else "full"
+            by_lane.setdefault((library_id, lane), []).append((job_id, state))
         timestamp = now()
         with self.store.db.transaction() as cursor:
-            for library_id, jobs in by_library.items():
+            touched_libraries: set[str] = set()
+            for (library_id, _lane), jobs in by_lane.items():
+                touched_libraries.add(library_id)
                 keep_id = next(
                     (job_id for job_id, state in jobs if state != "terminating"),
                     None,
@@ -4371,6 +4378,7 @@ class LibraryRuntime:
                             "UPDATE library_jobs SET state='terminated',message=?,error=NULL,finished_at=? WHERE id=?",
                             (message, timestamp, job_id),
                         )
+            for library_id in touched_libraries:
                 cursor.execute(
                     "UPDATE libraries SET scan_state='idle',scan_error=NULL,updated_at=? WHERE id=?",
                     (timestamp, library_id),
@@ -4609,7 +4617,7 @@ class LibraryRuntime:
         finally:
             for lock in reversed(locks):
                 lock.release()
-            revisions = self._job_target_revisions.pop(job_id, {})
+            revisions = getattr(self, "_job_target_revisions", {}).pop(job_id, {})
             if revisions:
                 with self.store.db.transaction() as cursor:
                     for target, revision in revisions.items():

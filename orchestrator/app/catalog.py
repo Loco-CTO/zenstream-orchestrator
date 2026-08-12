@@ -2801,6 +2801,29 @@ class Catalog:
 
     @_catalog_read
     def home_library(self, user_id: str, language: str, library_id: str) -> dict | None:
+        rows = self.home_library_rows(user_id, language, library_id)
+        if rows is None:
+            return None
+        if rows:
+            return rows[0]
+        library = next(
+            (value for value in self.libraries(user_id) if value["id"] == library_id),
+            None,
+        )
+        if library is None:
+            return None
+        return {
+            "libraryId": library["id"],
+            "libraryName": library["name"],
+            "titleKey": "newlyAddedOn",
+            "stackEpisodes": library["type"] == "tv_series",
+            "items": [],
+        }
+
+    @_catalog_read
+    def home_library_rows(
+        self, user_id: str, language: str, library_id: str
+    ) -> list[dict] | None:
         if library_id not in self.allowed_libraries(user_id):
             return None
         library = next(
@@ -2809,16 +2832,19 @@ class Catalog:
         )
         if library is None:
             return None
-        row = self._home_library_row(user_id, language, library)
-        if row is not None:
-            return row
-        return {
-            "libraryId": library["id"],
-            "libraryName": library["name"],
-            "titleKey": "newlyAddedOn",
-            "stackEpisodes": library["type"] == "tv_series",
-            "items": [],
-        }
+        series_names: dict[str, str] = {}
+        rows = []
+        newly_added = self._home_library_row(
+            user_id, language, library, series_names
+        )
+        if newly_added is not None:
+            rows.append(newly_added)
+        top_rated = self._home_top_rated_row(
+            user_id, language, library, series_names
+        )
+        if top_rated is not None:
+            rows.append(top_rated)
+        return rows
 
     def _home_library_row(
         self,
@@ -2869,6 +2895,87 @@ class Catalog:
             "libraryName": library["name"],
             "titleKey": "newlyAddedOn",
             "stackEpisodes": library["type"] == "tv_series",
+            "items": items,
+        }
+
+    def _home_top_rated_row(
+        self,
+        user_id: str,
+        language: str,
+        library: dict,
+        series_names: dict[str, str] | None = None,
+    ) -> dict | None:
+        entity_type = {
+            "movies": "movie",
+            "tv_series": "series",
+            "collection": "collection",
+        }.get(library["type"])
+        if entity_type is None:
+            return None
+        series_names = series_names if series_names is not None else {}
+        rows: list[tuple] = []
+        projection_ready = self._read_model_ready() and self._has_table(
+            "catalog_item_projection"
+        )
+        if projection_ready:
+            rows = self.db.execute(
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+                "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                "FROM catalog_item_projection p "
+                "JOIN library_entities e ON e.id=p.entity_id "
+                "WHERE p.locale=? AND e.library_id=? AND e.parent_id IS NULL "
+                "AND e.entity_type=? "
+                "AND CAST(COALESCE(json_extract(p.payload, '$.communityRating'), 0) AS REAL)>0 "
+                "ORDER BY CAST(json_extract(p.payload, '$.communityRating') AS REAL) DESC, "
+                "COALESCE(json_extract(p.payload, '$.title'), '') COLLATE NOCASE ASC, e.id ASC "
+                "LIMIT 18",
+                (language, library["id"], entity_type),
+            )
+        else:
+            rows = self.db.execute(
+                "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,"
+                "episode_number,episode_end_number,created_at,updated_at "
+                "FROM library_entities WHERE library_id=? AND parent_id IS NULL AND entity_type=?",
+                (library["id"], entity_type),
+            )
+        if not rows:
+            return None
+
+        self._seed_hydration_rows(user_id, list(rows), language)
+        self._preload_projected_metadata(user_id, [row[0] for row in rows], language)
+        ranked: list[tuple[float, str, str, tuple, dict]] = []
+        for row in rows:
+            metadata = self.metadata(user_id, row[0], language)["metadata"]
+            try:
+                rating = float(metadata.get("communityRating") or 0)
+            except (TypeError, ValueError):
+                rating = 0.0
+            if rating > 0:
+                ranked.append(
+                    (
+                        -rating,
+                        str(metadata.get("title") or row[4] or "").casefold(),
+                        row[0],
+                        row,
+                        metadata,
+                    )
+                )
+        ranked.sort(key=lambda value: value[:3])
+        items = [
+            self._serialize(
+                user_id,
+                row,
+                metadata,
+                language=language,
+            )
+            for _, _, _, row, metadata in ranked[:18]
+        ]
+        if not items:
+            return None
+        return {
+            "libraryId": library["id"],
+            "libraryName": library["name"],
+            "titleKey": "topRated",
             "items": items,
         }
 
@@ -2968,8 +3075,13 @@ class Catalog:
                 else self.libraries(user_id)
             )
         }
-        for library_id, library in by_library.items():
+        libraries = list(by_library.values())
+        for library in libraries:
             row = self._home_library_row(user_id, language, library, series_names)
+            if row:
+                library_rows.append(row)
+        for library in libraries:
+            row = self._home_top_rated_row(user_id, language, library, series_names)
             if row:
                 library_rows.append(row)
         context = self._context(user_id)

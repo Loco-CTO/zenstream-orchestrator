@@ -137,6 +137,8 @@ function LibraryViewPage() {
 	const urlEntityId = params.get("entityId");
 	const urlEntityPathValue = params.get("entityPath") || "";
 	const urlLocale = params.get("locale");
+	const urlQuery = params.get("query") || "";
+	const parsedUrlPage = Number(params.get("page") || "1");
 	const [session, setSession] = useState<Session | null>(null);
 	const [items, setItems] = useState<Item[]>([]);
 	const [libraryName, setLibraryName] = useState("");
@@ -144,9 +146,11 @@ function LibraryViewPage() {
 	const [locale, setLocale] = useState("");
 	const [locales, setLocales] = useState<string[]>([]);
 	const [languageOptions, setLanguageOptions] = useState<LanguageOption[]>([]);
-	const [searchInput, setSearchInput] = useState("");
-	const [searchQuery, setSearchQuery] = useState("");
-	const [page, setPage] = useState(1);
+	const [searchInput, setSearchInput] = useState(urlQuery);
+	const [searchQuery, setSearchQuery] = useState(urlQuery);
+	const [page, setPage] = useState(
+		Number.isFinite(parsedUrlPage) && parsedUrlPage > 0 ? parsedUrlPage : 1,
+	);
 	const [total, setTotal] = useState(0);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
@@ -265,12 +269,21 @@ function LibraryViewPage() {
 	}, [libraryId, urlLocale]);
 
 	useEffect(() => {
-		const timer = window.setTimeout(
-			() => setSearchQuery(searchInput.trim()),
-			300,
-		);
+		const timer = window.setTimeout(() => {
+			const nextQuery = searchInput.trim();
+			setSearchQuery(nextQuery);
+			if (navigation.length === 0) {
+				const next = new URLSearchParams(params.toString());
+				if (nextQuery) next.set("query", nextQuery);
+				else next.delete("query");
+				next.delete("page");
+				const nextHref = `${pathname}${next.toString() ? `?${next.toString()}` : ""}`;
+				if (params.get("query") !== nextQuery || params.has("page"))
+					router.replace(nextHref);
+			}
+		}, 300);
 		return () => window.clearTimeout(timer);
-	}, [searchInput]);
+	}, [navigation.length, params, pathname, router, searchInput]);
 
 	useEffect(() => {
 		const current = readSession();
@@ -420,6 +433,7 @@ function LibraryViewPage() {
 									);
 									const next = new URLSearchParams(params.toString());
 									next.set("locale", nextLocale);
+									next.delete("page");
 									router.replace(`${pathname}?${next.toString()}`);
 									setItems([]);
 								}}
@@ -498,7 +512,13 @@ function LibraryViewPage() {
 								<div className="flex gap-2">
 									<button
 										disabled={page <= 1}
-										onClick={() => setPage((value) => value - 1)}
+										onClick={() => {
+											const nextPage = page - 1;
+											setPage(nextPage);
+											const next = new URLSearchParams(params.toString());
+											next.set("page", String(nextPage));
+											router.push(`${pathname}?${next.toString()}`);
+										}}
 										className="material-icon-button disabled:opacity-30"
 										aria-label="Previous page"
 									>
@@ -506,7 +526,13 @@ function LibraryViewPage() {
 									</button>
 									<button
 										disabled={page >= pageCount}
-										onClick={() => setPage((value) => value + 1)}
+										onClick={() => {
+											const nextPage = page + 1;
+											setPage(nextPage);
+											const next = new URLSearchParams(params.toString());
+											next.set("page", String(nextPage));
+											router.push(`${pathname}?${next.toString()}`);
+										}}
 										className="material-icon-button disabled:opacity-30"
 										aria-label="Next page"
 									>
@@ -700,7 +726,7 @@ function EntityPoster({
 				/>
 			) : (
 				<IconPhoto
-					className={state === "missing" ? "material-muted" : "text-[#aeb9ff]"}
+					className={state === "missing" ? "material-muted" : "text-[#5ee3d8]"}
 					size={28}
 				/>
 			)}
@@ -1069,7 +1095,7 @@ function IntroOutroInspectionPanel({
 						not an audio waveform.
 					</p>
 				</div>
-				<span className="rounded-full border border-[#aeb9ff]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#aeb9ff]">
+				<span className="rounded-full border border-[#5ee3d8]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#5ee3d8]">
 					{state}
 				</span>
 			</div>
@@ -1166,7 +1192,7 @@ function FingerprintPreview({
 					aria-label={`${kind} Chromaprint bit-density preview`}
 					className="mt-3 h-20 w-full rounded bg-black/35"
 				>
-					<polyline fill="none" stroke="#aeb9ff" strokeWidth="2" points={points} />
+					<polyline fill="none" stroke="#5ee3d8" strokeWidth="2" points={points} />
 				</svg>
 			) : (
 				<div className="mt-3 flex h-20 items-center justify-center rounded bg-black/35 text-xs material-muted">
@@ -1178,7 +1204,7 @@ function FingerprintPreview({
 					<div
 						className={
 							segment
-								? "h-full rounded-full bg-[#aeb9ff]"
+								? "h-full rounded-full bg-[#5ee3d8]"
 								: "h-full rounded-full bg-white/20"
 						}
 						style={{ marginLeft: `${left}%`, width: `${width}%` }}
@@ -1254,7 +1280,7 @@ function TrickplayAssetPanel({
 				<p className="text-xs uppercase tracking-[.18em] material-muted">
 					Trickplay assets
 				</p>
-				<span className="rounded-full border border-[#aeb9ff]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#aeb9ff]">
+				<span className="rounded-full border border-[#5ee3d8]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#5ee3d8]">
 					{status}
 				</span>
 			</div>
@@ -1390,7 +1416,7 @@ function MetadataSummary({ detail }: { detail: Item }) {
 							href={trailer.url}
 							target="_blank"
 							rel="noreferrer"
-							className="mr-2 text-[#aeb9ff] hover:underline"
+							className="mr-2 text-[#5ee3d8] hover:underline"
 						>
 							{trailer.name || trailer.language || `Trailer ${index + 1}`}
 						</a>

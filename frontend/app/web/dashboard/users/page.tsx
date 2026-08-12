@@ -324,7 +324,7 @@ export default function UsersPage() {
 								</button>
 								<button
 									onClick={() => setUserToDelete(user)}
-									className="material-icon-button text-[#aeb9ff]"
+									className="material-icon-button text-[#5ee3d8]"
 									aria-label={`Delete ${user.username}`}
 									title="Delete user"
 								>
@@ -346,7 +346,7 @@ export default function UsersPage() {
 											onChange={(event) =>
 												void setAccess(user, library.id, event.target.checked)
 											}
-											className="accent-[#aeb9ff]"
+											className="accent-[#5ee3d8]"
 										/>
 										<span className="min-w-0">
 											<span className="block truncate font-medium">{library.name}</span>

@@ -188,7 +188,7 @@ export default function PlaybackPage() {
 							limits.
 						</p>
 					</div>
-					<IconPlayerPlay className="text-[#aeb9ff]" size={22} />
+					<IconPlayerPlay className="text-[#5ee3d8]" size={22} />
 				</div>
 				<form onSubmit={save} className="mt-6 space-y-5">
 					<label className="block">
@@ -273,7 +273,7 @@ export default function PlaybackPage() {
 							always 16:9; narrower source media is fitted fully inside a black frame.
 						</p>
 					</div>
-					<IconPhoto className="text-[#aeb9ff]" size={22} />
+					<IconPhoto className="text-[#5ee3d8]" size={22} />
 				</div>
 				<form onSubmit={save} className="mt-6 space-y-5">
 					<label className="block">
@@ -310,7 +310,7 @@ export default function PlaybackPage() {
 											trickplayFrameWidth: width,
 										}))
 									}
-									className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${settings.trickplayFrameWidth === width ? "border-[#aeb9ff] bg-[#aeb9ff]/15 text-[#e8eaff]" : "border-white/15 text-white/75 hover:border-white/35"}`}
+									className={`rounded-lg border px-3 py-2 text-sm font-semibold transition ${settings.trickplayFrameWidth === width ? "border-[#5ee3d8] bg-[#5ee3d8]/15 text-[#d8fffb]" : "border-white/15 text-white/75 hover:border-white/35"}`}
 								>
 									{width} × {(width * 9) / 16}
 								</button>

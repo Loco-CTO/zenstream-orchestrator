@@ -166,7 +166,7 @@ export default function MetadataPage() {
 								provider translations are skipped.
 							</p>
 						</div>
-						<IconMusic className="text-[#aeb9ff]" size={22} />
+						<IconMusic className="text-[#5ee3d8]" size={22} />
 					</div>
 					<div className="mt-5 flex flex-wrap gap-2">
 						{locales.map((locale) => (
@@ -239,7 +239,7 @@ export default function MetadataPage() {
 							<p className="console-kicker">Movies and secondary TV metadata</p>
 							<h2 className="mt-2 text-xl font-bold">TMDB</h2>
 						</div>
-						<IconKey className="text-[#aeb9ff]" size={22} />
+						<IconKey className="text-[#5ee3d8]" size={22} />
 					</div>
 					<p className="mt-3 text-sm console-muted">
 						Use a TMDB v3 API key or v4 read access token.
@@ -286,7 +286,7 @@ export default function MetadataPage() {
 							<p className="console-kicker">Series and collection metadata</p>
 							<h2 className="mt-2 text-xl font-bold">TheTVDB</h2>
 						</div>
-						<IconKey className="text-[#aeb9ff]" size={22} />
+						<IconKey className="text-[#5ee3d8]" size={22} />
 					</div>
 					<p className="mt-3 text-sm console-muted">
 						A subscriber PIN is optional for licensed keys and required for some
@@ -329,7 +329,7 @@ export default function MetadataPage() {
 				</form>
 				<div className="console-card rounded-2xl p-6 lg:col-span-2">
 					<div className="flex items-start gap-4">
-						<span className="rounded-xl bg-[#aeb9ff]/10 p-3 text-[#aeb9ff]">
+						<span className="rounded-xl bg-[#5ee3d8]/10 p-3 text-[#5ee3d8]">
 							<IconMusic size={22} />
 						</span>
 						<div>
@@ -345,7 +345,7 @@ export default function MetadataPage() {
 							<p className="mt-4 text-xs console-muted">
 								Metadata provided by{" "}
 								<a
-									className="text-[#aeb9ff]"
+									className="text-[#5ee3d8]"
 									href="https://musicbrainz.org/"
 									target="_blank"
 									rel="noreferrer"
@@ -354,7 +354,7 @@ export default function MetadataPage() {
 								</a>{" "}
 								and artwork by the{" "}
 								<a
-									className="text-[#aeb9ff]"
+									className="text-[#5ee3d8]"
 									href="https://coverartarchive.org/"
 									target="_blank"
 									rel="noreferrer"
@@ -377,7 +377,7 @@ function ProviderStatus({ state }: { state?: ProviderState }) {
 		<p className="mt-4 flex items-center gap-2 text-xs console-muted">
 			{state?.configured ? (
 				<>
-					<IconCheck size={15} className="text-[#aeb9ff]" />
+					<IconCheck size={15} className="text-[#5ee3d8]" />
 					Configured
 					{state.validatedAt
 						? ` · validated ${new Date(state.validatedAt).toLocaleString()}`

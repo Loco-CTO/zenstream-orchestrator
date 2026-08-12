@@ -32,7 +32,7 @@ export default function RegisterPage() {
 				className="console-card w-full max-w-md rounded-2xl p-8"
 			>
 				<img
-					src="/assets/icons/icon.png"
+					src="/icons/icon.png"
 					alt="ZenStream"
 					className="mb-5 h-14 w-14 rounded-2xl"
 				/>

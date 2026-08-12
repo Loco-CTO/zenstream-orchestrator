@@ -113,18 +113,18 @@ export default function DashboardOverview() {
 						kicker="Scheduler"
 						title="Background tasks"
 						action={
-							<Link href="/web/dashboard/jobs" className="text-xs text-[#aeb9ff]">
+							<Link href="/web/dashboard/jobs" className="text-xs text-[#5ee3d8]">
 								Manage all
 							</Link>
 						}
 					/>
 					{tasks.map((task) => (
 						<Link
-							href={"/web/dashboard/jobs?jobId=" + task.id}
+							href={"/web/dashboard/jobs/detail?jobId=" + encodeURIComponent(task.id)}
 							key={task.id}
 							className="flex items-center gap-3 border-b console-divider px-5 py-4 last:border-0 hover:bg-white/[.035]"
 						>
-							<IconClock size={17} className="text-[#aeb9ff]" />
+							<IconClock size={17} className="text-[#5ee3d8]" />
 							<span className="min-w-0 flex-1">
 								<span className="block truncate text-sm">{task.name}</span>
 								<span className="mt-1 block text-xs console-muted">
@@ -149,7 +149,7 @@ export default function DashboardOverview() {
 							href="/web/dashboard/libraries"
 							className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"
 						>
-							<IconLibrary size={17} className="text-[#aeb9ff]" />
+							<IconLibrary size={17} className="text-[#5ee3d8]" />
 							Libraries
 							<IconArrowUpRight size={15} className="ml-auto console-muted" />
 						</Link>
@@ -157,7 +157,7 @@ export default function DashboardOverview() {
 							href="/web/dashboard/metadata"
 							className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"
 						>
-							<IconDatabase size={17} className="text-[#aeb9ff]" />
+							<IconDatabase size={17} className="text-[#5ee3d8]" />
 							Metadata
 							<IconArrowUpRight size={15} className="ml-auto console-muted" />
 						</Link>
@@ -165,7 +165,7 @@ export default function DashboardOverview() {
 							href="/web/dashboard/profile"
 							className="flex items-center gap-3 rounded-lg border console-divider px-3 py-3 text-sm hover:bg-white/[.035]"
 						>
-							<IconUsers size={17} className="text-[#aeb9ff]" />
+							<IconUsers size={17} className="text-[#5ee3d8]" />
 							Account security
 							<IconArrowUpRight size={15} className="ml-auto console-muted" />
 						</Link>

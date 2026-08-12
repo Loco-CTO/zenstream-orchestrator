@@ -156,7 +156,7 @@ export default function LibrariesPage() {
 							className="flex items-start justify-between gap-4 border-b console-divider px-5 py-5 last:border-0"
 						>
 							<div className="flex min-w-0 items-start gap-3">
-								<span className="rounded-lg bg-[#aeb9ff]/10 p-2.5 text-[#aeb9ff]">
+								<span className="rounded-lg bg-[#5ee3d8]/10 p-2.5 text-[#5ee3d8]">
 									<IconFolder size={18} />
 								</span>
 								<div className="min-w-0">
@@ -185,7 +185,7 @@ export default function LibrariesPage() {
 										"/web/dashboard/libraries/view?libraryId=" +
 										encodeURIComponent(library.id)
 									}
-									className="rounded-lg border console-divider px-3 py-2 text-xs text-[#aeb9ff]"
+									className="rounded-lg border console-divider px-3 py-2 text-xs text-[#5ee3d8]"
 								>
 									View
 								</Link>
@@ -199,7 +199,7 @@ export default function LibrariesPage() {
 								<button
 									onClick={() => setLibraryToRemove(library)}
 									aria-label="Remove"
-									className="rounded-lg border console-divider p-2 console-muted hover:bg-[#aeb9ff]/10 hover:text-[#aeb9ff]"
+									className="rounded-lg border console-divider p-2 console-muted hover:bg-[#5ee3d8]/10 hover:text-[#5ee3d8]"
 								>
 									<IconTrash size={16} />
 								</button>

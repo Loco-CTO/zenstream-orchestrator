@@ -12,9 +12,9 @@ export function PageHeader({
 	actions?: ReactNode;
 }) {
 	return (
-		<header className="flex flex-col gap-4 border-b console-divider pb-6 sm:flex-row sm:items-end sm:justify-between">
+		<header className="dashboard-page-header flex flex-col gap-4 pb-5 sm:flex-row sm:items-end sm:justify-between">
 			<div className="max-w-3xl">
-				<h1 className="text-3xl font-semibold tracking-tight">{title}</h1>
+				<h1 className="text-[1.7rem] font-semibold tracking-[-0.03em]">{title}</h1>
 				{description && (
 					<p className="mt-2 text-sm leading-6 console-muted">{description}</p>
 				)}
@@ -34,7 +34,7 @@ export function SurfaceCard({
 	className?: string;
 }) {
 	return (
-		<section className={`console-card rounded-2xl ${className}`}>
+		<section className={`console-card rounded-xl ${className}`}>
 			{children}
 		</section>
 	);
@@ -66,7 +66,7 @@ export function SectionHeader({
 
 export function StatusMessage({ children }: { children: ReactNode }) {
 	return (
-		<p className="mt-5 rounded-xl border border-[#aeb9ff]/20 bg-[#aeb9ff]/10 px-4 py-3 text-sm text-[#e8eaff]">
+		<p className="mt-5 rounded-xl border border-[#5ee3d8]/20 bg-[#5ee3d8]/10 px-4 py-3 text-sm text-[#d8fffb]">
 			{children}
 		</p>
 	);

@@ -40,7 +40,7 @@ export default function InvitesPage() {
 					credentials.
 				</p>
 				{invite && (
-					<div className="mt-6 break-all rounded-xl border border-[#aeb9ff]/25 bg-[#aeb9ff]/10 p-4 text-sm text-[#e8eaff]">
+					<div className="mt-6 break-all rounded-xl border border-[#5ee3d8]/25 bg-[#5ee3d8]/10 p-4 text-sm text-[#d8fffb]">
 						{invite}
 					</div>
 				)}

@@ -123,7 +123,7 @@ export default function AdminShell({
 
 	return (
 		<div className="console-root dashboard-shell min-h-screen">
-			<aside className="dashboard-rail fixed inset-y-0 left-0 z-40 hidden w-[76px] flex-col px-2 py-4 md:flex">
+			<aside className="dashboard-rail fixed inset-y-0 left-0 z-40 hidden w-[52px] flex-col px-1.5 py-3 md:flex">
 				<Brand compact />
 				<nav aria-label="Dashboard" className="mt-6 space-y-1">
 					{links.map(([label, href, Icon]) => (
@@ -231,7 +231,7 @@ export default function AdminShell({
 				</div>
 			)}
 
-			<main className="dashboard-content md:ml-[76px]">
+			<main className="dashboard-content md:ml-[52px]">
 				<div className="w-full px-5 py-8 sm:px-8 md:px-10 md:py-10">{children}</div>
 			</main>
 		</div>
@@ -248,7 +248,7 @@ function Brand({ compact = false }: { compact?: boolean }) {
 			<img
 				src="/icons/icon.png"
 				alt=""
-				className="h-10 w-10 rounded-xl"
+				className={`${compact ? "h-8 w-8 rounded-lg" : "h-10 w-10 rounded-xl"}`}
 				onError={(event) => {
 					event.currentTarget.onerror = null;
 					event.currentTarget.src = "/favicon.ico";

@@ -1,30 +1,34 @@
 @import "tailwindcss";
 
+/* ZenStream console type is bundled by the app's package/system stack.  Keep
+ * the dashboard usable in offline launcher deployments without a web-font
+ * request. */
+
 @theme {
-	--color-core-colors-primary: #aeb9ff;
-	--color-core-colors-secondary: #aeb9ff;
-	--color-core-colors-tertiary: #aeb9ff;
-	--color-schemes-dark-primary: #aeb9ff;
-	--color-schemes-dark-primary-hover: #dce1ff;
-	--color-schemes-dark-on-primary: #09090b;
-	--color-schemes-dark-primary-container: #242957;
-	--color-schemes-dark-on-primary-container: #e8eaff;
-	--color-schemes-dark-secondary: #aeb9ff;
+	--color-core-colors-primary: #5ee3d8;
+	--color-core-colors-secondary: #5ee3d8;
+	--color-core-colors-tertiary: #5ee3d8;
+	--color-schemes-dark-primary: #5ee3d8;
+	--color-schemes-dark-primary-hover: #7deae1;
+	--color-schemes-dark-on-primary: #050909;
+	--color-schemes-dark-primary-container: #123c3b;
+	--color-schemes-dark-on-primary-container: #d8fffb;
+	--color-schemes-dark-secondary: #5ee3d8;
 	--color-schemes-dark-on-secondary: #09090b;
-	--color-schemes-dark-secondary-container: #242957;
-	--color-schemes-dark-on-secondary-container: #e8eaff;
-	--color-schemes-dark-error: #aeb9ff;
-	--color-schemes-dark-on-error: #09090b;
-	--color-schemes-dark-error-container: #242957;
-	--color-schemes-dark-on-error-container: #e8eaff;
+	--color-schemes-dark-secondary-container: #123c3b;
+	--color-schemes-dark-on-secondary-container: #d8fffb;
+	--color-schemes-dark-error: #f07070;
+	--color-schemes-dark-on-error: #190707;
+	--color-schemes-dark-error-container: #3b1515;
+	--color-schemes-dark-on-error-container: #ffe2e2;
 	--color-schemes-dark-background: #000000;
 	--color-schemes-dark-on-background: #f5f5f5;
 	--color-schemes-dark-surface: #000000;
 	--color-schemes-dark-on-surface: #f5f5f5;
-	--color-schemes-dark-surface-variant: #2a2a2d;
-	--color-schemes-dark-on-surface-variant: #b5b5b8;
-	--color-schemes-dark-outline: #757579;
-	--color-schemes-dark-outline-variant: #2a2a2d;
+	--color-schemes-dark-surface-variant: #1c2424;
+	--color-schemes-dark-on-surface-variant: #9aa8a7;
+	--color-schemes-dark-outline: #445654;
+	--color-schemes-dark-outline-variant: #1d2928;
 	--color-schemes-dark-surface-dim: #000000;
 	--color-schemes-dark-surface-container-lowest: #000000;
 	--color-schemes-dark-surface-container-low: #0a0a0b;
@@ -34,16 +38,16 @@
 }
 
 :root {
-	--md-sys-color-primary: #aeb9ff;
-	--md-sys-color-on-primary: #09090b;
-	--md-sys-color-primary-container: #242957;
-	--md-sys-color-on-primary-container: #e8eaff;
-	--md-sys-color-secondary: #aeb9ff;
-	--md-sys-color-on-secondary: #09090b;
-	--md-sys-color-error: #aeb9ff;
-	--md-sys-color-on-error: #09090b;
-	--md-sys-color-error-container: #242957;
-	--md-sys-color-on-error-container: #e8eaff;
+	--md-sys-color-primary: #5ee3d8;
+	--md-sys-color-on-primary: #050909;
+	--md-sys-color-primary-container: #123c3b;
+	--md-sys-color-on-primary-container: #d8fffb;
+	--md-sys-color-secondary: #5ee3d8;
+	--md-sys-color-on-secondary: #050909;
+	--md-sys-color-error: #f07070;
+	--md-sys-color-on-error: #190707;
+	--md-sys-color-error-container: #3b1515;
+	--md-sys-color-on-error-container: #ffe2e2;
 	--md-sys-color-background: #000000;
 	--md-sys-color-on-background: #f5f5f5;
 	--md-sys-color-surface: #000000;
@@ -52,9 +56,9 @@
 	--md-sys-color-surface-container: #111113;
 	--md-sys-color-surface-container-high: #18181b;
 	--md-sys-color-surface-container-highest: #222225;
-	--md-sys-color-on-surface-variant: #b5b5b8;
-	--md-sys-color-outline: #757579;
-	--md-sys-color-outline-variant: #2a2a2d;
+	--md-sys-color-on-surface-variant: #9aa8a7;
+	--md-sys-color-outline: #445654;
+	--md-sys-color-outline-variant: #1d2928;
 }
 
 @keyframes spin-fast {
@@ -72,6 +76,14 @@
 		min-height: 100vh;
 		background: var(--md-sys-color-background);
 		color: var(--md-sys-color-on-background);
+		font-family:
+			Inter,
+			ui-sans-serif,
+			system-ui,
+			-apple-system,
+			BlinkMacSystemFont,
+			"Segoe UI",
+			sans-serif;
 	}
 
 	*,
@@ -194,7 +206,7 @@
 	}
 
 	.console-button:hover:not(:disabled) {
-		background: #dce1ff;
+		background: #7deae1;
 		box-shadow: 0 2px 6px rgb(0 0 0 / 0.22);
 	}
 
@@ -270,6 +282,7 @@
 
 	.dashboard-rail {
 		background: var(--md-sys-color-surface-container-lowest);
+		border-right: 1px solid rgb(255 255 255 / 0.06);
 	}
 
 	.dashboard-mobile-bar {

@@ -34,7 +34,7 @@ export default function AdminLogin() {
 			>
 				<div className="mb-8">
 					<img
-						src="/assets/icons/icon.png"
+						src="/icons/icon.png"
 						alt="ZenStream"
 						className="mb-5 h-14 w-14 rounded-2xl"
 					/>

@@ -4174,12 +4174,15 @@ class _LibraryChangeHandler(FileSystemEventHandler):
     def on_any_event(
         self, event
     ):  # watchdog emits separate create/modify/delete/move events
-        if not getattr(event, "is_directory", False):
-            self.runtime.request_reconcile(
-                self.library_id,
-                getattr(event, "src_path", None),
-                getattr(event, "dest_path", None),
-            )
+        # Directory events are important: a newly-created movie/series root
+        # has no file event until its children arrive, and deleting a root
+        # must remove the previously indexed inventory.  The scanner still
+        # applies supported-media/admission filtering at reconciliation time.
+        self.runtime.request_reconcile(
+            self.library_id,
+            getattr(event, "src_path", None),
+            getattr(event, "dest_path", None),
+        )
 
 
 class LibraryRuntime:
@@ -4193,12 +4196,13 @@ class LibraryRuntime:
         self.thread: threading.Thread | None = None
         self.observer = None
         self._watch_paths: set[str] = set()
-        self._reconcile_due: dict[str, float] = {}
-        self._reconcile_targets: dict[str, set[str]] = {}
         self._job_targets: dict[str, set[str]] = {}
+        self._job_target_revisions: dict[str, dict[str, int]] = {}
         self._active_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_lock = threading.RLock()
+        self._root_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._root_locks_guard = threading.RLock()
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -4239,8 +4243,13 @@ class LibraryRuntime:
         kind: str = "scan",
         targets: set[str] | None = None,
     ) -> dict | None:
-        # Scan, reconcile, and collection rebuild all mutate the same inventory.
-        # Claim the task atomically so different triggers cannot overlap.
+        # Full inventory work and watcher reconciliation are independent lanes.
+        # There is at most one active job in each lane for a library, while a
+        # full scan and a targeted reconcile may run together on disjoint roots.
+        lane_kinds = ("reconcile",) if kind == "reconcile" else (
+            "scan",
+            "collection_rebuild",
+        )
         with self.store.db.transaction() as cursor:
             # Filesystem events and the repair timer can race library deletion.
             # Check the parent row in the same transaction as the job insert so
@@ -4249,8 +4258,8 @@ class LibraryRuntime:
             if not cursor.fetchone():
                 return None
             cursor.execute(
-                "SELECT id FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1",
-                (library_id,),
+                "SELECT id FROM library_jobs WHERE library_id=? AND kind IN (?,?) AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1",
+                (library_id, lane_kinds[0], lane_kinds[-1]),
             )
             existing = cursor.fetchone()
             if existing:
@@ -4261,14 +4270,11 @@ class LibraryRuntime:
                     "INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)",
                     (job_id, library_id, kind, now()),
                 )
-        if targets:
-            pending = getattr(self, "_reconcile_targets", {}).setdefault(
-                library_id, set()
-            )
-            pending.update(targets)
-            if not existing:
-                getattr(self, "_job_targets", {}).update({job_id: pending.copy()})
-                pending.clear()
+        if targets and kind == "reconcile":
+            # Legacy callers may still pass an explicit target set.  Durable
+            # watcher events use the table directly; this path keeps the
+            # public enqueue API compatible for manual targeted scans/tests.
+            self._job_targets[job_id] = set(targets)
         job = self.store.job(job_id)
         with self.condition:
             self.condition.notify_all()
@@ -4366,12 +4372,12 @@ class LibraryRuntime:
                 )
 
     def request_reconcile(self, library_id: str, *paths: str | None) -> None:
-        """Debounce watcher changes into top-level, path-scoped reconciles."""
+        """Persist and debounce watcher changes into top-level reconciles."""
         library = self.store.get(library_id)
         if not library:
             return
         root = Path(library["directory"])
-        targets = self._reconcile_targets.setdefault(library_id, set())
+        targets: set[str] = set()
         for value in paths:
             if not value:
                 continue
@@ -4383,9 +4389,39 @@ class LibraryRuntime:
                 targets.add(relative_path.parts[0])
         if not targets:
             return
-        self._reconcile_due[library_id] = time.monotonic() + 5
+        deadline = time.time() + 5
+        timestamp = now()
+        with self.store.db.transaction() as cursor:
+            cursor.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,))
+            if not cursor.fetchone():
+                return
+            for target in targets:
+                cursor.execute(
+                    """
+                    INSERT INTO library_reconcile_targets
+                        (library_id,top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at)
+                    VALUES(?,?,?,1,1,?,?)
+                    ON CONFLICT(library_id,top_level_root) DO UPDATE SET
+                        debounce_until=excluded.debounce_until,
+                        event_count=library_reconcile_targets.event_count+1,
+                        revision=library_reconcile_targets.revision+1,
+                        last_seen_at=excluded.last_seen_at
+                    """,
+                    (library_id, target, deadline, timestamp, timestamp),
+                )
         with self.condition:
             self.condition.notify_all()
+
+    def _root_lock(self, library_id: str, root: str) -> threading.Lock:
+        key = (library_id, root.casefold())
+        with self._root_locks_guard:
+            return self._root_locks.setdefault(key, threading.Lock())
+
+    def _acquire_roots(self, library_id: str, roots: set[str]):
+        locks = [self._root_lock(library_id, root) for root in sorted(roots, key=str.casefold)]
+        for lock in locks:
+            lock.acquire()
+        return locks
 
     def _configure_watchers(self) -> None:
         if Observer is None:
@@ -4439,18 +4475,12 @@ class LibraryRuntime:
 
     def _run(self):
         while not self.stop_event.is_set():
-            due = [
-                library_id
-                for library_id, deadline in self._reconcile_due.items()
-                if time.monotonic() >= deadline
-            ]
-            for library_id in due:
-                self.enqueue(
-                    library_id,
-                    "reconcile",
-                    self._reconcile_targets.get(library_id, set()).copy(),
-                )
-                self._reconcile_due.pop(library_id, None)
+            due_rows = self.store.db.execute(
+                "SELECT DISTINCT library_id FROM library_reconcile_targets WHERE debounce_until<=?",
+                (time.time(),),
+            )
+            for (library_id,) in due_rows:
+                self.enqueue(library_id, "reconcile")
             rows = self.store.db.execute(
                 "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
             )
@@ -4484,9 +4514,21 @@ class LibraryRuntime:
             ).start()
 
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
+        locks: list[threading.Lock] = []
         try:
             if kind in {"scan", "reconcile", "collection_rebuild"}:
                 targets = self._job_targets.pop(job_id, None)
+                target_revisions: dict[str, int] = {}
+                if kind == "reconcile" and targets is None:
+                    rows = self.store.db.execute(
+                        "SELECT top_level_root,revision FROM library_reconcile_targets WHERE library_id=? AND debounce_until<=? ORDER BY top_level_root",
+                        (library_id, time.time()),
+                    )
+                    targets = {row[0] for row in rows}
+                    target_revisions = {row[0]: int(row[1]) for row in rows}
+                    self._job_target_revisions[job_id] = target_revisions
+                if kind == "reconcile" and targets:
+                    locks = self._acquire_roots(library_id, targets)
                 # A scan owns mutable traversal state and diagnostics.  Do not
                 # share one scanner between concurrent library workers: a movie
                 # scan could otherwise overwrite a TV scan's stage, delta, and
@@ -4514,11 +4556,19 @@ class LibraryRuntime:
                 kind,
             )
         finally:
+            for lock in reversed(locks):
+                lock.release()
+            revisions = self._job_target_revisions.pop(job_id, {})
+            if revisions:
+                with self.store.db.transaction() as cursor:
+                    for target, revision in revisions.items():
+                        cursor.execute(
+                            "DELETE FROM library_reconcile_targets WHERE library_id=? AND top_level_root=? AND revision=?",
+                            (library_id, target, revision),
+                        )
             with self._active_lock:
                 self._active_jobs.discard(job_id)
                 self._cancel_events.pop(job_id, None)
-            if self._reconcile_targets.get(library_id):
-                self._reconcile_due[library_id] = time.monotonic()
             with self.condition:
                 self.condition.notify_all()
 

@@ -1,6 +1,6 @@
 import hashlib
-import sys
 import struct
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,8 +68,9 @@ class LocalArtworkCacheTest(unittest.TestCase):
                 Path(args[-1]).write_bytes(b"webp")
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-            with patch("app.playback.ffmpeg_path", return_value="ffmpeg"), patch(
-                "app.images.subprocess.run", side_effect=fake_run
+            with (
+                patch("app.playback.ffmpeg_path", return_value="ffmpeg"),
+                patch("app.images.subprocess.run", side_effect=fake_run),
             ):
                 encode_webp(source, target)
 
@@ -91,8 +92,9 @@ class LocalArtworkCacheTest(unittest.TestCase):
                     returncode=0, stdout=bytes([0, 0, 0]) * 32 * 32, stderr=b""
                 )
 
-            with patch("app.playback.ffmpeg_path", return_value="ffmpeg"), patch(
-                "app.images.subprocess.run", side_effect=fake_run
+            with (
+                patch("app.playback.ffmpeg_path", return_value="ffmpeg"),
+                patch("app.images.subprocess.run", side_effect=fake_run),
             ):
                 value = blurhash_for_image(source)
 
@@ -108,20 +110,18 @@ class LocalArtworkCacheTest(unittest.TestCase):
 
             def render(**kwargs):
                 rendered.append(kwargs["svg_string"])
-                return (
-                    b"\x89PNG\r\n\x1a\n"
-                    + b"\x00" * 8
-                    + struct.pack(">II", 100, 40)
-                )
+                return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", 100, 40)
 
             def fake_run(args, **kwargs):
                 Path(args[-1]).write_bytes(b"webp")
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
 
             fake_resvg = SimpleNamespace(svg_to_bytes=render)
-            with patch.dict(sys.modules, {"resvg_py": fake_resvg}), patch(
-                "app.playback.ffmpeg_path", return_value="ffmpeg"
-            ), patch("app.images.subprocess.run", side_effect=fake_run):
+            with (
+                patch.dict(sys.modules, {"resvg_py": fake_resvg}),
+                patch("app.playback.ffmpeg_path", return_value="ffmpeg"),
+                patch("app.images.subprocess.run", side_effect=fake_run),
+            ):
                 encode_webp_bytes(
                     b'<svg width="100" height="40" xmlns="http://www.w3.org/2000/svg"/>',
                     target,

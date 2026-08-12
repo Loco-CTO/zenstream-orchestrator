@@ -1242,6 +1242,7 @@ class MetadataIngestService:
                         provider_id,
                         values,
                         force=force_assets,
+                        complete_batch=True,
                     )
                 else:
                     for locale in locales:
@@ -1698,6 +1699,7 @@ class MetadataImageIngestService:
         documents: dict[str, dict],
         *,
         force: bool = False,
+        complete_batch: bool = False,
     ) -> dict[str, int]:
         """Materialize one provider winner per locale/category.
 
@@ -1808,7 +1810,12 @@ class MetadataImageIngestService:
                 document,
                 preserve_artwork=preserved.get(locale),
             )
-        self._prune_replaced(provider, entity_type, provider_id, documents, outcomes)
+        # A single-locale replay is intentionally non-destructive.  Pruning is
+        # safe only when the caller supplied the complete configured-locale
+        # document batch, otherwise another locale's ready artwork could be
+        # mistaken for an obsolete alternate.
+        if complete_batch:
+            self._prune_replaced(provider, entity_type, provider_id, documents, outcomes)
         return {"ready": ready, "failed": failed, "skipped": skipped}
 
     def ingest(
@@ -1827,6 +1834,7 @@ class MetadataImageIngestService:
             provider_id,
             {locale: document},
             force=force,
+            complete_batch=False,
         )
 
 

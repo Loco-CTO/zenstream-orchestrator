@@ -775,6 +775,7 @@ def _list_admin_items_sync(
 ):
     if not store.get(library_id):
         raise HTTPException(404, "Library not found.")
+    catalog_generation = _catalog_generation(library_id)
     parent_id = parent_id or None
     query = query.strip()
     if query:
@@ -932,7 +933,7 @@ def _list_admin_items_sync(
         _admin_hydration.reset(token)
     return {
         "items": items,
-        "catalogGeneration": _catalog_generation(library_id),
+        "catalogGeneration": catalog_generation,
         "page": page,
         "pageSize": page_size,
         "total": total,

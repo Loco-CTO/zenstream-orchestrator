@@ -1005,23 +1005,37 @@ async def catalog_status(
     require_admin(Username, TOKEN)
     if not store.get(library_id):
         raise HTTPException(404, "Library not found.")
+    has_summary = bool(
+        store.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_library_summary'"
+        )
+    )
+    generation_select = (
+        "COALESCE(s.generation,0)"
+        if has_summary
+        else "0"
+    )
+    summary_join = (
+        "LEFT JOIN catalog_library_summary s ON s.library_id=l.id"
+        if has_summary
+        else ""
+    )
     rows = store.db.execute(
-        """
-        SELECT
-            l.scan_state,
+        f"""
+        SELECT {generation_select}, l.scan_state,
             EXISTS(SELECT 1 FROM library_jobs j WHERE j.library_id=l.id AND j.kind IN ('scan','collection_rebuild') AND j.state IN ('queued','running','terminating')),
             EXISTS(SELECT 1 FROM library_jobs j WHERE j.library_id=l.id AND j.kind='reconcile' AND j.state IN ('queued','running','terminating'))
-        FROM libraries l WHERE l.id=?
+        FROM libraries l {summary_join} WHERE l.id=?
         """,
         (library_id,),
     )
     if not rows:
         raise HTTPException(404, "Library not found.")
     return {
-        "catalogGeneration": _catalog_generation(library_id),
-        "scanState": rows[0][0],
-        "activeScan": bool(rows[0][1]),
-        "activeReconcile": bool(rows[0][2]),
+        "catalogGeneration": int(rows[0][0] or 0),
+        "scanState": rows[0][1],
+        "activeScan": bool(rows[0][2]),
+        "activeReconcile": bool(rows[0][3]),
     }
 
 

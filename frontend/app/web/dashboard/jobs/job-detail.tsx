@@ -6,19 +6,156 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
 	IconArrowLeft,
 	IconClock,
+	IconMinus,
 	IconPlayerPlay,
 	IconPlayerStop,
+	IconPlus,
 	IconRefresh,
-	IconSettings,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import {
-	ConfirmDialog,
-	PageHeader,
-	StatusMessage,
-	SurfaceCard,
-} from "../components/dashboard-surface";
-import { activeStates, Job, JobTrigger, stateColor } from "./job-types";
+import { Job, JobTrigger, activeStates, stateColor } from "./job-types";
+
+const days = [
+	"Sunday",
+	"Monday",
+	"Tuesday",
+	"Wednesday",
+	"Thursday",
+	"Friday",
+	"Saturday",
+];
+
+function triggerLabel(trigger: JobTrigger) {
+	if (trigger.type === "startup") return "On application start";
+	if (trigger.type === "daily") return `Daily at ${trigger.time}`;
+	if (trigger.type === "weekly")
+		return `Weekly on ${days[trigger.weekday]} at ${trigger.time}`;
+	const seconds = trigger.intervalSeconds;
+	if (seconds % 3600 === 0) return `Every ${seconds / 3600} hours`;
+	if (seconds % 60 === 0) return `Every ${seconds / 60} minutes`;
+	return `Every ${seconds} seconds`;
+}
+
+const fieldStyle: React.CSSProperties = {
+	width: "100%",
+	background: "#1a1a1a",
+	border: "1px solid var(--border-strong)",
+	borderRadius: 8,
+	padding: "10px 14px",
+	color: "var(--text)",
+	fontSize: 14,
+	fontFamily: "var(--font-sans)",
+};
+
+function Btn({
+	children,
+	onClick,
+	variant = "primary",
+	icon,
+}: {
+	children: React.ReactNode;
+	onClick?: () => void;
+	variant?: "primary" | "ghost";
+	icon?: React.ReactNode;
+}) {
+	return (
+		<button
+			type="button"
+			onClick={onClick}
+			style={{
+				display: "inline-flex",
+				alignItems: "center",
+				justifyContent: "center",
+				gap: 7,
+				border: variant === "ghost" ? "1px solid var(--border-strong)" : "none",
+				background: variant === "ghost" ? "transparent" : "var(--primary)",
+				color: variant === "ghost" ? "#aaa" : "#000",
+				borderRadius: 7,
+				padding: "9px 14px",
+				fontSize: 12,
+				fontWeight: 600,
+				cursor: "pointer",
+				fontFamily: "var(--font-sans)",
+			}}
+		>
+			{icon}
+			{children}
+		</button>
+	);
+}
+
+function Modal({
+	open,
+	onClose,
+	title,
+	children,
+}: {
+	open: boolean;
+	onClose: () => void;
+	title: string;
+	children: React.ReactNode;
+}) {
+	if (!open) return null;
+	return (
+		<div
+			role="presentation"
+			onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+			style={{
+				position: "fixed",
+				inset: 0,
+				zIndex: 50,
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				background: "rgba(0,0,0,.72)",
+				padding: 20,
+			}}
+		>
+			<div
+				role="dialog"
+				aria-modal="true"
+				aria-label={title}
+				style={{
+					width: "100%",
+					maxWidth: 420,
+					background: "#101010",
+					border: "1px solid var(--border-strong)",
+					borderRadius: 12,
+					padding: 22,
+					boxShadow: "0 24px 80px rgba(0,0,0,.5)",
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						marginBottom: 20,
+					}}
+				>
+					<h2 style={{ margin: 0, fontSize: 16, color: "#fff", fontWeight: 600 }}>
+						{title}
+					</h2>
+					<button
+						type="button"
+						onClick={onClose}
+						aria-label="Close"
+						style={{
+							border: 0,
+							background: "none",
+							color: "#666",
+							cursor: "pointer",
+							fontSize: 20,
+						}}
+					>
+						×
+					</button>
+				</div>
+				{children}
+			</div>
+		</div>
+	);
+}
 
 export default function JobDetailPage() {
 	const params = useSearchParams();
@@ -28,7 +165,12 @@ export default function JobDetailPage() {
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
 	const [message, setMessage] = useState("");
-	const [confirmTerminate, setConfirmTerminate] = useState(false);
+	const [addingTrigger, setAddingTrigger] = useState(false);
+	const [triggerType, setTriggerType] = useState<JobTrigger["type"]>("daily");
+	const [triggerTime, setTriggerTime] = useState("00:00");
+	const [triggerDay, setTriggerDay] = useState("0");
+	const [triggerIntervalVal, setTriggerIntervalVal] = useState("15");
+	const [triggerIntervalUnit, setTriggerIntervalUnit] = useState("minutes");
 	const selected = useMemo(
 		() => jobs.find((job) => job.id === requestedId),
 		[jobs, requestedId],
@@ -50,7 +192,6 @@ export default function JobDetailPage() {
 		setSession(current);
 		if (current) void load(current);
 	}, [load]);
-
 	useEffect(() => {
 		if (
 			!session ||
@@ -60,6 +201,12 @@ export default function JobDetailPage() {
 		const timer = window.setInterval(() => void load(session, false), 2000);
 		return () => window.clearInterval(timer);
 	}, [load, selected, session]);
+
+	function updateSelected(change: (job: Job) => Job) {
+		setJobs((current) =>
+			current.map((job) => (job.id === requestedId ? change(job) : job)),
+		);
+	}
 
 	async function save() {
 		if (!session || !selected) return;
@@ -80,7 +227,6 @@ export default function JobDetailPage() {
 		if (response.ok) await load(session, false);
 		setSaving(false);
 	}
-
 	async function runNow() {
 		if (!session || !selected) return;
 		const response = await adminFetch(
@@ -93,408 +239,468 @@ export default function JobDetailPage() {
 		);
 		await load(session, false);
 	}
-
 	async function terminate() {
 		if (!session || !selected || !activeRun) return;
-		const response = await adminFetch(
+		await adminFetch(
 			`/api/admin/jobs/${selected.id}/runs/${activeRun.id}/terminate`,
 			session,
 			{ method: "POST" },
 		);
-		setMessage(
-			response.ok ? "Termination requested." : "Could not terminate the task run.",
-		);
-		setConfirmTerminate(false);
 		await load(session, false);
 	}
 
-	if (!requestedId) {
-		return (
-			<div className="dashboard-page">
-				<PageHeader
-					title="Task not selected"
-					description="Choose a scheduled task to inspect its settings and recent runs."
-				/>
-				<Link href="/web/dashboard/jobs" className="material-back">
-					<IconArrowLeft size={16} /> Back to tasks
-				</Link>
-			</div>
-		);
-	}
-	if (!loading && !selected) {
-		return (
-			<div className="dashboard-page">
-				<PageHeader
-					title="Task not found"
-					description="This task may have been removed or is not available to your administrator account."
-				/>
-				<Link href="/web/dashboard/jobs" className="material-back">
-					<IconArrowLeft size={16} /> Back to tasks
-				</Link>
-			</div>
-		);
+	function addTrigger() {
+		const id = crypto.randomUUID();
+		const trigger: JobTrigger =
+			triggerType === "startup"
+				? { id, type: "startup" }
+				: triggerType === "daily"
+					? { id, type: "daily", time: triggerTime }
+					: triggerType === "weekly"
+						? { id, type: "weekly", weekday: Number(triggerDay), time: triggerTime }
+						: {
+								id,
+								type: "interval",
+								intervalSeconds: Math.min(
+									2592000,
+									Math.max(
+										1,
+										Number(triggerIntervalVal) *
+											(triggerIntervalUnit === "hours"
+												? 3600
+												: triggerIntervalUnit === "minutes"
+													? 60
+													: 1),
+									),
+								),
+							};
+		updateSelected((job) => ({
+			...job,
+			triggers: [...(job.triggers || []), trigger],
+		}));
+		setAddingTrigger(false);
 	}
 
+	if (!requestedId || (!loading && !selected))
+		return (
+			<div className="dashboard-page dashboard-design">
+				<Link
+					href="/web/dashboard/jobs"
+					style={{
+						display: "inline-flex",
+						alignItems: "center",
+						gap: 6,
+						color: "#666",
+						fontSize: 13,
+						textDecoration: "none",
+					}}
+				>
+					<IconArrowLeft size={14} /> Back to tasks
+				</Link>
+				<h1 style={{ margin: "22px 0 6px", fontSize: 20, color: "#fff" }}>
+					{requestedId ? "Task not found" : "Task not selected"}
+				</h1>
+				<p style={{ margin: 0, color: "#666", fontSize: 13 }}>
+					Choose a scheduled task to inspect its settings and recent runs.
+				</p>
+			</div>
+		);
+	if (!selected)
+		return (
+			<div
+				className="dashboard-page dashboard-design"
+				style={{ color: "#666", fontSize: 13 }}
+			>
+				Loading task…
+			</div>
+		);
+
 	return (
-		<div className="dashboard-page">
-			<ConfirmDialog
-				open={confirmTerminate}
-				title="Terminate active task run?"
-				description={`This stops the active run for ${selected?.name || "this task"}. Incomplete work may be resumed by its scheduler later.`}
-				confirmLabel="Terminate run"
-				destructive
-				onClose={() => setConfirmTerminate(false)}
-				onConfirm={() => void terminate()}
-			/>
-			<div className="mb-6">
-				<Link href="/web/dashboard/jobs" className="material-back">
-					<IconArrowLeft size={16} /> Back to tasks
+		<div className="dashboard-page dashboard-design">
+			<div style={{ marginBottom: 22 }}>
+				<Link
+					href="/web/dashboard/jobs"
+					style={{
+						display: "inline-flex",
+						alignItems: "center",
+						gap: 6,
+						background: "none",
+						border: "none",
+						color: "#666",
+						cursor: "pointer",
+						fontSize: 13,
+						textDecoration: "none",
+					}}
+				>
+					<IconArrowLeft size={14} /> Back to tasks
 				</Link>
 			</div>
-			<PageHeader
-				title={selected?.name || "Loading task"}
-				description={
-					selected?.description ||
-					"Review scheduler settings, triggers, and recent runs."
-				}
-				actions={
-					<button
-						onClick={() => session && void load(session)}
-						className="material-icon-button"
-						aria-label="Refresh task"
+			<div
+				style={{
+					display: "flex",
+					alignItems: "flex-start",
+					justifyContent: "space-between",
+					marginBottom: 6,
+					gap: 16,
+				}}
+			>
+				<div>
+					<h1
+						style={{
+							margin: 0,
+							fontSize: 20,
+							fontWeight: 700,
+							color: "#fff",
+							letterSpacing: "-0.02em",
+						}}
 					>
-						<IconRefresh size={17} />
-					</button>
-				}
-			/>
-			{message && <StatusMessage>{message}</StatusMessage>}
-			{selected && (
-				<div className="mt-7 grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
-					<SurfaceCard className="p-6">
-						<div className="flex items-start justify-between gap-4">
-							<div>
-								<p className="console-kicker">Schedule</p>
-								<h2 className="mt-2 text-xl font-semibold">Task controls</h2>
-							</div>
-							<IconSettings className="console-muted" size={19} />
-						</div>
-						<label className="mt-7 block text-sm">
-							<span className="console-muted">Run every (minutes)</span>
-							<input
-								type="number"
-								min={5}
-								max={43200}
-								value={selected.intervalMinutes}
-								onChange={(event) =>
-									setJobs((current) =>
-										current.map((job) =>
-											job.id === selected.id
-												? { ...job, intervalMinutes: Number(event.target.value) }
-												: job,
-										),
-									)
-								}
-								className="console-input mt-2 h-11 w-full rounded-lg px-3 outline-none"
-							/>
-						</label>
-						<label className="mt-4 flex items-center justify-between text-sm">
-							<span className="console-muted">Enabled</span>
-							<input
-								type="checkbox"
-								checked={selected.enabled}
-								onChange={(event) =>
-									setJobs((current) =>
-										current.map((job) =>
-											job.id === selected.id
-												? { ...job, enabled: event.target.checked }
-												: job,
-										),
-									)
-								}
-							/>
-						</label>
-						<div className="mt-6 border-t console-divider pt-5">
-							<div className="flex items-center justify-between">
-								<div>
-									<p className="console-kicker">Triggers</p>
-									<p className="mt-1 text-xs console-muted">
-										Use one or more schedules, or leave empty for manual-only runs.
-									</p>
-								</div>
-								<button
-									type="button"
-									className="rounded-lg border border-[#5ee3d8]/25 px-3 py-2 text-xs text-[#5ee3d8]"
-									onClick={() =>
-										setJobs((current) =>
-											current.map((job) =>
-												job.id === selected.id
-													? {
-															...job,
-															triggers: [
-																...(job.triggers || []),
-																{
-																	id: crypto.randomUUID(),
-																	type: "interval",
-																	intervalSeconds: Math.max(60, job.intervalMinutes * 60),
-																},
-															],
-														}
-													: job,
-											),
-										)
-									}
-								>
-									Add trigger
-								</button>
-							</div>
-							<div className="mt-3 space-y-2">
-								{(selected.triggers || []).map((trigger, index) => (
-									<div
-										key={trigger.id}
-										className="flex items-center gap-2 rounded-lg border console-divider p-2 text-xs"
-									>
-										<select
-											value={trigger.type}
-											className="console-input h-9 flex-1 rounded-md px-2"
-											onChange={(event) =>
-												setJobs((current) =>
-													current.map((job) => {
-														if (job.id !== selected.id) return job;
-														const nextType = event.target.value as JobTrigger["type"];
-														const next: JobTrigger =
-															nextType === "interval"
-																? { id: trigger.id, type: "interval", intervalSeconds: 1800 }
-																: nextType === "daily"
-																	? { id: trigger.id, type: "daily", time: "02:00" }
-																	: nextType === "weekly"
-																		? {
-																				id: trigger.id,
-																				type: "weekly",
-																				weekday: 1,
-																				time: "02:00",
-																			}
-																		: { id: trigger.id, type: "startup" };
-														return {
-															...job,
-															triggers: job.triggers.map((value, valueIndex) =>
-																valueIndex === index ? next : value,
-															),
-														};
-													}),
-												)
-											}
-										>
-											<option value="interval">Interval</option>
-											<option value="daily">Daily</option>
-											<option value="weekly">Weekly</option>
-											<option value="startup">Startup</option>
-										</select>
-										{trigger.type === "interval" && (
-											<input
-												type="number"
-												min={1}
-												max={2592000}
-												value={trigger.intervalSeconds}
-												aria-label="Interval seconds"
-												className="console-input h-9 w-28 rounded-md px-2"
-												onChange={(event) =>
-													setJobs((current) =>
-														current.map((job) =>
-															job.id === selected.id
-																? {
-																		...job,
-																		triggers: job.triggers.map((value, valueIndex) =>
-																			valueIndex === index
-																				? { ...value, intervalSeconds: Number(event.target.value) }
-																				: value,
-																		),
-																	}
-																: job,
-														),
-													)
-												}
-											/>
-										)}
-										{(trigger.type === "daily" || trigger.type === "weekly") && (
-											<input
-												type="time"
-												value={trigger.time}
-												aria-label="Trigger time"
-												className="console-input h-9 w-28 rounded-md px-2"
-												onChange={(event) =>
-													setJobs((current) =>
-														current.map((job) =>
-															job.id === selected.id
-																? {
-																		...job,
-																		triggers: job.triggers.map((value, valueIndex) =>
-																			valueIndex === index
-																				? { ...value, time: event.target.value }
-																				: value,
-																		),
-																	}
-																: job,
-														),
-													)
-												}
-											/>
-										)}
-										{trigger.type === "weekly" && (
-											<select
-												value={trigger.weekday}
-												aria-label="Trigger weekday"
-												className="console-input h-9 w-24 rounded-md px-2"
-												onChange={(event) =>
-													setJobs((current) =>
-														current.map((job) =>
-															job.id === selected.id
-																? {
-																		...job,
-																		triggers: job.triggers.map((value, valueIndex) =>
-																			valueIndex === index
-																				? { ...value, weekday: Number(event.target.value) }
-																				: value,
-																		),
-																	}
-																: job,
-														),
-													)
-												}
-											>
-												<option value={0}>Sun</option>
-												<option value={1}>Mon</option>
-												<option value={2}>Tue</option>
-												<option value={3}>Wed</option>
-												<option value={4}>Thu</option>
-												<option value={5}>Fri</option>
-												<option value={6}>Sat</option>
-											</select>
-										)}
-										<button
-											type="button"
-											aria-label="Remove trigger"
-											className="px-2 text-[#f07070]"
-											onClick={() =>
-												setJobs((current) =>
-													current.map((job) =>
-														job.id === selected.id
-															? {
-																	...job,
-																	triggers: job.triggers.filter(
-																		(_, valueIndex) => valueIndex !== index,
-																	),
-																}
-															: job,
-													),
-												)
-											}
-										>
-											×
-										</button>
-									</div>
-								))}
-							</div>
-						</div>
-						{selected.kind === "metadata_refresh" && (
-							<label className="mt-5 flex items-start justify-between gap-4 rounded-xl border console-divider p-3 text-sm">
-								<span>
-									<span className="block console-muted">
-										Preserve cached artwork and portraits
-									</span>
-									<span className="mt-1 block text-xs leading-5 console-muted">
-										Reuse valid files during metadata refreshes; missing or changed assets
-										are still downloaded.
-									</span>
-								</span>
-								<input
-									type="checkbox"
-									checked={Boolean(selected.config?.preserveCachedAssets)}
-									onChange={(event) =>
-										setJobs((current) =>
-											current.map((job) =>
-												job.id === selected.id
-													? {
-															...job,
-															config: {
-																...(job.config || {}),
-																preserveCachedAssets: event.target.checked,
-															},
-														}
-													: job,
-											),
-										)
-									}
-								/>
-							</label>
-						)}
-						<div className="mt-6 grid gap-2 sm:grid-cols-2">
-							<button
-								onClick={() => void save()}
-								disabled={saving}
-								className="console-button rounded-lg px-3 py-2.5 text-sm font-medium disabled:opacity-50"
-							>
-								{saving ? "Saving…" : "Save settings"}
-							</button>
-							<button
-								onClick={() => void runNow()}
-								disabled={Boolean(activeRun)}
-								className="flex items-center justify-center gap-2 rounded-lg border console-divider px-3 py-2.5 text-sm console-muted hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
-							>
-								<IconPlayerPlay size={15} />
-								{activeRun ? "Task active" : "Run now"}
-							</button>
-							{activeRun && (
-								<button
-									onClick={() => setConfirmTerminate(true)}
-									disabled={activeRun.state === "terminating"}
-									className="sm:col-span-2 flex items-center justify-center gap-2 rounded-lg border border-[#f07070]/30 px-3 py-2.5 text-sm text-[#f07070] hover:bg-[#f07070]/10 disabled:opacity-50"
-								>
-									<IconPlayerStop size={15} />
-									{activeRun.state === "terminating"
-										? "Terminating…"
-										: "Terminate active run"}
-								</button>
-							)}
-						</div>
-					</SurfaceCard>
-					<SurfaceCard className="p-6">
-						<p className="console-kicker">Recent activity</p>
-						<div className="mt-2 flex items-center gap-2">
-							<IconClock size={18} className="text-[#5ee3d8]" />
-							<span
-								className={`capitalize ${stateColor[selected.lastState] || "console-muted"}`}
-							>
-								{selected.enabled ? selected.lastState : "paused"}
-							</span>
-						</div>
-						<div className="mt-7 space-y-4">
-							{selected.recentRuns?.slice(0, 8).map((run) => (
-								<div
-									key={run.id}
-									className="flex items-start justify-between gap-3 text-xs"
-								>
-									<span>
-										<span
-											className={`block capitalize ${stateColor[run.state] || "console-muted"}`}
-										>
-											{run.state}
-										</span>
-										<span className="mt-1 block console-muted">
-											{run.message || run.error || "No details"}
-										</span>
-									</span>
-									<time className="shrink-0 console-muted">
-										{new Date(run.createdAt).toLocaleString()}
-									</time>
-								</div>
-							))}
-							{!selected.recentRuns?.length && (
-								<p className="text-xs console-muted">No runs yet.</p>
-							)}
-						</div>
-					</SurfaceCard>
+						{selected.name}
+					</h1>
+					<p
+						style={{
+							margin: "6px 0 0",
+							fontSize: 13,
+							color: "#666",
+							lineHeight: 1.55,
+						}}
+					>
+						{selected.description ||
+							"Review scheduler settings, triggers, and recent runs."}
+					</p>
+				</div>
+				<button
+					type="button"
+					onClick={() => session && void load(session)}
+					aria-label="Refresh task"
+					style={{
+						width: 32,
+						height: 32,
+						border: 0,
+						background: "none",
+						color: "#777",
+						cursor: "pointer",
+					}}
+				>
+					<IconRefresh size={15} />
+				</button>
+			</div>
+			<div style={{ marginBottom: 16 }}>
+				<Btn icon={<IconPlus size={14} />} onClick={() => setAddingTrigger(true)}>
+					Add trigger
+				</Btn>
+			</div>
+			{message && (
+				<div
+					role="status"
+					style={{ color: "var(--primary)", fontSize: 12, marginBottom: 12 }}
+				>
+					{message}
 				</div>
 			)}
+			<Modal
+				open={addingTrigger}
+				onClose={() => setAddingTrigger(false)}
+				title="Add trigger"
+			>
+				<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+					<label
+						style={{
+							fontSize: 10,
+							fontWeight: 600,
+							letterSpacing: ".1em",
+							textTransform: "uppercase",
+							color: "var(--primary)",
+						}}
+					>
+						Trigger type
+						<select
+							value={triggerType}
+							onChange={(event) =>
+								setTriggerType(event.target.value as JobTrigger["type"])
+							}
+							style={{ ...fieldStyle, marginTop: 8, appearance: "none" }}
+						>
+							<option value="daily">Daily</option>
+							<option value="weekly">Weekly</option>
+							<option value="interval">Interval</option>
+							<option value="startup">On application start</option>
+						</select>
+					</label>
+					{triggerType === "weekly" && (
+						<label
+							style={{
+								fontSize: 10,
+								fontWeight: 600,
+								letterSpacing: ".1em",
+								textTransform: "uppercase",
+								color: "var(--primary)",
+							}}
+						>
+							Day
+							<select
+								value={triggerDay}
+								onChange={(event) => setTriggerDay(event.target.value)}
+								style={{ ...fieldStyle, marginTop: 8 }}
+							>
+								{days.map((day, index) => (
+									<option key={day} value={index}>
+										{day}
+									</option>
+								))}
+							</select>
+						</label>
+					)}
+					{(triggerType === "daily" || triggerType === "weekly") && (
+						<label
+							style={{
+								fontSize: 10,
+								fontWeight: 600,
+								letterSpacing: ".1em",
+								textTransform: "uppercase",
+								color: "var(--primary)",
+							}}
+						>
+							Time
+							<input
+								type="time"
+								value={triggerTime}
+								onChange={(event) => setTriggerTime(event.target.value)}
+								style={{ ...fieldStyle, marginTop: 8 }}
+							/>
+						</label>
+					)}
+					{triggerType === "interval" && (
+						<div>
+							<label
+								style={{
+									fontSize: 10,
+									fontWeight: 600,
+									letterSpacing: ".1em",
+									textTransform: "uppercase",
+									color: "var(--primary)",
+								}}
+							>
+								Every
+							</label>
+							<div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+								<input
+									type="number"
+									min={1}
+									value={triggerIntervalVal}
+									onChange={(event) => setTriggerIntervalVal(event.target.value)}
+									style={{ ...fieldStyle, flex: 1 }}
+								/>
+								<select
+									value={triggerIntervalUnit}
+									onChange={(event) => setTriggerIntervalUnit(event.target.value)}
+									style={{ ...fieldStyle, flex: 1 }}
+								>
+									<option>seconds</option>
+									<option>minutes</option>
+									<option>hours</option>
+								</select>
+							</div>
+						</div>
+					)}
+					<div
+						style={{
+							display: "flex",
+							justifyContent: "flex-end",
+							gap: 8,
+							paddingTop: 4,
+						}}
+					>
+						<Btn variant="ghost" onClick={() => setAddingTrigger(false)}>
+							Cancel
+						</Btn>
+						<Btn onClick={addTrigger}>Add</Btn>
+					</div>
+				</div>
+			</Modal>
+			<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
+				<div
+					style={{
+						padding: "11px 18px",
+						background: "#0d0d0d",
+						borderRadius: "12px 12px 0 0",
+					}}
+				>
+					<span
+						style={{
+							fontSize: 11,
+							fontWeight: 600,
+							color: "#555",
+							letterSpacing: ".08em",
+							textTransform: "uppercase",
+						}}
+					>
+						Schedule
+					</span>
+				</div>
+				<div style={{ height: 1, background: "#111" }} />
+				{(selected.triggers || []).length === 0 ? (
+					<div style={{ padding: "20px 18px", fontSize: 13, color: "#333" }}>
+						No triggers configured. Add one above.
+					</div>
+				) : (
+					selected.triggers.map((trigger, index) => (
+						<div key={trigger.id}>
+							<div
+								style={{
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "space-between",
+									padding: "14px 18px",
+								}}
+							>
+								<span style={{ fontSize: 14, color: "#ccc", fontWeight: 500 }}>
+									{triggerLabel(trigger)}
+								</span>
+								<button
+									type="button"
+									aria-label="Remove trigger"
+									onClick={() =>
+										updateSelected((job) => ({
+											...job,
+											triggers: job.triggers.filter((entry) => entry.id !== trigger.id),
+										}))
+									}
+									style={{
+										width: 22,
+										height: 22,
+										borderRadius: "50%",
+										background: "var(--danger)",
+										border: "none",
+										color: "#000",
+										cursor: "pointer",
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+									}}
+								>
+									<IconMinus size={10} stroke={3} />
+								</button>
+							</div>
+							{index < selected.triggers.length - 1 && (
+								<div style={{ height: 1, background: "#111" }} />
+							)}
+						</div>
+					))
+				)}
+			</div>
+			<div
+				style={{
+					display: "flex",
+					alignItems: "center",
+					gap: 18,
+					marginTop: 16,
+					padding: "12px 2px",
+					color: "#777",
+					fontSize: 12,
+				}}
+			>
+				<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+					Interval (minutes)
+					<input
+						type="number"
+						min={1}
+						max={43200}
+						value={selected.intervalMinutes}
+						onChange={(event) =>
+							updateSelected((job) => ({
+								...job,
+								intervalMinutes: Number(event.target.value),
+							}))
+						}
+						style={{ ...fieldStyle, width: 96, padding: "7px 9px", fontSize: 12 }}
+					/>
+				</label>
+				<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+					<input
+						type="checkbox"
+						checked={selected.enabled}
+						onChange={(event) =>
+							updateSelected((job) => ({ ...job, enabled: event.target.checked }))
+						}
+					/>{" "}
+					Enabled
+				</label>
+				{selected.kind === "metadata_refresh" && (
+					<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+						<input
+							type="checkbox"
+							checked={Boolean(selected.config?.preserveCachedAssets)}
+							onChange={(event) =>
+								updateSelected((job) => ({
+									...job,
+									config: {
+										...(job.config || {}),
+										preserveCachedAssets: event.target.checked,
+									},
+								}))
+							}
+						/>{" "}
+						Preserve cached assets
+					</label>
+				)}
+			</div>
+			<div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+				<Btn onClick={() => void save()}>
+					{saving ? "Saving…" : "Save settings"}
+				</Btn>
+				<Btn
+					variant="ghost"
+					icon={<IconPlayerPlay size={14} />}
+					onClick={() => void runNow()}
+				>
+					{activeRun ? "Task active" : "Run now"}
+				</Btn>
+				{activeRun && (
+					<Btn
+						variant="ghost"
+						icon={<IconPlayerStop size={14} />}
+						onClick={() => void terminate()}
+					>
+						Terminate active run
+					</Btn>
+				)}
+			</div>
+			<div
+				style={{
+					marginTop: 28,
+					background: "#080808",
+					borderRadius: 12,
+					padding: "20px 22px",
+				}}
+			>
+				<div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+					<IconClock size={16} color="var(--primary)" />
+					<span
+						style={{
+							fontSize: 13,
+							color: stateColor[selected.lastState] ? undefined : "#666",
+						}}
+					>
+						{selected.enabled ? selected.lastState : "paused"}
+					</span>
+				</div>
+				{selected.recentRuns?.slice(0, 8).map((run) => (
+					<div
+						key={run.id}
+						style={{
+							display: "flex",
+							justifyContent: "space-between",
+							gap: 12,
+							marginTop: 14,
+							fontSize: 12,
+							color: "#666",
+						}}
+					>
+						<span>{run.message || run.error || run.state}</span>
+						<time>{new Date(run.createdAt).toLocaleString()}</time>
+					</div>
+				))}
+			</div>
 		</div>
 	);
 }

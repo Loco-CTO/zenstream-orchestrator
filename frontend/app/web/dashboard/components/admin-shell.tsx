@@ -21,7 +21,7 @@ import {
 import { adminFetch, clearSession, readSession, Session } from "./admin-client";
 
 const links = [
-	["Overview", "/web/dashboard", IconChartDonut],
+	["Dashboard", "/web/dashboard", IconChartDonut],
 	["Tasks", "/web/dashboard/jobs", IconClock],
 	["Libraries", "/web/dashboard/libraries", IconLibrary],
 	["Metadata", "/web/dashboard/metadata", IconDatabase],
@@ -30,19 +30,13 @@ const links = [
 	["Users", "/web/dashboard/users", IconUsers],
 	["Administrators", "/web/dashboard/administrators", IconShieldLock],
 	["Invites", "/web/dashboard/invites", IconKey],
-	["Profile & security", "/web/dashboard/profile", IconAdjustments],
+	["Profile", "/web/dashboard/profile", IconAdjustments],
 ] as const;
 
-function isCurrentPath(pathname: string | null, href: string) {
+function current(pathname: string | null, href: string) {
 	return (
 		pathname === href ||
-		(href !== "/web/dashboard" && pathname?.startsWith(`${href}/`))
-	);
-}
-
-function currentLabel(pathname: string | null) {
-	return (
-		links.find(([, href]) => isCurrentPath(pathname, href))?.[0] ?? "Dashboard"
+		(href !== "/web/dashboard" && !!pathname?.startsWith(href + "/"))
 	);
 }
 
@@ -55,37 +49,28 @@ export default function AdminShell({
 	const pathname = usePathname();
 	const [session, setSession] = useState<Session | null>(null);
 	const [drawerOpen, setDrawerOpen] = useState(false);
-	const menuTriggerRef = useRef<HTMLButtonElement>(null);
-	const drawerRef = useRef<HTMLElement>(null);
-	const pageLabel = currentLabel(pathname);
+	const trigger = useRef<HTMLButtonElement>(null);
+	const drawer = useRef<HTMLElement>(null);
 
 	useEffect(() => {
-		const current = readSession();
-		if (!current) router.replace("/web/login");
-		else setSession(current);
+		const value = readSession();
+		if (!value) router.replace("/web/login");
+		else setSession(value);
 	}, [router]);
 
 	useEffect(() => {
 		if (!drawerOpen) return;
-		const drawer = drawerRef.current;
-		const focusableSelector =
-			'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-		const focusable = () =>
-			Array.from(drawer?.querySelectorAll<HTMLElement>(focusableSelector) ?? []);
-		const firstFocusable = focusable()[0];
-		window.requestAnimationFrame(() => firstFocusable?.focus());
-
-		const keepFocusInDrawer = (event: KeyboardEvent) => {
-			if (event.key === "Escape") {
-				setDrawerOpen(false);
-				return;
-			}
+		const node = drawer.current;
+		const selector =
+			"button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled])";
+		const focusables = () =>
+			Array.from(node?.querySelectorAll<HTMLElement>(selector) || []);
+		window.requestAnimationFrame(() => focusables()[0]?.focus());
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === "Escape") setDrawerOpen(false);
 			if (event.key !== "Tab") return;
-			const items = focusable();
-			if (!items.length) {
-				event.preventDefault();
-				return;
-			}
+			const items = focusables();
+			if (!items.length) return;
 			const first = items[0];
 			const last = items[items.length - 1];
 			if (event.shiftKey && document.activeElement === first) {
@@ -96,11 +81,10 @@ export default function AdminShell({
 				first.focus();
 			}
 		};
-		const menuTrigger = menuTriggerRef.current;
-		window.addEventListener("keydown", keepFocusInDrawer);
+		window.addEventListener("keydown", onKeyDown);
 		return () => {
-			window.removeEventListener("keydown", keepFocusInDrawer);
-			menuTrigger?.focus();
+			window.removeEventListener("keydown", onKeyDown);
+			trigger.current?.focus();
 		};
 	}, [drawerOpen]);
 
@@ -108,158 +92,272 @@ export default function AdminShell({
 
 	if (!session) {
 		return (
-			<main className="console-root flex min-h-screen items-center justify-center console-muted">
+			<main
+				style={{
+					minHeight: "100vh",
+					background: "#000",
+					color: "#666",
+					display: "grid",
+					placeItems: "center",
+				}}
+			>
 				Loading console…
 			</main>
 		);
 	}
 
 	async function logout() {
-		if (!session) return;
 		await adminFetch("/api/admin/logout", session, { method: "POST" });
 		clearSession();
 		router.replace("/web/login");
 	}
 
+	const renderLinks = (mobile = false) =>
+		links.map(([label, href, Icon]) => {
+			const active = current(pathname, href);
+			return (
+				<Link
+					key={href}
+					href={href}
+					aria-label={label}
+					aria-current={active ? "page" : undefined}
+					onClick={() => mobile && setDrawerOpen(false)}
+					style={
+						mobile
+							? {
+									display: "flex",
+									alignItems: "center",
+									gap: 12,
+									height: 44,
+									padding: "0 14px",
+									borderRadius: 8,
+									color: active ? "var(--primary)" : "#606060",
+									textDecoration: "none",
+								}
+							: {
+									position: "relative",
+									display: "flex",
+									alignItems: "center",
+									justifyContent: "center",
+									width: 36,
+									height: 36,
+									border: "none",
+									borderRadius: 8,
+									background: active ? "#111" : "none",
+									color: active ? "var(--primary)" : "#606060",
+									transition: "color 0.15s, background 0.15s",
+								}
+					}
+				>
+					<Icon size={16} stroke={1.6} />
+					{mobile && <span style={{ fontSize: 13 }}>{label}</span>}
+				</Link>
+			);
+		});
+
 	return (
-		<div className="console-root dashboard-shell min-h-screen">
-			<aside className="dashboard-rail fixed inset-y-0 left-0 z-40 hidden w-[48px] flex-col px-1.5 py-3 md:flex">
-				<Brand compact />
-				<nav aria-label="Dashboard" className="mt-6 space-y-1">
-					{links.map(([label, href, Icon]) => (
-						<Link
-							key={href}
-							href={href}
-							aria-label={label}
-							aria-current={isCurrentPath(pathname, href) ? "page" : undefined}
-							className={`admin-nav-item group relative flex h-11 w-full items-center justify-center rounded-xl transition ${isCurrentPath(pathname, href) ? "console-nav-active" : "console-nav-link"}`}
-						>
-							<Icon size={21} stroke={1.8} />
-							<span className="admin-tooltip" role="tooltip">
-								{label}
-							</span>
-						</Link>
-					))}
-				</nav>
-				<div className="mt-auto border-t console-divider pt-3">
+		<div
+			className="dashboard-design"
+			style={{ display: "flex", minHeight: "100vh", background: "#000" }}
+		>
+			<nav
+				className="dashboard-rail"
+				style={{
+					width: 52,
+					flexShrink: 0,
+					background: "#060606",
+					borderRight: "1px solid #111",
+					display: "flex",
+					flexDirection: "column",
+					alignItems: "center",
+					padding: "10px 0",
+					position: "fixed",
+					top: 0,
+					left: 0,
+					bottom: 0,
+					zIndex: 20,
+				}}
+			>
+				<div
+					style={{
+						width: "100%",
+						display: "flex",
+						justifyContent: "center",
+						paddingBottom: 12,
+						borderBottom: "1px solid #111",
+						marginBottom: 10,
+					}}
+				>
+					<Link href="/web/dashboard/" aria-label="ZenStream dashboard">
+						<img
+							src="/icons/icon.png"
+							alt="ZenStream"
+							style={{ width: 28, height: 28, display: "block" }}
+						/>
+					</Link>
+				</div>
+				<div
+					style={{
+						flex: 1,
+						width: "100%",
+						display: "flex",
+						flexDirection: "column",
+						alignItems: "center",
+						gap: 4,
+					}}
+				>
+					{renderLinks()}
+				</div>
+				<div
+					style={{
+						width: "100%",
+						display: "flex",
+						justifyContent: "center",
+						paddingTop: 10,
+						borderTop: "1px solid #111",
+					}}
+				>
 					<button
-						onClick={logout}
+						title="Sign out"
 						aria-label="Sign out"
-						className="admin-nav-item group relative flex h-11 w-full items-center justify-center rounded-xl console-muted transition hover:text-white"
+						onClick={logout}
+						style={{
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "center",
+							width: 36,
+							height: 36,
+							border: "none",
+							borderRadius: 8,
+							background: "none",
+							cursor: "pointer",
+							color: "#606060",
+						}}
 					>
-						<IconLogout size={21} stroke={1.8} />
-						<span className="admin-tooltip" role="tooltip">
-							Sign out
-						</span>
+						<IconLogout size={16} stroke={1.6} />
 					</button>
 				</div>
-			</aside>
-
-			<header className="dashboard-mobile-bar sticky top-0 z-30 flex h-16 items-center justify-between px-4 md:hidden">
+			</nav>
+			<header
+				className="dashboard-mobile-bar"
+				style={{
+					display: "none",
+					height: 56,
+					alignItems: "center",
+					justifyContent: "space-between",
+					padding: "0 16px",
+					background: "#060606",
+					borderBottom: "1px solid #111",
+				}}
+			>
 				<button
-					ref={menuTriggerRef}
+					ref={trigger}
 					onClick={() => setDrawerOpen(true)}
 					aria-label="Open dashboard navigation"
-					aria-expanded={drawerOpen}
-					aria-controls="dashboard-mobile-drawer"
-					className="material-icon-button"
+					style={{ background: "none", border: 0, color: "#888" }}
 				>
-					<IconMenu2 size={21} />
+					<IconMenu2 size={20} />
 				</button>
-				<div className="text-center">
-					<p className="console-wordmark text-[10px] font-black">ZENSTREAM</p>
-					<p className="mt-0.5 text-xs font-semibold">{pageLabel}</p>
-				</div>
+				<span
+					style={{
+						color: "var(--primary)",
+						fontSize: 11,
+						fontWeight: 700,
+						letterSpacing: "0.18em",
+						textTransform: "uppercase",
+					}}
+				>
+					ZenStream
+				</span>
 				<button
 					onClick={logout}
 					aria-label="Sign out"
-					className="material-icon-button"
+					style={{ background: "none", border: 0, color: "#888" }}
 				>
 					<IconLogout size={19} />
 				</button>
 			</header>
-
 			{drawerOpen && (
-				<div className="dashboard-drawer-layer md:hidden">
+				<div style={{ position: "fixed", inset: 0, zIndex: 50 }}>
 					<button
-						type="button"
-						aria-label="Close dashboard navigation"
-						className="dashboard-drawer-backdrop"
+						aria-label="Close navigation"
 						onClick={() => setDrawerOpen(false)}
+						style={{
+							position: "absolute",
+							inset: 0,
+							width: "100%",
+							border: 0,
+							background: "rgba(0,0,0,.75)",
+						}}
 					/>
 					<aside
-						ref={drawerRef}
-						id="dashboard-mobile-drawer"
+						ref={drawer}
 						role="dialog"
 						aria-modal="true"
 						aria-label="Dashboard navigation"
-						className="dashboard-mobile-drawer"
+						style={{
+							position: "relative",
+							display: "flex",
+							flexDirection: "column",
+							width: "min(20rem, calc(100vw - 3rem))",
+							height: "100%",
+							background: "#0d0d0d",
+							boxShadow: "12px 0 36px rgba(0,0,0,.35)",
+						}}
 					>
-						<div className="flex items-center justify-between px-5 py-5">
-							<Brand />
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								padding: 20,
+							}}
+						>
+							<span
+								style={{
+									color: "var(--primary)",
+									fontSize: 11,
+									fontWeight: 700,
+									letterSpacing: "0.18em",
+								}}
+							>
+								ZenStream
+							</span>
 							<button
+								aria-label="Close navigation"
 								onClick={() => setDrawerOpen(false)}
-								aria-label="Close dashboard navigation"
-								className="material-icon-button"
+								style={{ background: "none", border: 0, color: "#888" }}
 							>
 								<IconX size={20} />
 							</button>
 						</div>
-						<nav aria-label="Dashboard" className="px-3 pb-4">
-							{links.map(([label, href, Icon]) => (
-								<Link
-									key={href}
-									href={href}
-									aria-current={isCurrentPath(pathname, href) ? "page" : undefined}
-									className={`dashboard-drawer-link ${isCurrentPath(pathname, href) ? "console-nav-active" : "console-nav-link"}`}
-								>
-									<Icon size={20} stroke={1.8} />
-									<span>{label}</span>
-								</Link>
-							))}
-						</nav>
-						<div className="mt-auto border-t console-divider p-3">
-							<button
-								onClick={logout}
-								className="dashboard-drawer-link w-full console-muted"
-							>
-								<IconLogout size={20} stroke={1.8} />
-								<span>Sign out</span>
-							</button>
-						</div>
+						<nav style={{ padding: "0 12px" }}>{renderLinks(true)}</nav>
+						<button
+							onClick={logout}
+							style={{
+								marginTop: "auto",
+								display: "flex",
+								alignItems: "center",
+								gap: 12,
+								padding: 16,
+								border: 0,
+								borderTop: "1px solid #111",
+								background: "none",
+								color: "#888",
+							}}
+						>
+							<IconLogout size={18} />
+							<span>Sign out</span>
+						</button>
 					</aside>
 				</div>
 			)}
-
 			<main
 				className="dashboard-content"
-				style={{ marginLeft: 48, flex: 1, maxWidth: "none", padding: "44px 52px" }}
+				style={{ marginLeft: 52, flex: 1, padding: "44px 52px", maxWidth: 1080 }}
 			>
 				{children}
 			</main>
 		</div>
-	);
-}
-
-function Brand({ compact = false }: { compact?: boolean }) {
-	return (
-		<Link
-			href="/web/dashboard"
-			aria-label="ZenStream dashboard"
-			className="flex items-center gap-3"
-		>
-			<img
-				src="/icons/icon.png"
-				alt=""
-				className={`${compact ? "h-8 w-8 rounded-lg" : "h-10 w-10 rounded-xl"}`}
-				onError={(event) => {
-					event.currentTarget.onerror = null;
-					event.currentTarget.src = "/favicon.ico";
-				}}
-			/>
-			{!compact && (
-				<span className="console-wordmark text-xs font-black">ZENSTREAM</span>
-			)}
-		</Link>
 	);
 }

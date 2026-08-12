@@ -12,6 +12,8 @@
 		"format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,json,css,md}\""
 	},
 	"dependencies": {
+		"@fontsource/dm-mono": "^5.3.0",
+		"@fontsource/inter": "^5.3.0",
 		"@tabler/icons-react": "^3.44.0",
 		"cookies-next": "^5.1.0",
 		"next": "15.5.23",

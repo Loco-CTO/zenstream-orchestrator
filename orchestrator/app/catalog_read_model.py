@@ -700,7 +700,7 @@ class CatalogReadModel:
                     rows = self.db.read_execute(
                         "SELECT local_path,blur_hash FROM metadata_images WHERE provider=? "
                         "AND entity_type=? AND provider_id=? AND image_type=? "
-                        "AND image_url=? AND local_path IS NOT NULL ORDER BY fetched_at DESC LIMIT 1",
+                        "AND image_url=? AND local_path IS NOT NULL LIMIT 1",
                         (provider, entity_type, provider_id, image_type, choice["url"]),
                     )
                     if rows:

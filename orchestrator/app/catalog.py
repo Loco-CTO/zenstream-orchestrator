@@ -517,9 +517,23 @@ class Catalog:
                             for field in ("overview", "description")
                         )
                     ):
-                        if context:
-                            context.projected_metadata[(entity_id, language)] = value
+                        # Artwork projections can outlive an interrupted
+                        # asset refresh. Re-resolve the image map from ready
+                        # cache rows so stale URLs cannot be shown or cached.
+                        resolved_artwork = self._read_service().resolve_public(
+                            entity_id,
+                            row[3],
+                            self._provider_ids(entity_id, row[3]),
+                            language,
+                        )
                         resolved_value = dict(value)
+                        resolved_value["images"] = resolved_artwork["metadata"].get(
+                            "images", {}
+                        )
+                        if context:
+                            context.projected_metadata[(entity_id, language)] = (
+                                resolved_value
+                            )
                         if include_credits:
                             resolved_value["credits"] = self.credits(
                                 user_id,

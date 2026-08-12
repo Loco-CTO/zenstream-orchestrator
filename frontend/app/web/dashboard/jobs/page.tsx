@@ -1,9 +1,8 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-	IconChevronRight,
 	IconClock,
 	IconPlayerPlay,
 	IconPlayerStop,
@@ -12,16 +11,28 @@ import {
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import { Job, activeStates } from "./job-types";
 
+type TaskGroup = { group: string; tasks: Job[] };
+
+const GROUP_ORDER = ["Catalog", "Library", "Media Analysis", "Metadata"];
+
+function taskGroup(job: Job) {
+	if (job.kind.includes("metadata")) return "Metadata";
+	if (job.kind.includes("trickplay") || job.kind.includes("intro_outro"))
+		return "Media Analysis";
+	if (job.kind.includes("library")) return "Library";
+	return "Catalog";
+}
+
 function relativeTime(value?: string | null) {
 	if (!value) return "never";
 	const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000);
-	if (seconds < 60) return `${Math.floor(seconds / 60)} min ago`;
-	if (seconds < 3600) return `${Math.floor(seconds / 3600)} hours ago`;
-	if (seconds < 86400) return `${Math.floor(seconds / 86400)} days ago`;
+	if (seconds < 60) return "just now";
+	if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+	if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`;
 	return `${Math.floor(seconds / 86400)} days ago`;
 }
 
-function duration(job: Job) {
+function runDuration(job: Job) {
 	const run = job.recentRuns?.[0];
 	if (!run?.startedAt) return "< 1 min";
 	const end = run.finishedAt ? new Date(run.finishedAt).getTime() : Date.now();
@@ -29,13 +40,13 @@ function duration(job: Job) {
 	return seconds < 60 ? "< 1 min" : `${Math.round(seconds / 60)} min`;
 }
 
-function statusFor(job: Job) {
-	if (!job.enabled) return { label: "Paused", color: "#666" };
-	if (activeStates.has(job.lastState))
-		return { label: "Running", color: "#60b4e8" };
-	if (["failed", "error"].includes(job.lastState))
-		return { label: "Failed", color: "#f07070" };
-	return { label: "Completed", color: "#5ee3d8" };
+function progressFor(job: Job) {
+	const run = job.recentRuns?.find((entry) => activeStates.has(entry.state));
+	if (!run || !run.progressTotal) return undefined;
+	return Math.max(
+		0,
+		Math.min(100, (run.progressCurrent / run.progressTotal) * 100),
+	);
 }
 
 export default function JobsPage() {
@@ -45,14 +56,20 @@ export default function JobsPage() {
 	const [jobs, setJobs] = useState<Job[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
+
 	const load = useCallback(async (current: Session | null) => {
 		if (!current) return;
 		setLoading(true);
 		const response = await adminFetch("/api/admin/jobs", current);
-		if (!response.ok) setError("Scheduled tasks could not be loaded.");
-		else setJobs(((await response.json()) as { jobs?: Job[] }).jobs || []);
+		if (response.ok) {
+			setJobs(((await response.json()) as { jobs?: Job[] }).jobs || []);
+			setError("");
+		} else {
+			setError("Scheduled tasks could not be loaded.");
+		}
 		setLoading(false);
 	}, []);
+
 	useEffect(() => {
 		const legacyId = params.get("jobId");
 		if (legacyId) {
@@ -65,20 +82,43 @@ export default function JobsPage() {
 		setSession(current);
 		void load(current);
 	}, [load, params, router]);
-	async function runNow(job: Job) {
+
+	useEffect(() => {
+		if (!session || !jobs.some((job) => activeStates.has(job.lastState))) return;
+		const timer = window.setInterval(() => void load(session), 2000);
+		return () => window.clearInterval(timer);
+	}, [jobs, load, session]);
+
+	const groups = useMemo<TaskGroup[]>(
+		() =>
+			GROUP_ORDER.map((group) => ({
+				group,
+				tasks: jobs.filter((job) => taskGroup(job) === group),
+			})).filter((group) => group.tasks.length),
+		[jobs],
+	);
+
+	async function toggleRun(task: Job, event: React.MouseEvent) {
+		event.stopPropagation();
 		if (!session) return;
-		const response = await adminFetch(`/api/admin/jobs/${job.id}/run`, session, {
-			method: "POST",
-		});
-		if (!response.ok) setError("The task could not be started.");
-		else await load(session);
+		const activeRun = task.recentRuns?.find((run) => activeStates.has(run.state));
+		if (activeRun) {
+			await adminFetch(
+				`/api/admin/jobs/${task.id}/runs/${activeRun.id}/terminate`,
+				session,
+				{ method: "POST" },
+			);
+		} else {
+			await adminFetch(`/api/admin/jobs/${task.id}/run`, session, {
+				method: "POST",
+			});
+		}
+		await load(session);
 	}
+
 	return (
-		<div
-			className="dashboard-page dashboard-design"
-			style={{ width: "100%", maxWidth: 1268, margin: "0 auto" }}
-		>
-			<header
+		<div className="dashboard-page dashboard-design">
+			<div
 				style={{
 					display: "flex",
 					alignItems: "flex-start",
@@ -116,211 +156,196 @@ export default function JobsPage() {
 					title="Refresh"
 					aria-label="Refresh tasks"
 					style={{
+						background: "none",
+						border: "none",
+						color: "#777",
+						cursor: "pointer",
 						width: 32,
 						height: 32,
-						border: "none",
-						background: "none",
-						color: "#777",
 						display: "flex",
 						alignItems: "center",
 						justifyContent: "center",
 						borderRadius: 8,
-						cursor: "pointer",
 					}}
 				>
 					<IconRefresh size={15} />
 				</button>
-			</header>
+			</div>
+
 			{error && (
-				<p
+				<div
 					role="alert"
 					style={{ color: "var(--danger)", fontSize: 12, marginBottom: 16 }}
 				>
 					{error}
-				</p>
+				</div>
 			)}
-			<section
-				style={{ background: "#080808", borderRadius: 12, overflow: "hidden" }}
-			>
+
+			{loading ? (
 				<div
 					style={{
-						padding: "36px 40px 20px",
-						display: "flex",
-						alignItems: "center",
-						gap: 14,
+						background: "#080808",
+						borderRadius: 12,
+						padding: "20px 22px",
+						color: "#666",
+						fontSize: 13,
 					}}
 				>
-					<span
-						style={{
-							fontSize: 11,
-							fontWeight: 600,
-							color: "#888",
-							letterSpacing: "0.1em",
-							textTransform: "uppercase",
-						}}
-					>
-						All tasks
-					</span>
-					<span style={{ fontSize: 12, color: "#5ee3d8" }}>{jobs.length || ""}</span>
+					Loading tasks…
 				</div>
-				<div style={{ height: 1, background: "#111" }} />
-				{loading ? (
-					<div style={{ padding: "28px 40px", fontSize: 13, color: "#666" }}>
-						Loading tasks…
-					</div>
-				) : (
-					jobs.map((job, index) => {
-						const status = statusFor(job);
-						const running = activeStates.has(job.lastState);
-						const subtitle =
-							job.description ||
-							"Last run " + relativeTime(job.lastRunAt) + " · " + duration(job);
-						return (
-							<div key={job.id}>
-								<div
-									style={{
-										display: "grid",
-										gridTemplateColumns: "minmax(0, 1fr) 92px 32px 24px",
-										alignItems: "center",
-										columnGap: 18,
-										minHeight: 68,
-										padding: "0 40px",
-									}}
-								>
-									<button
-										type="button"
-										onClick={() =>
-											router.push(
-												`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(job.id)}`,
-											)
-										}
-										style={{
-											minWidth: 0,
-											display: "flex",
-											alignItems: "center",
-											gap: 14,
-											textAlign: "left",
-											border: 0,
-											padding: 0,
-											background: "none",
-											color: "inherit",
-											cursor: "pointer",
-										}}
-									>
-										<span
-											style={{
-												width: 30,
-												height: 30,
-												borderRadius: "50%",
-												background: "rgba(94,227,216,.09)",
-												border: "1px solid rgba(94,227,216,.14)",
-												display: "flex",
-												alignItems: "center",
-												justifyContent: "center",
-												flexShrink: 0,
-												color: "#5ee3d8",
-											}}
-										>
-											<IconClock size={14} />
-										</span>
-										<span style={{ minWidth: 0 }}>
-											<span
-												style={{
-													display: "block",
-													overflow: "hidden",
-													textOverflow: "ellipsis",
-													whiteSpace: "nowrap",
-													fontSize: 14,
-													fontWeight: 600,
-													color: "#e8e8e8",
-												}}
-											>
-												{job.name}
-											</span>
-											<span
-												style={{
-													display: "block",
-													marginTop: 4,
-													overflow: "hidden",
-													textOverflow: "ellipsis",
-													whiteSpace: "nowrap",
-													fontSize: 11,
-													color: "#78a0b4",
-												}}
-											>
-												{subtitle}
-											</span>
-										</span>
-									</button>
-									<span
-										style={{
-											fontSize: 11,
-											fontWeight: 600,
-											color: status.color,
-											textAlign: "right",
-										}}
-									>
-										{status.label}
-									</span>
-									<button
-										type="button"
-										onClick={() => void runNow(job)}
-										aria-label={running ? "Stop " + job.name : "Run " + job.name}
-										style={{
-											width: 28,
-											height: 28,
-											border: 0,
-											borderRadius: 6,
-											background: "none",
-											color: running ? "#888" : "#8b999d",
-											display: "flex",
-											alignItems: "center",
-											justifyContent: "center",
-											cursor: "pointer",
-										}}
-									>
-										{running ? (
-											<IconPlayerStop size={12} />
-										) : (
-											<IconPlayerPlay size={13} />
-										)}
-									</button>
-									<button
-										type="button"
-										onClick={() =>
-											router.push(
-												`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(job.id)}`,
-											)
-										}
-										aria-label={"Open " + job.name}
-										style={{
-											width: 24,
-											height: 28,
-											border: 0,
-											background: "none",
-											color: "#899699",
-											display: "flex",
-											alignItems: "center",
-											justifyContent: "center",
-											cursor: "pointer",
-										}}
-									>
-										<IconChevronRight size={15} />
-									</button>
-								</div>
-								{index < jobs.length - 1 && (
-									<div style={{ height: 1, background: "#101010", margin: "0 40px" }} />
-								)}
+			) : (
+				<div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+					{groups.map((group) => (
+						<div key={group.group}>
+							<div
+								style={{
+									fontSize: 13,
+									fontWeight: 600,
+									color: "#fff",
+									marginBottom: 10,
+								}}
+							>
+								{group.group}
 							</div>
-						);
-					})
-				)}
-				{!loading && !jobs.length && (
-					<div style={{ padding: "28px 40px", fontSize: 13, color: "#666" }}>
-						No scheduled tasks.
-					</div>
-				)}
-			</section>
+							<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
+								{group.tasks.map((task, index) => {
+									const active = activeStates.has(task.lastState);
+									const progress = progressFor(task);
+									return (
+										<div key={task.id}>
+											<div style={{ padding: "0 18px" }}>
+												<div
+													role="button"
+													tabIndex={0}
+													onClick={() =>
+														router.push(
+															`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(task.id)}`,
+														)
+													}
+													onKeyDown={(event) => {
+														if (event.key === "Enter" || event.key === " ") {
+															event.preventDefault();
+															router.push(
+																`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(task.id)}`,
+															);
+														}
+													}}
+													style={{
+														display: "flex",
+														alignItems: "center",
+														gap: 14,
+														paddingTop: 13,
+														paddingBottom: active ? 8 : 13,
+														cursor: "pointer",
+													}}
+												>
+													<div
+														style={{
+															width: 32,
+															height: 32,
+															borderRadius: "50%",
+															background: "var(--primary-dim)",
+															border: "1px solid rgba(94,227,216,0.15)",
+															display: "flex",
+															alignItems: "center",
+															justifyContent: "center",
+															flexShrink: 0,
+															color: "var(--primary)",
+														}}
+													>
+														<IconClock size={14} />
+													</div>
+													<div style={{ flex: 1, minWidth: 0 }}>
+														<div style={{ fontSize: 14, fontWeight: 500, color: "#ddd" }}>
+															{task.name}
+														</div>
+														<div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+															Last run {relativeTime(task.lastRunAt)} · {runDuration(task)}
+														</div>
+													</div>
+													<button
+														type="button"
+														onClick={(event) => void toggleRun(task, event)}
+														aria-label={active ? `Stop ${task.name}` : `Run ${task.name}`}
+														style={{
+															width: 28,
+															height: 28,
+															borderRadius: 6,
+															background: "none",
+															border: "none",
+															color: active ? "#888" : "#444",
+															cursor: "pointer",
+															display: "flex",
+															alignItems: "center",
+															justifyContent: "center",
+															flexShrink: 0,
+														}}
+													>
+														{active ? (
+															<IconPlayerStop size={12} />
+														) : (
+															<IconPlayerPlay size={12} />
+														)}
+													</button>
+												</div>
+												{active && progress !== undefined && (
+													<div style={{ paddingBottom: 12 }}>
+														<div
+															style={{
+																height: 2,
+																background: "#111",
+																borderRadius: 2,
+																overflow: "hidden",
+																marginBottom: 5,
+															}}
+														>
+															<div
+																style={{
+																	height: "100%",
+																	width: `${progress}%`,
+																	background: "var(--primary)",
+																	borderRadius: 2,
+																	transition: "width 0.4s ease",
+																}}
+															/>
+														</div>
+														<div
+															style={{
+																fontSize: 11,
+																color: "#555",
+																textAlign: "right",
+																fontFamily: "var(--font-mono)",
+															}}
+														>
+															{Math.round(progress)}%
+														</div>
+													</div>
+												)}
+											</div>
+											{index < group.tasks.length - 1 && (
+												<div style={{ height: 1, background: "#111", margin: 0 }} />
+											)}
+										</div>
+									);
+								})}
+							</div>
+						</div>
+					))}
+					{!groups.length && (
+						<div
+							style={{
+								background: "#080808",
+								borderRadius: 12,
+								padding: "20px 22px",
+								color: "#666",
+								fontSize: 13,
+							}}
+						>
+							No scheduled tasks.
+						</div>
+					)}
+				</div>
+			)}
 		</div>
 	);
 }

@@ -283,7 +283,15 @@ class MetadataSearchProjection:
     ) -> tuple[dict, tuple] | None:
         """Return the first provider-ordered candidate with a ready file."""
         for candidate in rank_artwork_candidates(
-            images, locale, image_type, original, [provider]
+            images,
+            locale,
+            image_type,
+            original,
+            [provider],
+            include_english=any(
+                language_family(value) == "en"
+                for value in MetadataLanguageSettings().get()
+            ),
         ):
             path_column = "local_path" in columns
             selected = self.db.execute(
@@ -499,6 +507,10 @@ class MetadataSearchProjection:
                                 image_type,
                                 payload.get("originalLanguage"),
                                 [provider],
+                                include_english=any(
+                                    language_family(value) == "en"
+                                    for value in MetadataLanguageSettings().get()
+                                ),
                             )
                             if not candidates:
                                 # An empty provider response is not a reason to
@@ -798,7 +810,7 @@ class MetadataReadService:
             if not provider or not provider_id:
                 continue
             rows = self.db.execute(
-                "SELECT locale,payload FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? ORDER BY fetched_at DESC",
+                "SELECT locale,payload FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=?",
                 (provider, entity_type, provider_id),
             )
             for locale, encoded in rows:
@@ -881,14 +893,26 @@ class MetadataReadService:
                     )
                     break
 
-        images = [
-            image
-            for provider in providers
-            for (payload_provider, _), payload in payloads.items()
-            if payload_provider == provider
-            for image in payload.get("images", []) or []
-            if isinstance(image, dict) and image.get("type") in ARTWORK_CATEGORY_SET
-        ]
+        locale_order: list[str] = []
+        for tier in tiers:
+            for locale in locale_variants(tier, available):
+                if locale not in locale_order:
+                    locale_order.append(locale)
+        locale_order.extend(
+            sorted(locale for locale in available if locale not in locale_order)
+        )
+        images = []
+        for provider in providers:
+            for locale in locale_order:
+                payload = payloads.get((provider, locale))
+                if not payload:
+                    continue
+                images.extend(
+                    image
+                    for image in payload.get("images", []) or []
+                    if isinstance(image, dict)
+                    and image.get("type") in ARTWORK_CATEGORY_SET
+                )
         result["images"] = images
         result["trailers"] = self._localized_trailers(
             payloads, providers, requested, original
@@ -992,7 +1016,15 @@ class MetadataReadService:
         }:
             return None
         for candidate in rank_artwork_candidates(
-            images, requested, image_type, original, provider_order
+            images,
+            requested,
+            image_type,
+            original,
+            provider_order,
+            include_english=any(
+                language_family(value) == "en"
+                for value in MetadataLanguageSettings().get()
+            ),
         ):
             provider = str(candidate.get("provider") or "")
             provider_id = identities.get(provider)
@@ -1242,6 +1274,7 @@ class MetadataIngestService:
                         provider_id,
                         values,
                         force=force_assets,
+                        complete_batch=True,
                     )
                 else:
                     for locale in locales:
@@ -1650,6 +1683,10 @@ class MetadataImageIngestService:
                     image_type,
                     document.get("originalLanguage"),
                     [provider],
+                    include_english=any(
+                        language_family(value) == "en"
+                        for value in MetadataLanguageSettings().get()
+                    ),
                 )
                 if not choice or not choice.get("url"):
                     continue
@@ -1698,6 +1735,7 @@ class MetadataImageIngestService:
         documents: dict[str, dict],
         *,
         force: bool = False,
+        complete_batch: bool = False,
     ) -> dict[str, int]:
         """Materialize one provider winner per locale/category.
 
@@ -1721,6 +1759,10 @@ class MetadataImageIngestService:
                     image_type,
                     document.get("originalLanguage"),
                     [provider],
+                    include_english=any(
+                        language_family(value) == "en"
+                        for value in MetadataLanguageSettings().get()
+                    ),
                 )
                 if not candidates:
                     continue
@@ -1808,7 +1850,14 @@ class MetadataImageIngestService:
                 document,
                 preserve_artwork=preserved.get(locale),
             )
-        self._prune_replaced(provider, entity_type, provider_id, documents, outcomes)
+        # A single-locale replay is intentionally non-destructive.  Pruning is
+        # safe only when the caller supplied the complete configured-locale
+        # document batch, otherwise another locale's ready artwork could be
+        # mistaken for an obsolete alternate.
+        if complete_batch:
+            self._prune_replaced(
+                provider, entity_type, provider_id, documents, outcomes
+            )
         return {"ready": ready, "failed": failed, "skipped": skipped}
 
     def ingest(
@@ -1827,6 +1876,7 @@ class MetadataImageIngestService:
             provider_id,
             {locale: document},
             force=force,
+            complete_batch=False,
         )
 
 

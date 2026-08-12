@@ -3,16 +3,10 @@ from __future__ import annotations
 import math
 import subprocess
 import tempfile
-import threading
 import uuid
 from pathlib import Path
 
-from app.worker_config import configured_worker_limit
-
 WEBP_QUALITY = 85
-_IMAGE_CONVERSION_SLOTS = threading.BoundedSemaphore(
-    configured_worker_limit("METADATA_IMAGE_CONVERSION_WORKERS", 16, default=4)
-)
 _BASE83 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~"
 
 
@@ -96,33 +90,30 @@ def blurhash_for_image(source: Path) -> str:
     executable = ffmpeg_path()
     if not executable:
         raise RuntimeError("FFmpeg is not available for BlurHash encoding.")
-    with _IMAGE_CONVERSION_SLOTS:
-        completed = subprocess.run(
-            [
-                executable,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-threads",
-                "1",
-                "-i",
-                str(source),
-                "-map",
-                "0:v:0",
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale=32:32",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "pipe:1",
-            ],
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
+    completed = subprocess.run(
+        [
+            executable,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=32:32",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
     if completed.returncode != 0 or len(completed.stdout) != 32 * 32 * 3:
         detail = completed.stderr.decode("utf-8", "replace").strip()
         raise RuntimeError(detail[-1000:] or "FFmpeg did not produce BlurHash pixels.")
@@ -138,37 +129,34 @@ def encode_webp(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.stem}.{uuid.uuid4().hex}.webp")
     try:
-        with _IMAGE_CONVERSION_SLOTS:
-            completed = subprocess.run(
-                [
-                    executable,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-threads",
-                    "1",
-                    "-y",
-                    "-i",
-                    str(source),
-                    "-map",
-                    "0:v:0",
-                    "-frames:v",
-                    "1",
-                    "-c:v",
-                    "libwebp",
-                    "-quality",
-                    str(WEBP_QUALITY),
-                    "-compression_level",
-                    "6",
-                    str(temporary),
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-                check=False,
-            )
+        completed = subprocess.run(
+            [
+                executable,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(source),
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "libwebp",
+                "-quality",
+                str(WEBP_QUALITY),
+                "-compression_level",
+                "6",
+                str(temporary),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
         if (
             completed.returncode != 0
             or not temporary.is_file()

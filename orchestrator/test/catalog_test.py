@@ -1219,6 +1219,7 @@ class CatalogTest(unittest.TestCase):
 
         catalog.metadata = metadata
         catalog._home_discovery_items = lambda *_args: []
+        catalog._home_top_rated_row = lambda *_args: None
 
         result = catalog.home(user_id, "en")
 

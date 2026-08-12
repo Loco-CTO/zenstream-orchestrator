@@ -163,7 +163,13 @@ function LibraryViewPage() {
 	const backgroundRefresh = useRef(false);
 	const trailingRefresh = useRef(false);
 	const loadRef = useRef<
-		((current: Session | null, parentId: string | null, currentPage: number, background?: boolean) => Promise<void>) | null
+		| ((
+				current: Session | null,
+				parentId: string | null,
+				currentPage: number,
+				background?: boolean,
+		  ) => Promise<void>)
+		| null
 	>(null);
 
 	function mergeItems(previous: Item[], next: Item[]) {
@@ -219,7 +225,9 @@ function LibraryViewPage() {
 				if (id !== requestId.current) return;
 				setLibraryName(library.name || "Library");
 				setItems((currentItems) =>
-					background ? mergeItems(currentItems, value.items || []) : value.items || [],
+					background
+						? mergeItems(currentItems, value.items || [])
+						: value.items || [],
 				);
 				setTotal(value.total || 0);
 				if (typeof value.catalogGeneration === "number")
@@ -354,7 +362,8 @@ function LibraryViewPage() {
 				if (!response.ok) throw new Error("Catalog status unavailable.");
 				const status = await response.json();
 				const generation = Number(status.catalogGeneration || 0);
-				if (catalogGeneration.current == null) catalogGeneration.current = generation;
+				if (catalogGeneration.current == null)
+					catalogGeneration.current = generation;
 				else if (generation > catalogGeneration.current) {
 					catalogGeneration.current = generation;
 					if (backgroundRefresh.current) trailingRefresh.current = true;

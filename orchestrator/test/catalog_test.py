@@ -1227,7 +1227,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(metadata_calls, 18)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_home_top_rated_rows_are_scoped_sorted_and_exclude_unrated(self, _languages):
+    def test_home_top_rated_rows_are_scoped_sorted_and_exclude_unrated(
+        self, _languages
+    ):
         user_id = self.account().create("top-rated", "password-123")["id"]
         self.db.execute(
             "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
@@ -1270,9 +1272,7 @@ class CatalogTest(unittest.TestCase):
 
         self.assertIsNotNone(row)
         self.assertEqual(row["titleKey"], "topRated")
-        self.assertEqual(
-            [item["id"] for item in row["items"]], ["movie-a", "movie-z"]
-        )
+        self.assertEqual([item["id"] for item in row["items"]], ["movie-a", "movie-z"])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_derived_rows_use_existing_catalog_and_user_state(self, _languages):

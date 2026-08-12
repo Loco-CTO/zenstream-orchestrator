@@ -851,7 +851,13 @@ def _list_admin_items_sync(
             revision_rows = [
                 (
                     entity_id,
-                    (store.db.execute("SELECT updated_at FROM library_entities WHERE id=?", (entity_id,)) or [[""]])[0][0],
+                    (
+                        store.db.execute(
+                            "SELECT updated_at FROM library_entities WHERE id=?",
+                            (entity_id,),
+                        )
+                        or [[""]]
+                    )[0][0],
                     0,
                     "",
                     "",
@@ -1010,11 +1016,7 @@ async def catalog_status(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_library_summary'"
         )
     )
-    generation_select = (
-        "COALESCE(s.generation,0)"
-        if has_summary
-        else "0"
-    )
+    generation_select = "COALESCE(s.generation,0)" if has_summary else "0"
     summary_join = (
         "LEFT JOIN catalog_library_summary s ON s.library_id=l.id"
         if has_summary

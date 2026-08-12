@@ -2834,14 +2834,10 @@ class Catalog:
             return None
         series_names: dict[str, str] = {}
         rows = []
-        newly_added = self._home_library_row(
-            user_id, language, library, series_names
-        )
+        newly_added = self._home_library_row(user_id, language, library, series_names)
         if newly_added is not None:
             rows.append(newly_added)
-        top_rated = self._home_top_rated_row(
-            user_id, language, library, series_names
-        )
+        top_rated = self._home_top_rated_row(user_id, language, library, series_names)
         if top_rated is not None:
             rows.append(top_rated)
         return rows
@@ -2920,9 +2916,7 @@ class Catalog:
         if projection_ready:
             projection_columns = {
                 row[1]
-                for row in self.db.execute(
-                    "PRAGMA table_info(catalog_item_projection)"
-                )
+                for row in self.db.execute("PRAGMA table_info(catalog_item_projection)")
             }
             rating_expression = (
                 "p.rating_sort"

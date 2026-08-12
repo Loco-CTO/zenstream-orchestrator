@@ -4295,9 +4295,13 @@ class LibraryRuntime:
         # Full inventory work and watcher reconciliation are independent lanes.
         # There is at most one active job in each lane for a library, while a
         # full scan and a targeted reconcile may run together on disjoint roots.
-        lane_kinds = ("reconcile",) if kind == "reconcile" else (
-            "scan",
-            "collection_rebuild",
+        lane_kinds = (
+            ("reconcile",)
+            if kind == "reconcile"
+            else (
+                "scan",
+                "collection_rebuild",
+            )
         )
         with self.store.db.transaction() as cursor:
             # Filesystem events and the repair timer can race library deletion.
@@ -4490,7 +4494,10 @@ class LibraryRuntime:
             return self._root_locks.setdefault(key, threading.Lock())
 
     def _acquire_roots(self, library_id: str, roots: set[str]):
-        locks = [self._root_lock(library_id, root) for root in sorted(roots, key=str.casefold)]
+        locks = [
+            self._root_lock(library_id, root)
+            for root in sorted(roots, key=str.casefold)
+        ]
         for lock in locks:
             lock.acquire()
         return locks

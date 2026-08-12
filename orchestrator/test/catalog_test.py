@@ -1226,6 +1226,54 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(metadata_calls, 18)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_top_rated_rows_are_scoped_sorted_and_exclude_unrated(self, _languages):
+        user_id = self.account().create("top-rated", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
+        )
+        for entity_id in ("movie-z", "movie-a", "movie-unrated"):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    "allowed",
+                    None,
+                    "movie",
+                    entity_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+        catalog = self.catalog()
+        ratings = {
+            "movie-z": (9.0, "Zulu"),
+            "movie-a": (9.0, "Alpha"),
+            "movie-unrated": (0, "Unrated"),
+        }
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {
+                "title": ratings[entity_id][1],
+                "communityRating": ratings[entity_id][0],
+            }
+        }
+
+        row = catalog._home_top_rated_row(
+            user_id,
+            "en",
+            {"id": "allowed", "name": "Allowed", "type": "movies"},
+        )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["titleKey"], "topRated")
+        self.assertEqual(
+            [item["id"] for item in row["items"]], ["movie-a", "movie-z"]
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_derived_rows_use_existing_catalog_and_user_state(self, _languages):
         user_id = self.account().create("derived", "password-123")["id"]
         self.db.execute(

@@ -2918,6 +2918,22 @@ class Catalog:
             "catalog_item_projection"
         )
         if projection_ready:
+            projection_columns = {
+                row[1]
+                for row in self.db.execute(
+                    "PRAGMA table_info(catalog_item_projection)"
+                )
+            }
+            rating_expression = (
+                "p.rating_sort"
+                if "rating_sort" in projection_columns
+                else "CAST(COALESCE(json_extract(p.payload, '$.communityRating'), 0) AS REAL)"
+            )
+            title_expression = (
+                "p.title_sort"
+                if "title_sort" in projection_columns
+                else "COALESCE(json_extract(p.payload, '$.title'), '')"
+            )
             rows = self.db.execute(
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
                 "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
@@ -2925,9 +2941,8 @@ class Catalog:
                 "JOIN library_entities e ON e.id=p.entity_id "
                 "WHERE p.locale=? AND e.library_id=? AND e.parent_id IS NULL "
                 "AND e.entity_type=? "
-                "AND CAST(COALESCE(json_extract(p.payload, '$.communityRating'), 0) AS REAL)>0 "
-                "ORDER BY CAST(json_extract(p.payload, '$.communityRating') AS REAL) DESC, "
-                "COALESCE(json_extract(p.payload, '$.title'), '') COLLATE NOCASE ASC, e.id ASC "
+                f"AND {rating_expression}>0 "
+                f"ORDER BY {rating_expression} DESC, {title_expression} COLLATE NOCASE ASC, e.id ASC "
                 "LIMIT 18",
                 (language, library["id"], entity_type),
             )

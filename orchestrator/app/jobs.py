@@ -642,6 +642,17 @@ class JobStore:
                 ),
             )
 
+    def _earliest_next(self, definition_id: str) -> str | None:
+        try:
+            rows = self.db.execute(
+                "SELECT next_run_at FROM job_schedule_triggers WHERE definition_id=? "
+                "AND next_run_at IS NOT NULL ORDER BY next_run_at LIMIT 1",
+                (definition_id,),
+            )
+        except Exception:
+            return None
+        return rows[0][0] if rows else None
+
     def update_definition(self, definition_id: str, values: dict) -> dict:
         definition = self.definition(definition_id)
         if not definition:
@@ -673,10 +684,7 @@ class JobStore:
                 interval,
                 enabled,
                 json.dumps(config or {}, ensure_ascii=False),
-                min(
-                    (trigger["nextRunAt"] for trigger in self._with_triggers(self._definition(self.db.execute("SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE id=?", (definition_id,))[0]))["triggers"] if trigger["nextRunAt"]),
-                    default=None,
-                ) if enabled else None,
+                self._earliest_next(definition_id) if enabled else None,
                 now(),
                 definition_id,
             ),

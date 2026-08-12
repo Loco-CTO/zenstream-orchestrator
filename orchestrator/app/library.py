@@ -4400,6 +4400,10 @@ class LibraryRuntime:
                 continue
             if relative_path.parts:
                 targets.add(relative_path.parts[0])
+            else:
+                # An event on the library directory itself has no target root
+                # to scope. Queue a full traversal as the safe fallback.
+                self.enqueue(library_id, "scan")
         if not targets:
             return
         deadline = time.time() + 5

@@ -1095,7 +1095,15 @@ class TVDBClient(ProviderClient):
             value = remote.get("id") or remote.get("value")
             if not value:
                 continue
-            if "tmdb" in source:
+            # TVDB labels this source as ``TheMovieDB.com`` in its v4
+            # responses (rather than the literal ``tmdb``).  Accept both
+            # spellings, but only attach TMDB as a secondary identity for
+            # series roots; TVDB remains authoritative for the hierarchy.
+            if entity_type == "series" and (
+                "tmdb" in source
+                or "themoviedb" in source
+                or "movie database" in source
+            ):
                 ids.append(
                     {
                         "provider": "tmdb",

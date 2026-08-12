@@ -215,7 +215,9 @@ def _remove_cached_files(db, tables: set[str], paths: set[str]) -> None:
             continue
 
 
-def _sweep_metadata_cache_files(db, tables: set[str], grace_seconds: int = 86400) -> None:
+def _sweep_metadata_cache_files(
+    db, tables: set[str], grace_seconds: int = 86400
+) -> None:
     """Remove old crash leftovers and unregistered metadata image files."""
     if "metadata_images" not in tables or not db.db_file:
         return

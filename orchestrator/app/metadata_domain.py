@@ -112,9 +112,7 @@ def choose_artwork(
     original: str | None,
     providers: list[str],
 ) -> dict | None:
-    ranked = rank_artwork_candidates(
-        images, requested, image_type, original, providers
-    )
+    ranked = rank_artwork_candidates(images, requested, image_type, original, providers)
     return ranked[0] if ranked else None
 
 
@@ -158,7 +156,5 @@ def rank_artwork_candidates(
             best_by_url[url] = candidate
     return [
         candidate[3]
-        for candidate in sorted(
-            best_by_url.values(), key=lambda value: value[:3]
-        )
+        for candidate in sorted(best_by_url.values(), key=lambda value: value[:3])
     ]

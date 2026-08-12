@@ -14,7 +14,6 @@ from app.config import Config
 from app.images import LocalArtworkCache
 from app.logging_config import get_logger
 from app.metadata_domain import (
-    choose_artwork,
     fallback_tiers,
     is_language_code_placeholder,
     locale_variants,

@@ -46,6 +46,7 @@ def _ready_file(path: Path | str | None) -> bool:
     except OSError:
         return False
 
+
 CATALOG_ITEM_PROJECTION_SCHEMA = 2
 
 LOCAL_ARTWORK_NAMES = {
@@ -286,7 +287,8 @@ class MetadataSearchProjection:
         ):
             path_column = "local_path" in columns
             selected = self.db.execute(
-                "SELECT " + ("local_path" if path_column else "NULL")
+                "SELECT "
+                + ("local_path" if path_column else "NULL")
                 + (",blur_hash" if "blur_hash" in columns else ",NULL")
                 + (",fetched_at" if "fetched_at" in columns else ",NULL")
                 + " FROM metadata_images WHERE provider=? AND entity_type=? "
@@ -444,13 +446,20 @@ class MetadataSearchProjection:
                             (entity_id, locale),
                         )
                         selected_types: set[str] = set()
-                        for selected_type, selected_provider, selected_path in selected_rows:
+                        for (
+                            selected_type,
+                            selected_provider,
+                            selected_path,
+                        ) in selected_rows:
                             if _ready_file(selected_path):
                                 selected_types.add(selected_type)
                                 artwork_providers.setdefault(
                                     selected_type, selected_provider
                                 )
-                            elif artwork_providers.get(selected_type) == selected_provider:
+                            elif (
+                                artwork_providers.get(selected_type)
+                                == selected_provider
+                            ):
                                 current_images.pop(selected_type, None)
                                 artwork_providers.pop(selected_type, None)
                         for owned_type in [
@@ -1000,10 +1009,7 @@ class MetadataReadService:
                 + "LIMIT 1",
                 (provider, entity_type, provider_id, image_type, url),
             )
-            if rows and (
-                "local_path" not in columns
-                or _ready_file(rows[0][1])
-            ):
+            if rows and ("local_path" not in columns or _ready_file(rows[0][1])):
                 return candidate
         return None
 
@@ -1535,10 +1541,7 @@ class MetadataImageIngestService:
 
     def _blur_hash(self, url: str, target: Path, image_type: str) -> str | None:
         columns = {
-            row[1]
-            for row in self.db.execute(
-                "PRAGMA table_info(metadata_images)"
-            )
+            row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")
         }
         existing = (
             self.db.execute(
@@ -1546,7 +1549,8 @@ class MetadataImageIngestService:
                 "AND local_path=? AND blur_hash IS NOT NULL LIMIT 1",
                 (url, str(target)),
             )
-            if "metadata_images" in {
+            if "metadata_images"
+            in {
                 row[0]
                 for row in self.db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
@@ -1588,7 +1592,9 @@ class MetadataImageIngestService:
         if "catalog_artwork_selection" in tables:
             selection_columns = {
                 row[1]
-                for row in self.db.execute("PRAGMA table_info(catalog_artwork_selection)")
+                for row in self.db.execute(
+                    "PRAGMA table_info(catalog_artwork_selection)"
+                )
             }
             if {"entity_id", "locale", "image_type", "local_path"}.issubset(
                 selection_columns
@@ -1603,8 +1609,7 @@ class MetadataImageIngestService:
                 if any(_ready_file(row[0]) for row in selected):
                     return True
         columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(metadata_images)")
+            row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")
         }
         path_clause = " AND local_path IS NOT NULL" if "local_path" in columns else ""
         rows = self.db.execute(
@@ -1636,7 +1641,9 @@ class MetadataImageIngestService:
             winners: set[str] = set()
             complete = True
             for locale, document in documents.items():
-                images = document.get("images", []) if isinstance(document, dict) else []
+                images = (
+                    document.get("images", []) if isinstance(document, dict) else []
+                )
                 choice = choose_artwork(
                     images,
                     locale,
@@ -1735,7 +1742,11 @@ class MetadataImageIngestService:
                     target = self._target(url)
                     if target is None:
                         continue
-                    if outcome == "ready" and target.is_file() and target.stat().st_size > 0:
+                    if (
+                        outcome == "ready"
+                        and target.is_file()
+                        and target.stat().st_size > 0
+                    ):
                         skipped += 1
                         self._persist(
                             provider,
@@ -1797,9 +1808,7 @@ class MetadataImageIngestService:
                 document,
                 preserve_artwork=preserved.get(locale),
             )
-        self._prune_replaced(
-            provider, entity_type, provider_id, documents, outcomes
-        )
+        self._prune_replaced(provider, entity_type, provider_id, documents, outcomes)
         return {"ready": ready, "failed": failed, "skipped": skipped}
 
     def ingest(

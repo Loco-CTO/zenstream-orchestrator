@@ -156,9 +156,12 @@ class ClientPreferenceRouteTest(unittest.TestCase):
             return_value=({"id": "user-1"}, "token"),
         ):
             for route, path in routes:
-                with self.subTest(path=path), self.assertRaisesRegex(
-                    client_routes.HTTPException, "A JSON object is required"
-                ) as raised:
+                with (
+                    self.subTest(path=path),
+                    self.assertRaisesRegex(
+                        client_routes.HTTPException, "A JSON object is required"
+                    ) as raised,
+                ):
                     asyncio.run(
                         route(
                             _json_request(

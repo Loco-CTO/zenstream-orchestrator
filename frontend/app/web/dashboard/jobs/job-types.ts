@@ -11,9 +11,20 @@ export type Run = {
 };
 
 export type JobTrigger =
-	| { id: string; type: "interval"; intervalSeconds: number; nextRunAt?: string | null }
+	| {
+			id: string;
+			type: "interval";
+			intervalSeconds: number;
+			nextRunAt?: string | null;
+	  }
 	| { id: string; type: "daily"; time: string; nextRunAt?: string | null }
-	| { id: string; type: "weekly"; weekday: number; time: string; nextRunAt?: string | null }
+	| {
+			id: string;
+			type: "weekly";
+			weekday: number;
+			time: string;
+			nextRunAt?: string | null;
+	  }
 	| { id: string; type: "startup"; nextRunAt?: string | null };
 
 export type Job = {

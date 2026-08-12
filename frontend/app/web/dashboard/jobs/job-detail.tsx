@@ -217,44 +217,180 @@ export default function JobDetailPage() {
 							<div className="flex items-center justify-between">
 								<div>
 									<p className="console-kicker">Triggers</p>
-									<p className="mt-1 text-xs console-muted">Use one or more schedules, or leave empty for manual-only runs.</p>
+									<p className="mt-1 text-xs console-muted">
+										Use one or more schedules, or leave empty for manual-only runs.
+									</p>
 								</div>
 								<button
 									type="button"
 									className="rounded-lg border border-[#5ee3d8]/25 px-3 py-2 text-xs text-[#5ee3d8]"
-									onClick={() => setJobs((current) => current.map((job) => job.id === selected.id ? { ...job, triggers: [...(job.triggers || []), { id: crypto.randomUUID(), type: "interval", intervalSeconds: Math.max(60, job.intervalMinutes * 60) }] } : job))}
+									onClick={() =>
+										setJobs((current) =>
+											current.map((job) =>
+												job.id === selected.id
+													? {
+															...job,
+															triggers: [
+																...(job.triggers || []),
+																{
+																	id: crypto.randomUUID(),
+																	type: "interval",
+																	intervalSeconds: Math.max(60, job.intervalMinutes * 60),
+																},
+															],
+														}
+													: job,
+											),
+										)
+									}
 								>
 									Add trigger
 								</button>
 							</div>
 							<div className="mt-3 space-y-2">
 								{(selected.triggers || []).map((trigger, index) => (
-									<div key={trigger.id} className="flex items-center gap-2 rounded-lg border console-divider p-2 text-xs">
+									<div
+										key={trigger.id}
+										className="flex items-center gap-2 rounded-lg border console-divider p-2 text-xs"
+									>
 										<select
 											value={trigger.type}
 											className="console-input h-9 flex-1 rounded-md px-2"
-											onChange={(event) => setJobs((current) => current.map((job) => {
-												if (job.id !== selected.id) return job;
-												const nextType = event.target.value as JobTrigger["type"];
-												const next: JobTrigger = nextType === "interval"
-													? { id: trigger.id, type: "interval", intervalSeconds: 1800 }
-													: nextType === "daily"
-														? { id: trigger.id, type: "daily", time: "02:00" }
-														: nextType === "weekly"
-															? { id: trigger.id, type: "weekly", weekday: 1, time: "02:00" }
-															: { id: trigger.id, type: "startup" };
-												return { ...job, triggers: job.triggers.map((value, valueIndex) => valueIndex === index ? next : value) };
-											}))}
+											onChange={(event) =>
+												setJobs((current) =>
+													current.map((job) => {
+														if (job.id !== selected.id) return job;
+														const nextType = event.target.value as JobTrigger["type"];
+														const next: JobTrigger =
+															nextType === "interval"
+																? { id: trigger.id, type: "interval", intervalSeconds: 1800 }
+																: nextType === "daily"
+																	? { id: trigger.id, type: "daily", time: "02:00" }
+																	: nextType === "weekly"
+																		? {
+																				id: trigger.id,
+																				type: "weekly",
+																				weekday: 1,
+																				time: "02:00",
+																			}
+																		: { id: trigger.id, type: "startup" };
+														return {
+															...job,
+															triggers: job.triggers.map((value, valueIndex) =>
+																valueIndex === index ? next : value,
+															),
+														};
+													}),
+												)
+											}
 										>
 											<option value="interval">Interval</option>
 											<option value="daily">Daily</option>
 											<option value="weekly">Weekly</option>
 											<option value="startup">Startup</option>
 										</select>
-										{trigger.type === "interval" && <input type="number" min={1} max={2592000} value={trigger.intervalSeconds} aria-label="Interval seconds" className="console-input h-9 w-28 rounded-md px-2" onChange={(event) => setJobs((current) => current.map((job) => job.id === selected.id ? { ...job, triggers: job.triggers.map((value, valueIndex) => valueIndex === index ? { ...value, intervalSeconds: Number(event.target.value) } : value) } : job))} />}
-										{(trigger.type === "daily" || trigger.type === "weekly") && <input type="time" value={trigger.time} aria-label="Trigger time" className="console-input h-9 w-28 rounded-md px-2" onChange={(event) => setJobs((current) => current.map((job) => job.id === selected.id ? { ...job, triggers: job.triggers.map((value, valueIndex) => valueIndex === index ? { ...value, time: event.target.value } : value) } : job))} />}
-										{trigger.type === "weekly" && <select value={trigger.weekday} aria-label="Trigger weekday" className="console-input h-9 w-24 rounded-md px-2" onChange={(event) => setJobs((current) => current.map((job) => job.id === selected.id ? { ...job, triggers: job.triggers.map((value, valueIndex) => valueIndex === index ? { ...value, weekday: Number(event.target.value) } : value) } : job))}><option value={0}>Sun</option><option value={1}>Mon</option><option value={2}>Tue</option><option value={3}>Wed</option><option value={4}>Thu</option><option value={5}>Fri</option><option value={6}>Sat</option></select>}
-										<button type="button" aria-label="Remove trigger" className="px-2 text-[#f07070]" onClick={() => setJobs((current) => current.map((job) => job.id === selected.id ? { ...job, triggers: job.triggers.filter((_, valueIndex) => valueIndex !== index) } : job))}>×</button>
+										{trigger.type === "interval" && (
+											<input
+												type="number"
+												min={1}
+												max={2592000}
+												value={trigger.intervalSeconds}
+												aria-label="Interval seconds"
+												className="console-input h-9 w-28 rounded-md px-2"
+												onChange={(event) =>
+													setJobs((current) =>
+														current.map((job) =>
+															job.id === selected.id
+																? {
+																		...job,
+																		triggers: job.triggers.map((value, valueIndex) =>
+																			valueIndex === index
+																				? { ...value, intervalSeconds: Number(event.target.value) }
+																				: value,
+																		),
+																	}
+																: job,
+														),
+													)
+												}
+											/>
+										)}
+										{(trigger.type === "daily" || trigger.type === "weekly") && (
+											<input
+												type="time"
+												value={trigger.time}
+												aria-label="Trigger time"
+												className="console-input h-9 w-28 rounded-md px-2"
+												onChange={(event) =>
+													setJobs((current) =>
+														current.map((job) =>
+															job.id === selected.id
+																? {
+																		...job,
+																		triggers: job.triggers.map((value, valueIndex) =>
+																			valueIndex === index
+																				? { ...value, time: event.target.value }
+																				: value,
+																		),
+																	}
+																: job,
+														),
+													)
+												}
+											/>
+										)}
+										{trigger.type === "weekly" && (
+											<select
+												value={trigger.weekday}
+												aria-label="Trigger weekday"
+												className="console-input h-9 w-24 rounded-md px-2"
+												onChange={(event) =>
+													setJobs((current) =>
+														current.map((job) =>
+															job.id === selected.id
+																? {
+																		...job,
+																		triggers: job.triggers.map((value, valueIndex) =>
+																			valueIndex === index
+																				? { ...value, weekday: Number(event.target.value) }
+																				: value,
+																		),
+																	}
+																: job,
+														),
+													)
+												}
+											>
+												<option value={0}>Sun</option>
+												<option value={1}>Mon</option>
+												<option value={2}>Tue</option>
+												<option value={3}>Wed</option>
+												<option value={4}>Thu</option>
+												<option value={5}>Fri</option>
+												<option value={6}>Sat</option>
+											</select>
+										)}
+										<button
+											type="button"
+											aria-label="Remove trigger"
+											className="px-2 text-[#f07070]"
+											onClick={() =>
+												setJobs((current) =>
+													current.map((job) =>
+														job.id === selected.id
+															? {
+																	...job,
+																	triggers: job.triggers.filter(
+																		(_, valueIndex) => valueIndex !== index,
+																	),
+																}
+															: job,
+													),
+												)
+											}
+										>
+											×
+										</button>
 									</div>
 								))}
 							</div>

@@ -1930,6 +1930,28 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(value["images"], [])
         self.assertEqual({item["provider"] for item in value["ids"]}, {"tvdb", "imdb"})
 
+    def test_tvdb_normalization_maps_themoviedb_remote_id_for_series(self):
+        value = TVDBClient({"apiKey": "test"}).normalize(
+            "series",
+            "88651",
+            {
+                "data": {
+                    "name": "07-Ghost",
+                    "remoteIds": [
+                        {"sourceName": "TheMovieDB.com", "id": "21855"},
+                        {"sourceName": "IMDB", "id": "tt1424033"},
+                    ],
+                }
+            },
+        )
+        self.assertEqual(
+            value["ids"],
+            [
+                {"provider": "tmdb", "identifierType": "series", "id": "21855"},
+                {"provider": "imdb", "identifierType": "imdb", "id": "tt1424033"},
+            ],
+        )
+
     def test_tvdb_details_requests_english_translation_explicitly(self):
         client = TVDBClient({"apiKey": "test"})
         TVDBClient._language_codes_loaded = False

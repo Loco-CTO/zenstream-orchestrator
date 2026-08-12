@@ -1017,6 +1017,9 @@ class CatalogTest(unittest.TestCase):
         self.patch_catalog_metadata(catalog)
 
         home = catalog.home(user_id, "en")
+        self.assertTrue(
+            all(row["titleKey"] == "newlyAddedOn" for row in home["libraryRows"])
+        )
         rows = {
             row["libraryId"]: row
             for row in home["libraryRows"]
@@ -1034,6 +1037,13 @@ class CatalogTest(unittest.TestCase):
         )
         self.assertFalse(rows["movies"]["stackEpisodes"])
         self.assertNotIn("hidden", rows)
+
+        allowed_row = catalog.home_library(user_id, "en", "allowed")
+        self.assertEqual(
+            [item["id"] for item in allowed_row["items"]], ["episode-2", "episode-1"]
+        )
+        self.assertTrue(allowed_row["stackEpisodes"])
+        self.assertIsNone(catalog.home_library(user_id, "en", "hidden"))
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_featured_uses_series_added_date(self, _languages):

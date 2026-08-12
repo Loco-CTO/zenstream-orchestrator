@@ -460,6 +460,11 @@
 }
 
 @media (max-width: 767px) {
+	.dashboard-content {
+		margin-left: 0 !important;
+		max-width: none !important;
+		padding: 28px 20px !important;
+	}
 	.material-topbar,
 	.dashboard-page-header {
 		align-items: flex-start;

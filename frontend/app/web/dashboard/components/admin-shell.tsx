@@ -231,8 +231,8 @@ export default function AdminShell({
 				</div>
 			)}
 
-			<main className="dashboard-content md:ml-[52px]">
-				<div className="w-full px-5 py-8 sm:px-8 md:px-10 md:py-10">{children}</div>
+			<main className="dashboard-content" style={{ marginLeft: 52, flex: 1, maxWidth: 1080, padding: "44px 52px" }}>
+				{children}
 			</main>
 		</div>
 	);

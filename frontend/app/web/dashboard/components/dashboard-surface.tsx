@@ -12,15 +12,47 @@ export function PageHeader({
 	actions?: ReactNode;
 }) {
 	return (
-		<header style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 36, gap: 16, flexWrap: "wrap" }}>
+		<header
+			style={{
+				display: "flex",
+				alignItems: "flex-start",
+				justifyContent: "space-between",
+				marginBottom: 36,
+				gap: 16,
+				flexWrap: "wrap",
+			}}
+		>
 			<div style={{ maxWidth: "70%" }}>
-				<h1 style={{ margin: 0, fontSize: 22, fontWeight: 600, color: "#fff", letterSpacing: "-0.02em" }}>{title}</h1>
+				<h1
+					style={{
+						margin: 0,
+						fontSize: 22,
+						fontWeight: 600,
+						color: "#fff",
+						letterSpacing: "-0.02em",
+					}}
+				>
+					{title}
+				</h1>
 				{description && (
-					<p style={{ margin: "5px 0 0", fontSize: 13, color: "#666", lineHeight: 1.5 }}>{description}</p>
+					<p
+						style={{
+							margin: "5px 0 0",
+							fontSize: 13,
+							color: "#666",
+							lineHeight: 1.5,
+						}}
+					>
+						{description}
+					</p>
 				)}
 			</div>
 			{actions && (
-				<div style={{ display: "flex", gap: 8, flexShrink: 0, alignItems: "center" }}>{actions}</div>
+				<div
+					style={{ display: "flex", gap: 8, flexShrink: 0, alignItems: "center" }}
+				>
+					{actions}
+				</div>
 			)}
 		</header>
 	);
@@ -34,7 +66,10 @@ export function SurfaceCard({
 	className?: string;
 }) {
 	return (
-		<section className={`console-card ${className}`} style={{ background: "#080808", borderRadius: 12, padding: "20px 22px" }}>
+		<section
+			className={`console-card ${className}`}
+			style={{ background: "#080808", borderRadius: 12, padding: "20px 22px" }}
+		>
 			{children}
 		</section>
 	);
@@ -50,10 +85,39 @@ export function SectionHeader({
 	action?: ReactNode;
 }) {
 	return (
-		<div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, borderBottom: "1px solid #111", padding: "16px 20px" }}>
+		<div
+			style={{
+				display: "flex",
+				alignItems: "flex-start",
+				justifyContent: "space-between",
+				gap: 16,
+				borderBottom: "1px solid #111",
+				padding: "16px 20px",
+			}}
+		>
 			<div>
-				{kicker && <p style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--primary)", marginBottom: 8 }}>{kicker}</p>}
-				<h2 style={{ margin: 0, fontSize: kicker ? 16 : 13, fontWeight: 600, color: "#fff" }}>
+				{kicker && (
+					<p
+						style={{
+							fontSize: 10,
+							fontWeight: 600,
+							letterSpacing: "0.1em",
+							textTransform: "uppercase",
+							color: "var(--primary)",
+							marginBottom: 8,
+						}}
+					>
+						{kicker}
+					</p>
+				)}
+				<h2
+					style={{
+						margin: 0,
+						fontSize: kicker ? 16 : 13,
+						fontWeight: 600,
+						color: "#fff",
+					}}
+				>
 					{title}
 				</h2>
 			</div>
@@ -64,7 +128,17 @@ export function SectionHeader({
 
 export function StatusMessage({ children }: { children: ReactNode }) {
 	return (
-			<p style={{ marginTop: 20, border: "1px solid rgba(94,227,216,.2)", background: "rgba(94,227,216,.1)", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#d8fffb" }}>
+		<p
+			style={{
+				marginTop: 20,
+				border: "1px solid rgba(94,227,216,.2)",
+				background: "rgba(94,227,216,.1)",
+				borderRadius: 8,
+				padding: "10px 14px",
+				fontSize: 13,
+				color: "#d8fffb",
+			}}
+		>
 			{children}
 		</p>
 	);
@@ -72,7 +146,16 @@ export function StatusMessage({ children }: { children: ReactNode }) {
 
 export function EmptyState({ children }: { children: ReactNode }) {
 	return (
-		<div style={{ padding: "42px 20px", textAlign: "center", fontSize: 13, color: "#666" }}>{children}</div>
+		<div
+			style={{
+				padding: "42px 20px",
+				textAlign: "center",
+				fontSize: 13,
+				color: "#666",
+			}}
+		>
+			{children}
+		</div>
 	);
 }
 

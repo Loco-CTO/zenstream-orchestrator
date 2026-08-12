@@ -183,11 +183,11 @@ class MetadataAssetExecutor:
         self._pending: dict[tuple, Future] = {}
         self._states: dict[tuple, str] = {}
 
-    def submit(self, key: tuple, work) -> str:
+    def submit_future(self, key: tuple, work) -> Future:
         with self._lock:
             current = self._pending.get(key)
             if current is not None and not current.done():
-                return self._states.get(key, "pending")
+                return current
             self._states[key] = "pending"
 
             future = self._executor.submit(work)
@@ -207,7 +207,14 @@ class MetadataAssetExecutor:
                     self._pending.pop(key, None)
 
             future.add_done_callback(finished)
-            return "pending"
+            return future
+
+    def submit(self, key: tuple, work) -> str:
+        self.submit_future(key, work)
+        return "pending"
+
+    def submit_wait(self, key: tuple, work):
+        return self.submit_future(key, work).result()
 
     def drain(self, timeout: float | None = None) -> None:
         with self._lock:
@@ -302,7 +309,6 @@ class MetadataSearchProjection:
                 + " FROM metadata_images WHERE provider=? AND entity_type=? "
                 "AND provider_id=? AND image_type=? AND image_url=? "
                 + ("AND local_path IS NOT NULL " if path_column else "")
-                + ("ORDER BY fetched_at DESC " if "fetched_at" in columns else "")
                 + "LIMIT 1",
                 (
                     provider,
@@ -319,6 +325,123 @@ class MetadataSearchProjection:
                 continue
             return candidate, row
         return None
+
+    def _global_ready_artwork(
+        self,
+        entity_id: str,
+        entity_type: str,
+        locale: str,
+        payload: dict,
+        provider_ids: list[dict],
+        current_provider: str | None = None,
+    ) -> dict[str, tuple[dict, tuple, str]]:
+        """Resolve ready artwork across all provider identities in one pass."""
+        reader = MetadataReadService(self.db)
+        has_cache = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata_cache'"
+            )
+        )
+        raw = reader.resolve_raw(entity_type, provider_ids, locale) if has_cache else {}
+        images = list(raw.get("images") or [])
+        current_images = payload.get("images") if isinstance(payload, dict) else None
+        if isinstance(current_images, list):
+            images.extend(
+                (
+                    {
+                        **image,
+                        "provider": image.get("provider") or current_provider,
+                    }
+                    if isinstance(image, dict)
+                    else image
+                )
+                for image in current_images
+            )
+        original = raw.get("originalLanguage") or payload.get("originalLanguage")
+        result: dict[str, tuple[dict, tuple, str]] = {}
+        has_selection = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_artwork_selection'"
+            )
+        )
+        existing = (
+            self.db.execute(
+                "SELECT s.image_type,s.provider,s.local_path,s.blur_hash,s.version "
+                "FROM catalog_artwork_selection s WHERE s.entity_id=? AND s.locale=?",
+                (entity_id, locale),
+            )
+            if has_selection
+            else []
+        )
+        for image_type, selected_provider, local_path, blur_hash, version in existing:
+            if image_type not in ARTWORK_CATEGORIES or not _ready_file(local_path):
+                continue
+            provider_id = next(
+                (
+                    str(identity.get("id"))
+                    for identity in provider_ids
+                    if identity.get("provider") == selected_provider
+                ),
+                None,
+            )
+            if not provider_id:
+                continue
+            selected = self.db.execute(
+                "SELECT image_url FROM metadata_images WHERE provider=? AND "
+                "entity_type=? AND provider_id=? AND image_type=? AND local_path=? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (selected_provider, entity_type, provider_id, image_type, local_path),
+            )
+            if selected:
+                result[image_type] = (
+                    {
+                        "type": image_type,
+                        "url": selected[0][0],
+                        "language": locale,
+                        "provider": selected_provider,
+                    },
+                    (local_path, blur_hash, None),
+                    selected_provider,
+                )
+        for image_type in ARTWORK_CATEGORIES:
+            if (
+                image_type in result
+                and not raw.get("images")
+                and current_provider != result[image_type][2]
+            ):
+                continue
+            choice = reader.ready_artwork(
+                entity_type,
+                provider_ids,
+                images,
+                locale,
+                image_type,
+                original,
+                reader.providers(entity_type),
+            )
+            if not choice:
+                continue
+            provider = str(choice.get("provider") or "")
+            provider_id = next(
+                (
+                    str(identity.get("id"))
+                    for identity in provider_ids
+                    if identity.get("provider") == provider
+                ),
+                None,
+            )
+            if not provider_id:
+                continue
+            rows = self.db.execute(
+                "SELECT local_path,blur_hash,fetched_at FROM metadata_images "
+                "WHERE provider=? AND entity_type=? AND provider_id=? "
+                "AND image_type=? AND image_url=? AND local_path IS NOT NULL "
+                "ORDER BY rowid DESC LIMIT 1",
+                (provider, entity_type, provider_id, image_type, choice.get("url")),
+            )
+            if rows and _ready_file(rows[0][0]):
+                result[image_type] = (choice, rows[0], provider)
+        return result
 
     def project(
         self,
@@ -496,75 +619,44 @@ class MetadataSearchProjection:
                         else:
                             current_images.pop(local_type, None)
                             artwork_providers.pop(local_type, None)
-                    images = payload.get("images")
-                    if isinstance(images, list):
-                        for image_type in ARTWORK_CATEGORY_SET:
-                            if preserve_artwork and image_type in preserve_artwork:
-                                continue
-                            candidates = rank_artwork_candidates(
-                                images,
-                                locale,
-                                image_type,
-                                payload.get("originalLanguage"),
-                                [provider],
-                                include_english=any(
-                                    language_family(value) == "en"
-                                    for value in MetadataLanguageSettings().get()
-                                ),
-                            )
-                            if not candidates:
-                                # An empty provider response is not a reason to
-                                # withdraw a working asset. Keep the previous
-                                # ready selection until a replacement is ready.
-                                continue
-                            if not (
-                                is_primary
-                                or image_type not in current_images
-                                or artwork_providers.get(image_type) == provider
-                            ):
-                                continue
-                            ready = self._ready_artwork(
-                                provider,
-                                entity_type,
-                                provider_id,
-                                images,
-                                locale,
-                                image_type,
-                                payload.get("originalLanguage"),
-                                metadata_image_columns,
-                            )
-                            if ready is None:
-                                # Keep the existing ready selection until the
-                                # replacement has been materialized.
-                                continue
-                            choice, cached_row = ready
-                            projected = {
-                                "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}",
-                                "language": choice.get("language"),
-                                "width": choice.get("width") or 0,
-                                "height": choice.get("height") or 0,
-                            }
-                            version = _asset_version(
-                                cached_row[0] if cached_row else None,
-                                f"{choice.get('url') or ''}:{cached_row[2] if cached_row else ''}",
-                            )
-                            projected["url"] += f"&v={version}"
-                            if image_type != "Logo" and cached_row and cached_row[1]:
-                                projected["blurHash"] = cached_row[1]
-                            if has_artwork_selection and cached_row and cached_row[0]:
-                                artwork_rows.append(
-                                    (
-                                        entity_id,
-                                        locale,
-                                        image_type,
-                                        provider,
-                                        cached_row[0],
-                                        cached_row[1],
-                                        version,
-                                    )
+                    global_artwork = self._global_ready_artwork(
+                        entity_id,
+                        entity_type,
+                        locale,
+                        payload,
+                        provider_ids,
+                        provider,
+                    )
+                    for image_type, (choice, cached_row, selected_provider) in global_artwork.items():
+                        if preserve_artwork and image_type in preserve_artwork:
+                            continue
+                        projected = {
+                            "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}",
+                            "language": choice.get("language"),
+                            "width": choice.get("width") or 0,
+                            "height": choice.get("height") or 0,
+                        }
+                        version = _asset_version(
+                            cached_row[0],
+                            f"{choice.get('url') or ''}:{cached_row[2] or ''}",
+                        )
+                        projected["url"] += f"&v={version}"
+                        if image_type != "Logo" and cached_row[1]:
+                            projected["blurHash"] = cached_row[1]
+                        if has_artwork_selection:
+                            artwork_rows.append(
+                                (
+                                    entity_id,
+                                    locale,
+                                    image_type,
+                                    selected_provider,
+                                    cached_row[0],
+                                    cached_row[1],
+                                    version,
                                 )
-                            current_images[image_type] = projected
-                            artwork_providers[image_type] = provider
+                            )
+                        current_images[image_type] = projected
+                        artwork_providers[image_type] = selected_provider
                     if "media_files" in tables:
                         media_columns = {
                             row[1]
@@ -1037,7 +1129,6 @@ class MetadataReadService:
                 "AND entity_type=? AND provider_id=? AND image_type=? "
                 "AND image_url=? "
                 + ("AND local_path IS NOT NULL " if "local_path" in columns else "")
-                + ("ORDER BY fetched_at DESC " if "fetched_at" in columns else "")
                 + "LIMIT 1",
                 (provider, entity_type, provider_id, image_type, url),
             )
@@ -1067,7 +1158,7 @@ class MetadataReadService:
         if key in self._blur_hashes:
             return self._blur_hashes[key]
         rows = self.db.execute(
-            "SELECT blur_hash FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=? AND blur_hash IS NOT NULL ORDER BY fetched_at DESC LIMIT 1",
+            "SELECT blur_hash FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=? AND blur_hash IS NOT NULL LIMIT 1",
             (provider, entity_type, provider_id, image_type, image_url),
         )
         value = rows[0][0] if rows and rows[0][0] else None
@@ -1301,20 +1392,18 @@ class MetadataIngestService:
             digest = hashlib.sha256(
                 json.dumps(values, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()
+            key = (
+                provider,
+                entity_type,
+                provider_id,
+                tuple(locales),
+                digest,
+                int(force_assets),
+            )
             if self.background_assets:
-                asset_executor.submit(
-                    (
-                        provider,
-                        entity_type,
-                        provider_id,
-                        tuple(locales),
-                        digest,
-                        int(force_assets),
-                    ),
-                    materialize_assets,
-                )
+                asset_executor.submit(key, materialize_assets)
             else:
-                materialize_assets()
+                asset_executor.submit_wait(key, materialize_assets)
         return values
 
     def ingest_locale(
@@ -1381,23 +1470,21 @@ class MetadataIngestService:
                         force_images=force_assets,
                     )
 
+            digest = hashlib.sha256(
+                json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            key = (
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                digest,
+                int(force_assets),
+            )
             if self.background_assets:
-                digest = hashlib.sha256(
-                    json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
-                ).hexdigest()
-                asset_executor.submit(
-                    (
-                        provider,
-                        entity_type,
-                        provider_id,
-                        locale,
-                        digest,
-                        int(force_assets),
-                    ),
-                    materialize_assets,
-                )
+                asset_executor.submit(key, materialize_assets)
             else:
-                materialize_assets()
+                asset_executor.submit_wait(key, materialize_assets)
         return normalized
 
 
@@ -1434,7 +1521,7 @@ class MetadataImageIngestService:
         suffix = Path(urlparse(url).path).suffix.lower()
         return (
             suffix
-            if suffix in {".jpg", ".jpeg", ".png", ".webp", ".avif"}
+            if suffix in {".jpg", ".jpeg", ".png", ".webp", ".avif", ".svg", ".svgz"}
             else ".image"
         )
 
@@ -1677,7 +1764,7 @@ class MetadataImageIngestService:
                 images = (
                     document.get("images", []) if isinstance(document, dict) else []
                 )
-                choice = choose_artwork(
+                candidates = rank_artwork_candidates(
                     images,
                     locale,
                     image_type,
@@ -1688,12 +1775,20 @@ class MetadataImageIngestService:
                         for value in MetadataLanguageSettings().get()
                     ),
                 )
+                choice = next(
+                    (
+                        candidate
+                        for candidate in candidates[:2]
+                        if outcomes.get(candidate.get("url")) == "ready"
+                    ),
+                    None,
+                )
                 if not choice or not choice.get("url"):
+                    if candidates:
+                        complete = False
                     continue
                 url = str(choice["url"])
                 winners.add(url)
-                if outcomes.get(url) != "ready":
-                    complete = False
             if not winners or not complete:
                 continue
             rows = self.db.execute(
@@ -1724,6 +1819,11 @@ class MetadataImageIngestService:
                         "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1",
                         (str(path),),
                     )
+                    if not still_referenced and "catalog_artwork_selection" in tables:
+                        still_referenced = self.db.execute(
+                            "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                            (str(path),),
+                        )
                     if not still_referenced:
                         path.unlink(missing_ok=True)
 
@@ -1800,6 +1900,7 @@ class MetadataImageIngestService:
                                 url, target, str(candidate.get("type") or image_type)
                             ),
                         )
+                        outcomes[url] = "ready"
                         break
                     try:
                         with self._file_lock(target):
@@ -1809,6 +1910,7 @@ class MetadataImageIngestService:
                             else:
                                 self._download(url, target)
                                 ready += 1
+                            outcomes[url] = "ready"
                         blur_hash = self._blur_hash(
                             url, target, str(candidate.get("type") or image_type)
                         )

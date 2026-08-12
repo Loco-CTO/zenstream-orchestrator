@@ -14,3 +14,4 @@ mutagen>=1.48.1
 watchdog>=6.0.0
 guessit>=4.1.0
 pycountry>=26.2.16
+resvg_py==0.3.4

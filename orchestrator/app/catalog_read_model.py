@@ -741,28 +741,9 @@ class CatalogReadModel:
                         )
                     )
                     continue
-                legacy = self.db.read_execute(
-                    "SELECT ep.provider,mi.local_path,mi.blur_hash FROM entity_provider_ids ep "
-                    "JOIN metadata_images mi ON mi.provider=ep.provider AND mi.provider_id=ep.provider_id "
-                    "AND mi.entity_type=? WHERE ep.entity_id=? AND mi.image_type=? "
-                    "AND mi.local_path IS NOT NULL ORDER BY ep.is_primary DESC, "
-                    "CASE WHEN mi.locale=? THEN 0 WHEN mi.locale='' THEN 1 ELSE 2 END, mi.rowid LIMIT 1",
-                    (entity_type, entity_id, image_type, locale),
-                )
-                if legacy and _ready_artwork_file(legacy[0][1]):
-                    provider, local_path, blur_hash = legacy[0]
-                    values.append(
-                        (
-                            entity_id,
-                            locale,
-                            image_type,
-                            provider,
-                            local_path,
-                            blur_hash,
-                            _artwork_version(local_path),
-                            now,
-                        )
-                    )
+                # Do not infer a new winner from legacy rows. If no provider
+                # document and ready candidate exist, preserve only an already
+                # selected verified row; the next ingest/rebuild can repair it.
         return values
 
     def _coverage_gaps(

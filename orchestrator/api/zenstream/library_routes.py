@@ -1106,7 +1106,22 @@ async def get_image(
     # Library previews must never turn a cache miss into provider work. Scans
     # and the administrator-triggered backfill own metadata population.
     image = None
+    image_item = item
     for candidate in _image_entities(item, imageType):
+        selected = store.db.execute(
+            "SELECT local_path FROM catalog_artwork_selection "
+            "WHERE entity_id=? AND locale=? AND image_type=? LIMIT 1",
+            (candidate["id"], locale, imageType),
+        )
+        if selected and selected[0][0] and Path(selected[0][0]).is_file():
+            return FileResponse(
+                selected[0][0],
+                media_type="image/webp",
+                headers={"X-ZenStream-Image-State": "ready"},
+            )
+        if selected:
+            pending = True
+            continue
         metadata = await asyncio.to_thread(
             _metadata_for, candidate, locale, False, False
         )
@@ -1122,6 +1137,7 @@ async def get_image(
             read_service.providers(candidate["type"]),
         )
         if image:
+            image_item = candidate
             break
     if not image:
         if pending:
@@ -1142,8 +1158,22 @@ async def get_image(
         )
         return Response(status_code=404, headers={"X-ZenStream-Image-State": "missing"})
     cached_file = store.db.execute(
-        "SELECT local_path FROM metadata_images WHERE image_type=? AND image_url=?",
-        (imageType, image["url"]),
+        "SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? "
+        "AND provider_id=? AND image_type=? AND image_url=? AND local_path IS NOT NULL",
+        (
+            image.get("provider"),
+            image_item["type"],
+            next(
+                (
+                    identity.get("id")
+                    for identity in image_item.get("providerIds", [])
+                    if identity.get("provider") == image.get("provider")
+                ),
+                None,
+            ),
+            imageType,
+            image["url"],
+        ),
     )
     for (local_path,) in cached_file:
         if local_path and Path(local_path).is_file():

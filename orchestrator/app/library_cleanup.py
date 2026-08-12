@@ -207,9 +207,15 @@ def _remove_cached_files(db, tables: set[str], paths: set[str]) -> None:
             path = Path(raw_path)
             resolved = path.resolve()
             resolved.relative_to(cache_root)
-            if not db.execute(
+            referenced = db.execute(
                 "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1", (str(path),)
-            ):
+            )
+            if not referenced and "catalog_artwork_selection" in tables:
+                referenced = db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                    (str(path),),
+                )
+            if not referenced:
                 resolved.unlink(missing_ok=True)
         except (OSError, ValueError):
             continue
@@ -237,10 +243,16 @@ def _sweep_metadata_cache_files(
         except (OSError, ValueError):
             continue
         with MetadataImageIngestService._file_lock(path):
-            if db.execute(
+            referenced = db.execute(
                 "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1",
                 (str(path),),
-            ):
+            )
+            if not referenced and "catalog_artwork_selection" in tables:
+                referenced = db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                    (str(path),),
+                )
+            if referenced:
                 continue
             try:
                 path.unlink(missing_ok=True)

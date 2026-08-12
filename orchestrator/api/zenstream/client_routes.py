@@ -572,38 +572,10 @@ async def item_image(
                     if cached and cached.is_file():
                         return cached
                     raise HTTPException(404, "Image not found.")
-        # Resolve provider artwork from the current ready candidate before
-        # consulting the projection row. The row can lag during repair and
-        # must never make a stale alternate win over the locale-aware choice.
-        image = catalog.selected_image(account["id"], entity_id, language, image_type)
-        if image:
-            provider = image.get("provider")
-            provider_id = next(
-                (
-                    identity.get("id")
-                    for identity in catalog._provider_ids(entity_id, row[3])
-                    if identity.get("provider") == provider
-                ),
-                None,
-            )
-            rows = catalog.db.execute(
-                "SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=? AND local_path IS NOT NULL LIMIT 1",
-                (provider, row[3], provider_id, image_type, image.get("url")),
-            )
-            if rows and rows[0][0] and Path(rows[0][0]).is_file():
-                if requested_version:
-                    digest = hashlib.sha256()
-                    with Path(rows[0][0]).open("rb") as source:
-                        while chunk := source.read(1024 * 1024):
-                            digest.update(chunk)
-                    if digest.hexdigest()[:12] != requested_version:
-                        raise HTTPException(
-                            404, "Image version is no longer available."
-                        )
-                return Path(rows[0][0])
-            if requested_version:
-                raise HTTPException(404, "Image version is no longer available.")
-        if image is None and catalog._has_table("catalog_artwork_selection"):
+        # The catalog selection is canonical. Request-time provider reselection
+        # can disagree with the projection while a secondary provider refreshes
+        # and would reject a valid versioned URL from the catalog payload.
+        if catalog._has_table("catalog_artwork_selection"):
             projected = catalog.db.execute(
                 "SELECT local_path,version FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
                 (entity_id, language, image_type),
@@ -627,6 +599,28 @@ async def item_image(
                     return Path(selected_path)
                 if requested_version:
                     raise HTTPException(404, "Image version is no longer available.")
+                return None
+        # Legacy/cache-only fallback is used only when no canonical selection
+        # exists. It never substitutes a different file for a versioned URL.
+        image = catalog.selected_image(account["id"], entity_id, language, image_type)
+        if image:
+            provider = image.get("provider")
+            provider_id = next(
+                (
+                    identity.get("id")
+                    for identity in catalog._provider_ids(entity_id, row[3])
+                    if identity.get("provider") == provider
+                ),
+                None,
+            )
+            rows = catalog.db.execute(
+                "SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=? AND local_path IS NOT NULL LIMIT 1",
+                (provider, row[3], provider_id, image_type, image.get("url")),
+            )
+            if rows and rows[0][0] and Path(rows[0][0]).is_file():
+                if requested_version:
+                    raise HTTPException(404, "Image version is no longer available.")
+                return Path(rows[0][0])
         if requested_version:
             raise HTTPException(404, "Image version is no longer available.")
         return None

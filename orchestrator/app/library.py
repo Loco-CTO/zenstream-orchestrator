@@ -958,7 +958,7 @@ class LibraryScanner:
                 self._set_stage(job_id, "Populating changed metadata locales")
                 self._fetch_seen_locales(should_terminate)
             self._set_stage(job_id, "Reconciling moved entities")
-            self._reconcile_moved_entities(library_id, root)
+            self._reconcile_moved_entities(library_id, root, targets=targets)
             self._set_stage(job_id, "Pruning entities without playable media")
             rejected = self._prune_rejected_entities()
             self._set_stage(job_id, "Pruning missing entities")
@@ -1387,7 +1387,12 @@ class LibraryScanner:
             return None
         return "|".join(f"{role}:{fingerprint}" for role, fingerprint in rows)
 
-    def _reconcile_moved_entities(self, library_id: str, root: Path) -> None:
+    def _reconcile_moved_entities(
+        self,
+        library_id: str,
+        root: Path,
+        targets: set[str] | None = None,
+    ) -> None:
         """Match newly discovered leaf entities to vanished paths by unique hash."""
         if "quick_fingerprint" not in {
             row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
@@ -1406,7 +1411,14 @@ class LibraryScanner:
         old_ids = [
             row[0]
             for row in old_rows
-            if row[0] not in self._scan_seen_ids and row[1] in leaf_types
+            if row[0] not in self._scan_seen_ids
+            and row[1] in leaf_types
+            and (
+                targets is None
+                or bool(row[2])
+                and Path(row[2]).parts
+                and Path(row[2]).parts[0] in targets
+            )
         ]
         old_by_key: dict[tuple[str, str], list[str]] = {}
         new_by_key: dict[tuple[str, str], list[str]] = {}

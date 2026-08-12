@@ -1,6 +1,7 @@
 "use client";
 import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { apiUrl } from "../api-url";
 
 export default function RegisterPage() {
 	const router = useRouter();
@@ -15,7 +16,7 @@ export default function RegisterPage() {
 	);
 	async function submit(event: FormEvent) {
 		event.preventDefault();
-		const response = await fetch("/api/user/register", {
+		const response = await fetch(apiUrl("/api/user/register"), {
 			method: "POST",
 			headers: { Username: username, Password: password, url: invite },
 		});

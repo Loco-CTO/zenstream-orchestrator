@@ -2795,7 +2795,16 @@ class Catalog:
         )
         if library is None:
             return None
-        return self._home_library_row(user_id, language, library)
+        row = self._home_library_row(user_id, language, library)
+        if row is not None:
+            return row
+        return {
+            "libraryId": library["id"],
+            "libraryName": library["name"],
+            "titleKey": "newlyAddedOn",
+            "stackEpisodes": library["type"] == "tv_series",
+            "items": [],
+        }
 
     def _home_library_row(
         self,

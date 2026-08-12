@@ -8,6 +8,7 @@ import ipaddress
 import json
 import os
 import time
+from urllib.parse import urlsplit
 
 from app.models.account import Account
 from fastapi import HTTPException, Request, WebSocket
@@ -17,6 +18,43 @@ _RESERVED_TICKET_CLAIMS = {"uid", "kind", "iat", "exp"}
 CLIENT_SESSION_COOKIE = "__Host-zenstream-session"
 DEV_CLIENT_SESSION_COOKIE = "zenstream-session"
 DEV_CLIENT_SESSION_COOKIE_PREFIX = f"{DEV_CLIENT_SESSION_COOKIE}-"
+_DEFAULT_BROWSER_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+)
+
+
+def _normalized_origin(value: str | None) -> str | None:
+    parsed = urlsplit(value or "")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def browser_origins() -> list[str]:
+    values = [
+        value.strip()
+        for value in os.getenv("CORS_ORIGINS", "").split(",")
+        if value.strip()
+    ]
+    values.extend(_DEFAULT_BROWSER_ORIGINS)
+    return list(dict.fromkeys(filter(None, map(_normalized_origin, values))))
+
+
+def administrator_origin_allowed(request: Request) -> bool:
+    supplied = _normalized_origin(request.headers.get("origin"))
+    if supplied is None:
+        return False
+    direct = _normalized_origin(
+        f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+    )
+    forwarded = _normalized_origin(
+        f"{request.headers.get('x-forwarded-proto', request.url.scheme)}://"
+        f"{request.headers.get('x-forwarded-host', '')}"
+    )
+    return supplied in {direct, forwarded, *browser_origins()}
 
 
 def _request_hostname(request: Request) -> str:

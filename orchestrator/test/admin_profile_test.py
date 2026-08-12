@@ -63,6 +63,17 @@ class AdminProfileRouteTest(unittest.TestCase):
             )
         self.assertEqual(raised.exception.status_code, 403)
 
+    def test_missing_library_admin_session_is_unauthorized(self):
+        with self.assertRaises(HTTPException) as raised:
+            library_module.authenticate_admin_request(_request(cookie=False))
+        self.assertEqual(raised.exception.status_code, 401)
+
+    def test_invalid_library_admin_session_is_unauthorized(self):
+        with patch.object(library_module.Admin, "from_token", return_value=None):
+            with self.assertRaises(HTTPException) as raised:
+                library_module.authenticate_admin_request(_request())
+        self.assertEqual(raised.exception.status_code, 401)
+
     def test_cookie_authenticated_mutation_accepts_frontend_origin_through_proxy(self):
         authenticated = MagicMock(username="root")
         with patch.object(app_module.Admin, "from_token", return_value=authenticated):
@@ -75,6 +86,22 @@ class AdminProfileRouteTest(unittest.TestCase):
                 )
             )
         self.assertEqual((username, token), ("root", "server-owned-session"))
+
+    def test_cookie_authenticated_mutation_accepts_direct_dev_frontend_origin(self):
+        authenticated = MagicMock(username="root")
+        request = _request(method="POST", origin="http://localhost:3001")
+        with patch.object(app_module.Admin, "from_token", return_value=authenticated):
+            username, token = app_module._admin_request(request)
+        self.assertEqual((username, token), ("root", "server-owned-session"))
+
+    def test_library_mutation_accepts_direct_dev_frontend_origin(self):
+        authenticated = MagicMock(username="root")
+        request = _request(method="POST", origin="http://localhost:3001")
+        with patch.object(
+            library_module.Admin, "from_token", return_value=authenticated
+        ):
+            username = library_module.authenticate_admin_request(request)
+        self.assertEqual(username, "root")
 
     def test_invalid_admin_session_is_unauthorized(self):
         with patch.object(app_module.Admin, "from_token", return_value=None):

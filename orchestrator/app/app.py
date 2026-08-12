@@ -14,6 +14,7 @@ from api.zenstream.application_routes import (
 from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
 from app.catalog_read_model import CatalogReadModel
+from app.client_auth import browser_origins
 from app.config import load_config
 from app.foreground import active_requests, run_foreground
 from app.foreground import shutdown as shutdown_foreground
@@ -71,17 +72,9 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
-origins = [
-    value.strip() for value in os.getenv("CORS_ORIGINS", "").split(",") if value.strip()
-]
-origins += [
-    value
-    for value in ("http://localhost:3000", "http://127.0.0.1:3000")
-    if value not in origins
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=browser_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

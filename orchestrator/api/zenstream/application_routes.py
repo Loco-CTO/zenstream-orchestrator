@@ -2,9 +2,13 @@ import asyncio
 import math
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
 
-from app.client_auth import cookie_secure, require_account, websocket_account
+from app.client_auth import (
+    administrator_origin_allowed,
+    cookie_secure,
+    require_account,
+    websocket_account,
+)
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite
@@ -199,12 +203,7 @@ def _admin_request(
     request: Request, username: str | None = None, token: str | None = None
 ):
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-        origin = request.headers.get("origin")
-        expected = f"{request.headers.get('x-forwarded-proto', request.url.scheme)}://{request.headers.get('x-forwarded-host', request.headers.get('host', request.url.netloc))}"
-        if (
-            not origin
-            or f"{urlsplit(origin).scheme}://{urlsplit(origin).netloc}" != expected
-        ):
+        if not administrator_origin_allowed(request):
             raise HTTPException(403, "Cross-site administrator request rejected.")
     cookie_name = (
         ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session"

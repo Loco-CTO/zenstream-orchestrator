@@ -2,6 +2,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { saveSession } from "../dashboard/components/admin-client";
+import { apiUrl } from "../api-url";
 
 export default function AdminLogin() {
 	const router = useRouter();
@@ -14,8 +15,9 @@ export default function AdminLogin() {
 		event.preventDefault();
 		setBusy(true);
 		setError("");
-		const response = await fetch("/api/admin/login", {
+		const response = await fetch(apiUrl("/api/admin/login"), {
 			method: "POST",
+			credentials: "include",
 			headers: { Username: username, Password: password },
 		});
 		if (response.ok) {

@@ -789,7 +789,7 @@ class JobStore:
             "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=? ORDER BY next_run_at",
             (now(),),
         )
-        return [self._definition(row) for row in rows]
+        return [self._with_triggers(self._definition(row)) for row in rows]
 
     def mark_scheduled(
         self, definition_id: str, run_id: str | None, message: str = "Queued"
@@ -797,10 +797,33 @@ class JobStore:
         definition = self.definition(definition_id)
         if not definition:
             return
-        next_run = (
-            datetime.now(timezone.utc)
-            + timedelta(minutes=definition["intervalMinutes"])
-        ).isoformat()
+        current = now()
+        try:
+            trigger_rows = self.db.execute(
+                "SELECT id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at "
+                "FROM job_schedule_triggers WHERE definition_id=? AND next_run_at IS NOT NULL AND next_run_at<=?",
+                (definition_id, current),
+            )
+            for row in trigger_rows:
+                trigger = {"type": row[1]}
+                if row[1] == "interval":
+                    trigger["intervalSeconds"] = row[2]
+                elif row[1] == "daily":
+                    trigger["time"] = row[3]
+                elif row[1] == "weekly":
+                    trigger["weekday"] = row[4]
+                    trigger["time"] = row[3]
+                next_trigger = self._next_for_trigger(trigger)
+                self.db.execute(
+                    "UPDATE job_schedule_triggers SET next_run_at=?,updated_at=? WHERE id=?",
+                    (next_trigger, current, row[0]),
+                )
+            next_run = self._earliest_next(definition_id)
+        except Exception:
+            next_run = (
+                datetime.now(timezone.utc)
+                + timedelta(minutes=definition["intervalMinutes"])
+            ).isoformat()
         self.db.execute(
             "UPDATE job_definitions SET next_run_at=?,last_run_at=?,last_run_id=?,last_state='queued',last_message=?,updated_at=? WHERE id=?",
             (next_run, now(), run_id, message, now(), definition_id),
@@ -1224,6 +1247,21 @@ class JobScheduler:
             )
         for library in self.library_runtime.store.list():
             self.store.ensure_library(library)
+        # Startup triggers are intentionally armed on every process start and
+        # remain manual-only afterward until their next explicit update.
+        try:
+            startup_rows = self.store.db.execute(
+                "SELECT DISTINCT definition_id FROM job_schedule_triggers "
+                "WHERE trigger_type='startup'"
+            )
+            for (definition_id,) in startup_rows:
+                self.store.db.execute(
+                    "UPDATE job_definitions SET next_run_at=?,updated_at=? "
+                    "WHERE id=? AND enabled=1",
+                    (now(), now(), definition_id),
+                )
+        except Exception:
+            pass
         self._recover_active_runs()
         self.stop_event.clear()
         self.thread = threading.Thread(

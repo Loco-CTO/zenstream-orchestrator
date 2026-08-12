@@ -1,5 +1,36 @@
 @import "tailwindcss";
 
+:root {
+	--bg: #000;
+	--surface: #0d0d0d;
+	--surface-2: #141414;
+	--surface-3: #1c1c1c;
+	--border: rgba(255, 255, 255, 0.07);
+	--border-strong: rgba(255, 255, 255, 0.13);
+	--primary: #5ee3d8;
+	--primary-dim: rgba(94, 227, 216, 0.09);
+	--primary-hover: #7deae1;
+	--text: #e8e8e8;
+	--text-2: #888;
+	--text-3: #444;
+	--success: #4dd98a;
+	--warning: #f0bf6a;
+	--danger: #f07070;
+	--running: #60b4e8;
+}
+
+/* The dashboard uses Inter and DM Mono. These local/system stacks avoid
+ * runtime font requests in the exported dashboard while preserving metrics. */
+.dashboard-design,
+.login-design {
+	font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.dashboard-design code,
+.dashboard-design .mono,
+.login-design code {
+	font-family: "DM Mono", "SFMono-Regular", Consolas, monospace;
+}
+
 /* ZenStream console type is bundled by the app's package/system stack.  Keep
  * the dashboard usable in offline launcher deployments without a web-font
  * request. */

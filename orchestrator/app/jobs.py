@@ -889,6 +889,44 @@ class MetadataMissingJob:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrichment_queue'"
             )
         )
+        # Discover optional TMDB series identities from the authoritative TVDB
+        # documents before taking the work-list snapshot.  This lets one global
+        # refresh ingest the newly discovered TMDB documents in the same run.
+        tv_series_rows = self.db.execute(
+            "SELECT e.id,p.provider_id FROM library_entities e "
+            "JOIN entity_provider_ids p ON p.entity_id=e.id "
+            "WHERE e.entity_type='series' AND p.provider='tvdb' "
+            "AND p.identifier_type='series' ORDER BY e.id"
+        )
+        for entity_id, tvdb_id in tv_series_rows:
+            try:
+                documents = ingest.ingest_locales(
+                    "tvdb",
+                    "series",
+                    str(tvdb_id),
+                    locales,
+                    force=force,
+                    force_assets=force_assets,
+                )
+            except (ProviderError, ValueError, OSError) as error:
+                logger.warning(
+                    "TVDB series secondary-ID discovery failed entity_id=%s provider_id=%s: %s",
+                    entity_id,
+                    tvdb_id,
+                    error,
+                )
+                continue
+            linked_ids = {
+                str(value.get("id"))
+                for document in documents.values()
+                for value in document.get("ids", []) or []
+                if value.get("provider") == "tmdb" and value.get("id")
+            }
+            for tmdb_id in sorted(linked_ids):
+                self.db.execute(
+                    "INSERT OR IGNORE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
+                    (entity_id, "tmdb", "series", tmdb_id),
+                )
         rows = self.db.execute(
             "SELECT DISTINCT p.provider,p.identifier_type,p.provider_id "
             "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "

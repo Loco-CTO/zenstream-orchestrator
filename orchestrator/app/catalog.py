@@ -531,7 +531,9 @@ class Catalog:
                             "images", {}
                         )
                         if context:
-                            context.projected_metadata[(entity_id, language)] = resolved_value
+                            context.projected_metadata[(entity_id, language)] = (
+                                resolved_value
+                            )
                         if include_credits:
                             resolved_value["credits"] = self.credits(
                                 user_id,
@@ -2833,7 +2835,9 @@ class Catalog:
         entity_type = "movie" if library["type"] == "movies" else "episode"
         series_names = series_names if series_names is not None else {}
         playable_rows = self._newly_added_rows(library["id"], entity_type)
-        dates = self._date_values("", {library["id"]}, {row[0] for row in playable_rows})
+        dates = self._date_values(
+            "", {library["id"]}, {row[0] for row in playable_rows}
+        )
         self._seed_hydration_rows(user_id, playable_rows, language)
         items = []
         for playable_row in playable_rows:
@@ -2853,7 +2857,9 @@ class Catalog:
                     language=language,
                 )
             )
-        items.sort(key=lambda value: (str(value.get("name") or "").casefold(), value["id"]))
+        items.sort(
+            key=lambda value: (str(value.get("name") or "").casefold(), value["id"])
+        )
         items.sort(key=lambda value: value.get("lastAddedAt") or "", reverse=True)
         items = items[:18]
         if not items:

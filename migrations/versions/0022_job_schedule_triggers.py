@@ -36,7 +36,9 @@ def upgrade() -> None:
     )
     bind = op.get_bind()
     rows = bind.execute(
-        sa.text("SELECT id, interval_minutes, created_at, updated_at FROM job_definitions")
+        sa.text(
+            "SELECT id, interval_minutes, created_at, updated_at FROM job_definitions"
+        )
     ).fetchall()
     for definition_id, interval_minutes, created_at, updated_at in rows:
         seconds = max(1, int(interval_minutes or 1440) * 60)

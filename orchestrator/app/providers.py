@@ -1101,9 +1101,7 @@ class TVDBClient(ProviderClient):
             # spellings, but only attach TMDB as a secondary identity for
             # series roots; TVDB remains authoritative for the hierarchy.
             if entity_type == "series" and (
-                "tmdb" in source
-                or "themoviedb" in source
-                or "movie database" in source
+                "tmdb" in source or "themoviedb" in source or "movie database" in source
             ):
                 if "tmdb" in linked_providers:
                     continue

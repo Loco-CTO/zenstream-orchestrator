@@ -899,11 +899,7 @@ class MetadataReadService:
                 if locale not in locale_order:
                     locale_order.append(locale)
         locale_order.extend(
-            sorted(
-                locale
-                for locale in available
-                if locale not in locale_order
-            )
+            sorted(locale for locale in available if locale not in locale_order)
         )
         images = []
         for provider in providers:
@@ -1859,7 +1855,9 @@ class MetadataImageIngestService:
         # document batch, otherwise another locale's ready artwork could be
         # mistaken for an obsolete alternate.
         if complete_batch:
-            self._prune_replaced(provider, entity_type, provider_id, documents, outcomes)
+            self._prune_replaced(
+                provider, entity_type, provider_id, documents, outcomes
+            )
         return {"ready": ready, "failed": failed, "skipped": skipped}
 
     def ingest(

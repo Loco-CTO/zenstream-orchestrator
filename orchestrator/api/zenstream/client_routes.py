@@ -436,7 +436,9 @@ async def home(
         return await run_foreground(catalog.home_derived, account["id"], preferred)
     if section == "library":
         if not libraryId:
-            raise HTTPException(400, "libraryId is required for the library Home section.")
+            raise HTTPException(
+                400, "libraryId is required for the library Home section."
+            )
         row = await run_foreground(
             catalog.home_library, account["id"], preferred, libraryId
         )
@@ -595,7 +597,9 @@ async def item_image(
                         while chunk := source.read(1024 * 1024):
                             digest.update(chunk)
                     if digest.hexdigest()[:12] != requested_version:
-                        raise HTTPException(404, "Image version is no longer available.")
+                        raise HTTPException(
+                            404, "Image version is no longer available."
+                        )
                 return Path(rows[0][0])
             if requested_version:
                 raise HTTPException(404, "Image version is no longer available.")
@@ -617,7 +621,9 @@ async def item_image(
                             while chunk := source.read(1024 * 1024):
                                 digest.update(chunk)
                         if digest.hexdigest()[:12] != requested_version:
-                            raise HTTPException(404, "Image version is no longer available.")
+                            raise HTTPException(
+                                404, "Image version is no longer available."
+                            )
                     return Path(selected_path)
                 if requested_version:
                     raise HTTPException(404, "Image version is no longer available.")

@@ -15,14 +15,13 @@ from app.library import JobTerminated
 from app.library import runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.logging_config import get_logger
-from app.metadata_domain import choose_artwork
+from app.metadata_domain import choose_artwork, language_family
 from app.metadata_services import (
     FACT_FIELDS,
     TEXT_FIELDS,
     MetadataIngestService,
     metadata_task_results,
 )
-from app.metadata_domain import language_family
 from app.models.metadata import MetadataLanguageSettings
 from app.providers import ProviderError
 from app.trickplay import TrickplayExtractor
@@ -33,7 +32,9 @@ ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
 
 
 def _english_configured() -> bool:
-    return any(language_family(value) == "en" for value in MetadataLanguageSettings().get())
+    return any(
+        language_family(value) == "en" for value in MetadataLanguageSettings().get()
+    )
 
 
 def now() -> str:
@@ -517,7 +518,12 @@ class JobStore:
         )
         self._replace_triggers(
             definition_id,
-            [{"type": "interval", "intervalSeconds": max(1, int(interval or 1440) * 60)}],
+            [
+                {
+                    "type": "interval",
+                    "intervalSeconds": max(1, int(interval or 1440) * 60),
+                }
+            ],
         )
         return self.definition(definition_id)  # type: ignore[return-value]
 
@@ -621,11 +627,16 @@ class JobStore:
             return {"type": "startup"}
         raise ValueError("Unsupported schedule trigger")
 
-    def _next_for_trigger(self, trigger: dict, base: datetime | None = None) -> str | None:
+    def _next_for_trigger(
+        self, trigger: dict, base: datetime | None = None
+    ) -> str | None:
         if trigger["type"] == "startup":
             return None
         if trigger["type"] == "interval":
-            return ((base or datetime.now(timezone.utc)) + timedelta(seconds=trigger["intervalSeconds"])).isoformat()
+            return (
+                (base or datetime.now(timezone.utc))
+                + timedelta(seconds=trigger["intervalSeconds"])
+            ).isoformat()
         if trigger["type"] == "daily":
             return _local_next(trigger["time"])
         return _local_next(trigger["time"], trigger["weekday"])
@@ -639,7 +650,9 @@ class JobStore:
             for trigger in triggers
         ]
         timestamp = now()
-        self.db.execute("DELETE FROM job_schedule_triggers WHERE definition_id=?", (definition_id,))
+        self.db.execute(
+            "DELETE FROM job_schedule_triggers WHERE definition_id=?", (definition_id,)
+        )
         for trigger in validated:
             self.db.execute(
                 "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",

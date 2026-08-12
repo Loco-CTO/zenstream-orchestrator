@@ -2855,12 +2855,12 @@ class LibraryJobControlTest(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def test_scan_and_reconcile_share_one_active_library_task(self):
+    def test_scan_and_reconcile_use_independent_library_lanes(self):
         scan = self.runtime.enqueue("library-1", "scan")
         reconcile = self.runtime.enqueue("library-1", "reconcile")
 
-        self.assertEqual(scan["id"], reconcile["id"])
-        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM library_jobs")[0][0], 1)
+        self.assertNotEqual(scan["id"], reconcile["id"])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM library_jobs")[0][0], 2)
 
     def test_queued_library_task_can_be_terminated(self):
         job = self.runtime.enqueue("library-1", "scan")
@@ -2879,7 +2879,7 @@ class LibraryJobControlTest(unittest.TestCase):
     def test_restart_requeues_newest_active_job_and_resets_transient_state(self):
         running = self.runtime.enqueue("library-1", "scan")
         queued = self.runtime.enqueue("library-1", "reconcile")
-        self.assertEqual(running["id"], queued["id"])
+        self.assertNotEqual(running["id"], queued["id"])
         self.db.execute(
             "UPDATE library_jobs SET state='running',progress_current=4,progress_total=10,started_at='before',finished_at='old',message='Working' WHERE id=?",
             (running["id"],),
@@ -2905,6 +2905,12 @@ class LibraryJobControlTest(unittest.TestCase):
                 0
             ],
             "idle",
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT state FROM library_jobs WHERE id=?", (queued["id"],)
+            )[0][0],
+            "queued",
         )
 
     def test_restart_terminates_explicitly_terminating_jobs(self):

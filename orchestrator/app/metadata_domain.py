@@ -85,7 +85,13 @@ class MetadataImage:
     height: int = 0
 
 
-def image_language_rank(image: dict, requested: str, original: str | None) -> int:
+def image_language_rank(
+    image: dict,
+    requested: str,
+    original: str | None,
+    *,
+    include_english: bool = True,
+) -> int:
     language = str(image.get("language") or "").lower()
     requested = str(requested or "").lower()
     if language == requested:
@@ -94,9 +100,9 @@ def image_language_rank(image: dict, requested: str, original: str | None) -> in
         return 1
     if not language:
         return 2
-    if language == "en":
+    if include_english and language == "en":
         return 3
-    if language_family(language) == "en":
+    if include_english and language_family(language) == "en":
         return 4
     if original and language == str(original).lower():
         return 5
@@ -111,8 +117,17 @@ def choose_artwork(
     image_type: str,
     original: str | None,
     providers: list[str],
+    *,
+    include_english: bool = True,
 ) -> dict | None:
-    ranked = rank_artwork_candidates(images, requested, image_type, original, providers)
+    ranked = rank_artwork_candidates(
+        images,
+        requested,
+        image_type,
+        original,
+        providers,
+        include_english=include_english,
+    )
     return ranked[0] if ranked else None
 
 
@@ -122,6 +137,8 @@ def rank_artwork_candidates(
     image_type: str,
     original: str | None,
     providers: list[str],
+    *,
+    include_english: bool = True,
 ) -> list[dict]:
     """Return provider-ordered artwork candidates for one locale/category.
 
@@ -139,7 +156,12 @@ def rank_artwork_candidates(
     for index, image in enumerate(images):
         if not isinstance(image, dict) or image.get("type") != image_type:
             continue
-        language_rank = image_language_rank(image, requested, original)
+        language_rank = image_language_rank(
+            image,
+            requested,
+            original,
+            include_english=include_english,
+        )
         if language_rank >= 99:
             continue
         url = image.get("url")

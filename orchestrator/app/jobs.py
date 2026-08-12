@@ -38,6 +38,27 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+def _local_next(time_text: str, weekday: int | None = None) -> str:
+    """Return the next server-local calendar occurrence as a UTC ISO instant."""
+    try:
+        hour, minute = (int(part) for part in time_text.split(":", 1))
+    except (TypeError, ValueError):
+        raise ValueError("time must be HH:mm")
+    if hour not in range(24) or minute not in range(60):
+        raise ValueError("time must be HH:mm")
+    local_now = datetime.now().astimezone()
+    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if weekday is not None:
+        if weekday not in range(7):
+            raise ValueError("weekday must be between 0 and 6")
+        candidate += timedelta(days=(weekday - candidate.weekday()) % 7)
+        if candidate <= local_now:
+            candidate += timedelta(days=7)
+    elif candidate <= local_now:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc).isoformat()
+
+
 def _usable_metadata_value(value) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
@@ -388,6 +409,30 @@ class JobStore:
             "updatedAt": row[14],
         }
 
+    def _with_triggers(self, definition: dict) -> dict:
+        try:
+            rows = self.db.execute(
+                "SELECT id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at "
+                "FROM job_schedule_triggers WHERE definition_id=? ORDER BY created_at",
+                (definition["id"],),
+            )
+        except Exception:
+            rows = []
+        triggers = []
+        for row in rows:
+            item = {"id": row[0], "type": row[1]}
+            if row[1] == "interval":
+                item["intervalSeconds"] = row[2]
+            elif row[1] == "daily":
+                item["time"] = row[3]
+            elif row[1] == "weekly":
+                item["weekday"] = row[4]
+                item["time"] = row[3]
+            item["nextRunAt"] = row[5]
+            triggers.append(item)
+        definition["triggers"] = triggers
+        return definition
+
     @staticmethod
     def _run(row) -> dict:
         return {
@@ -411,21 +456,21 @@ class JobStore:
         rows = self.db.execute(
             "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions ORDER BY name COLLATE NOCASE"
         )
-        return [self._definition(row) for row in rows]
+        return [self._with_triggers(self._definition(row)) for row in rows]
 
     def definition(self, definition_id: str) -> dict | None:
         rows = self.db.execute(
             "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE id=?",
             (definition_id,),
         )
-        return self._definition(rows[0]) if rows else None
+        return self._with_triggers(self._definition(rows[0])) if rows else None
 
     def by_key(self, key: str) -> dict | None:
         rows = self.db.execute(
             "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE job_key=?",
             (key,),
         )
-        return self._definition(rows[0]) if rows else None
+        return self._with_triggers(self._definition(rows[0])) if rows else None
 
     def ensure(
         self,
@@ -461,6 +506,10 @@ class JobStore:
                 timestamp,
                 timestamp,
             ),
+        )
+        self._replace_triggers(
+            definition_id,
+            [{"type": "interval", "intervalSeconds": max(1, int(interval or 1440) * 60)}],
         )
         return self.definition(definition_id)  # type: ignore[return-value]
 
@@ -543,6 +592,56 @@ class JobStore:
         )
         return self.definition(definition["id"])  # type: ignore[return-value]
 
+    @staticmethod
+    def _validate_trigger(trigger: dict) -> dict:
+        trigger_type = str(trigger.get("type", "")).strip().lower()
+        if trigger_type == "interval":
+            seconds = int(trigger.get("intervalSeconds", 0))
+            if not 1 <= seconds <= 2_592_000:
+                raise ValueError("intervalSeconds must be between 1 and 2592000")
+            return {"type": "interval", "intervalSeconds": seconds}
+        if trigger_type == "daily":
+            value = str(trigger.get("time", ""))
+            _local_next(value)
+            return {"type": "daily", "time": value}
+        if trigger_type == "weekly":
+            value = str(trigger.get("time", ""))
+            weekday = int(trigger.get("weekday", -1))
+            _local_next(value, weekday)
+            return {"type": "weekly", "weekday": weekday, "time": value}
+        if trigger_type == "startup":
+            return {"type": "startup"}
+        raise ValueError("Unsupported schedule trigger")
+
+    def _next_for_trigger(self, trigger: dict, base: datetime | None = None) -> str | None:
+        if trigger["type"] == "startup":
+            return None
+        if trigger["type"] == "interval":
+            return ((base or datetime.now(timezone.utc)) + timedelta(seconds=trigger["intervalSeconds"])).isoformat()
+        if trigger["type"] == "daily":
+            return _local_next(trigger["time"])
+        return _local_next(trigger["time"], trigger["weekday"])
+
+    def _replace_triggers(self, definition_id: str, triggers: list[dict]) -> None:
+        validated = [self._validate_trigger(trigger) for trigger in triggers]
+        timestamp = now()
+        self.db.execute("DELETE FROM job_schedule_triggers WHERE definition_id=?", (definition_id,))
+        for trigger in validated:
+            self.db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    new_id(),
+                    definition_id,
+                    trigger["type"],
+                    trigger.get("intervalSeconds"),
+                    trigger.get("time"),
+                    trigger.get("weekday"),
+                    self._next_for_trigger(trigger),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+
     def update_definition(self, definition_id: str, values: dict) -> dict:
         definition = self.definition(definition_id)
         if not definition:
@@ -559,6 +658,14 @@ class JobStore:
         enabled = int(bool(values.get("enabled", definition["enabled"])))
         name = str(values.get("name", definition["name"])).strip() or definition["name"]
         config = values.get("config", definition["config"])
+        if "triggers" in values:
+            triggers = values.get("triggers") or []
+            self._replace_triggers(definition_id, triggers)
+        elif "intervalMinutes" in values:
+            self._replace_triggers(
+                definition_id,
+                [{"type": "interval", "intervalSeconds": interval * 60}],
+            )
         self.db.execute(
             "UPDATE job_definitions SET name=?,interval_minutes=?,enabled=?,config=?,next_run_at=?,updated_at=? WHERE id=?",
             (
@@ -566,9 +673,10 @@ class JobStore:
                 interval,
                 enabled,
                 json.dumps(config or {}, ensure_ascii=False),
-                (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
-                if enabled
-                else None,
+                min(
+                    (trigger["nextRunAt"] for trigger in self._with_triggers(self._definition(self.db.execute("SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE id=?", (definition_id,))[0]))["triggers"] if trigger["nextRunAt"]),
+                    default=None,
+                ) if enabled else None,
                 now(),
                 definition_id,
             ),

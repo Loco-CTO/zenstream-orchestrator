@@ -65,8 +65,6 @@ def _watcher_task(library: dict, limit: int = 10) -> dict:
         "name": f"Watch {library['name']}",
         "description": "Automatic filesystem watcher reconciliation history.",
         "kind": "library_watch",
-        "intervalMinutes": 0,
-        "enabled": bool(library.get("watchEnabled", True)),
         "nextRunAt": None,
         "lastRunAt": (
             (latest.get("finishedAt") or latest.get("createdAt"))

@@ -61,6 +61,9 @@ export type Job = {
 	config?: Record<string, unknown>;
 	triggers: JobTrigger[];
 	optionDefinitions: JobOptionDefinition[];
+	/** @deprecated legacy fields are omitted by the API */
+	intervalMinutes?: number;
+	enabled?: boolean;
 	recentRuns: Run[];
 	historyOnly: boolean;
 };

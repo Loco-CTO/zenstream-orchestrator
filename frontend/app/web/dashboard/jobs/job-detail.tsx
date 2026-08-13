@@ -401,7 +401,7 @@ export default function JobDetailPage() {
 						padding: "12px 14px",
 					}}
 				>
-					<div
+						<div
 						style={{
 							display: "flex",
 							justifyContent: "space-between",
@@ -685,11 +685,11 @@ export default function JobDetailPage() {
 							))
 						)}
 					</div>
-					<div
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 18,
+						{false && <div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								gap: 18,
 							marginTop: 16,
 							padding: "12px 2px",
 							color: "#777",
@@ -740,15 +740,12 @@ export default function JobDetailPage() {
 								Preserve cached assets
 							</label>
 						)}
-					</div>
+					</div>}
 					<div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
-						<Btn onClick={() => void save()}>
-							{saving ? "Saving…" : "Save settings"}
-						</Btn>
 						<Btn
 							variant="ghost"
 							icon={<IconPlayerPlay size={14} />}
-							onClick={() => void runNow()}
+							onClick={openRunNow}
 						>
 							{activeRun ? "Task active" : "Run now"}
 						</Btn>
@@ -780,7 +777,7 @@ export default function JobDetailPage() {
 							color: stateColor[selected.lastState] ? undefined : "#666",
 						}}
 					>
-						{selected.enabled ? selected.lastState : "paused"}
+						{selected.historyOnly ? selected.lastState : selected.triggers?.length ? selected.lastState : "paused"}
 					</span>
 				</div>
 				{selected.recentRuns?.slice(0, 8).map((run) => (

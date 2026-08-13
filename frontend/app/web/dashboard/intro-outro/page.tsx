@@ -13,8 +13,7 @@ import {
 
 type Task = {
 	id: string;
-	enabled: boolean;
-	intervalMinutes: number;
+	triggers?: { type: string; intervalSeconds?: number; time?: string }[];
 	lastState?: string;
 	lastMessage?: string | null;
 	nextRunAt?: string | null;
@@ -331,11 +330,11 @@ export default function IntroOutroPage() {
 					<div className="mt-3 space-y-2 text-sm">
 						<p>
 							<span className="console-muted">Status: </span>
-							{task.enabled ? task.lastState || "idle" : "paused"}
+							{task.triggers?.length ? task.lastState || "idle" : "paused"}
 						</p>
 						<p>
-							<span className="console-muted">Cadence: </span>every{" "}
-							{task.intervalMinutes} minutes
+							<span className="console-muted">Schedule: </span>
+							{task.triggers?.length ? task.triggers.map((trigger) => trigger.type === "interval" ? `every ${Math.round((trigger.intervalSeconds || 0) / 60)} minutes` : trigger.type).join(", ") : "disabled (no triggers)"}
 						</p>
 						{task.lastMessage && <p className="console-muted">{task.lastMessage}</p>}
 						{task.nextRunAt && (

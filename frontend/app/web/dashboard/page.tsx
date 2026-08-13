@@ -16,7 +16,7 @@ type Task = {
 	name: string;
 	lastState: string;
 	lastMessage?: string | null;
-	enabled: boolean;
+	triggers?: unknown[];
 	recentRuns?: Run[];
 };
 
@@ -242,7 +242,7 @@ export default function DashboardOverview() {
 											<div style={{ fontSize: 11, color: "#777", marginTop: 2 }}>
 												{activeRun
 													? activeRun.message || activeRun.state
-													: `Last state ${task.enabled ? task.lastState : "paused"}`}
+									: `Last state ${task.triggers?.length ? task.lastState : "paused"}`}
 											</div>
 											{activeRun && detail && detail !== activeRun.message && (
 												<div

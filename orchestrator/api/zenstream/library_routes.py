@@ -771,12 +771,14 @@ async def list_jobs(
     values = []
     for definition in definitions:
         recent = scheduler.store.runs(definition["id"], 10)
+        summary = None
         if definition["kind"] == "library_scan":
             recent = scheduler.store.library_runs(
                 (definition.get("config") or {}).get("libraryId"),
                 10,
                 kinds=FULL_LIBRARY_RUN_KINDS,
             )
+            summary = _full_scan_summary(definition, recent)
         current = next(
             (
                 run
@@ -785,21 +787,16 @@ async def list_jobs(
             ),
             None,
         )
-        displayed_state = current["state"] if current else definition["lastState"]
-        if (
-            definition["kind"] == "library_scan"
-            and current is None
-            and displayed_state in {"queued", "running", "terminating"}
-        ):
-            displayed_state = recent[0]["state"] if recent else "idle"
         values.append(
             {
                 **definition,
                 "historyOnly": False,
-                "lastState": displayed_state,
-                "lastMessage": (current.get("message") or current.get("error"))
-                if current
-                else definition["lastMessage"],
+                **(summary or {
+                    "lastState": current["state"] if current else definition["lastState"],
+                    "lastMessage": (current.get("message") or current.get("error"))
+                    if current
+                    else definition["lastMessage"],
+                }),
                 "recentRuns": recent,
             }
         )
@@ -832,7 +829,12 @@ async def get_scheduled_job(
         if definition["kind"] == "library_scan"
         else scheduler.store.runs(job_id, 50)
     )
-    return {**definition, "recentRuns": recent, "historyOnly": False}
+    summary = (
+        _full_scan_summary(definition, recent)
+        if definition["kind"] == "library_scan"
+        else {}
+    )
+    return {**definition, **summary, "recentRuns": recent, "historyOnly": False}
 
 
 @router.patch("/jobs/{job_id}")

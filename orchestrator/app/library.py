@@ -163,6 +163,17 @@ ACTIVE_JOB_STATES = ("queued", "running", "terminating")
 logger = get_logger("library")
 
 
+def _path_key(value: str | os.PathLike[str]) -> str:
+    """Return a platform-aware stable key for relative filesystem paths."""
+
+    normalized = os.path.normcase(str(value).replace("\\", "/"))
+    return normalized.replace("\\", "/").strip("/")
+
+
+def _top_level_key(value: str | os.PathLike[str]) -> str:
+    return _path_key(value).split("/", 1)[0]
+
+
 class FairMetadataExecutor:
     """Bound metadata root work globally and rotate admission across libraries."""
 
@@ -814,6 +825,7 @@ class LibraryScanner:
         self._scan_provider_identity_changed: set[str] = set()
         self._scan_rejected_ids: set[str] = set()
         self._scan_reconciled_ids: set[str] = set()
+        self._scan_deferred_roots: set[str] = set()
         self._scan_refresh_root_ids: set[str] = set()
         self._scan_complete = False
         self._stage_lock = threading.RLock()
@@ -921,6 +933,7 @@ class LibraryScanner:
         self._scan_provider_identity_changed = set()
         self._scan_rejected_ids = set()
         self._scan_reconciled_ids = set()
+        self._scan_deferred_roots = set()
         self._scan_refresh_root_ids = set()
         self._last_stage_persisted_at = 0.0
         self._scan_complete = False
@@ -1171,23 +1184,20 @@ class LibraryScanner:
             (library_id,),
         )
         missing = []
-        normalized_targets = {
-            str(target).replace("\\", "/").strip("/").casefold()
-            for target in (targets or set())
-        }
+        normalized_targets = {_top_level_key(target) for target in (targets or set())}
         for entity_id, relative_path in rows:
             if entity_id in self._scan_seen_ids:
                 continue
             if normalized_targets:
-                normalized_path = (
-                    str(relative_path or "").replace("\\", "/").strip("/").casefold()
-                )
+                normalized_path = _path_key(relative_path or "")
                 if not any(
                     normalized_path == target
                     or normalized_path.startswith(target + "/")
                     for target in normalized_targets
                 ):
                     continue
+            if _top_level_key(relative_path or "") in self._scan_deferred_roots:
+                continue
             # A complete traversal is required before pruning. Existing paths
             # that were not classifiable are deliberately retained.
             if legacy_without_library_root:
@@ -1221,6 +1231,17 @@ class LibraryScanner:
         )
         if rows:
             self._scan_rejected_ids.add(rows[0][0])
+
+    def _defer_root(self, relative_path: str, reason: str) -> None:
+        root = _top_level_key(relative_path)
+        if not root:
+            return
+        self._scan_deferred_roots.add(root)
+        logger.warning(
+            "library scan deferred inaccessible root root=%s reason=%s",
+            relative_path,
+            reason,
+        )
 
     def _entity_closure(self, entity_ids: Iterable[str]) -> list[str]:
         roots = list(dict.fromkeys(entity_ids))
@@ -1278,7 +1299,22 @@ class LibraryScanner:
                 for entity_id, relative_path in rows
                 if relative_path
                 and Path(relative_path).parts
-                and Path(relative_path).parts[0] in targets
+                and _top_level_key(relative_path)
+                in {_top_level_key(target) for target in targets}
+                and _top_level_key(relative_path)
+                not in self._scan_deferred_roots
+            }
+        elif rejected:
+            rows = self.db.execute(
+                "SELECT id,relative_path FROM library_entities WHERE id IN (%s)"
+                % ",".join("?" for _ in rejected),
+                list(rejected),
+            )
+            rejected = {
+                entity_id
+                for entity_id, relative_path in rows
+                if _top_level_key(relative_path or "")
+                not in self._scan_deferred_roots
             }
         closure = self._entity_closure(rejected)
         if not closure:
@@ -1449,7 +1485,9 @@ class LibraryScanner:
                 targets is None
                 or bool(row[2])
                 and Path(row[2]).parts
-                and Path(row[2]).parts[0] in targets
+                and _top_level_key(row[2])
+                in {_top_level_key(target) for target in targets}
+                and _top_level_key(row[2]) not in self._scan_deferred_roots
             )
         ]
         old_by_key: dict[tuple[str, str], list[str]] = {}
@@ -3331,9 +3369,26 @@ class LibraryScanner:
                 )
 
     @staticmethod
-    def _walk_file_entries(directory: Path):
+    def _video_state(
+        path: Path, file_stat: os.stat_result | None = None
+    ) -> str:
+        """Classify a video candidate without mistaking access failure for absence."""
+
+        if path.suffix.lower() not in VIDEO_EXTENSIONS:
+            return "unsupported"
+        if path.is_symlink():
+            return "unsupported"
+        try:
+            value = file_stat if file_stat is not None else path.stat()
+        except OSError:
+            return "inaccessible"
+        return "supported" if stat.S_ISREG(value.st_mode) else "unsupported"
+
+    def _walk_file_entries(self, directory: Path):
+        traversal_errors: list[Path] = []
+
         def traversal_error(error):
-            raise error
+            traversal_errors.append(Path(getattr(error, "filename", None) or directory))
 
         for current, _directories, filenames in os.walk(
             directory, onerror=traversal_error
@@ -3361,6 +3416,10 @@ class LibraryScanner:
                         stat_seconds,
                     )
                 yield path, file_stat
+        for path in traversal_errors:
+            # Preserve the root when a directory itself could not be traversed;
+            # callers defer that root instead of treating it as empty.
+            yield path, None
 
     @staticmethod
     def _target_entries(root: Path, targets: set[str] | None) -> list[Path]:
@@ -3373,17 +3432,11 @@ class LibraryScanner:
                 entries.append(candidate)
         return entries
 
-    @staticmethod
+    @classmethod
     def _is_supported_video(
-        path: Path, file_stat: os.stat_result | None = None
+        cls, path: Path, file_stat: os.stat_result | None = None
     ) -> bool:
-        if path.suffix.lower() not in VIDEO_EXTENSIONS:
-            return False
-        try:
-            value = file_stat if file_stat is not None else path.stat()
-            return stat.S_ISREG(value.st_mode)
-        except OSError:
-            return False
+        return cls._video_state(path, file_stat) == "supported"
 
     def _series_episode_plan(
         self,

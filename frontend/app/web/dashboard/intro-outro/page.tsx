@@ -97,7 +97,7 @@ export default function IntroOutroPage() {
 	const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
 		setSettings((current) => ({ ...current, [key]: value }));
 	const load = useCallback(
-		async (current: Session | null = session) => {
+		async (current: Session | null) => {
 			if (!current) return;
 			const response = await adminFetch(
 				"/api/admin/intro-outro/settings",
@@ -108,7 +108,7 @@ export default function IntroOutroPage() {
 			setSettings({ ...defaults, ...value });
 			setTask(value.task || null);
 		},
-		[session],
+		[],
 	);
 	useEffect(() => {
 		const current = readSession();
@@ -138,7 +138,7 @@ export default function IntroOutroPage() {
 				: "Could not save settings.",
 		);
 		setSaving(false);
-		if (response.ok) void load();
+		if (response.ok) void load(session);
 	}
 	async function runNow() {
 		if (!session || !task) return;
@@ -148,7 +148,7 @@ export default function IntroOutroPage() {
 		setMessage(
 			response.ok ? "Detection task queued." : "Could not queue detection.",
 		);
-		void load();
+		void load(session);
 	}
 	async function clearDetected() {
 		if (!session) return;
@@ -183,7 +183,7 @@ export default function IntroOutroPage() {
 				description="Compare raw Chromaprint audio points across episodes. Each episode keeps its own matching timestamps."
 				actions={
 					<button
-						onClick={() => void load()}
+						onClick={() => void load(session)}
 						className="material-icon-button"
 						aria-label="Refresh"
 					>

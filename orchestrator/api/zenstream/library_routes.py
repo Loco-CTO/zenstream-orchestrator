@@ -93,6 +93,33 @@ def _require_mutable_task(job_id: str) -> None:
         raise HTTPException(409, "Watcher history tasks cannot be configured or started.")
 
 
+def _full_scan_summary(definition: dict, recent: list[dict]) -> dict:
+    """Project a library-scan definition from full-lane runs only."""
+    current = next(
+        (
+            run
+            for run in recent
+            if run["state"] in {"queued", "running", "terminating"}
+        ),
+        None,
+    )
+    latest = recent[0] if recent else None
+    return {
+        "lastRunAt": (
+            (latest.get("finishedAt") or latest.get("createdAt"))
+            if latest
+            else None
+        ),
+        "lastRunId": latest.get("id") if latest else None,
+        "lastState": current["state"] if current else (latest["state"] if latest else "idle"),
+        "lastMessage": (
+            (current.get("message") or current.get("error"))
+            if current
+            else ((latest.get("message") or latest.get("error")) if latest else None)
+        ),
+    }
+
+
 def _trickplay_asset(entity_id: str) -> dict | None:
     tables = {
         row[0]

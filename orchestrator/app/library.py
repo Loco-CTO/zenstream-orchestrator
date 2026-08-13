@@ -846,6 +846,11 @@ class LibraryStore:
             "progress_stage_unit",
             "progress_current_item",
         }
+        try:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")}
+            allowed = {key for key in allowed if key in columns}
+        except Exception:
+            pass
         updates = [(key, value) for key, value in values.items() if key in allowed]
         if not updates:
             return

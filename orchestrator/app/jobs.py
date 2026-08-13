@@ -1039,6 +1039,11 @@ class JobStore:
             "progress_stage_unit",
             "progress_current_item",
         }
+        try:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}
+            allowed = {key for key in allowed if key in columns}
+        except Exception:
+            pass
         updates = [(key, value) for key, value in values.items() if key in allowed]
         if updates:
             fields = ",".join(f"{key}=?" for key, _ in updates)

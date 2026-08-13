@@ -481,7 +481,13 @@ class JobStore:
                 (definition["id"],),
             )
         except Exception:
-            rows = []
+            try:
+                rows = self.db.execute(
+                    "SELECT id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,NULL FROM job_schedule_triggers WHERE definition_id=? ORDER BY created_at",
+                    (definition["id"],),
+                )
+            except Exception:
+                rows = []
         triggers = []
         for row in rows:
             item = {"id": row[0], "type": row[1]}
@@ -848,6 +854,38 @@ class JobStore:
                     "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (trigger["id"], definition_id, trigger["type"], trigger.get("intervalSeconds"), trigger.get("time"), trigger.get("weekday"), self._next_for_trigger(trigger), timestamp, timestamp),
                 )
+
+    def add_trigger(self, definition_id: str, trigger: dict) -> dict:
+        definition = self.definition(definition_id)
+        if not definition:
+            raise KeyError("Job definition not found")
+        validated = self._validate_trigger(trigger)
+        validated["options"] = self.validate_options(definition["kind"], trigger.get("options"))
+        trigger_id = str(trigger.get("id") or new_id())
+        timestamp = now()
+        try:
+            self.db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,options,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (trigger_id, definition_id, validated["type"], validated.get("intervalSeconds"), validated.get("time"), validated.get("weekday"), self._next_for_trigger(validated), json.dumps(validated["options"], ensure_ascii=False), timestamp, timestamp),
+            )
+        except Exception:
+            self.db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (trigger_id, definition_id, validated["type"], validated.get("intervalSeconds"), validated.get("time"), validated.get("weekday"), self._next_for_trigger(validated), timestamp, timestamp),
+            )
+        self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (self._earliest_next(definition_id), timestamp, definition_id))
+        return self.definition(definition_id)  # type: ignore[return-value]
+
+    def remove_trigger(self, definition_id: str, trigger_id: str) -> dict:
+        definition = self.definition(definition_id)
+        if not definition:
+            raise KeyError("Job definition not found")
+        exists = self.db.execute("SELECT 1 FROM job_schedule_triggers WHERE id=? AND definition_id=?", (trigger_id, definition_id))
+        if not exists:
+            raise KeyError("Trigger not found")
+        self.db.execute("DELETE FROM job_schedule_triggers WHERE id=? AND definition_id=?", (trigger_id, definition_id))
+        self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (self._earliest_next(definition_id), now(), definition_id))
+        return self.definition(definition_id)  # type: ignore[return-value]
 
     def _earliest_next(self, definition_id: str) -> str | None:
         try:
@@ -1874,13 +1912,15 @@ class JobScheduler:
 
     def _execute(self, run_id: str):
         try:
+            columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(job_runs)")}
+            snapshot = ",r.options" if "options" in columns else ",NULL"
             rows = self.store.db.execute(
-                "SELECT r.id,r.definition_id,d.kind,d.config,d.name FROM job_runs r JOIN job_definitions d ON d.id=r.definition_id WHERE r.id=?",
+                f"SELECT r.id,r.definition_id,d.kind,d.config,d.name{snapshot} FROM job_runs r JOIN job_definitions d ON d.id=r.definition_id WHERE r.id=?",
                 (run_id,),
             )
             if not rows:
                 return
-            _, definition_id, kind, config_text, name = rows[0]
+            _, definition_id, kind, config_text, name, options_text = rows[0]
             try:
                 config = json.loads(config_text or "{}")
             except json.JSONDecodeError:
@@ -1891,19 +1931,22 @@ class JobScheduler:
                 "config": config,
                 "name": name,
             }
+            try:
+                run_options = json.loads(options_text or "{}")
+            except (TypeError, json.JSONDecodeError):
+                run_options = {}
             self.store.begin_progress(run_id, kind)
             if kind == "metadata_missing":
                 MetadataMissingJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
             elif kind == "metadata_refresh":
-                config = definition.get("config") or {}
                 MetadataMissingJob(self.store).run(
                     run_id,
                     definition,
                     self.cancel_events[run_id].is_set,
                     force=True,
-                    force_assets=not bool(config.get("preserveCachedAssets", False)),
+                    force_assets=not bool(run_options.get("preserveCachedAssets", False)),
                 )
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(

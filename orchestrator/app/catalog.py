@@ -1183,12 +1183,22 @@ class Catalog:
         dates: dict[str, dict] | None = None,
     ) -> list[dict]:
         self._seed_hydration_rows(user_id, rows, language)
+        series_names: dict[str, str] = {}
+
+        def episode_series_name(row) -> str | None:
+            if row[3] != "episode" or not row[2]:
+                return None
+            season = self._entity_row(row[2])
+            series_id = season[2] if season else None
+            return self._home_series_name(user_id, language, series_id, series_names)
+
         return [
             self._serialize(
                 user_id,
                 row,
                 self.metadata(user_id, row[0], language)["metadata"],
                 dates=(dates or {}).get(row[0]),
+                series_name=episode_series_name(row),
                 language=language,
             )
             for row in rows

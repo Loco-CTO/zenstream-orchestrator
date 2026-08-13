@@ -119,6 +119,46 @@ class CatalogTest(unittest.TestCase):
 
         self.assertEqual(result["cast"][0]["name"], "Legacy Actor")
 
+    def test_hydrated_episode_rows_include_the_parent_series_name(self):
+        catalog = self.catalog()
+        account_id = "user-1"
+        episode_row = (
+            "episode-1",
+            "allowed",
+            "season-1",
+            "episode",
+            "Episode.mkv",
+            1,
+            1,
+            None,
+            "2026",
+            "2026",
+        )
+        with patch.object(
+            catalog,
+            "_entity_row",
+            return_value=(
+                "season-1",
+                "allowed",
+                "series-1",
+                "season",
+                "Season",
+                1,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        ), patch.object(
+            catalog, "_series_metadata", return_value={"title": "Example Series"}
+        ), patch.object(
+            catalog, "metadata", return_value={"metadata": {"title": "Pilot"}}
+        ):
+            value = catalog._hydrate_rows(account_id, [episode_row], "en")[0]
+
+        self.assertEqual("Example Series", value["seriesName"])
+        self.assertEqual("series-1", value["seriesId"])
+
     def seed_series_hierarchy(self):
         account = self.account().create("series", "password-123")
         self.db.execute(

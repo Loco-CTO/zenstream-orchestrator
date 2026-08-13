@@ -115,7 +115,12 @@ def resolve_progress_item(db, entity_id: str | None, fallback: Any = None) -> st
             if series_title:
                 number = f"S{int(season_number):02d}E{int(episode_number):02d}" if season_number is not None and episode_number is not None else None
                 return sanitize_progress_item(" — ".join(value for value in (series_title, number, episode_title) if value)) or "episode"
-        return sanitize_progress_item(title or fallback_label or relative_path or entity_id) or "item"
+        relative_label = (
+            re.split(r"[\\/]", str(relative_path).rstrip("\\/"))[-1]
+            if relative_path
+            else None
+        )
+        return sanitize_progress_item(title or fallback_label or relative_label or entity_id) or "item"
     except Exception:
         return fallback_label or sanitize_progress_item(entity_id) or "item"
 

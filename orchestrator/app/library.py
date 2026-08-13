@@ -940,7 +940,7 @@ class LibraryScanner:
             state="running",
             started_at=started,
             message=(
-                f"Reconciling changed {('series' if library['type'] == 'tv_series' else 'movie')} roots ({len(targets)} roots)"
+                f"Reconciling changed {({'tv_series': 'series', 'movies': 'movie', 'music': 'music'}.get(library['type'], library['type']))} roots ({len(targets)} roots)"
                 if targets is not None
                 else "Discovering media"
             ),

@@ -1628,13 +1628,11 @@ class CatalogTest(unittest.TestCase):
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (entity_id, "allowed", None, "movie", path, None, None, None, None, "2026", "2026"),
             )
-        self.db.executemany(
-            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
-            [
-                (user_id, "movie-old", 0, 0, 0, 1, 100, "2026-01-01", "2026-01-01"),
-                (user_id, "movie-new", 0, 0, 0, 0.1, 100, "2026-01-02", "2026-01-02"),
-            ],
-        )
+        for state in (
+            (user_id, "movie-old", 0, 0, 0, 1, 100, "2026-01-01", "2026-01-01"),
+            (user_id, "movie-new", 0, 0, 0, 0.1, 100, "2026-01-02", "2026-01-02"),
+        ):
+            self.db.execute("INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)", state)
         catalog = self.catalog()
         self.patch_catalog_metadata(catalog)
         self.assertEqual(

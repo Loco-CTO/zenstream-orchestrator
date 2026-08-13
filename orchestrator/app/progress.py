@@ -153,7 +153,7 @@ class ProgressReporter:
             safe = sanitize_progress_item(item) or "item"
             self.active = [value for value in self.active if value != safe]
             self.active.append(safe)
-            self._publish_locked(force=False)
+            self._publish_locked(force=self._last_emit < 0.001)
 
     def settle(self, item: Any = None, *, failed: bool = False, force: bool = False) -> None:
         with self.lock:

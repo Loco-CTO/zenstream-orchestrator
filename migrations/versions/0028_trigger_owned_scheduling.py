@@ -57,9 +57,9 @@ def upgrade() -> None:
         bind.execute(sa.text("""INSERT INTO job_definitions_new
             (id,job_key,name,description,kind,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at)
             SELECT id,job_key,name,description,kind,config,
-              (SELECT MIN(next_run_at) FROM job_schedule_triggers t WHERE t.definition_id=job_definitions.id AND t.next_run_at IS NOT NULL),
+              CASE WHEN enabled=1 THEN (SELECT MIN(next_run_at) FROM job_schedule_triggers t WHERE t.definition_id=job_definitions.id AND t.next_run_at IS NOT NULL) ELSE NULL END,
               last_run_at,last_run_id,last_state,last_message,created_at,updated_at
-            FROM job_definitions WHERE enabled=1"""))
+            FROM job_definitions"""))
         bind.execute(sa.text("DROP TABLE job_definitions"))
         bind.execute(sa.text("ALTER TABLE job_definitions_new RENAME TO job_definitions"))
         bind.execute(sa.text("CREATE INDEX IF NOT EXISTS idx_job_definitions_due ON job_definitions(next_run_at)"))

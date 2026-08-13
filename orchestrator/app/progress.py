@@ -366,8 +366,9 @@ class WholeJobProgress:
             denominator_changed = next_total != self._phase_total
             self._phase_total = next_total
             # A newly announced denominator starts a new phase-local counter.
-            # Later updates commonly provide only progress_current.
-            if not has_current:
+            # Later updates commonly provide only progress_current; repeated
+            # announcements of the same denominator must retain that counter.
+            if denominator_changed and not has_current:
                 self._phase_current = 0
         if has_current:
             try:

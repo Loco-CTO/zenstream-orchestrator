@@ -1067,12 +1067,17 @@ class MetadataMissingJob:
         )
         items = list(rows)
         total = len(items) * len(locales)
+        extractor_rows = self.db.execute(
+            "SELECT id,entity_type FROM library_entities "
+            "WHERE entity_type IN ('movie','episode') ORDER BY id"
+        )
+        extractor_total = len(extractor_rows)
         self.store.update_run(
             run_id,
             state="running",
             started_at=now(),
             thread_name=threading.current_thread().name,
-            progress_total=total,
+            progress_total=total + extractor_total,
             message=f"Processing 0/{total} metadata documents",
         )
 
@@ -1318,13 +1323,14 @@ class MetadataMissingJob:
         # after every real provider identity has been processed so a secondary
         # TMDB/TVDB Primary can displace a generated frame in the same pass.
         extractor_failures = []
+        artwork_entity_ids: set[str] = set()
         try:
+            from app.metadata_services import reproject_entity_artwork
             from app.screen_extractor import extract_entity
 
-            entity_rows = self.db.execute(
-                "SELECT id,entity_type FROM library_entities WHERE entity_type IN ('movie','episode') ORDER BY id"
-            )
-            for entity_id, entity_type in entity_rows:
+            for extractor_index, (entity_id, entity_type) in enumerate(
+                extractor_rows, start=1
+            ):
                 if should_terminate():
                     raise JobTerminated()
                 try:
@@ -1334,6 +1340,17 @@ class MetadataMissingJob:
                         entity_type,
                         force=False,
                         should_terminate=should_terminate,
+                    )
+                    reproject_entity_artwork(self.db, entity_id, locales)
+                    artwork_entity_ids.add(entity_id)
+                    self.store.update_run(
+                        run_id,
+                        progress_current=total + extractor_index,
+                        progress_total=total + extractor_total,
+                        message=(
+                            f"Extracting fallback artwork "
+                            f"{extractor_index}/{extractor_total}"
+                        ),
                     )
                 except Exception as error:
                     extractor_failures.append(
@@ -1354,10 +1371,22 @@ class MetadataMissingJob:
         try:
             from app.catalog_read_model import CatalogReadModel
 
-            roots = self.db.execute(
-                "SELECT id FROM library_entities WHERE entity_type IN ('movie','series','collection') AND parent_id IS NULL"
-            )
-            CatalogReadModel(self.db).refresh_roots([row[0] for row in roots])
+            roots = set()
+            for entity_id in artwork_entity_ids:
+                current = entity_id
+                seen = set()
+                while current and current not in seen:
+                    seen.add(current)
+                    rows = self.db.execute(
+                        "SELECT parent_id FROM library_entities WHERE id=?",
+                        (current,),
+                    )
+                    parent = rows[0][0] if rows else None
+                    if not parent:
+                        roots.add(current)
+                        break
+                    current = parent
+            CatalogReadModel(self.db).refresh_roots(sorted(roots))
         except Exception:
             logger.exception("screen extractor catalog refresh failed")
         if should_terminate():
@@ -1373,7 +1402,7 @@ class MetadataMissingJob:
                 run_id,
                 state="failed",
                 progress_current=completed,
-                progress_total=total,
+                progress_total=total + extractor_total,
                 finished_at=now(),
                 message=summary,
                 error=summary,
@@ -1398,7 +1427,7 @@ class MetadataMissingJob:
                 run_id,
                 state="completed",
                 progress_current=completed,
-                progress_total=total,
+                progress_total=total + extractor_total,
                 finished_at=now(),
                 message=summary,
             )

@@ -61,6 +61,23 @@ class DatabaseRollbackTest(unittest.TestCase):
 
 
 class WholeJobProgressTest(unittest.TestCase):
+    def test_scan_progress_retains_denominator_for_current_only_updates(self):
+        progress = WholeJobProgress("reconcile")
+        announced = progress.apply(
+            {
+                "state": "running",
+                "progress_total": 618,
+                "message": "Reconciling changed series roots (618 roots)",
+            }
+        )
+        indexed = progress.apply(
+            {"progress_current": 544, "message": "Indexing series 544/618"}
+        )
+
+        self.assertEqual(announced["progress_total"], PROGRESS_TOTAL)
+        self.assertGreater(indexed["progress_current"], announced["progress_current"])
+        self.assertEqual(indexed["progress_total"], PROGRESS_TOTAL)
+
     def test_progress_is_fixed_and_monotonic_across_stage_counter_resets(self):
         progress = WholeJobProgress("scan")
         first = progress.apply(

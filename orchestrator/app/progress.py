@@ -60,6 +60,8 @@ class WholeJobProgress:
         if kind in {"scan", "reconcile", "library_scan"}:
             if any(token in value for token in ("discover", "enumerat")):
                 return "discovery", ProgressRange(0, 1_000)
+            if "reconciling changed" in value:
+                return "processing", ProgressRange(1_000, 8_000)
             if any(
                 token in value
                 for token in (
@@ -148,11 +150,14 @@ class WholeJobProgress:
 
         has_current = "progress_current" in result
         has_total = "progress_total" in result
+        denominator_changed = False
         if has_total:
             try:
-                self._phase_total = float(result["progress_total"])
+                next_total = float(result["progress_total"])
             except (TypeError, ValueError):
-                self._phase_total = None
+                next_total = None
+            denominator_changed = next_total != self._phase_total
+            self._phase_total = next_total
             # A newly announced denominator starts a new phase-local counter.
             # Later updates commonly provide only progress_current.
             if not has_current:
@@ -169,7 +174,10 @@ class WholeJobProgress:
             )
             self.current = max(self.current, mapped)
             now = time.monotonic()
-            force = bool(result.get("state") in {"running", "failed", "terminated"})
+            force = bool(
+                result.get("state") in {"running", "failed", "terminated"}
+                or denominator_changed
+            )
             if (
                 not force
                 and self._last_persisted >= 0

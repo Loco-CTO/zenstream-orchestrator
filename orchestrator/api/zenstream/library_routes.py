@@ -34,10 +34,63 @@ from fastapi.responses import FileResponse, Response
 
 logger = get_logger("library_api")
 store = LibraryStore()
+WATCHER_TASK_PREFIX = "library_watch:"
+FULL_LIBRARY_RUN_KINDS = {"scan", "collection_rebuild"}
 credentials = MetadataCredentials()
 _admin_hydration: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "admin_catalog_hydration", default=None
 )
+
+
+def _watcher_task_id(library_id: str) -> str:
+    return f"{WATCHER_TASK_PREFIX}{library_id}"
+
+
+def _watcher_task(library: dict, limit: int = 10) -> dict:
+    recent = scheduler.store.library_runs(
+        library["id"], limit, kinds={"reconcile"}
+    )
+    current = next(
+        (
+            run
+            for run in recent
+            if run["state"] in {"queued", "running", "terminating"}
+        ),
+        None,
+    )
+    latest = recent[0] if recent else None
+    return {
+        "id": _watcher_task_id(library["id"]),
+        "key": _watcher_task_id(library["id"]),
+        "name": f"Watch {library['name']}",
+        "description": "Automatic filesystem watcher reconciliation history.",
+        "kind": "library_watch",
+        "intervalMinutes": 0,
+        "enabled": bool(library.get("watchEnabled", True)),
+        "nextRunAt": None,
+        "lastRunAt": (
+            (latest.get("finishedAt") or latest.get("createdAt"))
+            if latest
+            else None
+        ),
+        "lastState": current["state"] if current else (latest["state"] if latest else "idle"),
+        "lastMessage": (
+            (latest.get("message") or latest.get("error")) if latest else None
+        ),
+        "config": {"libraryId": library["id"]},
+        "triggers": [],
+        "recentRuns": recent,
+        "historyOnly": True,
+    }
+
+
+def _is_watcher_task_id(job_id: str) -> bool:
+    return job_id.startswith(WATCHER_TASK_PREFIX)
+
+
+def _require_mutable_task(job_id: str) -> None:
+    if _is_watcher_task_id(job_id):
+        raise HTTPException(409, "Watcher history tasks cannot be configured or started.")
 
 
 def _trickplay_asset(entity_id: str) -> dict | None:
@@ -693,19 +746,39 @@ async def list_jobs(
         recent = scheduler.store.runs(definition["id"], 10)
         if definition["kind"] == "library_scan":
             recent = scheduler.store.library_runs(
-                (definition.get("config") or {}).get("libraryId"), 10
+                (definition.get("config") or {}).get("libraryId"),
+                10,
+                kinds=FULL_LIBRARY_RUN_KINDS,
             )
-        current = recent[0] if recent else None
+        current = next(
+            (
+                run
+                for run in recent
+                if run["state"] in {"queued", "running", "terminating"}
+            ),
+            None,
+        )
+        displayed_state = current["state"] if current else definition["lastState"]
+        if (
+            definition["kind"] == "library_scan"
+            and current is None
+            and displayed_state in {"queued", "running", "terminating"}
+        ):
+            displayed_state = recent[0]["state"] if recent else "idle"
         values.append(
             {
                 **definition,
-                "lastState": current["state"] if current else definition["lastState"],
+                "historyOnly": False,
+                "lastState": displayed_state,
                 "lastMessage": (current.get("message") or current.get("error"))
                 if current
                 else definition["lastMessage"],
                 "recentRuns": recent,
             }
         )
+    for library in store.list():
+        if library["type"] != "collection":
+            values.append(_watcher_task(library, 10))
     return {"jobs": values}
 
 
@@ -714,17 +787,25 @@ async def get_scheduled_job(
     job_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
     require_admin(Username, TOKEN)
+    if _is_watcher_task_id(job_id):
+        library_id = job_id.removeprefix(WATCHER_TASK_PREFIX)
+        library = store.get(library_id)
+        if not library or library["type"] == "collection":
+            raise HTTPException(404, "Watcher task not found.")
+        return _watcher_task(library, 50)
     definition = scheduler.store.definition(job_id)
     if not definition:
         raise HTTPException(404, "Scheduled job not found.")
     recent = (
         scheduler.store.library_runs(
-            (definition.get("config") or {}).get("libraryId"), 50
+            (definition.get("config") or {}).get("libraryId"),
+            50,
+            kinds=FULL_LIBRARY_RUN_KINDS,
         )
         if definition["kind"] == "library_scan"
         else scheduler.store.runs(job_id, 50)
     )
-    return {**definition, "recentRuns": recent}
+    return {**definition, "recentRuns": recent, "historyOnly": False}
 
 
 @router.patch("/jobs/{job_id}")
@@ -735,6 +816,7 @@ async def update_scheduled_job(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
+    _require_mutable_task(job_id)
     try:
         return scheduler.store.update_definition(job_id, await request.json())
     except KeyError as error:
@@ -748,6 +830,7 @@ async def run_scheduled_job(
     job_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
     require_admin(Username, TOKEN)
+    _require_mutable_task(job_id)
     try:
         return scheduler.run_now(job_id)
     except KeyError as error:
@@ -762,13 +845,18 @@ async def terminate_scheduled_job(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
+    _require_mutable_task(job_id)
     definition = scheduler.store.definition(job_id)
     if not definition:
         raise HTTPException(404, "Scheduled job not found.")
     if definition["kind"] == "library_scan":
         library_id = (definition.get("config") or {}).get("libraryId")
         run = store.job(run_id)
-        if not run or run["libraryId"] != library_id:
+        if (
+            not run
+            or run["libraryId"] != library_id
+            or run["kind"] not in FULL_LIBRARY_RUN_KINDS
+        ):
             raise HTTPException(404, "Task run not found.")
         return runtime.terminate(run_id)
     run = scheduler.terminate(job_id, run_id)

@@ -2258,15 +2258,7 @@ class Catalog:
             f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders})",
             [user_id, *allowed],
         )
-        values = [
-            self._serialize(
-                user_id,
-                row,
-                self.metadata(user_id, row[0], language)["metadata"],
-                language=language,
-            )
-            for row in rows
-        ]
+        values = self._hydrate_rows(user_id, [row[:10] for row in rows], language)
         key = (
             (lambda value: value.get("dateAdded") or "")
             if sort_by.lower() in {"datecreated", "dateadded"}

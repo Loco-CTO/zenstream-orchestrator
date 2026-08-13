@@ -1,8 +1,19 @@
+export type ProgressDetail = {
+	stage?: string | null;
+	item?: string | null;
+	current?: number | null;
+	total?: number | null;
+	unit?: string | null;
+	active?: number | null;
+	failed?: number | null;
+};
+
 export type Run = {
 	id: string;
 	kind: string;
 	state: string;
 	message?: string | null;
+	progressDetail?: ProgressDetail | null;
 	error?: string | null;
 	createdAt: string;
 	startedAt?: string | null;
@@ -47,6 +58,27 @@ export type Job = {
 };
 
 export const activeStates = new Set(["queued", "running", "terminating"]);
+
+export function progressDetailText(detail?: ProgressDetail | null) {
+	if (!detail) return "";
+	const parts: string[] = [];
+	if (detail.stage) parts.push(detail.stage);
+	if (detail.item) parts.push(detail.item);
+	if (
+		typeof detail.current === "number" &&
+		typeof detail.total === "number" &&
+		detail.total > 0
+	) {
+		parts.push(
+			`${detail.current}/${detail.total}${detail.unit ? ` ${detail.unit}` : ""}`,
+		);
+	}
+	if (typeof detail.active === "number" && detail.active > 0)
+		parts.push(`${detail.active} active`);
+	if (typeof detail.failed === "number" && detail.failed > 0)
+		parts.push(`${detail.failed} failed`);
+	return parts.join(" · ");
+}
 
 export const stateColor: Record<string, string> = {
 	completed: "text-[#5ee3d8]",

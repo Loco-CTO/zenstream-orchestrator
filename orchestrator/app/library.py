@@ -743,8 +743,23 @@ class LibraryStore:
         return self.job(job_id)  # type: ignore[return-value]
 
     def job(self, job_id: str) -> dict | None:
+        try:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")}
+        except Exception:
+            columns = set()
+        detail_columns = [
+            name if name in columns else f"NULL AS {name}"
+            for name in (
+                "progress_phase",
+                "progress_label",
+                "progress_stage_current",
+                "progress_stage_total",
+                "progress_stage_unit",
+                "progress_current_item",
+            )
+        ]
         rows = self.db.execute(
-            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at FROM library_jobs WHERE id=?",
+            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at," + ",".join(detail_columns) + " FROM library_jobs WHERE id=?",
             (job_id,),
         )
         if not rows:
@@ -771,6 +786,7 @@ class LibraryStore:
             if has_queue
             else []
         )
+        detail_values = row[12:18]
         return {
             "id": row[0],
             "libraryId": row[1],
@@ -786,6 +802,18 @@ class LibraryStore:
             "finishedAt": row[11],
             "warningCount": int(failed_repairs[0][0]) if failed_repairs else 0,
             "repairPending": bool(pending_repairs and pending_repairs[0][0]),
+            "progressDetail": (
+                {
+                    "phase": detail_values[0] or "processing",
+                    "label": detail_values[1] or "Working",
+                    "current": detail_values[2],
+                    "total": detail_values[3],
+                    "unit": detail_values[4],
+                    "item": detail_values[5],
+                }
+                if any(value is not None for value in detail_values)
+                else None
+            ),
         }
 
     def jobs(self, library_id: str) -> list[dict]:
@@ -811,6 +839,12 @@ class LibraryStore:
             "error_details",
             "started_at",
             "finished_at",
+            "progress_phase",
+            "progress_label",
+            "progress_stage_current",
+            "progress_stage_total",
+            "progress_stage_unit",
+            "progress_current_item",
         }
         updates = [(key, value) for key, value in values.items() if key in allowed]
         if not updates:
@@ -934,13 +968,18 @@ class LibraryScanner:
         )
         self.store.begin_progress(job_id, progress_kind)
         started = now()
+        reconcile_root_label = {
+            "tv_series": "series",
+            "movies": "movie",
+            "music": "music",
+        }.get(library["type"], library["type"])
         self.store.set_scan_state(library_id, "scanning", started=started, error=None)
         self.store.update_job(
             job_id,
             state="running",
             started_at=started,
             message=(
-                f"Reconciling changed {({'tv_series': 'series', 'movies': 'movie', 'music': 'music'}.get(library['type'], library['type']))} roots ({len(targets)} roots)"
+                f"Reconciling changed {reconcile_root_label} roots ({len(targets)} roots)"
                 if targets is not None
                 else "Discovering media"
             ),

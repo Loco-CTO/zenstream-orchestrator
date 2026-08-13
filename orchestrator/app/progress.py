@@ -7,8 +7,11 @@ jobs.  It does not schedule work, claim items, or alter job state transitions.
 from __future__ import annotations
 
 import time
+import re
+import threading
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 PROGRESS_TOTAL = 10_000
 
@@ -17,6 +20,174 @@ PROGRESS_TOTAL = 10_000
 class ProgressRange:
     start: int
     end: int
+
+
+def sanitize_progress_item(value: Any, *, limit: int = 160) -> str | None:
+    """Return a compact, safe label suitable for an administrator status line."""
+    if value is None:
+        return None
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value)).strip()
+    if not text:
+        return None
+    # Absolute paths are intentionally reduced to their final relative-looking
+    # component.  Progress is observability, not a filesystem disclosure API.
+    try:
+        path = Path(text)
+        if path.is_absolute():
+            text = path.name or path.stem
+    except (TypeError, ValueError):
+        pass
+    text = re.sub(r"\s+", " ", text)
+    return text if len(text) <= limit else text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def format_progress_message(
+    label: str,
+    *,
+    item: Any = None,
+    current: int | None = None,
+    total: int | None = None,
+    unit: str | None = None,
+    detail: str | None = None,
+) -> str:
+    """Format a stable human-readable compatibility message."""
+    parts = [sanitize_progress_item(label, limit=96) or "Working"]
+    safe_item = sanitize_progress_item(item)
+    if safe_item:
+        parts.append(safe_item)
+    if current is not None and total is not None and total >= 0:
+        suffix = f"{max(0, int(current))}/{max(0, int(total))}"
+        if unit:
+            suffix += f" {sanitize_progress_item(unit, limit=48) or ''}".rstrip()
+        parts.append(suffix)
+    elif detail:
+        parts.append(sanitize_progress_item(detail, limit=96) or "")
+    return " · ".join(part for part in parts if part)
+
+
+def resolve_progress_item(db, entity_id: str | None, fallback: Any = None) -> str:
+    """Resolve a catalog title with a safe filename/provider fallback."""
+    fallback_label = sanitize_progress_item(Path(str(fallback)).name if fallback else None)
+    if not entity_id or db is None:
+        return fallback_label or "item"
+    try:
+        row = db.execute(
+            "SELECT entity_type,parent_id,season_number,episode_number,relative_path FROM library_entities WHERE id=?",
+            (entity_id,),
+        )
+        if not row:
+            return fallback_label or str(entity_id)
+        entity_type, parent_id, season_number, episode_number, relative_path = row[0]
+        title = None
+        projection = db.execute(
+            "SELECT payload FROM catalog_item_projection WHERE entity_id=? ORDER BY locale LIMIT 1",
+            (entity_id,),
+        )
+        if projection:
+            import json
+
+            try:
+                title = json.loads(projection[0][0]).get("title")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                title = None
+        if entity_type == "episode" and parent_id:
+            series_title = None
+            season_row = db.execute(
+                "SELECT parent_id FROM library_entities WHERE id=?", (parent_id,)
+            )
+            series_id = season_row[0][0] if season_row else None
+            if series_id:
+                series_projection = db.execute(
+                    "SELECT payload FROM catalog_item_projection WHERE entity_id=? ORDER BY locale LIMIT 1",
+                    (series_id,),
+                )
+                if series_projection:
+                    import json
+
+                    try:
+                        series_title = json.loads(series_projection[0][0]).get("title")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        series_title = None
+            episode_title = sanitize_progress_item(title or fallback_label)
+            if series_title:
+                number = f"S{int(season_number):02d}E{int(episode_number):02d}" if season_number is not None and episode_number is not None else None
+                return sanitize_progress_item(" — ".join(value for value in (series_title, number, episode_title) if value)) or "episode"
+        return sanitize_progress_item(title or fallback_label or relative_path or entity_id) or "item"
+    except Exception:
+        return fallback_label or sanitize_progress_item(entity_id) or "item"
+
+
+class ProgressReporter:
+    """Thread-safe latest-snapshot reporter for concurrent background work."""
+
+    def __init__(self, emit: Callable[..., None], *, unit: str, min_interval: float = 0.5):
+        self.emit = emit
+        self.unit = unit
+        self.min_interval = min_interval
+        self.lock = threading.RLock()
+        self.settled = 0
+        self.failed = 0
+        self.total: int | None = None
+        self.phase = "processing"
+        self.label = "Working"
+        self.active: list[str] = []
+        self._last_emit = 0.0
+
+    def stage(self, phase: str, label: str, *, total: int | None = None, force: bool = True) -> None:
+        with self.lock:
+            self.phase, self.label = phase, label
+            if total is not None:
+                self.total = max(self.settled, int(total))
+            self._publish_locked(force=force)
+
+    def start(self, item: Any) -> None:
+        with self.lock:
+            safe = sanitize_progress_item(item) or "item"
+            self.active = [value for value in self.active if value != safe]
+            self.active.append(safe)
+            self._publish_locked(force=False)
+
+    def settle(self, item: Any = None, *, failed: bool = False, force: bool = False) -> None:
+        with self.lock:
+            safe = sanitize_progress_item(item)
+            if safe:
+                self.active = [value for value in self.active if value != safe]
+            self.settled += 1
+            if failed:
+                self.failed += 1
+            self._publish_locked(force=force)
+
+    def finish(self, *, failed: bool = False) -> None:
+        with self.lock:
+            self._publish_locked(force=True, terminal=failed)
+
+    def _publish_locked(self, *, force: bool, terminal: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_emit < self.min_interval:
+            return
+        self._last_emit = now
+        item = self.active[-1] if self.active else None
+        detail = f"{self.failed} failed" if self.failed else None
+        message = format_progress_message(
+            self.label,
+            item=item,
+            current=self.settled if self.total is not None else None,
+            total=self.total,
+            unit=self.unit,
+            detail=detail,
+        )
+        values = {
+            "message": message,
+            "progress_phase": self.phase,
+            "progress_label": self.label,
+            "progress_stage_current": self.settled,
+            "progress_stage_total": self.total,
+            "progress_stage_unit": self.unit,
+            "progress_current_item": item,
+        }
+        if terminal:
+            values["progress_stage_current"] = self.settled
+        self.emit(**values)
 
 
 def _clamp(value: int, lower: int, upper: int) -> int:
@@ -109,6 +280,26 @@ class WholeJobProgress:
             return "preparation", ProgressRange(0, 500)
         return "processing", ProgressRange(0, PROGRESS_TOTAL)
 
+    def _range_for_phase(self, phase: str | None) -> tuple[str, ProgressRange] | None:
+        if not phase:
+            return None
+        ranges = {
+            "preparation": ProgressRange(0, 1_000),
+            "discovery": ProgressRange(0, 1_000),
+            "inventory": ProgressRange(1_000, 4_500),
+            "processing": ProgressRange(1_000, 8_000),
+            "metadata": ProgressRange(1_000, 7_000),
+            "artwork": ProgressRange(7_000, 9_000),
+            "extraction": ProgressRange(1_000, 9_500),
+            "fingerprinting": ProgressRange(1_000, 8_000),
+            "comparison": ProgressRange(8_000, 9_500),
+            "cleanup": ProgressRange(500, 9_500),
+            "finalization": ProgressRange(9_000, 10_000),
+        }
+        phase_key = str(phase).casefold()
+        selected = ranges.get(phase_key)
+        return (phase_key, selected) if selected else None
+
     def _select_phase(self, message: str | None) -> None:
         name, phase = self._range_for_message(message)
         self.phase_name = name
@@ -137,7 +328,13 @@ class WholeJobProgress:
         """Return storage values with progress translated and throttled."""
         result = dict(values)
         message = result.get("message")
-        if message is not None:
+        explicit_phase = result.get("progress_phase")
+        if explicit_phase:
+            selected = self._range_for_phase(str(explicit_phase))
+            if selected:
+                self.phase_name, self.phase = selected
+                self._phase_selected = True
+        elif message is not None:
             self._select_phase(str(message))
 
         if result.get("state") == "completed":

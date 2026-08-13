@@ -404,6 +404,36 @@ class JobStore:
     def end_progress(self, run_id: str) -> None:
         getattr(self, "_progress", {}).pop(run_id, None)
 
+    def _progress_columns(self, table: str) -> list[str]:
+        try:
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+        except Exception:
+            columns = set()
+        return [
+            f"{name}" if name in columns else f"NULL AS {name}"
+            for name in (
+                "progress_phase",
+                "progress_label",
+                "progress_stage_current",
+                "progress_stage_total",
+                "progress_stage_unit",
+                "progress_current_item",
+            )
+        ]
+
+    def _progress_detail(self, row: tuple, offset: int) -> dict | None:
+        values = row[offset : offset + 6]
+        if not any(value is not None for value in values):
+            return None
+        return {
+            "phase": values[0] or "processing",
+            "label": values[1] or "Working",
+            "current": values[2],
+            "total": values[3],
+            "unit": values[4],
+            "item": values[5],
+        }
+
     @staticmethod
     def _definition(row) -> dict:
         try:
@@ -454,7 +484,7 @@ class JobStore:
 
     @staticmethod
     def _run(row) -> dict:
-        return {
+        value = {
             "id": row[0],
             "definitionId": row[1],
             "libraryId": row[2],
@@ -470,6 +500,8 @@ class JobStore:
             "finishedAt": row[12],
             "threadName": row[13],
         }
+        value["progressDetail"] = JobStore._progress_detail(row, 14)
+        return value
 
     def definitions(self) -> list[dict]:
         rows = self.db.execute(
@@ -832,14 +864,15 @@ class JobStore:
         return self.definition(definition_id)  # type: ignore[return-value]
 
     def runs(self, definition_id: str | None = None, limit: int = 100) -> list[dict]:
+        detail = ",".join(self._progress_columns("job_runs"))
         if definition_id:
             rows = self.db.execute(
-                "SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
+                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail} FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
                 (definition_id, limit),
             )
         else:
             rows = self.db.execute(
-                "SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name FROM job_runs ORDER BY created_at DESC LIMIT ?",
+                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail} FROM job_runs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
         return [self._run(row) for row in rows]
@@ -851,7 +884,8 @@ class JobStore:
         kinds: set[str] | None = None,
     ) -> list[dict]:
         query = (
-            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at "
+            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at," 
+            + ",".join(self._progress_columns("library_jobs")) + " "
             "FROM library_jobs WHERE library_id=?"
         )
         params: list[object] = [library_id]
@@ -878,6 +912,7 @@ class JobStore:
                 "startedAt": row[10],
                 "finishedAt": row[11],
                 "threadName": None,
+                "progressDetail": self._progress_detail(row, 12),
             }
             for row in rows
         ]
@@ -996,6 +1031,12 @@ class JobStore:
             "started_at",
             "finished_at",
             "thread_name",
+            "progress_phase",
+            "progress_label",
+            "progress_stage_current",
+            "progress_stage_total",
+            "progress_stage_unit",
+            "progress_current_item",
         }
         updates = [(key, value) for key, value in values.items() if key in allowed]
         if updates:

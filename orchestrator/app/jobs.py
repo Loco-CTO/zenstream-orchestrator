@@ -844,11 +844,24 @@ class JobStore:
             )
         return [self._run(row) for row in rows]
 
-    def library_runs(self, library_id: str, limit: int = 10) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at FROM library_jobs WHERE library_id=? ORDER BY created_at DESC LIMIT ?",
-            (library_id, limit),
+    def library_runs(
+        self,
+        library_id: str,
+        limit: int = 10,
+        kinds: set[str] | None = None,
+    ) -> list[dict]:
+        query = (
+            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at "
+            "FROM library_jobs WHERE library_id=?"
         )
+        params: list[object] = [library_id]
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            query += f" AND kind IN ({placeholders})"
+            params.extend(sorted(kinds))
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.db.execute(query, params)
         return [
             {
                 "id": row[0],

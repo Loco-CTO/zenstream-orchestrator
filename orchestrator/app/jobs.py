@@ -437,8 +437,17 @@ class JobStore:
 
     @staticmethod
     def _definition(row) -> dict:
+        # Keep the mapper tolerant of pre-trigger test databases while the
+        # production schema is migrated to trigger-owned scheduling.
+        if len(row) >= 15:
+            interval_minutes, enabled, config, next_run, last_run = row[5:10]
+            offset = 0
+        else:
+            interval_minutes, enabled = None, None
+            config, next_run, last_run = row[5:8]
+            offset = -2
         try:
-            config = json.loads(row[7] or "{}")
+            config = json.loads(config or "{}")
         except json.JSONDecodeError:
             config = {}
         return {
@@ -447,22 +456,27 @@ class JobStore:
             "name": row[2],
             "description": row[3],
             "kind": row[4],
-            "intervalMinutes": row[5],
-            "enabled": bool(row[6]),
             "config": config,
-            "nextRunAt": row[8],
-            "lastRunAt": row[9],
-            "lastRunId": row[10],
-            "lastState": row[11],
-            "lastMessage": row[12],
-            "createdAt": row[13],
-            "updatedAt": row[14],
+            "nextRunAt": next_run,
+            "lastRunAt": last_run,
+            "lastRunId": row[10 + offset],
+            "lastState": row[11 + offset],
+            "lastMessage": row[12 + offset],
+            "createdAt": row[13 + offset],
+            "updatedAt": row[14 + offset],
         }
+
+    def _definition_select(self) -> str:
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")}
+        legacy = {"interval_minutes", "enabled"}.issubset(columns)
+        if legacy:
+            return "id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at"
+        return "id,job_key,name,description,kind,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at"
 
     def _with_triggers(self, definition: dict) -> dict:
         try:
             rows = self.db.execute(
-                "SELECT id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at "
+                "SELECT id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,options "
                 "FROM job_schedule_triggers WHERE definition_id=? ORDER BY created_at",
                 (definition["id"],),
             )
@@ -479,6 +493,10 @@ class JobStore:
                 item["weekday"] = row[4]
                 item["time"] = row[3]
             item["nextRunAt"] = row[5]
+            try:
+                item["options"] = json.loads(row[6] or "{}")
+            except (IndexError, TypeError, json.JSONDecodeError):
+                item["options"] = {}
             triggers.append(item)
         definition["triggers"] = triggers
         return definition
@@ -502,26 +520,25 @@ class JobStore:
             "threadName": row[13],
         }
         value["progressDetail"] = JobStore._progress_detail(row, 14)
+        option_offset = 20
+        if len(row) > option_offset:
+            value["sourceTriggerId"] = row[option_offset]
+            try:
+                value["options"] = json.loads(row[option_offset + 1] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                value["options"] = {}
         return value
 
     def definitions(self) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions ORDER BY name COLLATE NOCASE"
-        )
+        rows = self.db.execute(f"SELECT {self._definition_select()} FROM job_definitions ORDER BY name COLLATE NOCASE")
         return [self._with_triggers(self._definition(row)) for row in rows]
 
     def definition(self, definition_id: str) -> dict | None:
-        rows = self.db.execute(
-            "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE id=?",
-            (definition_id,),
-        )
+        rows = self.db.execute(f"SELECT {self._definition_select()} FROM job_definitions WHERE id=?", (definition_id,))
         return self._with_triggers(self._definition(rows[0])) if rows else None
 
     def by_key(self, key: str) -> dict | None:
-        rows = self.db.execute(
-            "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE job_key=?",
-            (key,),
-        )
+        rows = self.db.execute(f"SELECT {self._definition_select()} FROM job_definitions WHERE job_key=?", (key,))
         return self._with_triggers(self._definition(rows[0])) if rows else None
 
     def ensure(
@@ -538,27 +555,18 @@ class JobStore:
         if existing:
             return existing
         timestamp = now()
-        next_run = (
-            datetime.now(timezone.utc)
-            + timedelta(minutes=max(5, min(43200, int(interval or 1440))))
-        ).isoformat()
         definition_id = new_id()
-        self.db.execute(
-            "INSERT INTO job_definitions(id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                definition_id,
-                key,
-                name,
-                description,
-                kind,
-                max(5, min(43200, int(interval or 1440))),
-                int(enabled),
-                json.dumps(config or {}, ensure_ascii=False),
-                next_run,
-                timestamp,
-                timestamp,
-            ),
-        )
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")}
+        if {"interval_minutes", "enabled"}.issubset(columns):
+            self.db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (definition_id, key, name, description, kind, max(5, min(43200, int(interval or 1440))), int(enabled), json.dumps(config or {}, ensure_ascii=False), None, timestamp, timestamp),
+            )
+        else:
+            self.db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,description,kind,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (definition_id, key, name, description, kind, json.dumps(config or {}, ensure_ascii=False), None, timestamp, timestamp),
+            )
         self._replace_triggers(
             definition_id,
             [

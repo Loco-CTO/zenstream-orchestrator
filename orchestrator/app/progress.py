@@ -32,6 +32,8 @@ class WholeJobProgress:
     def __init__(self, kind: str):
         self.kind = kind
         self.current = 0
+        self._phase_current = 0
+        self._phase_total: float | None = None
         self.phase = ProgressRange(0, PROGRESS_TOTAL)
         self.phase_name = "Starting"
         self._phase_selected = False
@@ -144,9 +146,26 @@ class WholeJobProgress:
             self._last_persisted_at = time.monotonic()
             return result
 
-        if "progress_current" in result or "progress_total" in result:
+        has_current = "progress_current" in result
+        has_total = "progress_total" in result
+        if has_total:
+            try:
+                self._phase_total = float(result["progress_total"])
+            except (TypeError, ValueError):
+                self._phase_total = None
+            # A newly announced denominator starts a new phase-local counter.
+            # Later updates commonly provide only progress_current.
+            if not has_current:
+                self._phase_current = 0
+        if has_current:
+            try:
+                self._phase_current = float(result["progress_current"])
+            except (TypeError, ValueError):
+                self._phase_current = 0
+        if has_current or has_total:
             mapped = self._mapped(
-                result.get("progress_current", 0), result.get("progress_total", 0)
+                self._phase_current,
+                self._phase_total,
             )
             self.current = max(self.current, mapped)
             now = time.monotonic()

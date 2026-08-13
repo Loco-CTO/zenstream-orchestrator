@@ -936,7 +936,14 @@ class LibraryScanner:
         started = now()
         self.store.set_scan_state(library_id, "scanning", started=started, error=None)
         self.store.update_job(
-            job_id, state="running", started_at=started, message="Discovering media"
+            job_id,
+            state="running",
+            started_at=started,
+            message=(
+                f"Reconciling changed {('series' if library['type'] == 'tv_series' else 'movie')} roots ({len(targets)} roots)"
+                if targets is not None
+                else "Discovering media"
+            ),
         )
         self._start_heartbeat(library_id, job_id)
         self._scan_seen_ids = set()
@@ -1048,7 +1055,11 @@ class LibraryScanner:
                 progress_current=count,
                 progress_total=count,
                 finished_at=finished,
-                message=f"Indexed {count} entries",
+                message=(
+                    f"Indexed {count} entries; reconciled {len(targets)} changed roots"
+                    if targets is not None
+                    else f"Indexed {count} entries"
+                ),
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
             if removed:
@@ -3618,7 +3629,11 @@ class LibraryScanner:
     ) -> int:
         self._set_stage(
             job_id,
-            "Enumerating movie roots",
+            (
+                f"Reconciling changed movie roots ({len(targets)} roots)"
+                if targets is not None
+                else "Enumerating movie roots"
+            ),
             root=str(root),
             targets=sorted(targets) if targets else None,
         )
@@ -3739,7 +3754,11 @@ class LibraryScanner:
 
         self._set_stage(
             job_id,
-            "Enumerating TV series roots",
+            (
+                f"Reconciling changed series roots ({len(targets)} roots)"
+                if targets is not None
+                else "Enumerating TV series roots"
+            ),
             root=str(root),
             targets=sorted(targets) if targets else None,
         )

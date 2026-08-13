@@ -302,14 +302,14 @@ function LibraryViewPage() {
 		const timer = window.setTimeout(() => {
 			const nextQuery = searchInput.trim();
 			setSearchQuery(nextQuery);
-			if (navigation.length === 0) {
+			if (navigation.length === 0 && (params.get("query") || "") !== nextQuery) {
+				setPage(1);
 				const next = new URLSearchParams(params.toString());
 				if (nextQuery) next.set("query", nextQuery);
 				else next.delete("query");
 				next.delete("page");
 				const nextHref = `${pathname}${next.toString() ? `?${next.toString()}` : ""}`;
-				if (params.get("query") !== nextQuery || params.has("page"))
-					router.replace(nextHref);
+				router.replace(nextHref);
 			}
 		}, 300);
 		return () => window.clearTimeout(timer);

@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0025_screen_extractor_artwork"
 down_revision = "0024_durable_reconcile_targets"
 branch_labels = None

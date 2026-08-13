@@ -343,7 +343,12 @@ def _refresh_item_metadata_sync(entity_id: str) -> dict:
 
             extract_entity(store.db, entity_id, item["type"], force=False)
         except Exception as error:
-            failures.append({"provider": "screen_extractor", "error": f"{type(error).__name__}: {error}"})
+            failures.append(
+                {
+                    "provider": "screen_extractor",
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            )
     CatalogReadModel(store.db).refresh_roots([entity_id])
     if not refreshed:
         raise HTTPException(

@@ -2172,9 +2172,7 @@ class LibraryMetadataTest(unittest.TestCase):
         ):
             with (
                 self.subTest(entity_type=entity_type),
-                patch.object(
-                    client, "_language_code", side_effect=lambda value: value
-                ),
+                patch.object(client, "_language_code", side_effect=lambda value: value),
                 patch.object(
                     client,
                     "_request",

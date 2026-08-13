@@ -43,7 +43,7 @@ export type Job = {
 	config?: Record<string, unknown>;
 	triggers: JobTrigger[];
 	recentRuns: Run[];
-	historyOnly?: boolean;
+	historyOnly: boolean;
 };
 
 export const activeStates = new Set(["queued", "running", "terminating"]);

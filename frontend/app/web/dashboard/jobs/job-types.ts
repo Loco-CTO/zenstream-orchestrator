@@ -1,5 +1,6 @@
 export type Run = {
 	id: string;
+	kind: string;
 	state: string;
 	message?: string | null;
 	error?: string | null;
@@ -42,6 +43,7 @@ export type Job = {
 	config?: Record<string, unknown>;
 	triggers: JobTrigger[];
 	recentRuns: Run[];
+	historyOnly?: boolean;
 };
 
 export const activeStates = new Set(["queued", "running", "terminating"]);

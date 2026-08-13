@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0024_durable_reconcile_targets"
 down_revision = "0023_global_artwork_selection_rebuild"
 branch_labels = None

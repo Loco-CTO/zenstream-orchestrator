@@ -462,7 +462,7 @@ export default function JobDetailPage() {
 			{!selected.historyOnly && (
 				<>
 					<div style={{ marginBottom: 16 }}>
-						<Btn icon={<IconPlus size={14} />} onClick={() => setAddingTrigger(true)}>
+						<Btn icon={<IconPlus size={14} />} onClick={() => { setTriggerOptions({}); setAddingTrigger(true); }}>
 							Add trigger
 						</Btn>
 					</div>

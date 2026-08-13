@@ -426,7 +426,7 @@ class JobStore:
         values = row[offset : offset + 6]
         if not any(value is not None for value in values):
             return None
-        return {
+        value = {
             "phase": values[0] or "processing",
             "label": values[1] or "Working",
             "current": values[2],
@@ -465,6 +465,10 @@ class JobStore:
             "createdAt": row[13 + offset],
             "updatedAt": row[14 + offset],
         }
+        if offset == 0:
+            value["intervalMinutes"] = interval_minutes
+            value["enabled"] = bool(enabled)
+        return value
 
     def _definition_select(self) -> str:
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")}

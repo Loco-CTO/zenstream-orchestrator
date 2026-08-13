@@ -3389,8 +3389,11 @@ class LibraryScanner:
 
         if path.suffix.lower() not in VIDEO_EXTENSIONS:
             return "unsupported"
-        if path.is_symlink():
-            return "unsupported"
+        try:
+            if path.is_symlink():
+                return "unsupported"
+        except OSError:
+            return "inaccessible"
         try:
             value = file_stat if file_stat is not None else path.stat()
         except OSError:
@@ -3412,14 +3415,21 @@ class LibraryScanner:
                 # Do not index symlinks or reparse points.  A path that
                 # resolves outside the library root is treated as inaccessible
                 # and retained in the existing inventory for a later scan.
-                if path.is_symlink():
+                try:
+                    if path.is_symlink():
+                        yield path, None
+                        continue
+                except OSError:
+                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                        self._record_access_error(path)
                     yield path, None
                     continue
                 stat_started = time.monotonic()
                 try:
                     file_stat = path.stat()
                 except OSError:
-                    self._record_access_error(path)
+                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                        self._record_access_error(path)
                     yield path, None
                     continue
                 stat_seconds = time.monotonic() - stat_started
@@ -3508,7 +3518,8 @@ class LibraryScanner:
                     try:
                         value = path.stat()
                     except OSError:
-                        self._record_access_error(path)
+                        if path.suffix.lower() in VIDEO_EXTENSIONS:
+                            self._record_access_error(path)
                         episode_entries.append((path, None))
                         continue
                     if stat.S_ISREG(value.st_mode):
@@ -4609,7 +4620,16 @@ class LibraryRuntime:
             )
         )
         if not has_queue:
-            self._reconcile_targets.setdefault(library_id, set()).update(targets)
+            queued = self._reconcile_targets.setdefault(library_id, set())
+            for target in targets:
+                queued.difference_update(
+                    {
+                        existing
+                        for existing in queued
+                        if _top_level_key(existing) == _top_level_key(target)
+                    }
+                )
+                queued.add(target)
             self._reconcile_due[library_id] = time.monotonic() + 5
             with self.condition:
                 self.condition.notify_all()
@@ -4659,14 +4679,14 @@ class LibraryRuntime:
             self.condition.notify_all()
 
     def _root_lock(self, library_id: str, root: str) -> threading.Lock:
-        key = (library_id, root.casefold())
+        key = (library_id, _top_level_key(root))
         with self._root_locks_guard:
             return self._root_locks.setdefault(key, threading.Lock())
 
     def _acquire_roots(self, library_id: str, roots: set[str]):
         locks = [
             self._root_lock(library_id, root)
-            for root in sorted(roots, key=str.casefold)
+            for root in sorted(roots, key=_top_level_key)
         ]
         for lock in locks:
             lock.acquire()

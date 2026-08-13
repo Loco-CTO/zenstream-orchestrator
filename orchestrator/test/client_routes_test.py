@@ -175,7 +175,10 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
             {
                 "title": "Episode 1",
                 "genres": ["Drama"],
-                "images": {"Primary": {"url": "/primary"}},
+                "images": {
+                    "Primary": {"url": "/primary"},
+                    "Backdrop": {"url": "/backdrop"},
+                },
             },
         )
         self.assertIn("overview", item["metadata"])

@@ -116,7 +116,11 @@ def _catalog_response(value, view: str | None, limit: int | None = None):
             return _card_item(current) if view == "card" else current
         if isinstance(current, list):
             items = [transform(item) for item in current]
-            if limit is not None and items and all(_catalog_item(item) for item in items):
+            if (
+                limit is not None
+                and items
+                and all(_catalog_item(item) for item in items)
+            ):
                 return items[:limit]
             return items
         if isinstance(current, dict):
@@ -550,9 +554,9 @@ async def home(
     if section == "featured":
         return _catalog_response(
             {
-            "latestItems": await run_foreground(
-                catalog.home_featured, account["id"], preferred
-            )
+                "latestItems": await run_foreground(
+                    catalog.home_featured, account["id"], preferred
+                )
             },
             view,
             limit,
@@ -560,9 +564,9 @@ async def home(
     if section == "continueWatching":
         return _catalog_response(
             {
-            "continueWatching": await run_foreground(
-                catalog.home_continue_watching, account["id"], preferred
-            )
+                "continueWatching": await run_foreground(
+                    catalog.home_continue_watching, account["id"], preferred
+                )
             },
             view,
             limit,
@@ -570,9 +574,9 @@ async def home(
     if section == "nextUp":
         return _catalog_response(
             {
-            "nextUp": await run_foreground(
-                catalog.home_next_up, account["id"], preferred
-            )
+                "nextUp": await run_foreground(
+                    catalog.home_next_up, account["id"], preferred
+                )
             },
             view,
             limit,
@@ -612,9 +616,11 @@ async def items(
     sortBy: str | None = Query(None),
     sortOrder: str = Query("ascending"),
     view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
     result = await run_foreground(
         catalog.list_items,
         account["id"],
@@ -622,7 +628,7 @@ async def items(
         preferred,
         parent_id=parentId,
         page=page,
-        page_size=pageSize,
+        page_size=effective_page_size,
         sort_by=sortBy,
         sort_order=sortOrder,
     )
@@ -637,16 +643,18 @@ async def search(
     page: int = Query(1, ge=1),
     pageSize: int = Query(40, ge=1, le=100),
     view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
     result = await run_foreground(
         catalog.search,
         account["id"],
         query,
         preferred,
         page,
-        pageSize,
+        effective_page_size,
     )
     return _catalog_response(result, view)
 
@@ -660,15 +668,17 @@ async def favorites(
     sortBy: str = Query("title"),
     sortOrder: str = Query("ascending"),
     view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
     result = await run_foreground(
         catalog.favorites,
         account["id"],
         preferred,
         page,
-        pageSize,
+        effective_page_size,
         sortBy,
         sortOrder,
     )
@@ -834,9 +844,11 @@ async def item_detail(
     page: int = Query(1, ge=1),
     pageSize: int = Query(40, ge=1, le=100),
     view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
     result = await run_foreground(
         catalog.detail,
         account["id"],
@@ -845,7 +857,7 @@ async def item_detail(
         seasonId,
         section,
         page,
-        pageSize,
+        effective_page_size,
     )
     return _catalog_response(result, view)
 

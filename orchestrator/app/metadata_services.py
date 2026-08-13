@@ -656,13 +656,6 @@ class MetadataSearchProjection:
                     )
             changed += 1
         return changed
-
-
-def reproject_entity_artwork(
-    db, entity_id: str, locales: Iterable[str] | None = None
-) -> int:
-    return MetadataSearchProjection(db).reproject_entity_artwork(entity_id, locales)
-
     def project(
         self,
         provider: str,
@@ -1081,6 +1074,12 @@ def reproject_entity_artwork(
                 break
 
 
+def reproject_entity_artwork(
+    db, entity_id: str, locales: Iterable[str] | None = None
+) -> int:
+    return MetadataSearchProjection(db).reproject_entity_artwork(entity_id, locales)
+
+
 class MetadataReadService:
     """Resolve metadata consistently for public and administrator callers."""
 
@@ -1370,11 +1369,17 @@ class MetadataReadService:
             and image_type == "Primary"
             and entity_type in {"movie", "episode"}
         ):
-            from app.screen_extractor import ready_artwork
+            has_screen_assets = bool(
+                self.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='screen_extractor_assets'"
+                )
+            )
+            if has_screen_assets:
+                from app.screen_extractor import ready_artwork
 
-            generated = ready_artwork(self.db, entity_id, entity_type)
-            if generated:
-                return generated
+                generated = ready_artwork(self.db, entity_id, entity_type)
+                if generated:
+                    return generated
         return None
 
     def _image_blur_hash(

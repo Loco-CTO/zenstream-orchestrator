@@ -1067,9 +1067,18 @@ class MetadataMissingJob:
         )
         items = list(rows)
         total = len(items) * len(locales)
-        extractor_rows = self.db.execute(
-            "SELECT id,entity_type FROM library_entities "
-            "WHERE entity_type IN ('movie','episode') ORDER BY id"
+        has_screen_assets = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='screen_extractor_assets'"
+            )
+        )
+        extractor_rows = (
+            self.db.execute(
+                "SELECT id,entity_type FROM library_entities "
+                "WHERE entity_type IN ('movie','episode') ORDER BY id"
+            )
+            if has_screen_assets
+            else []
         )
         extractor_total = len(extractor_rows)
         self.store.update_run(
@@ -1386,7 +1395,8 @@ class MetadataMissingJob:
                         roots.add(current)
                         break
                     current = parent
-            CatalogReadModel(self.db).refresh_roots(sorted(roots))
+            if roots:
+                CatalogReadModel(self.db).refresh_roots(sorted(roots))
         except Exception:
             logger.exception("screen extractor catalog refresh failed")
         if should_terminate():

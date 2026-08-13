@@ -882,6 +882,8 @@ class IntroOutroDetector:
             reporter.stage("comparison", "Comparing fingerprints", total=None)
             comparison_progress = lambda current, total, season: job_store.update_run(
                     run_id,
+                    progress_current=current,
+                    progress_total=total,
                     progress_phase="comparison",
                     progress_label="Comparing fingerprints",
                     progress_stage_current=current,

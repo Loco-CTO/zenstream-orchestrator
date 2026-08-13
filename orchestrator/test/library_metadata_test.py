@@ -1478,20 +1478,18 @@ class LibraryMetadataTest(unittest.TestCase):
                 entity_id = db.execute("SELECT id FROM library_entities")[0][0]
 
                 self._prepare_incremental_scan(scanner)
-                with (
-                    patch.object(
-                        scanner,
-                        "_walk_file_entries",
-                        side_effect=PermissionError("denied"),
-                    ),
-                    self.assertRaises(PermissionError),
+                with patch.object(
+                    scanner,
+                    "_walk_file_entries",
+                    side_effect=PermissionError("denied"),
                 ):
                     scanner._scan_movies("library-1", root, "job-1", lambda: False)
 
-                self.assertFalse(scanner._scan_complete)
+                self.assertTrue(scanner._scan_complete)
                 self.assertEqual(
                     db.execute("SELECT id FROM library_entities"), [(entity_id,)]
                 )
+                self.assertTrue(scanner._scan_deferred_roots)
         finally:
             db.close()
 
@@ -3285,6 +3283,14 @@ class LibraryJobControlTest(unittest.TestCase):
                 ),
                 [("show", 2, 2)],
             )
+
+    def test_root_locks_follow_platform_case_semantics(self):
+        upper = self.runtime._root_lock("Show", "Show")
+        lower = self.runtime._root_lock("Show", "show")
+        if os.path.normcase("Show") == os.path.normcase("show"):
+            self.assertIs(upper, lower)
+        else:
+            self.assertIsNot(upper, lower)
 
 
 if __name__ == "__main__":

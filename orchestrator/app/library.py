@@ -3526,9 +3526,12 @@ class LibraryScanner:
                         episode_entries.append((path, value))
             else:
                 episode_entries = []
-                for candidate in self._walk_file_entries(season_dir):
-                    self._check_termination(should_terminate)
-                    episode_entries.append(candidate)
+                try:
+                    for candidate in self._walk_file_entries(season_dir):
+                        self._check_termination(should_terminate)
+                        episode_entries.append(candidate)
+                except OSError:
+                    self._record_access_error(season_dir)
             files_by_parent: dict[Path, list[tuple[Path, os.stat_result | None]]] = {}
             for entry in episode_entries:
                 files_by_parent.setdefault(entry[0].parent, []).append(entry)
@@ -3621,9 +3624,12 @@ class LibraryScanner:
             self._check_termination(should_terminate)
             if entry.is_dir():
                 files = []
-                for candidate in self._walk_file_entries(entry):
-                    self._check_termination(should_terminate)
-                    files.append(candidate)
+                try:
+                    for candidate in self._walk_file_entries(entry):
+                        self._check_termination(should_terminate)
+                        files.append(candidate)
+                except OSError:
+                    self._record_access_error(entry)
             else:
                 try:
                     files = [(entry, entry.stat())]
@@ -4662,7 +4668,10 @@ class LibraryRuntime:
                         (target, deadline, timestamp, library_id, match[0]),
                     )
                     existing_rows = [
-                        (target if row[0] == match[0] else row[0], row[1] + 1 if row[0] == match[0] else row[1])
+                        (
+                            target if row[0] == match[0] else row[0],
+                            row[1] + 1 if row[0] == match[0] else row[1],
+                        )
                         for row in existing_rows
                     ]
                 else:

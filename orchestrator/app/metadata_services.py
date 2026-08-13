@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from app.images import blurhash_for_image, encode_webp_bytes
+from app.images import LocalArtworkCache, blurhash_for_image, encode_webp_bytes
 from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORIES,
@@ -451,6 +451,217 @@ class MetadataSearchProjection:
             if rows and _ready_file(rows[0][0]):
                 result[image_type] = (choice, rows[0], provider)
         return result
+
+    def reproject_entity_artwork(
+        self, entity_id: str, locales: Iterable[str] | None = None
+    ) -> int:
+        """Rebuild cached artwork selections for one entity.
+
+        Scanner and metadata-repair paths can create a Screen Extractor file
+        after the catalog projection has already been written.  The normal
+        provider projection is not invoked for that language-neutral asset,
+        so keep this small, idempotent repair at the entity boundary.
+        """
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "catalog_artwork_selection" not in tables:
+            return 0
+        entity_rows = self.db.execute(
+            "SELECT library_id,parent_id,entity_type FROM library_entities WHERE id=?",
+            (entity_id,),
+        )
+        if not entity_rows:
+            return 0
+        library_id, parent_id, entity_type = entity_rows[0]
+        if entity_type not in {"movie", "episode"}:
+            return 0
+        configured = list(locales or MetadataLanguageSettings().get()) or ["en"]
+        identities = [
+            {"provider": row[0], "id": str(row[1])}
+            for row in self.db.execute(
+                "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                (entity_id,),
+            )
+        ]
+        reader = MetadataReadService(self.db)
+        local_cache = LocalArtworkCache(self.db)
+        projection_exists = "catalog_item_projection" in tables
+        selection_columns = {
+            row[1]
+            for row in self.db.execute(
+                "PRAGMA table_info(catalog_artwork_selection)"
+            )
+        }
+        if not {"provider", "local_path", "blur_hash", "version"}.issubset(
+            selection_columns
+        ):
+            return 0
+
+        def local_choice(image_type: str) -> dict | None:
+            if "media_files" not in tables:
+                return None
+            columns = {
+                row[1]
+                for row in self.db.execute("PRAGMA table_info(media_files)")
+            }
+            if "quick_fingerprint" not in columns:
+                return None
+            blur_field = ",image_blur_hash" if "image_blur_hash" in columns else ",NULL"
+            for relative_path, fingerprint, blur_hash in self.db.execute(
+                "SELECT relative_path,quick_fingerprint" + blur_field +
+                " FROM media_files WHERE entity_id=? AND role='image' "
+                "ORDER BY relative_path COLLATE NOCASE",
+                (entity_id,),
+            ):
+                stem = Path(relative_path or "").stem.casefold()
+                if stem not in LOCAL_ARTWORK_NAMES.get(image_type, set()) or not fingerprint:
+                    continue
+                path = local_cache.path(str(fingerprint))
+                if path and _ready_file(path):
+                    return {
+                        "provider": "local",
+                        "localPath": str(path),
+                        "version": str(fingerprint)[:12],
+                        "blurHash": blur_hash,
+                        "language": None,
+                    }
+            return None
+
+        changed = 0
+        for locale in configured:
+            payload_rows = (
+                self.db.execute(
+                    "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
+                    (entity_id, locale),
+                )
+                if projection_exists
+                else []
+            )
+            try:
+                payload = json.loads(payload_rows[0][0]) if payload_rows else {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            images = payload.get("images")
+            images = dict(images) if isinstance(images, dict) else {}
+            owners = payload.get("_catalogArtworkProviders")
+            owners = dict(owners) if isinstance(owners, dict) else {}
+            fallbacks = payload.get("_catalogArtworkFallbacks")
+            fallbacks = dict(fallbacks) if isinstance(fallbacks, dict) else {}
+            raw = reader.resolve_raw(entity_type, identities, locale)
+            existing_rows = self.db.execute(
+                "SELECT image_type,provider,local_path,blur_hash,version "
+                "FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
+                (entity_id, locale),
+            )
+            existing = {row[0]: row[1:] for row in existing_rows}
+            selection_rows = []
+            for image_type in ARTWORK_CATEGORIES:
+                choice = local_choice(image_type)
+                if choice is None:
+                    choice = reader.ready_artwork(
+                        entity_type,
+                        identities,
+                        raw.get("images", []),
+                        locale,
+                        image_type,
+                        raw.get("originalLanguage"),
+                        reader.providers(entity_type),
+                        entity_id=entity_id,
+                    )
+                selected = None
+                if choice:
+                    provider = str(choice.get("provider") or "")
+                    path = choice.get("localPath")
+                    if provider != "local" and provider != "screen_extractor":
+                        provider_id = next(
+                            (
+                                identity["id"]
+                                for identity in identities
+                                if identity.get("provider") == provider
+                            ),
+                            None,
+                        )
+                        if provider_id and choice.get("url"):
+                            rows = self.db.execute(
+                                "SELECT local_path,blur_hash FROM metadata_images "
+                                "WHERE provider=? AND entity_type=? AND provider_id=? "
+                                "AND image_type=? AND image_url=? AND local_path IS NOT NULL "
+                                "ORDER BY rowid DESC LIMIT 1",
+                                (
+                                    provider,
+                                    entity_type,
+                                    provider_id,
+                                    image_type,
+                                    choice["url"],
+                                ),
+                            )
+                            if rows:
+                                path, blur_hash = rows[0]
+                                selected = (provider, path, blur_hash, _asset_version(path, choice["url"]))
+                    elif path:
+                        selected = (
+                            provider,
+                            path,
+                            choice.get("blurHash"),
+                            choice.get("version") or _asset_version(path, path),
+                        )
+                    if selected and not _ready_file(selected[1]):
+                        selected = None
+                if selected is None:
+                    prior = existing.get(image_type)
+                    if prior and prior[0] != "screen_extractor" and _ready_file(prior[1]):
+                        selected = (prior[0], prior[1], prior[2], prior[3] or _asset_version(prior[1], prior[1]))
+                if selected is None:
+                    if owners.get(image_type) in {"screen_extractor", "local"}:
+                        images.pop(image_type, None)
+                        owners.pop(image_type, None)
+                    continue
+                provider, path, blur_hash, version = selected
+                if image_type != "Logo" and images.get(image_type) and owners.get(image_type) not in {provider, "local", "screen_extractor"}:
+                    fallbacks.setdefault(image_type, {"image": images[image_type], "provider": owners.get(image_type)})
+                projected = {
+                    "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}&v={version}",
+                    "language": choice.get("language") if choice and provider not in {"local", "screen_extractor"} else None,
+                    "width": (choice or {}).get("width") or 0,
+                    "height": (choice or {}).get("height") or 0,
+                }
+                if image_type != "Logo" and blur_hash:
+                    projected["blurHash"] = blur_hash
+                images[image_type] = projected
+                owners[image_type] = provider
+                selection_rows.append((entity_id, locale, image_type, provider, path, blur_hash, version))
+            if projection_exists:
+                payload["images"] = images
+                payload["_catalogArtworkProviders"] = owners
+                payload["_catalogArtworkFallbacks"] = fallbacks
+                with self.db.transaction() as cursor:
+                    cursor.execute(
+                        "UPDATE catalog_item_projection SET payload=?,updated_at=CURRENT_TIMESTAMP "
+                        "WHERE entity_id=? AND locale=?",
+                        (json.dumps(payload, ensure_ascii=False), entity_id, locale),
+                    )
+                    cursor.execute(
+                        "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
+                        (entity_id, locale),
+                    )
+                    cursor.executemany(
+                        "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,provider,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+                        selection_rows,
+                    )
+            changed += 1
+        return changed
+
+
+def reproject_entity_artwork(
+    db, entity_id: str, locales: Iterable[str] | None = None
+) -> int:
+    return MetadataSearchProjection(db).reproject_entity_artwork(entity_id, locales)
 
     def project(
         self,

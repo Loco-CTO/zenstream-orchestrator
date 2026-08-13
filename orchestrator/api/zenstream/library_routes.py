@@ -854,14 +854,50 @@ async def update_scheduled_job(
         raise HTTPException(400, str(error)) from error
 
 
-@router.post("/jobs/{job_id}/run", status_code=202)
-async def run_scheduled_job(
-    job_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)
+@router.post("/jobs/{job_id}/triggers")
+async def add_scheduled_trigger(
+    job_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
     _require_mutable_task(job_id)
     try:
-        return scheduler.run_now(job_id)
+        return scheduler.store.add_trigger(job_id, await request.json())
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@router.delete("/jobs/{job_id}/triggers/{trigger_id}")
+async def remove_scheduled_trigger(
+    job_id: str,
+    trigger_id: str,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    _require_mutable_task(job_id)
+    try:
+        return scheduler.store.remove_trigger(job_id, trigger_id)
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@router.post("/jobs/{job_id}/run", status_code=202)
+async def run_scheduled_job(
+    job_id: str, request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    require_admin(Username, TOKEN)
+    _require_mutable_task(job_id)
+    try:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        return scheduler.run_now(job_id, (payload or {}).get("options"))
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
 

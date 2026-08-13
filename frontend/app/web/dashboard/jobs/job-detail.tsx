@@ -217,7 +217,7 @@ export default function JobDetailPage() {
 	}
 
 	async function save() {
-		if (!session || !selected) return;
+		if (!session || !selected || selected.historyOnly) return;
 		setSaving(true);
 		const response = await adminFetch(`/api/admin/jobs/${selected.id}`, session, {
 			method: "PATCH",
@@ -236,7 +236,7 @@ export default function JobDetailPage() {
 		setSaving(false);
 	}
 	async function runNow() {
-		if (!session || !selected) return;
+		if (!session || !selected || selected.historyOnly) return;
 		const response = await adminFetch(
 			`/api/admin/jobs/${selected.id}/run`,
 			session,
@@ -248,7 +248,7 @@ export default function JobDetailPage() {
 		await load(session, false);
 	}
 	async function terminate() {
-		if (!session || !selected || !activeRun) return;
+		if (!session || !selected || selected.historyOnly || !activeRun) return;
 		await adminFetch(
 			`/api/admin/jobs/${selected.id}/runs/${activeRun.id}/terminate`,
 			session,
@@ -434,93 +434,27 @@ export default function JobDetailPage() {
 					</div>
 				</div>
 			)}
-			<div style={{ marginBottom: 16 }}>
-				<Btn icon={<IconPlus size={14} />} onClick={() => setAddingTrigger(true)}>
-					Add trigger
-				</Btn>
-			</div>
-			{message && (
-				<div
-					role="status"
-					style={{ color: "var(--primary)", fontSize: 12, marginBottom: 12 }}
-				>
-					{message}
-				</div>
-			)}
-			<Modal
-				open={addingTrigger}
-				onClose={() => setAddingTrigger(false)}
-				title="Add trigger"
-			>
-				<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-					<label
-						style={{
-							fontSize: 10,
-							fontWeight: 600,
-							letterSpacing: ".1em",
-							textTransform: "uppercase",
-							color: "var(--primary)",
-						}}
+			{!selected.historyOnly && (
+				<>
+					<div style={{ marginBottom: 16 }}>
+						<Btn icon={<IconPlus size={14} />} onClick={() => setAddingTrigger(true)}>
+							Add trigger
+						</Btn>
+					</div>
+					{message && (
+						<div
+							role="status"
+							style={{ color: "var(--primary)", fontSize: 12, marginBottom: 12 }}
+						>
+							{message}
+						</div>
+					)}
+					<Modal
+						open={addingTrigger}
+						onClose={() => setAddingTrigger(false)}
+						title="Add trigger"
 					>
-						Trigger type
-						<select
-							value={triggerType}
-							onChange={(event) =>
-								setTriggerType(event.target.value as JobTrigger["type"])
-							}
-							style={{ ...fieldStyle, marginTop: 8, appearance: "none" }}
-						>
-							<option value="daily">Daily</option>
-							<option value="weekly">Weekly</option>
-							<option value="interval">Interval</option>
-							<option value="startup">On application start</option>
-						</select>
-					</label>
-					{triggerType === "weekly" && (
-						<label
-							style={{
-								fontSize: 10,
-								fontWeight: 600,
-								letterSpacing: ".1em",
-								textTransform: "uppercase",
-								color: "var(--primary)",
-							}}
-						>
-							Day
-							<select
-								value={triggerDay}
-								onChange={(event) => setTriggerDay(event.target.value)}
-								style={{ ...fieldStyle, marginTop: 8 }}
-							>
-								{days.map((day, index) => (
-									<option key={day} value={index}>
-										{day}
-									</option>
-								))}
-							</select>
-						</label>
-					)}
-					{(triggerType === "daily" || triggerType === "weekly") && (
-						<label
-							style={{
-								fontSize: 10,
-								fontWeight: 600,
-								letterSpacing: ".1em",
-								textTransform: "uppercase",
-								color: "var(--primary)",
-							}}
-						>
-							Time
-							<input
-								type="time"
-								value={triggerTime}
-								onChange={(event) => setTriggerTime(event.target.value)}
-								style={{ ...fieldStyle, marginTop: 8 }}
-							/>
-						</label>
-					)}
-					{triggerType === "interval" && (
-						<div>
+						<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 							<label
 								style={{
 									fontSize: 10,
@@ -530,191 +464,261 @@ export default function JobDetailPage() {
 									color: "var(--primary)",
 								}}
 							>
-								Every
-							</label>
-							<div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-								<input
-									type="number"
-									min={1}
-									value={triggerIntervalVal}
-									onChange={(event) => setTriggerIntervalVal(event.target.value)}
-									style={{ ...fieldStyle, flex: 1 }}
-								/>
+								Trigger type
 								<select
-									value={triggerIntervalUnit}
-									onChange={(event) => setTriggerIntervalUnit(event.target.value)}
-									style={{ ...fieldStyle, flex: 1 }}
+									value={triggerType}
+									onChange={(event) =>
+										setTriggerType(event.target.value as JobTrigger["type"])
+									}
+									style={{ ...fieldStyle, marginTop: 8, appearance: "none" }}
 								>
-									<option>seconds</option>
-									<option>minutes</option>
-									<option>hours</option>
+									<option value="daily">Daily</option>
+									<option value="weekly">Weekly</option>
+									<option value="interval">Interval</option>
+									<option value="startup">On application start</option>
 								</select>
-							</div>
-						</div>
-					)}
-					<div
-						style={{
-							display: "flex",
-							justifyContent: "flex-end",
-							gap: 8,
-							paddingTop: 4,
-						}}
-					>
-						<Btn variant="ghost" onClick={() => setAddingTrigger(false)}>
-							Cancel
-						</Btn>
-						<Btn onClick={addTrigger}>Add</Btn>
-					</div>
-				</div>
-			</Modal>
-			<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
-				<div
-					style={{
-						padding: "11px 18px",
-						background: "#0d0d0d",
-						borderRadius: "12px 12px 0 0",
-					}}
-				>
-					<span
-						style={{
-							fontSize: 11,
-							fontWeight: 600,
-							color: "#555",
-							letterSpacing: ".08em",
-							textTransform: "uppercase",
-						}}
-					>
-						Schedule
-					</span>
-				</div>
-				<div style={{ height: 1, background: "#111" }} />
-				{(selected.triggers || []).length === 0 ? (
-					<div style={{ padding: "20px 18px", fontSize: 13, color: "#333" }}>
-						No triggers configured. Add one above.
-					</div>
-				) : (
-					selected.triggers.map((trigger, index) => (
-						<div key={trigger.id}>
+							</label>
+							{triggerType === "weekly" && (
+								<label
+									style={{
+										fontSize: 10,
+										fontWeight: 600,
+										letterSpacing: ".1em",
+										textTransform: "uppercase",
+										color: "var(--primary)",
+									}}
+								>
+									Day
+									<select
+										value={triggerDay}
+										onChange={(event) => setTriggerDay(event.target.value)}
+										style={{ ...fieldStyle, marginTop: 8 }}
+									>
+										{days.map((day, index) => (
+											<option key={day} value={index}>
+												{day}
+											</option>
+										))}
+									</select>
+								</label>
+							)}
+							{(triggerType === "daily" || triggerType === "weekly") && (
+								<label
+									style={{
+										fontSize: 10,
+										fontWeight: 600,
+										letterSpacing: ".1em",
+										textTransform: "uppercase",
+										color: "var(--primary)",
+									}}
+								>
+									Time
+									<input
+										type="time"
+										value={triggerTime}
+										onChange={(event) => setTriggerTime(event.target.value)}
+										style={{ ...fieldStyle, marginTop: 8 }}
+									/>
+								</label>
+							)}
+							{triggerType === "interval" && (
+								<div>
+									<label
+										style={{
+											fontSize: 10,
+											fontWeight: 600,
+											letterSpacing: ".1em",
+											textTransform: "uppercase",
+											color: "var(--primary)",
+										}}
+									>
+										Every
+									</label>
+									<div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+										<input
+											type="number"
+											min={1}
+											value={triggerIntervalVal}
+											onChange={(event) => setTriggerIntervalVal(event.target.value)}
+											style={{ ...fieldStyle, flex: 1 }}
+										/>
+										<select
+											value={triggerIntervalUnit}
+											onChange={(event) => setTriggerIntervalUnit(event.target.value)}
+											style={{ ...fieldStyle, flex: 1 }}
+										>
+											<option>seconds</option>
+											<option>minutes</option>
+											<option>hours</option>
+										</select>
+									</div>
+								</div>
+							)}
 							<div
 								style={{
 									display: "flex",
-									alignItems: "center",
-									justifyContent: "space-between",
-									padding: "14px 18px",
+									justifyContent: "flex-end",
+									gap: 8,
+									paddingTop: 4,
 								}}
 							>
-								<span style={{ fontSize: 14, color: "#ccc", fontWeight: 500 }}>
-									{triggerLabel(trigger)}
-								</span>
-								<button
-									type="button"
-									aria-label="Remove trigger"
-									onClick={() =>
+								<Btn variant="ghost" onClick={() => setAddingTrigger(false)}>
+									Cancel
+								</Btn>
+								<Btn onClick={addTrigger}>Add</Btn>
+							</div>
+						</div>
+					</Modal>
+					<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
+						<div
+							style={{
+								padding: "11px 18px",
+								background: "#0d0d0d",
+								borderRadius: "12px 12px 0 0",
+							}}
+						>
+							<span
+								style={{
+									fontSize: 11,
+									fontWeight: 600,
+									color: "#555",
+									letterSpacing: ".08em",
+									textTransform: "uppercase",
+								}}
+							>
+								Schedule
+							</span>
+						</div>
+						<div style={{ height: 1, background: "#111" }} />
+						{(selected.triggers || []).length === 0 ? (
+							<div style={{ padding: "20px 18px", fontSize: 13, color: "#333" }}>
+								No triggers configured. Add one above.
+							</div>
+						) : (
+							selected.triggers.map((trigger, index) => (
+								<div key={trigger.id}>
+									<div
+										style={{
+											display: "flex",
+											alignItems: "center",
+											justifyContent: "space-between",
+											padding: "14px 18px",
+										}}
+									>
+										<span style={{ fontSize: 14, color: "#ccc", fontWeight: 500 }}>
+											{triggerLabel(trigger)}
+										</span>
+										<button
+											type="button"
+											aria-label="Remove trigger"
+											onClick={() =>
+												updateSelected((job) => ({
+													...job,
+													triggers: job.triggers.filter((entry) => entry.id !== trigger.id),
+												}))
+											}
+											style={{
+												width: 22,
+												height: 22,
+												borderRadius: "50%",
+												background: "var(--danger)",
+												border: "none",
+												color: "#000",
+												cursor: "pointer",
+												display: "flex",
+												alignItems: "center",
+												justifyContent: "center",
+											}}
+										>
+											<IconMinus size={10} stroke={3} />
+										</button>
+									</div>
+									{index < selected.triggers.length - 1 && (
+										<div style={{ height: 1, background: "#111" }} />
+									)}
+								</div>
+							))
+						)}
+					</div>
+					<div
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: 18,
+							marginTop: 16,
+							padding: "12px 2px",
+							color: "#777",
+							fontSize: 12,
+						}}
+					>
+						<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+							Interval (minutes)
+							<input
+								type="number"
+								min={1}
+								max={43200}
+								value={selected.intervalMinutes}
+								onChange={(event) =>
+									updateSelected((job) => ({
+										...job,
+										intervalMinutes: Number(event.target.value),
+									}))
+								}
+								style={{ ...fieldStyle, width: 96, padding: "7px 9px", fontSize: 12 }}
+							/>
+						</label>
+						<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+							<input
+								type="checkbox"
+								checked={selected.enabled}
+								onChange={(event) =>
+									updateSelected((job) => ({ ...job, enabled: event.target.checked }))
+								}
+							/>{" "}
+							Enabled
+						</label>
+						{selected.kind === "metadata_refresh" && (
+							<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+								<input
+									type="checkbox"
+									checked={Boolean(selected.config?.preserveCachedAssets)}
+									onChange={(event) =>
 										updateSelected((job) => ({
 											...job,
-											triggers: job.triggers.filter((entry) => entry.id !== trigger.id),
+											config: {
+												...(job.config || {}),
+												preserveCachedAssets: event.target.checked,
+											},
 										}))
 									}
-									style={{
-										width: 22,
-										height: 22,
-										borderRadius: "50%",
-										background: "var(--danger)",
-										border: "none",
-										color: "#000",
-										cursor: "pointer",
-										display: "flex",
-										alignItems: "center",
-										justifyContent: "center",
-									}}
-								>
-									<IconMinus size={10} stroke={3} />
-								</button>
-							</div>
-							{index < selected.triggers.length - 1 && (
-								<div style={{ height: 1, background: "#111" }} />
-							)}
-						</div>
-					))
-				)}
-			</div>
-			<div
-				style={{
-					display: "flex",
-					alignItems: "center",
-					gap: 18,
-					marginTop: 16,
-					padding: "12px 2px",
-					color: "#777",
-					fontSize: 12,
-				}}
-			>
-				<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-					Interval (minutes)
-					<input
-						type="number"
-						min={1}
-						max={43200}
-						value={selected.intervalMinutes}
-						onChange={(event) =>
-							updateSelected((job) => ({
-								...job,
-								intervalMinutes: Number(event.target.value),
-							}))
-						}
-						style={{ ...fieldStyle, width: 96, padding: "7px 9px", fontSize: 12 }}
-					/>
-				</label>
-				<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-					<input
-						type="checkbox"
-						checked={selected.enabled}
-						onChange={(event) =>
-							updateSelected((job) => ({ ...job, enabled: event.target.checked }))
-						}
-					/>{" "}
-					Enabled
-				</label>
-				{selected.kind === "metadata_refresh" && (
-					<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-						<input
-							type="checkbox"
-							checked={Boolean(selected.config?.preserveCachedAssets)}
-							onChange={(event) =>
-								updateSelected((job) => ({
-									...job,
-									config: {
-										...(job.config || {}),
-										preserveCachedAssets: event.target.checked,
-									},
-								}))
-							}
-						/>{" "}
-						Preserve cached assets
-					</label>
-				)}
-			</div>
-			<div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
-				<Btn onClick={() => void save()}>
-					{saving ? "Saving…" : "Save settings"}
-				</Btn>
-				<Btn
-					variant="ghost"
-					icon={<IconPlayerPlay size={14} />}
-					onClick={() => void runNow()}
-				>
-					{activeRun ? "Task active" : "Run now"}
-				</Btn>
-				{activeRun && (
-					<Btn
-						variant="ghost"
-						icon={<IconPlayerStop size={14} />}
-						onClick={() => void terminate()}
-					>
-						Terminate active run
-					</Btn>
-				)}
-			</div>
+								/>{" "}
+								Preserve cached assets
+							</label>
+						)}
+					</div>
+					<div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+						<Btn onClick={() => void save()}>
+							{saving ? "Saving…" : "Save settings"}
+						</Btn>
+						<Btn
+							variant="ghost"
+							icon={<IconPlayerPlay size={14} />}
+							onClick={() => void runNow()}
+						>
+							{activeRun ? "Task active" : "Run now"}
+						</Btn>
+						{activeRun && (
+							<Btn
+								variant="ghost"
+								icon={<IconPlayerStop size={14} />}
+								onClick={() => void terminate()}
+							>
+								Terminate active run
+							</Btn>
+						)}
+					</div>
+				</>
+			)}
 			<div
 				style={{
 					marginTop: 28,

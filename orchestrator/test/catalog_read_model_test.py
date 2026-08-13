@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 from app.catalog import Catalog, _CatalogReadContext
 from app.catalog_read_model import CatalogReadModel
 from app.database import DatabaseHandler
+from fastapi import HTTPException
 
 
 class CatalogReadModelTest(unittest.TestCase):
@@ -421,6 +422,74 @@ class CatalogReadModelTest(unittest.TestCase):
             detail = catalog.detail("user", "series", "en")
         self.assertEqual(detail["selectedSeasonId"], "season")
         self.assertLessEqual(query_count, 12)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_detail_sections_are_bounded_and_preserve_legacy_default(self, _languages):
+        CatalogReadModel(self.db).rebuild(["en"])
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+
+        legacy = catalog.detail("user", "series", "en")
+        self.assertEqual(
+            set(legacy),
+            {
+                "item",
+                "backgroundItem",
+                "seasons",
+                "selectedSeasonId",
+                "episodes",
+                "similar",
+                "collectionItems",
+                "rootEntityId",
+                "catalogGeneration",
+            },
+        )
+        self.assertEqual(
+            [episode["id"] for episode in legacy["episodes"]],
+            ["episode-1", "episode-2"],
+        )
+        self.assertIn("credits", legacy["item"]["metadata"])
+
+        header = catalog.detail("user", "series", "en", section="header")
+        self.assertEqual(
+            set(header),
+            {
+                "item",
+                "backgroundItem",
+                "seasons",
+                "selectedSeasonId",
+                "rootEntityId",
+                "catalogGeneration",
+            },
+        )
+        self.assertNotIn("credits", header["item"]["metadata"])
+
+        episodes = catalog.detail(
+            "user", "series", "en", section="episodes", page=2, page_size=1
+        )
+        self.assertEqual(episodes["total"], 2)
+        self.assertEqual(episodes["page"], 2)
+        self.assertEqual(episodes["pageSize"], 1)
+        self.assertEqual(
+            [episode["id"] for episode in episodes["episodes"]], ["episode-2"]
+        )
+
+        self.assertEqual(
+            catalog.detail("user", "episode-1", "en", section="similar"),
+            {"similar": []},
+        )
+        self.assertEqual(
+            catalog.detail("user", "series", "en", section="credits"),
+            {"credits": {"cast": [], "crew": []}},
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_detail_rejects_unknown_section(self, _languages):
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        with self.assertRaises(HTTPException) as raised:
+            catalog.detail("user", "series", "en", section="all")
+        self.assertEqual(raised.exception.status_code, 400)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_short_search_uses_read_model_grams_before_hydration(self, _languages):

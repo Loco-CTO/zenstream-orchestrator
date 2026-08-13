@@ -9,6 +9,7 @@ import re
 import subprocess
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
@@ -55,6 +56,10 @@ logger = get_logger("playback_routes")
 AUTH_BODY_LIMIT_BYTES = 16 * 1024
 RESOURCE_TICKET_TTL_SECONDS = 15 * 60
 _RATE_LIMIT_EVENTS: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+_ARTWORK_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(32, int(os.getenv("ARTWORK_RESOLVE_WORKERS", "8")))),
+    thread_name_prefix="zenstream-artwork",
+)
 CARD_METADATA_FIELDS = {
     "title",
     "date",
@@ -91,8 +96,11 @@ def _card_item(value: dict) -> dict:
     }
     images = metadata.get("images")
     if isinstance(images, dict):
-        primary = images.get("Primary")
-        metadata["images"] = {"Primary": primary} if isinstance(primary, dict) else {}
+        metadata["images"] = {
+            image_type: image
+            for image_type in ("Primary", "Backdrop")
+            if isinstance((image := images.get(image_type)), dict)
+        }
     result["metadata"] = metadata
     return result
 
@@ -493,9 +501,36 @@ async def set_subtitles(request: Request):
 
 
 @router.get("/api/catalog/libraries")
-async def libraries(request: Request):
+async def libraries(
+    request: Request,
+    language: str | None = Query(None),
+    includeFirstPage: bool = Query(False),
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(40, ge=1, le=100),
+    sortBy: str | None = Query(None),
+    sortOrder: str = Query("ascending"),
+):
     account, _ = await _require_account(request)
-    return {"libraries": await run_foreground(catalog.libraries, account["id"])}
+    libraries_value = await run_foreground(catalog.libraries, account["id"])
+    if not includeFirstPage:
+        return {"libraries": libraries_value}
+    preferred = await run_foreground(_preferred, account, language)
+    first_pages = await asyncio.gather(
+        *(
+            run_foreground(
+                catalog.list_items,
+                account["id"],
+                library["id"],
+                preferred,
+                page=page,
+                page_size=pageSize,
+                sort_by=sortBy,
+                sort_order=sortOrder,
+            )
+            for library in libraries_value
+        )
+    )
+    return {"libraries": libraries_value, "initialPage": first_pages}
 
 
 @router.get("/api/catalog/home")
@@ -750,7 +785,9 @@ async def item_image(
             raise HTTPException(404, "Image version is no longer available.")
         return None
 
-    cached_image = await run_foreground(resolve_cached_image)
+    cached_image = await asyncio.get_running_loop().run_in_executor(
+        _ARTWORK_EXECUTOR, resolve_cached_image
+    )
     if cached_image:
         versioned = bool(request.query_params.get("v"))
         return FileResponse(
@@ -772,9 +809,11 @@ async def item_image(
 
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
-    account = await run_foreground(account_from_access, request)
-    image = await run_foreground(
-        catalog.person_image, account["id"], entity_id, person_id
+    account = await asyncio.get_running_loop().run_in_executor(
+        _ARTWORK_EXECUTOR, account_from_access, request
+    )
+    image = await asyncio.get_running_loop().run_in_executor(
+        _ARTWORK_EXECUTOR, catalog.person_image, account["id"], entity_id, person_id
     )
     if image is None:
         raise HTTPException(404, "Person image not found.")

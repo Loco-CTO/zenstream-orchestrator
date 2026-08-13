@@ -2588,7 +2588,8 @@ class Catalog:
             f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
             f"LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
             f"LEFT JOIN library_entities series ON series.id=season.parent_id "
-            f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND s.duration_seconds>0 AND s.position_seconds/s.duration_seconds>=0.02 AND s.position_seconds/s.duration_seconds<0.9 ORDER BY s.last_played_at DESC LIMIT 18",
+            f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND e.entity_type IN ('movie','episode') AND s.played=0 AND s.duration_seconds>0 AND s.position_seconds>0 "
+            f"ORDER BY COALESCE(s.last_played_at,s.updated_at) DESC,e.id LIMIT 18",
             [user_id, *allowed],
         )
         context = self._context(user_id)
@@ -2622,32 +2623,69 @@ class Catalog:
         placeholders = ",".join("?" for _ in allowed)
 
         def select_rows():
-            started_series = self.db.execute(
+            completed_series = self.db.execute(
                 f"SELECT DISTINCT series.id "
                 f"FROM user_item_state s "
                 f"JOIN library_entities e ON e.id=s.entity_id AND e.entity_type='episode' "
                 f"JOIN library_entities season ON season.id=e.parent_id "
                 f"JOIN library_entities series ON series.id=season.parent_id "
                 f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) "
-                "AND (s.played=1 OR s.position_seconds>0)",
+                "AND s.played=1",
                 [user_id, *allowed],
             )
-            if not started_series:
+            if not completed_series:
                 return []
-            series_placeholders = ",".join("?" for _ in started_series)
+            series_placeholders = ",".join("?" for _ in completed_series)
+            published_join = (
+                "JOIN catalog_entity_summary published ON published.entity_id=e.id "
+                if self._read_model_ready()
+                else ""
+            )
             return self.db.execute(
-                f"WITH ranked AS ("
-                f" SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id AS series_id,COALESCE(s.played,0) AS played,COALESCE(s.last_played_at,'') AS last_played_at,"
-                f" ROW_NUMBER() OVER (PARTITION BY series.id ORDER BY e.season_number,e.episode_number,e.relative_path COLLATE NOCASE) AS item_rank"
-                f" FROM library_entities e "
-                f"JOIN library_entities season ON season.id=e.parent_id "
-                f"JOIN library_entities series ON series.id=season.parent_id "
-                f"LEFT JOIN user_item_state s ON s.entity_id=e.id AND s.user_id=? "
-                f"WHERE e.entity_type='episode' AND e.library_id IN ({placeholders}) "
-                f"AND series.id IN ({series_placeholders}) AND COALESCE(s.played,0)=0"
-                f" ) SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at,series_id,last_played_at "
-                f"FROM ranked WHERE item_rank=1 ORDER BY last_played_at DESC,id LIMIT 18",
-                [user_id, *allowed, *(row[0] for row in started_series)],
+                f"WITH completed AS ("
+                f" SELECT e.id,e.season_number,e.episode_number,e.episode_end_number,e.relative_path,series.id AS series_id,"
+                f" COALESCE(s.last_played_at,s.updated_at,'') AS activity_at,"
+                f" ROW_NUMBER() OVER (PARTITION BY series.id ORDER BY "
+                f" COALESCE(s.last_played_at,s.updated_at,'') DESC,"
+                f" COALESCE(e.season_number,-1) DESC,"
+                f" COALESCE(e.episode_end_number,e.episode_number,-1) DESC,"
+                f" COALESCE(e.episode_number,-1) DESC,e.relative_path COLLATE NOCASE DESC,e.id DESC"
+                f" ) AS anchor_rank"
+                f" FROM user_item_state s"
+                f" JOIN library_entities e ON e.id=s.entity_id AND e.entity_type='episode'"
+                f" JOIN library_entities season ON season.id=e.parent_id"
+                f" JOIN library_entities series ON series.id=season.parent_id"
+                f" WHERE s.user_id=? AND e.library_id IN ({placeholders})"
+                f" AND series.id IN ({series_placeholders}) AND s.played=1"
+                f"), anchors AS ("
+                f" SELECT id,season_number,episode_number,episode_end_number,series_id,activity_at"
+                f" FROM completed WHERE anchor_rank=1"
+                f"), candidates AS ("
+                f" SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,a.series_id,a.activity_at,"
+                f" COALESCE(s.played,0) AS played,COALESCE(s.position_seconds,0) AS position_seconds,"
+                f" ROW_NUMBER() OVER (PARTITION BY a.series_id ORDER BY "
+                f" COALESCE(e.season_number,-1),COALESCE(e.episode_number,-1),e.relative_path COLLATE NOCASE,e.id"
+                f" ) AS candidate_rank"
+                f" FROM anchors a"
+                f" JOIN library_entities e ON e.entity_type='episode'"
+                f" JOIN library_entities season ON season.id=e.parent_id"
+                f" JOIN library_entities series ON series.id=season.parent_id AND series.id=a.series_id"
+                f" {published_join}"
+                f" LEFT JOIN user_item_state s ON s.entity_id=e.id AND s.user_id=?"
+                f" WHERE e.library_id IN ({placeholders}) AND COALESCE(s.played,0)=0"
+                f" AND (COALESCE(e.season_number,-1)>COALESCE(a.season_number,-1)"
+                f" OR (COALESCE(e.season_number,-1)=COALESCE(a.season_number,-1)"
+                f" AND COALESCE(e.episode_number,-1)>COALESCE(a.episode_end_number,a.episode_number,-1)))"
+                f" ) SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at,series_id,activity_at"
+                f" FROM candidates WHERE candidate_rank=1 AND position_seconds<=0"
+                f" ORDER BY activity_at DESC,series_id,id LIMIT 18",
+                [
+                    user_id,
+                    *allowed,
+                    *(row[0] for row in completed_series),
+                    user_id,
+                    *allowed,
+                ],
             )
 
         context = self._context(user_id)

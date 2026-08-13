@@ -10,7 +10,6 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-
 PROGRESS_TOTAL = 10_000
 
 
@@ -49,7 +48,10 @@ class WholeJobProgress:
                     return "discovery", ProgressRange(0, 1_000)
                 if any(token in value for token in ("resolv", "metadata", "locale")):
                     return "metadata", ProgressRange(4_500, 8_000)
-                if any(token in value for token in ("reconcil", "pruning", "refreshing", "queueing")):
+                if any(
+                    token in value
+                    for token in ("reconcil", "pruning", "refreshing", "queueing")
+                ):
                     return "finalization", ProgressRange(8_000, 10_000)
                 return "inventory", ProgressRange(1_000, 4_500)
             kind = "scan"
@@ -91,7 +93,10 @@ class WholeJobProgress:
         if kind == "intro_outro_detect":
             if "fingerprint" in value:
                 return "fingerprinting", ProgressRange(1_000, 8_000)
-            if any(token in value for token in ("marker", "detected", "current", "complete")):
+            if any(
+                token in value
+                for token in ("marker", "detected", "current", "complete")
+            ):
                 return "finalization", ProgressRange(8_000, 10_000)
             return "preparation", ProgressRange(0, 1_000)
         if kind == "metadata_cleanup":
@@ -146,9 +151,13 @@ class WholeJobProgress:
             self.current = max(self.current, mapped)
             now = time.monotonic()
             force = bool(result.get("state") in {"running", "failed", "terminated"})
-            if not force and self._last_persisted >= 0 and (
-                self.current - self._last_persisted < self._MIN_DELTA
-                and now - self._last_persisted_at < self._MIN_INTERVAL
+            if (
+                not force
+                and self._last_persisted >= 0
+                and (
+                    self.current - self._last_persisted < self._MIN_DELTA
+                    and now - self._last_persisted_at < self._MIN_INTERVAL
+                )
             ):
                 result.pop("progress_current", None)
                 result.pop("progress_total", None)

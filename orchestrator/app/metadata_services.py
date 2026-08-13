@@ -492,9 +492,7 @@ class MetadataSearchProjection:
         projection_exists = "catalog_item_projection" in tables
         selection_columns = {
             row[1]
-            for row in self.db.execute(
-                "PRAGMA table_info(catalog_artwork_selection)"
-            )
+            for row in self.db.execute("PRAGMA table_info(catalog_artwork_selection)")
         }
         if not {"provider", "local_path", "blur_hash", "version"}.issubset(
             selection_columns
@@ -505,20 +503,23 @@ class MetadataSearchProjection:
             if "media_files" not in tables:
                 return None
             columns = {
-                row[1]
-                for row in self.db.execute("PRAGMA table_info(media_files)")
+                row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
             }
             if "quick_fingerprint" not in columns:
                 return None
             blur_field = ",image_blur_hash" if "image_blur_hash" in columns else ",NULL"
             for relative_path, fingerprint, blur_hash in self.db.execute(
-                "SELECT relative_path,quick_fingerprint" + blur_field +
-                " FROM media_files WHERE entity_id=? AND role='image' "
+                "SELECT relative_path,quick_fingerprint"
+                + blur_field
+                + " FROM media_files WHERE entity_id=? AND role='image' "
                 "ORDER BY relative_path COLLATE NOCASE",
                 (entity_id,),
             ):
                 stem = Path(relative_path or "").stem.casefold()
-                if stem not in LOCAL_ARTWORK_NAMES.get(image_type, set()) or not fingerprint:
+                if (
+                    stem not in LOCAL_ARTWORK_NAMES.get(image_type, set())
+                    or not fingerprint
+                ):
                     continue
                 path = local_cache.path(str(fingerprint))
                 if path and _ready_file(path):
@@ -603,7 +604,12 @@ class MetadataSearchProjection:
                             )
                             if rows:
                                 path, blur_hash = rows[0]
-                                selected = (provider, path, blur_hash, _asset_version(path, choice["url"]))
+                                selected = (
+                                    provider,
+                                    path,
+                                    blur_hash,
+                                    _asset_version(path, choice["url"]),
+                                )
                     elif path:
                         selected = (
                             provider,
@@ -615,19 +621,41 @@ class MetadataSearchProjection:
                         selected = None
                 if selected is None:
                     prior = existing.get(image_type)
-                    if prior and prior[0] != "screen_extractor" and _ready_file(prior[1]):
-                        selected = (prior[0], prior[1], prior[2], prior[3] or _asset_version(prior[1], prior[1]))
+                    if (
+                        prior
+                        and prior[0] != "screen_extractor"
+                        and _ready_file(prior[1])
+                    ):
+                        selected = (
+                            prior[0],
+                            prior[1],
+                            prior[2],
+                            prior[3] or _asset_version(prior[1], prior[1]),
+                        )
                 if selected is None:
                     if owners.get(image_type) in {"screen_extractor", "local"}:
                         images.pop(image_type, None)
                         owners.pop(image_type, None)
                     continue
                 provider, path, blur_hash, version = selected
-                if image_type != "Logo" and images.get(image_type) and owners.get(image_type) not in {provider, "local", "screen_extractor"}:
-                    fallbacks.setdefault(image_type, {"image": images[image_type], "provider": owners.get(image_type)})
+                if (
+                    image_type != "Logo"
+                    and images.get(image_type)
+                    and owners.get(image_type)
+                    not in {provider, "local", "screen_extractor"}
+                ):
+                    fallbacks.setdefault(
+                        image_type,
+                        {
+                            "image": images[image_type],
+                            "provider": owners.get(image_type),
+                        },
+                    )
                 projected = {
                     "url": f"/api/catalog/items/{entity_id}/images/{image_type}?language={locale}&v={version}",
-                    "language": choice.get("language") if choice and provider not in {"local", "screen_extractor"} else None,
+                    "language": choice.get("language")
+                    if choice and provider not in {"local", "screen_extractor"}
+                    else None,
                     "width": (choice or {}).get("width") or 0,
                     "height": (choice or {}).get("height") or 0,
                 }
@@ -635,7 +663,9 @@ class MetadataSearchProjection:
                     projected["blurHash"] = blur_hash
                 images[image_type] = projected
                 owners[image_type] = provider
-                selection_rows.append((entity_id, locale, image_type, provider, path, blur_hash, version))
+                selection_rows.append(
+                    (entity_id, locale, image_type, provider, path, blur_hash, version)
+                )
             if projection_exists:
                 payload["images"] = images
                 payload["_catalogArtworkProviders"] = owners
@@ -656,6 +686,7 @@ class MetadataSearchProjection:
                     )
             changed += 1
         return changed
+
     def project(
         self,
         provider: str,

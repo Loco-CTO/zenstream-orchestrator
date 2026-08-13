@@ -3232,9 +3232,7 @@ class LibraryJobControlTest(unittest.TestCase):
             ("completed", "No due watcher targets"),
         )
         self.assertEqual(
-            self.db.execute(
-                "SELECT top_level_root FROM library_reconcile_targets"
-            ),
+            self.db.execute("SELECT top_level_root FROM library_reconcile_targets"),
             [("Show",)],
         )
 
@@ -3255,7 +3253,9 @@ class LibraryJobControlTest(unittest.TestCase):
                 (time.time() + 60, "library-1", "Show"),
             )
 
-        with patch("app.library.LibraryScanner.scan", side_effect=scan_and_receive_event) as scan:
+        with patch(
+            "app.library.LibraryScanner.scan", side_effect=scan_and_receive_event
+        ) as scan:
             self.runtime._execute_job(job["id"], "library-1", "reconcile")
         scan.assert_called_once()
         self.assertEqual(
@@ -3274,9 +3274,16 @@ class LibraryJobControlTest(unittest.TestCase):
             self.db.execute(
                 "UPDATE libraries SET directory=? WHERE id='library-1'", (str(root),)
             )
-            with patch("app.library.os.path.normcase", side_effect=lambda value: str(value).lower()):
-                self.runtime.request_reconcile("library-1", str(root / "Show" / "one.mkv"))
-                self.runtime.request_reconcile("library-1", str(root / "show" / "two.mkv"))
+            with patch(
+                "app.library.os.path.normcase",
+                side_effect=lambda value: str(value).lower(),
+            ):
+                self.runtime.request_reconcile(
+                    "library-1", str(root / "Show" / "one.mkv")
+                )
+                self.runtime.request_reconcile(
+                    "library-1", str(root / "show" / "two.mkv")
+                )
             self.assertEqual(
                 self.db.execute(
                     "SELECT top_level_root,event_count,revision FROM library_reconcile_targets"

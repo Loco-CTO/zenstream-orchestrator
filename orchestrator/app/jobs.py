@@ -23,8 +23,8 @@ from app.metadata_services import (
     metadata_task_results,
 )
 from app.models.metadata import MetadataLanguageSettings
-from app.providers import ProviderError
 from app.progress import WholeJobProgress
+from app.providers import ProviderError
 from app.trickplay import TrickplayExtractor
 
 logger = get_logger("jobs")

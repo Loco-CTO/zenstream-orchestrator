@@ -134,25 +134,29 @@ class CatalogTest(unittest.TestCase):
             "2026",
             "2026",
         )
-        with patch.object(
-            catalog,
-            "_entity_row",
-            return_value=(
-                "season-1",
-                "allowed",
-                "series-1",
-                "season",
-                "Season",
-                1,
-                None,
-                None,
-                "2026",
-                "2026",
+        with (
+            patch.object(
+                catalog,
+                "_entity_row",
+                return_value=(
+                    "season-1",
+                    "allowed",
+                    "series-1",
+                    "season",
+                    "Season",
+                    1,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
             ),
-        ), patch.object(
-            catalog, "_series_metadata", return_value={"title": "Example Series"}
-        ), patch.object(
-            catalog, "metadata", return_value={"metadata": {"title": "Pilot"}}
+            patch.object(
+                catalog, "_series_metadata", return_value={"title": "Example Series"}
+            ),
+            patch.object(
+                catalog, "metadata", return_value={"metadata": {"title": "Pilot"}}
+            ),
         ):
             value = catalog._hydrate_rows(account_id, [episode_row], "en")[0]
 
@@ -1631,7 +1635,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(catalog.home_next_up(user_id, "en"), home["nextUp"])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_home_rows_use_completion_frontier_and_exclude_partial_next(self, _languages):
+    def test_home_rows_use_completion_frontier_and_exclude_partial_next(
+        self, _languages
+    ):
         user_id = self.seed_series_hierarchy()
         catalog = self.catalog()
         self.patch_catalog_metadata(catalog)
@@ -1691,7 +1697,9 @@ class CatalogTest(unittest.TestCase):
             "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
             (user_id, "episode-1", 0, 1, 1, 0, 100, "2026-01-01", "2026-01-01"),
         )
-        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY)")
+        self.db.execute(
+            "CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY)"
+        )
         catalog._read_model_ready = lambda: True
 
         self.assertEqual(catalog.home_next_up(user_id, "en"), [])
@@ -1702,7 +1710,9 @@ class CatalogTest(unittest.TestCase):
         )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_home_continue_includes_sub_two_percent_progress_and_orders_latest(self, _languages):
+    def test_home_continue_includes_sub_two_percent_progress_and_orders_latest(
+        self, _languages
+    ):
         user_id = self.account().create("home-progress", "password-123")["id"]
         self.db.execute(
             "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
@@ -1710,13 +1720,27 @@ class CatalogTest(unittest.TestCase):
         for entity_id, path in (("movie-old", "Old"), ("movie-new", "New")):
             self.db.execute(
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (entity_id, "allowed", None, "movie", path, None, None, None, None, "2026", "2026"),
+                (
+                    entity_id,
+                    "allowed",
+                    None,
+                    "movie",
+                    path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
             )
         for state in (
             (user_id, "movie-old", 0, 0, 0, 1, 100, "2026-01-01", "2026-01-01"),
             (user_id, "movie-new", 0, 0, 0, 0.1, 100, "2026-01-02", "2026-01-02"),
         ):
-            self.db.execute("INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)", state)
+            self.db.execute(
+                "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)", state
+            )
         catalog = self.catalog()
         self.patch_catalog_metadata(catalog)
         self.assertEqual(

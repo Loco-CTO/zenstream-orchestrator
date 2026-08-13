@@ -64,12 +64,23 @@ class WholeJobProgressTest(unittest.TestCase):
     def test_progress_is_fixed_and_monotonic_across_stage_counter_resets(self):
         progress = WholeJobProgress("scan")
         first = progress.apply(
-            {"state": "running", "progress_current": 1, "progress_total": 10, "message": "Indexed One"}
+            {
+                "state": "running",
+                "progress_current": 1,
+                "progress_total": 10,
+                "message": "Indexed One",
+            }
         )
         second = progress.apply(
-            {"progress_current": 0, "progress_total": 50, "message": "Resolving new metadata"}
+            {
+                "progress_current": 0,
+                "progress_total": 50,
+                "message": "Resolving new metadata",
+            }
         )
-        completed = progress.apply({"state": "completed", "message": "Indexed 1 entries"})
+        completed = progress.apply(
+            {"state": "completed", "message": "Indexed 1 entries"}
+        )
 
         self.assertEqual(first["progress_total"], PROGRESS_TOTAL)
         self.assertGreaterEqual(second["progress_current"], first["progress_current"])
@@ -79,10 +90,20 @@ class WholeJobProgressTest(unittest.TestCase):
     def test_terminal_failure_keeps_progress_partial(self):
         progress = WholeJobProgress("metadata_refresh")
         progress.apply(
-            {"state": "running", "progress_current": 5, "progress_total": 10, "message": "Processing 5/10"}
+            {
+                "state": "running",
+                "progress_current": 5,
+                "progress_total": 10,
+                "message": "Processing 5/10",
+            }
         )
         failed = progress.apply(
-            {"state": "failed", "progress_current": 5, "progress_total": 10, "message": "5 repair errors"}
+            {
+                "state": "failed",
+                "progress_current": 5,
+                "progress_total": 10,
+                "message": "5 repair errors",
+            }
         )
 
         self.assertLess(failed["progress_current"], PROGRESS_TOTAL)

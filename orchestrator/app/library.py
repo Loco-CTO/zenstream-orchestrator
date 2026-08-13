@@ -20,8 +20,8 @@ from queue import Empty
 from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
 from app.logging_config import get_logger
-from app.worker_config import configured_worker_limit
 from app.progress import WholeJobProgress
+from app.worker_config import configured_worker_limit
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -929,7 +929,9 @@ class LibraryScanner:
         root = Path(library["directory"])
         if not root.is_dir():
             raise ValueError("Library directory is no longer available")
-        progress_kind = "reconcile" if targets is not None else f"scan:{library['type']}"
+        progress_kind = (
+            "reconcile" if targets is not None else f"scan:{library['type']}"
+        )
         self.store.begin_progress(job_id, progress_kind)
         started = now()
         self.store.set_scan_state(library_id, "scanning", started=started, error=None)
@@ -1330,8 +1332,7 @@ class LibraryScanner:
                 and Path(relative_path).parts
                 and _top_level_key(relative_path)
                 in {_top_level_key(target) for target in targets}
-                and _top_level_key(relative_path)
-                not in self._scan_deferred_roots
+                and _top_level_key(relative_path) not in self._scan_deferred_roots
             }
         elif rejected:
             rows = self.db.execute(
@@ -1342,8 +1343,7 @@ class LibraryScanner:
             rejected = {
                 entity_id
                 for entity_id, relative_path in rows
-                if _top_level_key(relative_path or "")
-                not in self._scan_deferred_roots
+                if _top_level_key(relative_path or "") not in self._scan_deferred_roots
             }
         closure = self._entity_closure(rejected)
         if not closure:
@@ -2669,7 +2669,9 @@ class LibraryScanner:
                         progress_current=index,
                         message=f"Skipped unresolved {entity_type} {relative_path}",
                     )
-                    self._extract_and_reproject(entity_id, entity_type, should_terminate)
+                    self._extract_and_reproject(
+                        entity_id, entity_type, should_terminate
+                    )
                     continue
                 query, year = _inventory_query(relative_path or "")
                 try:
@@ -2709,7 +2711,9 @@ class LibraryScanner:
                         progress_current=index,
                         message=f"Metadata failed for {entity_type} {relative_path}; continuing",
                     )
-                    self._extract_and_reproject(entity_id, entity_type, should_terminate)
+                    self._extract_and_reproject(
+                        entity_id, entity_type, should_terminate
+                    )
                     continue
             priorities = {
                 "season": ["tvdb", "tmdb"],
@@ -3398,9 +3402,7 @@ class LibraryScanner:
                 )
 
     @staticmethod
-    def _video_state(
-        path: Path, file_stat: os.stat_result | None = None
-    ) -> str:
+    def _video_state(path: Path, file_stat: os.stat_result | None = None) -> str:
         """Classify a video candidate without mistaking access failure for absence."""
 
         if path.suffix.lower() not in VIDEO_EXTENSIONS:
@@ -3801,7 +3803,9 @@ class LibraryScanner:
             )
             series_relative_path = relative(str(root), str(series_dir))
             if self._root_has_access_error(series_dir):
-                self._defer_root(series_relative_path, "episode path could not be inspected")
+                self._defer_root(
+                    series_relative_path, "episode path could not be inspected"
+                )
                 self.store.update_job(
                     job_id,
                     progress_current=series_index,

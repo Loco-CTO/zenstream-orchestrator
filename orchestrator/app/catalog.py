@@ -77,6 +77,7 @@ class _CatalogReadContext:
         self.projected_states: dict[str, tuple] = {}
         self.empty_state_counts: dict[str, int] = {}
         self.projected_metadata: dict[tuple[str, str], dict] = {}
+        self.projected_metadata_loaded: set[tuple[str, str]] = set()
         self.playable_descendants: dict[str, list[str]] = {}
         self.resolved_states: dict[str, dict] = {}
         self.series_primary_images: dict[tuple[str, str], dict | None] = {}
@@ -473,6 +474,10 @@ class Catalog:
         if language not in configured:
             raise HTTPException(400, "Metadata language is not configured.")
         context = self._context(user_id)
+        projection_loaded = bool(
+            context
+            and (entity_id, language) in context.projected_metadata_loaded
+        )
         projected = (
             context.projected_metadata.get((entity_id, language)) if context else None
         )
@@ -499,11 +504,13 @@ class Catalog:
             if self._has_table("catalog_metadata_projection")
             else None
         )
-        if projection_table:
+        if projection_table and not projection_loaded:
             rows = self.db.execute(
                 f"SELECT payload FROM {projection_table} WHERE entity_id=? AND locale=?",
                 (entity_id, language),
             )
+            if context:
+                context.projected_metadata_loaded.add((entity_id, language))
             if rows:
                 try:
                     value = json.loads(rows[0][0])
@@ -1125,7 +1132,17 @@ class Catalog:
         context = self._context(user_id)
         if context is None or not entity_ids:
             return
-        placeholders = ",".join("?" for _ in entity_ids)
+        language = normalize_metadata_locale(language)
+        missing = list(
+            dict.fromkeys(
+                entity_id
+                for entity_id in entity_ids
+                if (entity_id, language) not in context.projected_metadata_loaded
+            )
+        )
+        if not missing:
+            return
+        placeholders = ",".join("?" for _ in missing)
         table = (
             "catalog_item_projection"
             if self._read_model_ready() and self._has_table("catalog_item_projection")
@@ -1137,7 +1154,10 @@ class Catalog:
             return
         rows = self.db.execute(
             f"SELECT entity_id,payload FROM {table} WHERE locale=? AND entity_id IN ({placeholders})",
-            [language, *entity_ids],
+            [language, *missing],
+        )
+        context.projected_metadata_loaded.update(
+            (entity_id, language) for entity_id in missing
         )
         for entity_id, payload in rows:
             try:
@@ -2352,8 +2372,13 @@ class Catalog:
         entity_id: str,
         language: str,
         season_id: str | None = None,
+        section: str | None = None,
+        page: int = 1,
+        page_size: int = 40,
     ) -> dict:
         """Return the bounded data needed to render one detail route."""
+        if section not in {None, "header", "episodes", "similar", "credits"}:
+            raise HTTPException(400, "Unsupported detail section.")
         row = self.require_entity(user_id, entity_id)
         root_row = row
         if row[3] == "episode" and row[2]:
@@ -2368,9 +2393,24 @@ class Catalog:
             root_row = self.require_entity(user_id, row[2])
             season_id = season_id or row[0]
 
+        if section == "credits":
+            metadata = self.metadata(
+                user_id, entity_id, language, include_credits=True
+            )["metadata"]
+            return {"credits": metadata.get("credits", {"cast": [], "crew": []})}
+        if section == "similar":
+            return {
+                "similar": (
+                    []
+                    if row[3] == "episode"
+                    else self.similar(user_id, entity_id, language)["items"]
+                )
+            }
+
         season_rows: list[tuple] = []
         episode_rows: list[tuple] = []
         collection_rows: list[tuple] = []
+        episode_total = 0
         if root_row[3] == "series":
             season_rows = self.db.execute(
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
@@ -2387,14 +2427,29 @@ class Catalog:
                 )
                 season_id = preferred[0] if preferred else None
             if season_id:
-                episode_rows = self.db.execute(
+                episode_query = (
                     "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                     "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
                     "WHERE p.locale=? AND p.library_id=? AND p.parent_id=? "
-                    "ORDER BY e.episode_number IS NULL,e.episode_number,e.relative_path COLLATE NOCASE,e.id",
-                    (language, root_row[1], season_id),
+                    "ORDER BY e.episode_number IS NULL,e.episode_number,e.relative_path COLLATE NOCASE,e.id"
                 )
-        elif row[3] == "collection":
+                episode_params: list[object] = [language, root_row[1], season_id]
+                if section == "episodes":
+                    count_rows = self.db.execute(
+                        "SELECT COUNT(*) FROM catalog_item_projection p "
+                        "WHERE p.locale=? AND p.library_id=? AND p.parent_id=?",
+                        episode_params,
+                    )
+                    episode_total = int(count_rows[0][0] or 0) if count_rows else 0
+                    episode_query += " LIMIT ? OFFSET ?"
+                    episode_params.extend(
+                        [page_size, max(0, page - 1) * page_size]
+                    )
+                if section in {None, "episodes"}:
+                    episode_rows = self.db.execute(episode_query, episode_params)
+                    if section is None:
+                        episode_total = len(episode_rows)
+        elif row[3] == "collection" and section is None:
             allowed = sorted(self.allowed_libraries(user_id))
             placeholders = ",".join("?" for _ in allowed)
             member_table = (
@@ -2416,16 +2471,17 @@ class Catalog:
                 else []
             )
 
+        selected_hydration_rows = (
+            episode_rows
+            if section == "episodes"
+            else [row, root_row, *season_rows]
+            if section == "header"
+            else [row, root_row, *season_rows, *episode_rows, *collection_rows]
+        )
         hydration_rows = list(
             {
                 value[0]: value
-                for value in [
-                    row,
-                    root_row,
-                    *season_rows,
-                    *episode_rows,
-                    *collection_rows,
-                ]
+                for value in selected_hydration_rows
             }.values()
         )
         self._seed_hydration_rows(user_id, hydration_rows, language)
@@ -2438,8 +2494,27 @@ class Catalog:
             )
             for value in hydration_rows
         }
+        generation_rows = (
+            self.db.execute(
+                "SELECT generation FROM catalog_library_summary WHERE library_id=?",
+                (row[1],),
+            )
+            if self._has_table("catalog_library_summary")
+            else []
+        )
+        generation = int(generation_rows[0][0]) if generation_rows else 0
+        if section == "episodes":
+            return {
+                "episodes": [hydrated[value[0]] for value in episode_rows],
+                "selectedSeasonId": season_id,
+                "page": page,
+                "pageSize": page_size,
+                "total": episode_total,
+                "rootEntityId": root_row[0],
+                "catalogGeneration": generation,
+            }
         item_metadata = self.metadata(
-            user_id, entity_id, language, include_credits=True
+            user_id, entity_id, language, include_credits=section is None
         )["metadata"]
         item_children = (
             [value[0] for value in season_rows]
@@ -2451,15 +2526,17 @@ class Catalog:
         item = self._serialize(
             user_id, row, item_metadata, item_children, language=language
         )
-
-        generation_rows = (
-            self.db.execute(
-                "SELECT generation FROM catalog_library_summary WHERE library_id=?",
-                (row[1],),
-            )
-            if self._has_table("catalog_library_summary")
-            else []
-        )
+        if section == "header":
+            return {
+                "item": item,
+                "backgroundItem": (
+                    hydrated[root_row[0]] if root_row[0] != row[0] else None
+                ),
+                "seasons": [hydrated[value[0]] for value in season_rows],
+                "selectedSeasonId": season_id,
+                "rootEntityId": root_row[0],
+                "catalogGeneration": generation,
+            }
         return {
             "item": item,
             "backgroundItem": (
@@ -2479,7 +2556,7 @@ class Catalog:
                 else None
             ),
             "rootEntityId": root_row[0],
-            "catalogGeneration": int(generation_rows[0][0]) if generation_rows else 0,
+            "catalogGeneration": generation,
         }
 
     def _home_series_name(
@@ -2591,7 +2668,7 @@ class Catalog:
             f"LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
             f"LEFT JOIN library_entities series ON series.id=season.parent_id "
             f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND e.entity_type IN ('movie','episode') AND s.played=0 AND s.duration_seconds>0 AND s.position_seconds>0 "
-            f"ORDER BY COALESCE(s.last_played_at,s.updated_at) DESC,e.id LIMIT 18",
+            f"ORDER BY COALESCE(s.last_played_at,s.updated_at) DESC,s.entity_id LIMIT 18",
             [user_id, *allowed],
         )
         context = self._context(user_id)

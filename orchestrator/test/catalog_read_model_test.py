@@ -1,7 +1,7 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from app.catalog import Catalog
+from app.catalog import Catalog, _CatalogReadContext
 from app.catalog_read_model import CatalogReadModel
 from app.database import DatabaseHandler
 
@@ -326,6 +326,55 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(
             response["items"][0]["lastAddedAt"], "1970-01-01T00:00:00+00:00"
         )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_projection_preload_deduplicates_and_caches_missing_rows(self, _languages):
+        CatalogReadModel(self.db).rebuild(["en"])
+        self.db.execute(
+            "DELETE FROM catalog_item_projection WHERE entity_id='episode-2' AND locale='en'"
+        )
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        context = _CatalogReadContext(catalog, "user")
+        token = Catalog._read_context.set(context)
+        projection_preloads = 0
+        single_projection_reads = 0
+        original_read = self.db.read_execute
+
+        def counted_read(query, params=None):
+            nonlocal projection_preloads, single_projection_reads
+            if query.startswith(
+                "SELECT entity_id,payload FROM catalog_item_projection"
+            ):
+                projection_preloads += 1
+            if query.startswith(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id="
+            ):
+                single_projection_reads += 1
+            return original_read(query, params)
+
+        self.db.read_execute = counted_read
+        try:
+            catalog._preload_projected_metadata(
+                "user", ["series", "series", "episode-2"], "en"
+            )
+            catalog._preload_projected_metadata(
+                "user", ["episode-2", "series"], "en"
+            )
+            service = Mock()
+            service.resolve_public.return_value = {"metadata": {"images": {}}}
+            with patch.object(catalog, "_read_service", return_value=service), patch.object(
+                catalog, "_provider_ids", return_value=[]
+            ):
+                resolved = catalog.metadata("user", "episode-2", "en")
+        finally:
+            self.db.read_execute = original_read
+            Catalog._read_context.reset(token)
+
+        self.assertEqual(projection_preloads, 1)
+        self.assertEqual(single_projection_reads, 0)
+        self.assertEqual(resolved, {"metadata": {"images": {}}})
+        self.assertIn(("episode-2", "en"), context.projected_metadata_loaded)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_projection_first_title_plan_avoids_temp_ordering_tree(self, _languages):

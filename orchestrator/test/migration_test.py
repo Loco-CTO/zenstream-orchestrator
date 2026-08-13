@@ -49,6 +49,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "idx_catalog_item_genres_covering",
                         "idx_catalog_artwork_selection_lookup",
                         "idx_catalog_collection_member_projection_page",
+                        "idx_user_item_state_continue",
                         "idx_metadata_images_url_path_ready",
                         "idx_metadata_images_type_url_fetched",
                     }

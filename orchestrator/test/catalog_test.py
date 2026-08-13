@@ -865,6 +865,55 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("USE TEMP B-TREE FOR ORDER BY", plan_text)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_continue_watching_plan_streams_from_partial_state_index(
+        self, _languages
+    ):
+        user_id = self.account().create("continue-plan", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (user_id, "allowed", "now"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('continue-movie','allowed',NULL,'movie','Continue.mkv',NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "continue-movie", 0, 0, 0, 20, 100, None, "2026"),
+        )
+        self.db.execute(
+            "CREATE INDEX idx_user_item_state_continue "
+            "ON user_item_state(user_id,COALESCE(last_played_at,updated_at) DESC,entity_id) "
+            "WHERE played=0 AND duration_seconds>0 AND position_seconds>0"
+        )
+        catalog = self.catalog()
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {"title": entity_id}
+        }
+        selected_query = None
+        selected_params = None
+        execute = self.db.execute
+
+        def capture_query(query, params=None):
+            nonlocal selected_query, selected_params
+            if "ORDER BY COALESCE(s.last_played_at,s.updated_at)" in query:
+                selected_query = query
+                selected_params = params
+            return execute(query, params)
+
+        self.db.execute = capture_query
+        try:
+            response = catalog.home_continue_watching(user_id, "en")
+        finally:
+            self.db.execute = execute
+
+        self.assertEqual([item["id"] for item in response], ["continue-movie"])
+        self.assertIsNotNone(selected_query)
+        plan = execute("EXPLAIN QUERY PLAN " + selected_query, selected_params)
+        plan_text = " ".join(str(row[3]) for row in plan)
+        self.assertIn("idx_user_item_state_continue", plan_text)
+        self.assertNotIn("TEMP B-TREE", plan_text)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_large_list_preloads_graph_and_state_once(self, _languages):
         user_id = self.account().create("large", "password-123")["id"]
         self.db.execute(

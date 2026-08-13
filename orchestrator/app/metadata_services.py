@@ -417,10 +417,20 @@ class MetadataSearchProjection:
                 image_type,
                 original,
                 reader.providers(entity_type),
+                entity_id=entity_id,
             )
             if not choice:
                 continue
             provider = str(choice.get("provider") or "")
+            if provider == "screen_extractor":
+                generated_path = choice.get("localPath")
+                if generated_path and _ready_file(generated_path):
+                    result[image_type] = (
+                        choice,
+                        (generated_path, choice.get("blurHash"), None),
+                        provider,
+                    )
+                continue
             provider_id = next(
                 (
                     str(identity.get("id"))
@@ -1046,6 +1056,7 @@ class MetadataReadService:
                 image_type,
                 original,
                 providers,
+                entity_id=entity_id,
             )
             if choice:
                 image = {
@@ -1054,19 +1065,23 @@ class MetadataReadService:
                     "width": choice.get("width") or 0,
                     "height": choice.get("height") or 0,
                 }
-                blur_hash = self._image_blur_hash(
-                    choice.get("provider"),
-                    entity_type,
-                    next(
-                        (
-                            identity.get("id")
-                            for identity in provider_ids
-                            if identity.get("provider") == choice.get("provider")
+                blur_hash = (
+                    choice.get("blurHash")
+                    if choice.get("provider") == "screen_extractor"
+                    else self._image_blur_hash(
+                        choice.get("provider"),
+                        entity_type,
+                        next(
+                            (
+                                identity.get("id")
+                                for identity in provider_ids
+                                if identity.get("provider") == choice.get("provider")
+                            ),
+                            None,
                         ),
-                        None,
-                    ),
-                    image_type,
-                    choice.get("url"),
+                        image_type,
+                        choice.get("url"),
+                    )
                 )
                 if blur_hash and image_type != "Logo":
                     image["blurHash"] = blur_hash
@@ -1090,6 +1105,7 @@ class MetadataReadService:
         image_type: str,
         original: str | None,
         providers: list[str] | None = None,
+        entity_id: str | None = None,
     ) -> dict | None:
         """Select the first provider-ordered candidate with a ready file."""
         identities = {
@@ -1103,13 +1119,12 @@ class MetadataReadService:
             columns = self._metadata_image_columns = {
                 row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")
             }
-        if "metadata_images" not in {
+        has_metadata_images = "metadata_images" in {
             row[0]
             for row in self.db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
-        }:
-            return None
+        }
         for candidate in rank_artwork_candidates(
             images,
             requested,
@@ -1127,6 +1142,8 @@ class MetadataReadService:
             if not provider_id or not isinstance(url, str):
                 continue
             path_sql = ",local_path" if "local_path" in columns else ""
+            if not has_metadata_images:
+                break
             rows = self.db.execute(
                 "SELECT 1" + path_sql + " FROM metadata_images WHERE provider=? "
                 "AND entity_type=? AND provider_id=? AND image_type=? "
@@ -1137,6 +1154,12 @@ class MetadataReadService:
             )
             if rows and ("local_path" not in columns or _ready_file(rows[0][1])):
                 return candidate
+        if entity_id and image_type == "Primary" and entity_type in {"movie", "episode"}:
+            from app.screen_extractor import ready_artwork
+
+            generated = ready_artwork(self.db, entity_id, entity_type)
+            if generated:
+                return generated
         return None
 
     def _image_blur_hash(

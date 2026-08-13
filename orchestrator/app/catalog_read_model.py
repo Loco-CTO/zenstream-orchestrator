@@ -686,9 +686,26 @@ class CatalogReadModel:
                     image_type,
                     original,
                     providers,
+                    entity_id=entity_id,
                 )
                 if choice:
                     provider = str(choice.get("provider") or "")
+                    if provider == "screen_extractor":
+                        local_path = choice.get("localPath")
+                        if local_path and Path(str(local_path)).is_file():
+                            values.append(
+                                (
+                                    entity_id,
+                                    locale,
+                                    image_type,
+                                    provider,
+                                    str(local_path),
+                                    choice.get("blurHash"),
+                                    choice.get("version") or _artwork_version(str(local_path)),
+                                    now,
+                                )
+                            )
+                        continue
                     provider_id = next(
                         (
                             identity["id"]

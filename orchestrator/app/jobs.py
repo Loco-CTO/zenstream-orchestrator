@@ -1211,6 +1211,39 @@ class MetadataMissingJob:
                         f"{entity_type} {provider}:{provider_id}"
                     ),
                 )
+        # Screen Extractor is a final, language-neutral fallback. Run it only
+        # after every real provider identity has been processed so a secondary
+        # TMDB/TVDB Primary can displace a generated frame in the same pass.
+        extractor_failures = []
+        try:
+            from app.screen_extractor import extract_entity
+
+            entity_rows = self.db.execute(
+                "SELECT id,entity_type FROM library_entities WHERE entity_type IN ('movie','episode') ORDER BY id"
+            )
+            for entity_id, entity_type in entity_rows:
+                if should_terminate():
+                    raise JobTerminated()
+                try:
+                    extract_entity(self.db, entity_id, entity_type, force=False, should_terminate=should_terminate)
+                except Exception as error:
+                    extractor_failures.append({"entityId": entity_id, "error": f"{type(error).__name__}: {error}"})
+        except JobTerminated:
+            raise
+        except Exception as error:
+            extractor_failures.append({"error": f"{type(error).__name__}: {error}"})
+        if extractor_failures:
+            incomplete_repairs.extend(
+                {"kind": "screen_extractor", **failure} for failure in extractor_failures
+            )
+        try:
+            from app.catalog_read_model import CatalogReadModel
+            roots = self.db.execute(
+                "SELECT id FROM library_entities WHERE entity_type IN ('movie','series','collection') AND parent_id IS NULL"
+            )
+            CatalogReadModel(self.db).refresh_roots([row[0] for row in roots])
+        except Exception:
+            logger.exception("screen extractor catalog refresh failed")
         if should_terminate():
             raise JobTerminated()
         if failures:

@@ -1982,6 +1982,12 @@ class LibraryScanner:
         total: int,
     ) -> None:
         self._resolve_movie_row(library_id, row, job_id, should_terminate, index, total)
+        try:
+            from app.screen_extractor import extract_entity
+
+            extract_entity(self.db, row[0], "movie", should_terminate=should_terminate)
+        except Exception as error:
+            logger.warning("screen extractor movie fallback failed entity_id=%s error=%s", row[0], error)
         self._publish_root(row[0])
 
     def _queue_metadata_repair(
@@ -2685,11 +2691,23 @@ class LibraryScanner:
                     progress_current=index,
                     message=f"Metadata failed for {entity_type} {relative_path}; continuing",
                 )
+                if entity_type == "episode":
+                    try:
+                        from app.screen_extractor import extract_entity
+                        extract_entity(self.db, entity_id, entity_type, should_terminate=should_terminate)
+                    except Exception as error:
+                        logger.warning("screen extractor episode fallback failed entity_id=%s error=%s", entity_id, error)
                 continue
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?",
                 (now(), entity_id),
             )
+            if entity_type == "episode":
+                try:
+                    from app.screen_extractor import extract_entity
+                    extract_entity(self.db, entity_id, entity_type, should_terminate=should_terminate)
+                except Exception as error:
+                    logger.warning("screen extractor episode fallback failed entity_id=%s error=%s", entity_id, error)
             self.store.update_job(
                 job_id,
                 progress_current=index,

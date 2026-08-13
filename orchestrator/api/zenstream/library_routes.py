@@ -275,7 +275,7 @@ def _refresh_item_metadata_sync(entity_id: str) -> dict:
         for identity in item.get("providerIds", [])
         if identity.get("provider") in {"tmdb", "tvdb"} and identity.get("id")
     ]
-    if not identities:
+    if not identities and item["type"] not in {"movie", "episode"}:
         raise HTTPException(409, "This item has no supported provider identity.")
     service = MetadataService()
     ingest = MetadataIngestService(service, background_assets=False)
@@ -337,6 +337,13 @@ def _refresh_item_metadata_sync(entity_id: str) -> dict:
                     "error": f"{type(error).__name__}: {error}",
                 }
             )
+    if item["type"] in {"movie", "episode"}:
+        try:
+            from app.screen_extractor import extract_entity
+
+            extract_entity(store.db, entity_id, item["type"], force=False)
+        except Exception as error:
+            failures.append({"provider": "screen_extractor", "error": f"{type(error).__name__}: {error}"})
     CatalogReadModel(store.db).refresh_roots([entity_id])
     if not refreshed:
         raise HTTPException(

@@ -614,6 +614,21 @@ class MissingTvChildIdentityRepairTest(unittest.TestCase):
 
 
 class JobMappingTest(unittest.TestCase):
+    def _scheduler_store(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        db.execute(
+            "CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE job_runs (id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, library_id TEXT, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, thread_name TEXT)"
+        )
+        db.execute(
+            "CREATE TABLE job_schedule_triggers (id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, trigger_type TEXT NOT NULL, interval_seconds INTEGER, time_of_day TEXT, weekday INTEGER, next_run_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        store = JobStore.__new__(JobStore)
+        store.db = db
+        return db, store
+
     def test_definition_mapping_uses_all_persisted_columns(self):
         row = (
             "id",
@@ -665,20 +680,96 @@ class JobMappingTest(unittest.TestCase):
         self.assertEqual(value["threadName"], "worker")
 
     def test_default_tasks_include_orphan_cleanup(self):
-        db = DatabaseHandler("sqlite", {}, ":memory:")
+        db, store = self._scheduler_store()
         try:
-            db.execute(
-                "CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
-            )
-            store = JobStore.__new__(JobStore)
-            store.db = db
-
             store.ensure_defaults()
 
             cleanup = store.by_key("metadata_cleanup")
             self.assertIsNotNone(cleanup)
             self.assertEqual(cleanup["kind"], "metadata_cleanup")
             self.assertEqual(cleanup["intervalMinutes"], 10080)
+        finally:
+            db.close()
+
+    def test_removes_legacy_library_definition_by_configured_owner(self):
+        db, store = self._scheduler_store()
+        try:
+            db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,kind,config,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    "definition-1",
+                    "library_delta_verify:library-1",
+                    "Scan Library",
+                    "library_scan",
+                    '{"libraryId":"library-1"}',
+                    "created",
+                    "updated",
+                ),
+            )
+            db.execute(
+                "INSERT INTO job_runs(id,definition_id,kind,created_at) VALUES('run-1','definition-1','library_scan','created')"
+            )
+            db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,created_at,updated_at) VALUES('trigger-1','definition-1','interval','created','updated')"
+            )
+
+            store.remove_library_definitions("library-1")
+
+            self.assertEqual(db.execute("SELECT id FROM job_definitions"), [])
+            self.assertEqual(db.execute("SELECT id FROM job_runs"), [])
+            self.assertEqual(db.execute("SELECT id FROM job_schedule_triggers"), [])
+        finally:
+            db.close()
+
+    def test_reconciles_legacy_and_orphaned_library_definitions(self):
+        db, store = self._scheduler_store()
+        try:
+            for values in (
+                (
+                    "legacy",
+                    "library_delta_verify:library-1",
+                    "Scan Existing",
+                    '{"libraryId":"library-1"}',
+                ),
+                (
+                    "orphan",
+                    "library_scan:deleted-library",
+                    "Scan Deleted",
+                    '{"libraryId":"deleted-library"}',
+                ),
+            ):
+                db.execute(
+                    "INSERT INTO job_definitions(id,job_key,name,kind,config,created_at,updated_at) VALUES(?,?,?,'library_scan',?,'created','updated')",
+                    values,
+                )
+            db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,created_at,updated_at) VALUES('orphan-trigger','orphan','interval','created','updated')"
+            )
+
+            store.reconcile_library_definitions(
+                [
+                    {
+                        "id": "library-1",
+                        "name": "Existing",
+                        "scanIntervalMinutes": 60,
+                        "watchEnabled": True,
+                    }
+                ]
+            )
+
+            self.assertEqual(
+                db.execute(
+                    "SELECT id,job_key,config FROM job_definitions ORDER BY id"
+                ),
+                [
+                    (
+                        "legacy",
+                        "library_scan:library-1",
+                        '{"libraryId": "library-1"}',
+                    )
+                ],
+            )
+            self.assertEqual(db.execute("SELECT id FROM job_schedule_triggers"), [])
         finally:
             db.close()
 

@@ -607,6 +607,109 @@ class JobStore:
         return self.definition(definition["id"])  # type: ignore[return-value]
 
     @staticmethod
+    def _library_definition_key_owner(job_key: str) -> str | None:
+        for prefix in ("library_scan:", "library_delta_verify:"):
+            if job_key.startswith(prefix):
+                return job_key.removeprefix(prefix) or None
+        return None
+
+    @classmethod
+    def _library_definition_owner(cls, job_key: str, config: str | None) -> str | None:
+        try:
+            library_id = json.loads(config or "{}").get("libraryId")
+        except (AttributeError, json.JSONDecodeError):
+            library_id = None
+        if library_id:
+            return str(library_id)
+        return cls._library_definition_key_owner(job_key)
+
+    def _delete_definitions(self, definition_ids: list[str]) -> None:
+        definition_ids = list(dict.fromkeys(definition_ids))
+        if not definition_ids:
+            return
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        with self.db.transaction() as cursor:
+            for definition_id in definition_ids:
+                if "job_schedule_triggers" in tables:
+                    cursor.execute(
+                        "DELETE FROM job_schedule_triggers WHERE definition_id=?",
+                        (definition_id,),
+                    )
+                if "job_runs" in tables:
+                    cursor.execute(
+                        "DELETE FROM job_runs WHERE definition_id=?", (definition_id,)
+                    )
+                cursor.execute(
+                    "DELETE FROM job_definitions WHERE id=?", (definition_id,)
+                )
+
+    def remove_library_definitions(self, library_id: str) -> None:
+        rows = self.db.execute(
+            "SELECT id,job_key,config FROM job_definitions WHERE kind='library_scan'"
+        )
+        self._delete_definitions(
+            [
+                row[0]
+                for row in rows
+                if library_id
+                in {
+                    self._library_definition_owner(row[1], row[2]),
+                    self._library_definition_key_owner(row[1]),
+                }
+            ]
+        )
+
+    def reconcile_library_definitions(self, libraries: list[dict]) -> None:
+        libraries_by_id = {str(library["id"]): library for library in libraries}
+        definitions_by_library: dict[str, list[tuple[str, str]]] = {}
+        orphan_ids = []
+        for definition_id, job_key, config in self.db.execute(
+            "SELECT id,job_key,config FROM job_definitions WHERE kind='library_scan'"
+        ):
+            library_id = self._library_definition_owner(job_key, config)
+            key_library_id = self._library_definition_key_owner(job_key)
+            if library_id not in libraries_by_id and key_library_id in libraries_by_id:
+                library_id = key_library_id
+            if library_id not in libraries_by_id:
+                orphan_ids.append(definition_id)
+                continue
+            definitions_by_library.setdefault(library_id, []).append(
+                (definition_id, job_key)
+            )
+        self._delete_definitions(orphan_ids)
+
+        for library_id, definitions in definitions_by_library.items():
+            canonical_key = f"library_scan:{library_id}"
+            keeper = next(
+                (
+                    definition
+                    for definition in definitions
+                    if definition[1] == canonical_key
+                ),
+                definitions[0],
+            )
+            self._delete_definitions(
+                [
+                    definition_id
+                    for definition_id, _key in definitions
+                    if definition_id != keeper[0]
+                ]
+            )
+            if keeper[1] != canonical_key:
+                self.db.execute(
+                    "UPDATE job_definitions SET job_key=?,updated_at=? WHERE id=?",
+                    (canonical_key, now(), keeper[0]),
+                )
+
+        for library in libraries_by_id.values():
+            self.ensure_library(library)
+
+    @staticmethod
     def _validate_trigger(trigger: dict) -> dict:
         trigger_type = str(trigger.get("type", "")).strip().lower()
         if trigger_type == "interval":
@@ -1352,8 +1455,7 @@ class JobScheduler:
             self.store.db.execute(
                 "DELETE FROM job_definitions WHERE id=?", (definition_id,)
             )
-        for library in self.library_runtime.store.list():
-            self.store.ensure_library(library)
+        self.store.reconcile_library_definitions(self.library_runtime.store.list())
         # Startup triggers are intentionally armed on every process start and
         # remain manual-only afterward until their next explicit update.
         try:
@@ -1393,12 +1495,7 @@ class JobScheduler:
         return self.store.update_definition(definition["id"], values)
 
     def remove_library_definition(self, library_id: str):
-        for key in (f"library_scan:{library_id}",):
-            definition = self.store.by_key(key)
-            if definition:
-                self.store.db.execute(
-                    "DELETE FROM job_definitions WHERE id=?", (definition["id"],)
-                )
+        self.store.remove_library_definitions(library_id)
 
     def run_now(self, definition_id: str) -> dict:
         definition = self.store.definition(definition_id)

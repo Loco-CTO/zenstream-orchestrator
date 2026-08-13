@@ -826,10 +826,14 @@ class JobStore:
         return _local_next(trigger["time"], trigger["weekday"])
 
     def _replace_triggers(self, definition_id: str, triggers: list[dict]) -> None:
+        definition = self.definition(definition_id)
+        if not definition:
+            raise KeyError("Job definition not found")
         validated = [
             {
                 **self._validate_trigger(trigger),
                 "id": str(trigger.get("id") or new_id()),
+                "options": self.validate_options(definition["kind"], trigger.get("options")),
             }
             for trigger in triggers
         ]
@@ -838,20 +842,16 @@ class JobStore:
             "DELETE FROM job_schedule_triggers WHERE definition_id=?", (definition_id,)
         )
         for trigger in validated:
-            self.db.execute(
-                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (
-                    str(trigger.get("id") or new_id()),
-                    definition_id,
-                    trigger["type"],
-                    trigger.get("intervalSeconds"),
-                    trigger.get("time"),
-                    trigger.get("weekday"),
-                    self._next_for_trigger(trigger),
-                    timestamp,
-                    timestamp,
-                ),
-            )
+            try:
+                self.db.execute(
+                    "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,options,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (trigger["id"], definition_id, trigger["type"], trigger.get("intervalSeconds"), trigger.get("time"), trigger.get("weekday"), self._next_for_trigger(trigger), json.dumps(trigger["options"], ensure_ascii=False), timestamp, timestamp),
+                )
+            except Exception:
+                self.db.execute(
+                    "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (trigger["id"], definition_id, trigger["type"], trigger.get("intervalSeconds"), trigger.get("time"), trigger.get("weekday"), self._next_for_trigger(trigger), timestamp, timestamp),
+                )
 
     def _earliest_next(self, definition_id: str) -> str | None:
         try:
@@ -868,37 +868,13 @@ class JobStore:
         definition = self.definition(definition_id)
         if not definition:
             raise KeyError("Job definition not found")
-        interval = max(
-            5,
-            min(
-                43200,
-                int(
-                    values.get("intervalMinutes", definition["intervalMinutes"]) or 1440
-                ),
-            ),
-        )
-        enabled = int(bool(values.get("enabled", definition["enabled"])))
+        if "intervalMinutes" in values or "enabled" in values:
+            raise ValueError("intervalMinutes and enabled are trigger properties")
         name = str(values.get("name", definition["name"])).strip() or definition["name"]
         config = values.get("config", definition["config"])
-        if "triggers" in values:
-            triggers = values.get("triggers") or []
-            self._replace_triggers(definition_id, triggers)
-        elif "intervalMinutes" in values:
-            self._replace_triggers(
-                definition_id,
-                [{"type": "interval", "intervalSeconds": interval * 60}],
-            )
         self.db.execute(
-            "UPDATE job_definitions SET name=?,interval_minutes=?,enabled=?,config=?,next_run_at=?,updated_at=? WHERE id=?",
-            (
-                name,
-                interval,
-                enabled,
-                json.dumps(config or {}, ensure_ascii=False),
-                self._earliest_next(definition_id) if enabled else None,
-                now(),
-                definition_id,
-            ),
+            "UPDATE job_definitions SET name=?,config=?,next_run_at=?,updated_at=? WHERE id=?",
+            (name, json.dumps(config or {}, ensure_ascii=False), self._earliest_next(definition_id), now(), definition_id),
         )
         return self.definition(definition_id)  # type: ignore[return-value]
 

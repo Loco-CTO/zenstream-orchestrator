@@ -1617,6 +1617,50 @@ class CatalogTest(unittest.TestCase):
         next_up = catalog.home_next_up(user_id, "en")
         self.assertEqual([item["id"] for item in next_up], ["episode-10"])
 
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "episode-11",
+                "allowed",
+                "season-1",
+                "episode",
+                "Example/Season 1/Episode 11",
+                1,
+                11,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "episode-10", 0, 1, 1, 0, 100, "2026-01-04", "2026-01-04"),
+        )
+        self.assertEqual(
+            [item["id"] for item in catalog.home_next_up(user_id, "en")],
+            ["episode-11"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_next_up_requires_published_candidate(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "episode-1", 0, 1, 1, 0, 100, "2026-01-01", "2026-01-01"),
+        )
+        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY)")
+        catalog._read_model_ready = lambda: True
+
+        self.assertEqual(catalog.home_next_up(user_id, "en"), [])
+        self.db.execute("INSERT INTO catalog_entity_summary VALUES(?)", ("episode-2",))
+        self.assertEqual(
+            [item["id"] for item in catalog.home_next_up(user_id, "en")],
+            ["episode-2"],
+        )
+
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_continue_includes_sub_two_percent_progress_and_orders_latest(self, _languages):
         user_id = self.account().create("home-progress", "password-123")["id"]

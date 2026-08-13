@@ -1982,17 +1982,35 @@ class LibraryScanner:
         total: int,
     ) -> None:
         self._resolve_movie_row(library_id, row, job_id, should_terminate, index, total)
+        self._extract_and_reproject(row[0], "movie", should_terminate)
+        self._publish_root(row[0])
+
+    def _extract_and_reproject(
+        self,
+        entity_id: str,
+        entity_type: str,
+        should_terminate: Callable[[], bool],
+    ) -> None:
+        if entity_type not in {"movie", "episode"}:
+            return
         try:
+            from app.metadata_services import reproject_entity_artwork
             from app.screen_extractor import extract_entity
 
-            extract_entity(self.db, row[0], "movie", should_terminate=should_terminate)
+            extract_entity(
+                self.db,
+                entity_id,
+                entity_type,
+                should_terminate=should_terminate,
+            )
+            reproject_entity_artwork(self.db, entity_id)
         except Exception as error:
             logger.warning(
-                "screen extractor movie fallback failed entity_id=%s error=%s",
-                row[0],
+                "screen extractor fallback failed entity_id=%s type=%s error=%s",
+                entity_id,
+                entity_type,
                 error,
             )
-        self._publish_root(row[0])
 
     def _queue_metadata_repair(
         self,
@@ -2521,11 +2539,29 @@ class LibraryScanner:
                     return True
             return False
 
-        rows = [
-            row
-            for row in rows
-            if row[0] in self._scan_seen_ids and needs_localized_metadata(row)
-        ]
+        def needs_artwork_reconciliation(row: tuple) -> bool:
+            if row[1] not in {"movie", "episode"} or row[0] not in self._scan_seen_ids:
+                return False
+            if needs_localized_metadata(row):
+                return True
+            # A ready Screen Extractor asset can exist without a selected
+            # catalog row (the historical publication bug). Revisit entities
+            # missing a Primary selection so incremental scans repair them.
+            locales = ingest.locales()
+            if not self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_artwork_selection'"
+            ):
+                return False
+            return bool(
+                self.db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection "
+                    "WHERE entity_id=? AND image_type='Primary' "
+                    "GROUP BY entity_id HAVING COUNT(DISTINCT locale)<?",
+                    (row[0], len(locales)),
+                )
+            )
+
+        rows = [row for row in rows if needs_artwork_reconciliation(row)]
         self.store.update_job(
             job_id,
             progress_total=len(rows),
@@ -2566,6 +2602,7 @@ class LibraryScanner:
                         progress_current=index,
                         message=f"Skipped unresolved {entity_type} {relative_path}",
                     )
+                    self._extract_and_reproject(entity_id, entity_type, should_terminate)
                     continue
                 query, year = _inventory_query(relative_path or "")
                 try:
@@ -2605,6 +2642,7 @@ class LibraryScanner:
                         progress_current=index,
                         message=f"Metadata failed for {entity_type} {relative_path}; continuing",
                     )
+                    self._extract_and_reproject(entity_id, entity_type, should_terminate)
                     continue
             priorities = {
                 "season": ["tvdb", "tmdb"],
@@ -2695,43 +2733,13 @@ class LibraryScanner:
                     progress_current=index,
                     message=f"Metadata failed for {entity_type} {relative_path}; continuing",
                 )
-                if entity_type == "episode":
-                    try:
-                        from app.screen_extractor import extract_entity
-
-                        extract_entity(
-                            self.db,
-                            entity_id,
-                            entity_type,
-                            should_terminate=should_terminate,
-                        )
-                    except Exception as error:
-                        logger.warning(
-                            "screen extractor episode fallback failed entity_id=%s error=%s",
-                            entity_id,
-                            error,
-                        )
+                self._extract_and_reproject(entity_id, entity_type, should_terminate)
                 continue
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?",
                 (now(), entity_id),
             )
-            if entity_type == "episode":
-                try:
-                    from app.screen_extractor import extract_entity
-
-                    extract_entity(
-                        self.db,
-                        entity_id,
-                        entity_type,
-                        should_terminate=should_terminate,
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "screen extractor episode fallback failed entity_id=%s error=%s",
-                        entity_id,
-                        error,
-                    )
+            self._extract_and_reproject(entity_id, entity_type, should_terminate)
             self.store.update_job(
                 job_id,
                 progress_current=index,

@@ -60,7 +60,7 @@ export type Job = {
 	lastMessage?: string | null;
 	config?: Record<string, unknown>;
 	triggers: JobTrigger[];
-	optionDefinitions: JobOptionDefinition[];
+	optionDefinitions?: JobOptionDefinition[];
 	/** @deprecated legacy fields are omitted by the API */
 	intervalMinutes?: number;
 	enabled?: boolean;

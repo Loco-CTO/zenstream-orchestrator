@@ -758,9 +758,7 @@ class JobMappingTest(unittest.TestCase):
             )
 
             self.assertEqual(
-                db.execute(
-                    "SELECT id,job_key,config FROM job_definitions ORDER BY id"
-                ),
+                db.execute("SELECT id,job_key,config FROM job_definitions ORDER BY id"),
                 [
                     (
                         "legacy",

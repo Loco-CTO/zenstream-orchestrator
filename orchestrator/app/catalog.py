@@ -2471,18 +2471,20 @@ class Catalog:
                 else []
             )
 
-        selected_hydration_rows = (
-            episode_rows
-            if section == "episodes"
-            else [row, root_row, *season_rows]
-            if section == "header"
-            else [row, root_row, *season_rows, *episode_rows, *collection_rows]
-        )
+        if section == "episodes":
+            selected_hydration_rows = episode_rows
+        elif section == "header":
+            selected_hydration_rows = [row, root_row, *season_rows]
+        else:
+            selected_hydration_rows = [
+                row,
+                root_row,
+                *season_rows,
+                *episode_rows,
+                *collection_rows,
+            ]
         hydration_rows = list(
-            {
-                value[0]: value
-                for value in selected_hydration_rows
-            }.values()
+            {value[0]: value for value in selected_hydration_rows}.values()
         )
         self._seed_hydration_rows(user_id, hydration_rows, language)
         hydrated = {

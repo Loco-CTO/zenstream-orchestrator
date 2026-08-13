@@ -100,6 +100,7 @@ export default function JobsPage() {
 
 	async function toggleRun(task: Job, event: React.MouseEvent) {
 		event.stopPropagation();
+		if (task.historyOnly) return;
 		if (!session) return;
 		const activeRun = task.recentRuns?.find((run) => activeStates.has(run.state));
 		if (activeRun) {
@@ -263,30 +264,32 @@ export default function JobsPage() {
 															Last run {relativeTime(task.lastRunAt)} · {runDuration(task)}
 														</div>
 													</div>
-													<button
-														type="button"
-														onClick={(event) => void toggleRun(task, event)}
-														aria-label={active ? `Stop ${task.name}` : `Run ${task.name}`}
-														style={{
-															width: 28,
-															height: 28,
-															borderRadius: 6,
-															background: "none",
-															border: "none",
-															color: active ? "#888" : "#444",
-															cursor: "pointer",
-															display: "flex",
-															alignItems: "center",
-															justifyContent: "center",
-															flexShrink: 0,
-														}}
-													>
-														{active ? (
-															<IconPlayerStop size={12} />
-														) : (
-															<IconPlayerPlay size={12} />
-														)}
-													</button>
+													{!task.historyOnly && (
+														<button
+															type="button"
+															onClick={(event) => void toggleRun(task, event)}
+															aria-label={active ? `Stop ${task.name}` : `Run ${task.name}`}
+															style={{
+																width: 28,
+																height: 28,
+																borderRadius: 6,
+																background: "none",
+																border: "none",
+																color: active ? "#888" : "#444",
+																cursor: "pointer",
+																display: "flex",
+																alignItems: "center",
+																justifyContent: "center",
+																flexShrink: 0,
+															}}
+														>
+															{active ? (
+																<IconPlayerStop size={12} />
+															) : (
+																<IconPlayerPlay size={12} />
+															)}
+														</button>
+													)}
 												</div>
 												{active && progress !== undefined && (
 													<div style={{ paddingBottom: 12 }}>

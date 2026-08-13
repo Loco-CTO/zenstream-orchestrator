@@ -597,15 +597,11 @@ class JobStore:
                 "INSERT INTO job_definitions(id,job_key,name,description,kind,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (definition_id, key, name, description, kind, json.dumps(config or {}, ensure_ascii=False), None, timestamp, timestamp),
             )
-        self._replace_triggers(
-            definition_id,
-            [
-                {
-                    "type": "interval",
-                    "intervalSeconds": max(1, int(interval or 1440) * 60),
-                }
-            ],
-        )
+        if enabled:
+            self._replace_triggers(
+                definition_id,
+                [{"type": "interval", "intervalSeconds": max(1, int(interval or 1440) * 60)}],
+            )
         return self.definition(definition_id)  # type: ignore[return-value]
 
     def ensure_defaults(self) -> None:
@@ -880,14 +876,16 @@ class JobStore:
 
     def runs(self, definition_id: str | None = None, limit: int = 100) -> list[dict]:
         detail = ",".join(self._progress_columns("job_runs"))
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}
+        snapshot = ",source_trigger_id,options" if {"source_trigger_id", "options"}.issubset(columns) else ",NULL,NULL"
         if definition_id:
             rows = self.db.execute(
-                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail} FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
+                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail}{snapshot} FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
                 (definition_id, limit),
             )
         else:
             rows = self.db.execute(
-                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail} FROM job_runs ORDER BY created_at DESC LIMIT ?",
+                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail}{snapshot} FROM job_runs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
         return [self._run(row) for row in rows]
@@ -900,7 +898,7 @@ class JobStore:
     ) -> list[dict]:
         query = (
             "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at," 
-            + ",".join(self._progress_columns("library_jobs")) + " "
+            + ",".join(self._progress_columns("library_jobs")) + ",NULL,NULL "
             "FROM library_jobs WHERE library_id=?"
         )
         params: list[object] = [library_id]
@@ -946,7 +944,7 @@ class JobStore:
         )
         return self.runs(definition["id"], 1)[0]
 
-    def create_or_get_active_run(self, definition: dict) -> tuple[dict, bool]:
+    def create_or_get_active_run(self, definition: dict, options: dict | None = None, source_trigger_id: str | None = None) -> tuple[dict, bool]:
         """Atomically keep at most one queued/running run for a task definition."""
         timestamp = now()
         with self.db.transaction() as cursor:
@@ -961,16 +959,18 @@ class JobStore:
             else:
                 run_id = new_id()
                 library_id = (definition.get("config") or {}).get("libraryId")
-                cursor.execute(
-                    "INSERT INTO job_runs(id,definition_id,library_id,kind,created_at) VALUES(?,?,?,?,?)",
-                    (
-                        run_id,
-                        definition["id"],
-                        library_id,
-                        definition["kind"],
-                        timestamp,
-                    ),
-                )
+                values = self.validate_options(definition["kind"], options)
+                columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}
+                if {"source_trigger_id", "options"}.issubset(columns):
+                    cursor.execute(
+                        "INSERT INTO job_runs(id,definition_id,library_id,kind,source_trigger_id,options,created_at) VALUES(?,?,?,?,?,?,?)",
+                        (run_id, definition["id"], library_id, definition["kind"], source_trigger_id, json.dumps(values, ensure_ascii=False), timestamp),
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO job_runs(id,definition_id,library_id,kind,created_at) VALUES(?,?,?,?,?)",
+                        (run_id, definition["id"], library_id, definition["kind"], timestamp),
+                    )
                 cursor.execute(
                     "UPDATE job_definitions SET last_state='queued',last_message=?,updated_at=? WHERE id=?",
                     ("Queued", timestamp, definition["id"]),
@@ -987,49 +987,37 @@ class JobStore:
             )
         )
 
-    def due(self) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=? ORDER BY next_run_at",
-            (now(),),
-        )
-        return [self._with_triggers(self._definition(row)) for row in rows]
-
-    def mark_scheduled(
-        self, definition_id: str, run_id: str | None, message: str = "Queued"
-    ) -> None:
-        definition = self.definition(definition_id)
-        if not definition:
-            return
+    def due_triggers(self) -> list[dict]:
         current = now()
-        try:
-            trigger_rows = self.db.execute(
-                "SELECT id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at "
-                "FROM job_schedule_triggers WHERE definition_id=? AND next_run_at IS NOT NULL AND next_run_at<=?",
-                (definition_id, current),
-            )
-            for row in trigger_rows:
-                trigger = {"type": row[1]}
-                if row[1] == "interval":
-                    trigger["intervalSeconds"] = row[2]
-                elif row[1] == "daily":
-                    trigger["time"] = row[3]
-                elif row[1] == "weekly":
-                    trigger["weekday"] = row[4]
-                    trigger["time"] = row[3]
-                next_trigger = self._next_for_trigger(trigger)
-                self.db.execute(
-                    "UPDATE job_schedule_triggers SET next_run_at=?,updated_at=? WHERE id=?",
-                    (next_trigger, current, row[0]),
-                )
-            next_run = self._earliest_next(definition_id)
-        except Exception:
-            next_run = (
-                datetime.now(timezone.utc)
-                + timedelta(minutes=definition["intervalMinutes"])
-            ).isoformat()
+        rows = self.db.execute(
+            "SELECT t.id,t.definition_id,t.trigger_type,t.interval_seconds,t.time_of_day,t.weekday,t.next_run_at,t.options "
+            "FROM job_schedule_triggers t WHERE t.next_run_at IS NOT NULL AND t.next_run_at<=? ORDER BY t.next_run_at,t.created_at",
+            (current,),
+        )
+        values = []
+        for row in rows:
+            definition = self.definition(row[1])
+            if not definition:
+                continue
+            trigger = {"id": row[0], "type": row[2], "nextRunAt": row[6]}
+            if row[2] == "interval": trigger["intervalSeconds"] = row[3]
+            elif row[2] == "daily": trigger["time"] = row[4]
+            elif row[2] == "weekly": trigger["weekday"], trigger["time"] = row[5], row[4]
+            try: trigger["options"] = json.loads(row[7] or "{}")
+            except (TypeError, json.JSONDecodeError): trigger["options"] = {}
+            values.append({"definition": definition, "trigger": trigger})
+        return values
+
+    def mark_trigger_scheduled(self, definition_id: str, trigger: dict, run_id: str | None, message: str = "Queued") -> None:
+        current = now()
+        next_trigger = self._next_for_trigger(trigger, datetime.now(timezone.utc))
+        self.db.execute(
+            "UPDATE job_schedule_triggers SET next_run_at=?,updated_at=? WHERE id=? AND definition_id=?",
+            (next_trigger, current, trigger["id"], definition_id),
+        )
         self.db.execute(
             "UPDATE job_definitions SET next_run_at=?,last_run_at=?,last_run_id=?,last_state='queued',last_message=?,updated_at=? WHERE id=?",
-            (next_run, now(), run_id, message, now(), definition_id),
+            (self._earliest_next(definition_id), current, run_id, message, current, definition_id),
         )
 
     def update_run(self, run_id: str, **values) -> None:
@@ -1659,15 +1647,14 @@ class JobScheduler:
         # remain manual-only afterward until their next explicit update.
         try:
             startup_rows = self.store.db.execute(
-                "SELECT DISTINCT definition_id FROM job_schedule_triggers "
-                "WHERE trigger_type='startup'"
+                "SELECT id,definition_id FROM job_schedule_triggers WHERE trigger_type='startup'"
             )
-            for (definition_id,) in startup_rows:
+            for trigger_id, definition_id in startup_rows:
                 self.store.db.execute(
-                    "UPDATE job_definitions SET next_run_at=?,updated_at=? "
-                    "WHERE id=? AND enabled=1",
-                    (now(), now(), definition_id),
+                    "UPDATE job_schedule_triggers SET next_run_at=?,updated_at=? WHERE id=?",
+                    (now(), now(), trigger_id),
                 )
+                self.store.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (now(), now(), definition_id))
         except Exception:
             pass
         self._recover_active_runs()
@@ -1686,17 +1673,23 @@ class JobScheduler:
 
     def refresh_library_definition(self, library: dict) -> dict:
         definition = self.store.ensure_library(library)
-        values = {
-            "intervalMinutes": library.get("scanIntervalMinutes"),
-            "enabled": library.get("watchEnabled", True),
-            "config": {"libraryId": library["id"]},
-        }
-        return self.store.update_definition(definition["id"], values)
+        desired = max(1, int(library.get("scanIntervalMinutes") or 1440)) * 60
+        triggers = definition.get("triggers") or []
+        if library.get("watchEnabled", True):
+            interval = next((item for item in triggers if item["type"] == "interval"), None)
+            if interval:
+                if interval.get("intervalSeconds") != desired:
+                    self.store._replace_triggers(definition["id"], [{**interval, "intervalSeconds": desired}])
+            else:
+                self.store._replace_triggers(definition["id"], [{"type": "interval", "intervalSeconds": desired}])
+        else:
+            self.store._replace_triggers(definition["id"], [item for item in triggers if item["type"] != "interval"])
+        return self.store.update_definition(definition["id"], {"config": {"libraryId": library["id"]}})
 
     def remove_library_definition(self, library_id: str):
         self.store.remove_library_definitions(library_id)
 
-    def run_now(self, definition_id: str) -> dict:
+    def run_now(self, definition_id: str, options: dict | None = None) -> dict:
         definition = self.store.definition(definition_id)
         if not definition:
             raise KeyError("Job definition not found")
@@ -1714,7 +1707,7 @@ class JobScheduler:
                 ),
             )
             return job
-        run, _ = self.store.create_or_get_active_run(definition)
+        run, _ = self.store.create_or_get_active_run(definition, options=options)
         with self.condition:
             self.condition.notify_all()
         return run
@@ -1729,7 +1722,7 @@ class JobScheduler:
             self.condition.notify_all()
         return run
 
-    def enqueue_metadata_refresh(self) -> dict:
+    def enqueue_metadata_refresh(self, options: dict | None = None) -> dict:
         definition = self.store.by_key("metadata_refresh")
         if not definition:
             definition = self.store.ensure(
@@ -1740,7 +1733,7 @@ class JobScheduler:
                 43200,
                 {},
             )
-        run, _ = self.store.create_or_get_active_run(definition)
+        run, _ = self.store.create_or_get_active_run(definition, options=options)
         with self.condition:
             self.condition.notify_all()
         return run
@@ -1826,19 +1819,21 @@ class JobScheduler:
                         )
 
     def _schedule_due(self):
-        for definition in self.store.due():
+        for due in self.store.due_triggers():
+            definition = due["definition"]
+            trigger = due["trigger"]
             if self.store.queued_or_running(definition["id"]):
                 continue
             if definition["kind"] == "library_scan":
                 library_id = (definition.get("config") or {}).get("libraryId")
                 if library_id:
                     self.library_runtime.enqueue(library_id, "scan")
-                self.store.mark_scheduled(definition["id"], None, "Library scan queued")
+                self.store.mark_trigger_scheduled(definition["id"], trigger, None, "Library scan queued")
             else:
-                run, created = self.store.create_or_get_active_run(definition)
+                run, created = self.store.create_or_get_active_run(definition, options=trigger.get("options"), source_trigger_id=trigger["id"])
                 if not created:
                     continue
-                self.store.mark_scheduled(definition["id"], run["id"])
+                self.store.mark_trigger_scheduled(definition["id"], trigger, run["id"])
 
     def _dispatch(self):
         while not self.stop_event.is_set():

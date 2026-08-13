@@ -826,6 +826,7 @@ class LibraryScanner:
         self._scan_rejected_ids: set[str] = set()
         self._scan_reconciled_ids: set[str] = set()
         self._scan_deferred_roots: set[str] = set()
+        self._scan_access_errors: set[Path] = set()
         self._scan_refresh_root_ids: set[str] = set()
         self._scan_complete = False
         self._stage_lock = threading.RLock()
@@ -934,6 +935,7 @@ class LibraryScanner:
         self._scan_rejected_ids = set()
         self._scan_reconciled_ids = set()
         self._scan_deferred_roots = set()
+        self._scan_access_errors = set()
         self._scan_refresh_root_ids = set()
         self._last_stage_persisted_at = 0.0
         self._scan_complete = False
@@ -1243,6 +1245,17 @@ class LibraryScanner:
             reason,
         )
 
+    def _record_access_error(self, path: Path) -> None:
+        self._scan_access_errors.add(path)
+
+    def _root_has_access_error(self, root: Path) -> bool:
+        root_key = _path_key(root.resolve(strict=False))
+        return any(
+            (candidate_key := _path_key(path.resolve(strict=False))) == root_key
+            or candidate_key.startswith(root_key + "/")
+            for path in self._scan_access_errors
+        )
+
     def _entity_closure(self, entity_ids: Iterable[str]) -> list[str]:
         roots = list(dict.fromkeys(entity_ids))
         if not roots:
@@ -1476,18 +1489,18 @@ class LibraryScanner:
             "SELECT id,entity_type,relative_path FROM library_entities WHERE library_id=?",
             (library_id,),
         )
+        normalized_targets = {_top_level_key(target) for target in (targets or set())}
         old_ids = [
             row[0]
             for row in old_rows
             if row[0] not in self._scan_seen_ids
             and row[1] in leaf_types
+            and _top_level_key(row[2] or "") not in self._scan_deferred_roots
             and (
                 targets is None
                 or bool(row[2])
                 and Path(row[2]).parts
-                and _top_level_key(row[2])
-                in {_top_level_key(target) for target in targets}
-                and _top_level_key(row[2]) not in self._scan_deferred_roots
+                and _top_level_key(row[2]) in normalized_targets
             )
         ]
         old_by_key: dict[tuple[str, str], list[str]] = {}
@@ -3385,10 +3398,10 @@ class LibraryScanner:
         return "supported" if stat.S_ISREG(value.st_mode) else "unsupported"
 
     def _walk_file_entries(self, directory: Path):
-        traversal_errors: list[Path] = []
-
         def traversal_error(error):
-            traversal_errors.append(Path(getattr(error, "filename", None) or directory))
+            self._record_access_error(
+                Path(getattr(error, "filename", None) or directory)
+            )
 
         for current, _directories, filenames in os.walk(
             directory, onerror=traversal_error
@@ -3406,6 +3419,7 @@ class LibraryScanner:
                 try:
                     file_stat = path.stat()
                 except OSError:
+                    self._record_access_error(path)
                     yield path, None
                     continue
                 stat_seconds = time.monotonic() - stat_started
@@ -3416,10 +3430,6 @@ class LibraryScanner:
                         stat_seconds,
                     )
                 yield path, file_stat
-        for path in traversal_errors:
-            # Preserve the root when a directory itself could not be traversed;
-            # callers defer that root instead of treating it as empty.
-            yield path, None
 
     @staticmethod
     def _target_entries(root: Path, targets: set[str] | None) -> list[Path]:
@@ -3467,7 +3477,10 @@ class LibraryScanner:
             if path.is_dir()
             and (SEASON_RE.match(path.name) or path.name.lower() == "specials")
         ]
-        if any(self._is_supported_video(path) for path in children):
+        child_video_states = [self._video_state(path) for path in children]
+        if any(state == "inaccessible" for state in child_video_states):
+            self._record_access_error(series_dir)
+        if any(state == "supported" for state in child_video_states):
             season_dirs.append(series_dir)
         season_dirs.sort(
             key=lambda path: (
@@ -3495,6 +3508,7 @@ class LibraryScanner:
                     try:
                         value = path.stat()
                     except OSError:
+                        self._record_access_error(path)
                         episode_entries.append((path, None))
                         continue
                     if stat.S_ISREG(value.st_mode):
@@ -3603,8 +3617,17 @@ class LibraryScanner:
                 try:
                     files = [(entry, entry.stat())]
                 except OSError:
+                    self._record_access_error(entry)
                     files = []
             relative_path = relative(str(root), str(entry))
+            if self._root_has_access_error(entry):
+                self._defer_root(relative_path, "media path could not be inspected")
+                self.store.update_job(
+                    job_id,
+                    progress_current=count,
+                    message=f"Deferred {entry.name}: media path inaccessible",
+                )
+                continue
             if not any(
                 self._is_supported_video(path, file_stat) for path, file_stat in files
             ):
@@ -3724,13 +3747,34 @@ class LibraryScanner:
                 series_dir,
             )
             series_children = []
-            for child in series_dir.iterdir():
-                self._check_termination(should_terminate)
-                series_children.append(child)
+            try:
+                for child in series_dir.iterdir():
+                    self._check_termination(should_terminate)
+                    series_children.append(child)
+            except OSError as error:
+                self._record_access_error(series_dir)
+                self._defer_root(
+                    relative(str(root), str(series_dir)),
+                    f"series directory could not be enumerated: {error}",
+                )
+                self.store.update_job(
+                    job_id,
+                    progress_current=series_index,
+                    message=f"Deferred {series_dir.name}: directory inaccessible",
+                )
+                continue
             episode_plan = self._series_episode_plan(
                 root, series_dir, should_terminate, series_children
             )
             series_relative_path = relative(str(root), str(series_dir))
+            if self._root_has_access_error(series_dir):
+                self._defer_root(series_relative_path, "episode path could not be inspected")
+                self.store.update_job(
+                    job_id,
+                    progress_current=series_index,
+                    message=f"Deferred {series_dir.name}: media path inaccessible",
+                )
+                continue
             if not episode_plan:
                 self._reject_existing_entity(library_id, "series", series_relative_path)
                 self.store.update_job(
@@ -4574,20 +4618,43 @@ class LibraryRuntime:
             cursor.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,))
             if not cursor.fetchone():
                 return
+            existing_rows = cursor.execute(
+                "SELECT top_level_root,revision FROM library_reconcile_targets WHERE library_id=?",
+                (library_id,),
+            ).fetchall()
             for target in targets:
-                cursor.execute(
-                    """
-                    INSERT INTO library_reconcile_targets
-                        (library_id,top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at)
-                    VALUES(?,?,?,1,1,?,?)
-                    ON CONFLICT(library_id,top_level_root) DO UPDATE SET
-                        debounce_until=excluded.debounce_until,
-                        event_count=library_reconcile_targets.event_count+1,
-                        revision=library_reconcile_targets.revision+1,
-                        last_seen_at=excluded.last_seen_at
-                    """,
-                    (library_id, target, deadline, timestamp, timestamp),
+                match = next(
+                    (
+                        row
+                        for row in existing_rows
+                        if _top_level_key(row[0]) == _top_level_key(target)
+                    ),
+                    None,
                 )
+                if match:
+                    cursor.execute(
+                        """
+                        UPDATE library_reconcile_targets
+                        SET top_level_root=?, debounce_until=?, event_count=event_count+1,
+                            revision=revision+1, last_seen_at=?
+                        WHERE library_id=? AND top_level_root=?
+                        """,
+                        (target, deadline, timestamp, library_id, match[0]),
+                    )
+                    existing_rows = [
+                        (target if row[0] == match[0] else row[0], row[1] + 1 if row[0] == match[0] else row[1])
+                        for row in existing_rows
+                    ]
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO library_reconcile_targets
+                            (library_id,top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at)
+                        VALUES(?,?,?,1,1,?,?)
+                        """,
+                        (library_id, target, deadline, timestamp, timestamp),
+                    )
+                    existing_rows.append((target, 1))
         with self.condition:
             self.condition.notify_all()
 
@@ -4739,11 +4806,27 @@ class LibraryRuntime:
                             "SELECT top_level_root,revision FROM library_reconcile_targets WHERE library_id=? AND debounce_until<=? ORDER BY top_level_root",
                             (library_id, time.time()),
                         )
-                        targets = {row[0] for row in rows}
+                        targets_by_key: dict[str, str] = {}
+                        for row in rows:
+                            targets_by_key[_top_level_key(row[0])] = row[0]
+                        targets = set(targets_by_key.values())
                         target_revisions = {row[0]: int(row[1]) for row in rows}
                     else:
                         targets = self._reconcile_targets.pop(library_id, set())
                     self._job_target_revisions[job_id] = target_revisions
+                if kind == "reconcile" and not targets:
+                    # A newer watcher event may have postponed every target
+                    # after the job was queued. Complete this stale job without
+                    # invoking a scanner or unscoped cleanup.
+                    self.store.update_job(
+                        job_id,
+                        state="completed",
+                        progress_current=0,
+                        progress_total=0,
+                        finished_at=now(),
+                        message="No due watcher targets",
+                    )
+                    return
                 if kind == "reconcile" and targets:
                     locks = self._acquire_roots(library_id, targets)
                 # A scan owns mutable traversal state and diagnostics.  Do not

@@ -11,6 +11,7 @@ from threading import Lock
 
 from app.config import Config
 from app.logging_config import get_logger
+from app.progress import ProgressReporter, resolve_progress_item, format_progress_message
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
 from fastapi import HTTPException
 
@@ -332,11 +333,19 @@ class IntroOutroStore:
             (error[:1000], now(), asset["mediaFileId"], asset["sourceFingerprint"]),
         )
 
-    def recompute_all(self, settings: dict) -> int:
+    def recompute_all(self, settings: dict, progress=None) -> int:
         rows = self.db.execute(
             "SELECT DISTINCT season_id FROM intro_outro_assets WHERE state='scanned'"
         )
-        return sum(self.recompute_season(row[0], settings) for row in rows)
+        total = len(rows)
+        completed = 0
+        markers = 0
+        for row in rows:
+            markers += self.recompute_season(row[0], settings)
+            completed += 1
+            if progress:
+                progress(completed, total, row[0])
+        return markers
 
     def recompute_season(self, season_id: str, settings: dict) -> int:
         rows = self.db.execute(
@@ -776,10 +785,19 @@ class IntroOutroDetector:
             run_id,
             state="running",
             started_at=now(),
-            message="Detecting intro and outro segments",
+            message=format_progress_message(
+                "Preparing intro/outro analysis", detail=f"{queued} episodes queued"
+            ),
+            progress_phase="preparation",
+            progress_label="Preparing intro/outro analysis",
+            progress_stage_current=0,
+            progress_stage_total=queued,
+            progress_stage_unit="episodes",
         )
         completed = failures = markers = 0
         progress_lock = Lock()
+        reporter = ProgressReporter(job_store.update_run, unit="episodes")
+        reporter.stage("fingerprinting", "Fingerprinting intros/outros", total=queued)
 
         def process_assets():
             nonlocal completed, failures
@@ -788,6 +806,8 @@ class IntroOutroDetector:
                 if not asset:
                     return
                 try:
+                    item_label = resolve_progress_item(self.db, asset.get("entityId"), asset.get("path"))
+                    reporter.start(item_label)
                     duration = asset["durationSeconds"]
                     intro_duration = min(
                         duration * settings["analysisPercent"] / 100.0,
@@ -814,13 +834,7 @@ class IntroOutroDetector:
                     self.store.mark_fingerprinted(asset, intro, outro)
                     with progress_lock:
                         completed += 1
-                        current = completed
-                        job_store.update_run(
-                            run_id,
-                            progress_current=current,
-                            progress_total=max(current, queued),
-                            message=f"Fingerprinting episode {current}",
-                        )
+                    reporter.settle(item_label)
                 except Exception as error:
                     if should_terminate():
                         self.store.requeue(asset)
@@ -828,6 +842,10 @@ class IntroOutroDetector:
                     self.store.mark_failed(asset, str(error))
                     with progress_lock:
                         failures += 1
+                    reporter.settle(
+                        resolve_progress_item(self.db, asset.get("entityId"), asset.get("path")),
+                        failed=True,
+                    )
                     logger.warning(
                         "intro/outro detection failed entity_id=%s media_file_id=%s error=%s",
                         asset["entityId"],
@@ -849,6 +867,7 @@ class IntroOutroDetector:
                 message="Terminated by administrator",
             )
         elif failures:
+            reporter.finish(failed=True)
             message = f"Fingerprinted {completed} episodes; {failures} failed"
             job_store.update_run(
                 run_id,
@@ -860,7 +879,27 @@ class IntroOutroDetector:
                 error=message,
             )
         else:
-            markers = self.store.recompute_all(settings)
+            reporter.stage("comparison", "Comparing fingerprints", total=None)
+            markers = self.store.recompute_all(
+                settings,
+                progress=lambda current, total, season: job_store.update_run(
+                    run_id,
+                    progress_phase="comparison",
+                    progress_label="Comparing fingerprints",
+                    progress_stage_current=current,
+                    progress_stage_total=total,
+                    progress_stage_unit="seasons",
+                    progress_current_item=resolve_progress_item(self.db, season, season),
+                    message=format_progress_message(
+                        "Comparing fingerprints",
+                        item=resolve_progress_item(self.db, season, season),
+                        current=current,
+                        total=total,
+                        unit="seasons",
+                    ),
+                ),
+            )
+            reporter.finish()
             job_store.update_run(
                 run_id,
                 state="completed",

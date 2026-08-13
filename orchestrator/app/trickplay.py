@@ -16,6 +16,7 @@ from app.client_auth import issue_ticket
 from app.config import Config
 from app.images import WEBP_QUALITY
 from app.logging_config import get_logger
+from app.progress import ProgressReporter, resolve_progress_item, format_progress_message
 from app.models.playback_settings import PlaybackSettings
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
 from fastapi import HTTPException
@@ -393,11 +394,20 @@ class TrickplayExtractor:
             run_id,
             state="running",
             started_at=now(),
-            message="Extracting trickplay sheets",
+            message=format_progress_message(
+                "Preparing trickplay", detail=f"{discovered} videos queued"
+            ),
+            progress_phase="preparation",
+            progress_label="Preparing trickplay",
+            progress_stage_current=0,
+            progress_stage_total=discovered,
+            progress_stage_unit="videos",
         )
         completed = 0
         failures = []
         progress_lock = Lock()
+        reporter = ProgressReporter(job_store.update_run, unit="videos")
+        reporter.stage("extraction", "Extracting trickplay", total=discovered)
 
         def process_assets():
             nonlocal completed
@@ -406,6 +416,8 @@ class TrickplayExtractor:
                 if not asset:
                     return
                 try:
+                    item_label = resolve_progress_item(self.db, asset.get("entityId"), asset.get("path"))
+                    reporter.start(item_label)
                     extractor = self.extract
                     if len(inspect.signature(extractor).parameters) >= 2:
                         extractor(asset, should_terminate)
@@ -414,12 +426,7 @@ class TrickplayExtractor:
                     with progress_lock:
                         completed += 1
                         current = completed
-                        job_store.update_run(
-                            run_id,
-                            progress_current=current,
-                            progress_total=max(current, discovered),
-                            message=f"Extracted {current} trickplay assets",
-                        )
+                    reporter.settle(item_label)
                 except Exception as error:
                     if should_terminate():
                         self.store.requeue(asset)
@@ -427,6 +434,10 @@ class TrickplayExtractor:
                     self.store.mark_failed(asset, str(error))
                     with progress_lock:
                         failures.append(asset["mediaFileId"])
+                    reporter.settle(
+                        resolve_progress_item(self.db, asset.get("entityId"), asset.get("path")),
+                        failed=True,
+                    )
                     logger.warning(
                         "trickplay extraction failed entity_id=%s media_file_id=%s error=%s",
                         asset["entityId"],
@@ -448,6 +459,7 @@ class TrickplayExtractor:
                 message="Terminated by administrator",
             )
         elif failures:
+            reporter.finish(failed=True)
             summary = f"Extracted {completed} trickplay assets; {len(failures)} failed"
             job_store.update_run(
                 run_id,
@@ -459,6 +471,7 @@ class TrickplayExtractor:
                 error=summary,
             )
         else:
+            reporter.finish()
             job_store.update_run(
                 run_id,
                 state="completed",

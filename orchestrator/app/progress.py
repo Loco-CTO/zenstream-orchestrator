@@ -178,6 +178,8 @@ class ProgressReporter:
         )
         values = {
             "message": message,
+            "progress_current": self.settled,
+            "progress_total": self.total if self.total is not None else 0,
             "progress_phase": self.phase,
             "progress_label": self.label,
             "progress_stage_current": self.settled,

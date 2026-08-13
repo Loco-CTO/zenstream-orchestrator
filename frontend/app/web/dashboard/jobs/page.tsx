@@ -9,7 +9,7 @@ import {
 	IconRefresh,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import { Job, activeStates } from "./job-types";
+import { Job, activeStates, progressDetailText } from "./job-types";
 
 type TaskGroup = { group: string; tasks: Job[] };
 
@@ -210,8 +210,14 @@ export default function JobsPage() {
 							</div>
 							<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
 								{group.tasks.map((task, index) => {
-									const active = activeStates.has(task.lastState);
+									const activeRun = task.recentRuns?.find((run) =>
+										activeStates.has(run.state),
+									);
+									const active = Boolean(activeRun);
 									const progress = progressFor(task);
+									const progressDetail = progressDetailText(
+										activeRun?.progressDetail,
+									);
 									return (
 										<div key={task.id}>
 											<div style={{ padding: "0 18px" }}>

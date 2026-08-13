@@ -33,8 +33,8 @@ def sanitize_progress_item(value: Any, *, limit: int = 160) -> str | None:
     # component.  Progress is observability, not a filesystem disclosure API.
     try:
         path = Path(text)
-        if path.is_absolute():
-            text = path.name or path.stem
+        if path.is_absolute() or re.match(r"^[A-Za-z]:[\\/]", text):
+            text = re.split(r"[\\/]", text.rstrip("\\/"))[-1]
     except (TypeError, ValueError):
         pass
     text = re.sub(r"\s+", " ", text)
@@ -67,7 +67,10 @@ def format_progress_message(
 
 def resolve_progress_item(db, entity_id: str | None, fallback: Any = None) -> str:
     """Resolve a catalog title with a safe filename/provider fallback."""
-    fallback_label = sanitize_progress_item(Path(str(fallback)).name if fallback else None)
+    fallback_text = str(fallback) if fallback else None
+    if fallback_text:
+        fallback_text = re.split(r"[\\/]", fallback_text.rstrip("\\/"))[-1]
+    fallback_label = sanitize_progress_item(fallback_text)
     if not entity_id or db is None:
         return fallback_label or "item"
     try:

@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { adminFetch, readSession, Session } from "./components/admin-client";
+import { Run, activeStates, progressDetailText } from "./jobs/job-types";
 
 type Overview = {
 	users: number;
@@ -10,7 +11,14 @@ type Overview = {
 	administrators: number;
 	pending_invites: number;
 };
-type Task = { id: string; name: string; lastState: string; enabled: boolean };
+type Task = {
+	id: string;
+	name: string;
+	lastState: string;
+	lastMessage?: string | null;
+	enabled: boolean;
+	recentRuns?: Run[];
+};
 
 export default function DashboardOverview() {
 	const [session, setSession] = useState<Session | null>(null);
@@ -18,33 +26,40 @@ export default function DashboardOverview() {
 	const [tasks, setTasks] = useState<Task[]>([]);
 	const [error, setError] = useState("");
 
+	const load = useCallback(async (current: Session) => {
+		try {
+			const [overviewResponse, jobsResponse] = await Promise.all([
+				adminFetch("/api/admin/overview", current),
+				adminFetch("/api/admin/jobs", current),
+			]);
+			if (!overviewResponse.ok || !jobsResponse.ok)
+				throw new Error("Dashboard data could not be loaded.");
+			setOverview((await overviewResponse.json()) as Overview);
+			setTasks(
+				(((await jobsResponse.json()) as { jobs?: Task[] }).jobs || []).slice(0, 5),
+			);
+			setError("");
+		} catch (caught) {
+			setError(
+				caught instanceof Error
+					? caught.message
+					: "Dashboard data could not be loaded.",
+			);
+		}
+	}, []);
+
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
-		if (!current) return;
-		Promise.all([
-			adminFetch("/api/admin/overview", current),
-			adminFetch("/api/admin/jobs", current),
-		])
-			.then(async ([overviewResponse, jobsResponse]) => {
-				if (!overviewResponse.ok || !jobsResponse.ok)
-					throw new Error("Dashboard data could not be loaded.");
-				setOverview((await overviewResponse.json()) as Overview);
-				setTasks(
-					(((await jobsResponse.json()) as { jobs?: Task[] }).jobs || []).slice(
-						0,
-						5,
-					),
-				);
-			})
-			.catch((caught) =>
-				setError(
-					caught instanceof Error
-						? caught.message
-						: "Dashboard data could not be loaded.",
-				),
-			);
-	}, []);
+		if (current) void load(current);
+	}, [load]);
+
+	useEffect(() => {
+		if (!session || !tasks.some((task) => activeStates.has(task.lastState)))
+			return;
+		const timer = window.setInterval(() => void load(session), 2000);
+		return () => window.clearInterval(timer);
+	}, [load, session, tasks]);
 
 	const stats = [
 		["Users", overview?.users ?? "—", "/web/dashboard/users"],
@@ -194,43 +209,63 @@ export default function DashboardOverview() {
 						</Link>
 					</div>
 					<div style={{ height: 1, background: "#111" }} />
-					{tasks.map((task, index) => (
-						<div key={task.id}>
-							<Link
-								href={`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(task.id)}`}
-								style={{
-									display: "flex",
-									alignItems: "center",
-									justifyContent: "space-between",
-									padding: "13px 22px",
-									textDecoration: "none",
-								}}
-							>
-								<div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-									<span
-										style={{
-											color: task.lastState === "running" ? "var(--primary)" : "#666",
-											fontSize: 14,
-										}}
-									>
-										◷
-									</span>
-									<div>
-										<div style={{ fontSize: 13, fontWeight: 500, color: "#ccc" }}>
-											{task.name}
-										</div>
-										<div style={{ fontSize: 11, color: "#777", marginTop: 2 }}>
-											Last state {task.enabled ? task.lastState : "paused"}
+					{tasks.map((task, index) => {
+						const activeRun = task.recentRuns?.find((run) =>
+							activeStates.has(run.state),
+						);
+						const detail = progressDetailText(activeRun?.progressDetail);
+						return (
+							<div key={task.id}>
+								<Link
+									href={`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(task.id)}`}
+									style={{
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "space-between",
+										padding: "13px 22px",
+										textDecoration: "none",
+									}}
+								>
+									<div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+										<span
+											style={{
+												color: task.lastState === "running" ? "var(--primary)" : "#666",
+												fontSize: 14,
+											}}
+										>
+											◷
+										</span>
+										<div>
+											<div style={{ fontSize: 13, fontWeight: 500, color: "#ccc" }}>
+												{task.name}
+											</div>
+											<div style={{ fontSize: 11, color: "#777", marginTop: 2 }}>
+												{activeRun
+													? activeRun.message || activeRun.state
+													: `Last state ${task.enabled ? task.lastState : "paused"}`}
+											</div>
+											{activeRun && detail && detail !== activeRun.message && (
+												<div
+													style={{
+														fontSize: 10,
+														color: "#666",
+														marginTop: 2,
+														fontFamily: "var(--font-mono)",
+													}}
+												>
+													{detail}
+												</div>
+											)}
 										</div>
 									</div>
-								</div>
-								<span style={{ color: "#444" }}>›</span>
-							</Link>
-							{index < tasks.length - 1 && (
-								<div style={{ height: 1, background: "#111" }} />
-							)}
-						</div>
-					))}
+									<span style={{ color: "#444" }}>›</span>
+								</Link>
+								{index < tasks.length - 1 && (
+									<div style={{ height: 1, background: "#111" }} />
+								)}
+							</div>
+						);
+					})}
 					{!tasks.length && (
 						<div style={{ padding: "24px 22px", color: "#666", fontSize: 13 }}>
 							No scheduled tasks.

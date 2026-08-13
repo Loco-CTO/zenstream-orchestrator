@@ -13,7 +13,13 @@ import {
 	IconRefresh,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import { Job, JobTrigger, activeStates, stateColor } from "./job-types";
+import {
+	Job,
+	JobTrigger,
+	activeStates,
+	progressDetailText,
+	stateColor,
+} from "./job-types";
 
 const days = [
 	"Sunday",
@@ -186,6 +192,8 @@ export default function JobDetailPage() {
 	const activeRun = selected?.recentRuns?.find((run) =>
 		activeStates.has(run.state),
 	);
+	const activeProgress = runProgress(activeRun);
+	const activeProgressDetail = progressDetailText(activeRun?.progressDetail);
 
 	const load = useCallback(async (current: Session, showLoading = true) => {
 		if (showLoading) setLoading(true);
@@ -392,8 +400,9 @@ export default function JobDetailPage() {
 					<IconRefresh size={15} />
 				</button>
 			</div>
-			{activeRun && runProgress(activeRun) !== undefined && (
+			{activeRun && (
 				<div
+					aria-live="polite"
 					style={{
 						marginTop: 16,
 						background: "#080808",
@@ -412,26 +421,51 @@ export default function JobDetailPage() {
 					>
 						<span>{activeRun.message || activeRun.state}</span>
 						<span style={{ fontFamily: "var(--font-mono)" }}>
-							{Math.round(runProgress(activeRun) || 0)}%
+							{activeProgress === undefined
+								? "Preparing…"
+								: `${Math.round(activeProgress)}%`}
 						</span>
 					</div>
-					<div
-						style={{
-							height: 3,
-							background: "#151515",
-							borderRadius: 3,
-							overflow: "hidden",
-						}}
-					>
+					{activeProgressDetail && activeProgressDetail !== activeRun.message && (
 						<div
 							style={{
-								height: "100%",
-								width: `${runProgress(activeRun)}%`,
-								background: "var(--primary)",
-								transition: "width .4s ease",
+								color: "#999",
+								fontSize: 11,
+								fontFamily: "var(--font-mono)",
+								marginBottom: 7,
+							}}
+						>
+							{activeProgressDetail}
+						</div>
+					)}
+					{activeProgress === undefined ? (
+						<progress
+							aria-label={`${selected.name} preparation progress`}
+							style={{
+								width: "100%",
+								height: 4,
+								accentColor: "var(--primary)",
 							}}
 						/>
-					</div>
+					) : (
+						<div
+							style={{
+								height: 3,
+								background: "#151515",
+								borderRadius: 3,
+								overflow: "hidden",
+							}}
+						>
+							<div
+								style={{
+									height: "100%",
+									width: `${activeProgress}%`,
+									background: "var(--primary)",
+									transition: "width .4s ease",
+								}}
+							/>
+						</div>
+					)}
 				</div>
 			)}
 			{!selected.historyOnly && (

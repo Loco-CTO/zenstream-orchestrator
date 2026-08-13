@@ -806,7 +806,7 @@ class IntroOutroDetector:
                 if not asset:
                     return
                 try:
-                    item_label = resolve_progress_item(self.db, asset.get("entityId"), asset.get("path"))
+                    item_label = resolve_progress_item(getattr(self.store, "db", None), asset.get("entityId"), asset.get("path"))
                     reporter.start(item_label)
                     duration = asset["durationSeconds"]
                     intro_duration = min(
@@ -843,7 +843,7 @@ class IntroOutroDetector:
                     with progress_lock:
                         failures += 1
                     reporter.settle(
-                        resolve_progress_item(self.db, asset.get("entityId"), asset.get("path")),
+                        resolve_progress_item(getattr(self.store, "db", None), asset.get("entityId"), asset.get("path")),
                         failed=True,
                     )
                     logger.warning(
@@ -880,25 +880,28 @@ class IntroOutroDetector:
             )
         else:
             reporter.stage("comparison", "Comparing fingerprints", total=None)
-            markers = self.store.recompute_all(
-                settings,
-                progress=lambda current, total, season: job_store.update_run(
+            comparison_progress = lambda current, total, season: job_store.update_run(
                     run_id,
                     progress_phase="comparison",
                     progress_label="Comparing fingerprints",
                     progress_stage_current=current,
                     progress_stage_total=total,
                     progress_stage_unit="seasons",
-                    progress_current_item=resolve_progress_item(self.db, season, season),
+                    progress_current_item=resolve_progress_item(getattr(self.store, "db", None), season, season),
                     message=format_progress_message(
                         "Comparing fingerprints",
-                        item=resolve_progress_item(self.db, season, season),
+                        item=resolve_progress_item(getattr(self.store, "db", None), season, season),
                         current=current,
                         total=total,
                         unit="seasons",
                     ),
-                ),
-            )
+                )
+            try:
+                markers = self.store.recompute_all(settings, progress=comparison_progress)
+            except TypeError as error:
+                if "progress" not in str(error):
+                    raise
+                markers = self.store.recompute_all(settings)
             reporter.finish()
             job_store.update_run(
                 run_id,

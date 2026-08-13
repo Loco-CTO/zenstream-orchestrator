@@ -1,11 +1,10 @@
 export type ProgressDetail = {
-	stage?: string | null;
+	phase?: string | null;
+	label?: string | null;
 	item?: string | null;
 	current?: number | null;
 	total?: number | null;
 	unit?: string | null;
-	active?: number | null;
-	failed?: number | null;
 };
 
 export type Run = {
@@ -62,7 +61,7 @@ export const activeStates = new Set(["queued", "running", "terminating"]);
 export function progressDetailText(detail?: ProgressDetail | null) {
 	if (!detail) return "";
 	const parts: string[] = [];
-	if (detail.stage) parts.push(detail.stage);
+	if (detail.label) parts.push(detail.label);
 	if (detail.item) parts.push(detail.item);
 	if (
 		typeof detail.current === "number" &&
@@ -73,10 +72,6 @@ export function progressDetailText(detail?: ProgressDetail | null) {
 			`${detail.current}/${detail.total}${detail.unit ? ` ${detail.unit}` : ""}`,
 		);
 	}
-	if (typeof detail.active === "number" && detail.active > 0)
-		parts.push(`${detail.active} active`);
-	if (typeof detail.failed === "number" && detail.failed > 0)
-		parts.push(`${detail.failed} failed`);
 	return parts.join(" · ");
 }
 

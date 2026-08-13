@@ -381,7 +381,7 @@ def _sweep_screen_extractor_cache(
             continue
 
 
-def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
+def _cleanup(db, entity_ids: list[str], library_id: str | None = None, progress=None) -> bool:
     tables = _table_names(db)
     if "library_entities" not in tables or "entity_provider_ids" not in tables:
         raise RuntimeError("Library inventory schema is incomplete.")
@@ -418,15 +418,30 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
         _purge_orphan_inventory(cursor, tables)
         _purge_orphan_metadata(cursor, tables)
 
+    if progress:
+        progress("database", "Cleaning database relationships")
+
     _remove_cached_files(db, tables, image_paths)
+    if progress:
+        progress("artwork", "Cleaning cached artwork")
     _remove_person_cached_files(db, tables, person_image_paths)
+    if progress:
+        progress("portraits", "Cleaning cached portraits")
     _remove_trickplay_files(db, trickplay_media_ids)
+    if progress:
+        progress("trickplay", "Cleaning trickplay cache")
     _remove_screen_extractor_files(db, tables, screen_paths)
+    if progress:
+        progress("screen_extractor", "Cleaning screen-extractor cache")
     _sweep_screen_extractor_cache(db, tables)
     _sweep_metadata_cache_files(db, tables)
+    if progress:
+        progress("cache_sweep", "Sweeping metadata caches")
     from app.images import LocalArtworkCache
 
     LocalArtworkCache(db).prune()
+    if progress:
+        progress("local_artwork", "Pruning local artwork")
     return True
 
 
@@ -449,6 +464,6 @@ def cleanup_library(db, library_id: str) -> bool:
     return _cleanup(db, entity_ids, library_id)
 
 
-def cleanup_orphans(db) -> None:
+def cleanup_orphans(db, progress=None) -> None:
     """Purge leftovers from libraries/entities deleted before cascading cleanup existed."""
-    _cleanup(db, [])
+    _cleanup(db, [], progress=progress)

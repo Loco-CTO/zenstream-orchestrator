@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { IconPlayerPlay, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { activeStates } from "../jobs/job-types";
 import {
 	ConfirmDialog,
 	PageHeader,
@@ -95,19 +96,30 @@ export default function IntroOutroPage() {
 
 	const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
 		setSettings((current) => ({ ...current, [key]: value }));
-	async function load(current = session) {
-		if (!current) return;
-		const response = await adminFetch("/api/admin/intro-outro/settings", current);
-		if (!response.ok) return;
-		const value = await response.json();
-		setSettings({ ...defaults, ...value });
-		setTask(value.task || null);
-	}
+	const load = useCallback(
+		async (current: Session | null = session) => {
+			if (!current) return;
+			const response = await adminFetch(
+				"/api/admin/intro-outro/settings",
+				current,
+			);
+			if (!response.ok) return;
+			const value = await response.json();
+			setSettings({ ...defaults, ...value });
+			setTask(value.task || null);
+		},
+		[session],
+	);
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
 		void load(current);
-	}, []);
+	}, [load]);
+	useEffect(() => {
+		if (!session || !task?.lastState || !activeStates.has(task.lastState)) return;
+		const timer = window.setInterval(() => void load(session), 2000);
+		return () => window.clearInterval(timer);
+	}, [load, session, task?.lastState]);
 	async function save() {
 		if (!session) return;
 		setSaving(true);

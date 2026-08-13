@@ -215,9 +215,7 @@ export default function JobsPage() {
 									);
 									const active = Boolean(activeRun);
 									const progress = progressFor(task);
-									const progressDetail = progressDetailText(
-										activeRun?.progressDetail,
-									);
+									const progressDetail = progressDetailText(activeRun?.progressDetail);
 									return (
 										<div key={task.id}>
 											<div style={{ padding: "0 18px" }}>
@@ -267,8 +265,24 @@ export default function JobsPage() {
 															{task.name}
 														</div>
 														<div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
-															Last run {relativeTime(task.lastRunAt)} · {runDuration(task)}
+															{activeRun
+																? activeRun.message || activeRun.state
+																: `Last run ${relativeTime(task.lastRunAt)} · ${runDuration(task)}`}
 														</div>
+														{activeRun &&
+															progressDetail &&
+															progressDetail !== activeRun.message && (
+																<div
+																	style={{
+																		fontSize: 11,
+																		color: "#777",
+																		marginTop: 2,
+																		fontFamily: "var(--font-mono)",
+																	}}
+																>
+																	{progressDetail}
+																</div>
+															)}
 													</div>
 													{!task.historyOnly && (
 														<button
@@ -297,27 +311,39 @@ export default function JobsPage() {
 														</button>
 													)}
 												</div>
-												{active && progress !== undefined && (
+												{active && (
 													<div style={{ paddingBottom: 12 }}>
-														<div
-															style={{
-																height: 2,
-																background: "#111",
-																borderRadius: 2,
-																overflow: "hidden",
-																marginBottom: 5,
-															}}
-														>
-															<div
+														{progress === undefined ? (
+															<progress
+																aria-label={`${task.name} preparation progress`}
 																style={{
-																	height: "100%",
-																	width: `${progress}%`,
-																	background: "var(--primary)",
-																	borderRadius: 2,
-																	transition: "width 0.4s ease",
+																	width: "100%",
+																	height: 3,
+																	marginBottom: 5,
+																	accentColor: "var(--primary)",
 																}}
 															/>
-														</div>
+														) : (
+															<div
+																style={{
+																	height: 2,
+																	background: "#111",
+																	borderRadius: 2,
+																	overflow: "hidden",
+																	marginBottom: 5,
+																}}
+															>
+																<div
+																	style={{
+																		height: "100%",
+																		width: `${progress}%`,
+																		background: "var(--primary)",
+																		borderRadius: 2,
+																		transition: "width 0.4s ease",
+																	}}
+																/>
+															</div>
+														)}
 														<div
 															style={{
 																fontSize: 11,
@@ -326,7 +352,9 @@ export default function JobsPage() {
 																fontFamily: "var(--font-mono)",
 															}}
 														>
-															{Math.round(progress)}%
+															{progress === undefined
+																? "Preparing…"
+																: `${Math.round(progress)}%`}
 														</div>
 													</div>
 												)}

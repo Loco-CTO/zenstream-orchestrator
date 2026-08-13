@@ -24,6 +24,7 @@ from app.metadata_services import (
 )
 from app.models.metadata import MetadataLanguageSettings
 from app.progress import WholeJobProgress
+from app.progress import format_progress_message, resolve_progress_item
 from app.providers import ProviderError
 from app.trickplay import TrickplayExtractor
 
@@ -1154,7 +1155,14 @@ class MetadataMissingJob:
             started_at=now(),
             thread_name=threading.current_thread().name,
             progress_total=total + extractor_total,
-            message=f"Processing 0/{total} metadata documents",
+            progress_phase="discovery",
+            progress_label="Discovering metadata work",
+            progress_stage_current=0,
+            progress_stage_total=total + extractor_total,
+            progress_stage_unit="documents",
+            message=format_progress_message(
+                "Discovering metadata work", current=0, total=total + extractor_total, unit="documents"
+            ),
         )
 
         def queue_failures(
@@ -1387,12 +1395,32 @@ class MetadataMissingJob:
                 completed += processed
                 repaired += repaired_documents
                 provider, entity_type, provider_id = item
+                entity_rows = self.db.execute(
+                    "SELECT entity_id FROM entity_provider_ids WHERE provider=? AND identifier_type=? AND provider_id=? ORDER BY entity_id LIMIT 1",
+                    (provider, entity_type, provider_id),
+                )
+                item_label = resolve_progress_item(
+                    self.db,
+                    entity_rows[0][0] if entity_rows else None,
+                    f"{entity_type} {provider}:{provider_id}",
+                )
                 self.store.update_run(
                     run_id,
                     progress_current=completed,
+                    progress_phase="metadata",
+                    progress_label="Refreshing metadata",
+                    progress_stage_current=completed,
+                    progress_stage_total=total + extractor_total,
+                    progress_stage_unit="documents",
+                    progress_current_item=item_label,
                     message=(
-                        f"Processing {completed}/{total}: "
-                        f"{entity_type} {provider}:{provider_id}"
+                        format_progress_message(
+                            "Refreshing metadata",
+                            item=item_label,
+                            current=completed,
+                            total=total + extractor_total,
+                            unit="documents",
+                        )
                     ),
                 )
         # Screen Extractor is a final, language-neutral fallback. Run it only
@@ -1423,9 +1451,20 @@ class MetadataMissingJob:
                         run_id,
                         progress_current=total + extractor_index,
                         progress_total=total + extractor_total,
+                        progress_phase="artwork",
+                        progress_label="Extracting fallback artwork",
+                        progress_stage_current=total + extractor_index,
+                        progress_stage_total=total + extractor_total,
+                        progress_stage_unit="documents",
+                        progress_current_item=resolve_progress_item(self.db, entity_id, entity_id),
                         message=(
-                            f"Extracting fallback artwork "
-                            f"{extractor_index}/{extractor_total}"
+                            format_progress_message(
+                                "Extracting fallback artwork",
+                                item=resolve_progress_item(self.db, entity_id, entity_id),
+                                current=total + extractor_index,
+                                total=total + extractor_total,
+                                unit="documents",
+                            )
                         ),
                     )
                 except Exception as error:
@@ -1524,10 +1563,30 @@ class MetadataCleanupJob:
             state="running",
             started_at=now(),
             progress_total=1,
-            message="Cleaning orphaned library data",
+            progress_phase="preparation",
+            progress_label="Cleaning orphaned data",
+            progress_stage_current=0,
+            progress_stage_total=7,
+            progress_stage_unit="stages",
+            message="Cleaning orphaned data · 0/7 stages",
             thread_name=threading.current_thread().name,
         )
-        cleanup_orphans(self.db)
+        completed = 0
+
+        def progress(_phase, label):
+            nonlocal completed
+            completed += 1
+            self.store.update_run(
+                run_id,
+                progress_phase="cleanup",
+                progress_label=label,
+                progress_stage_current=completed,
+                progress_stage_total=7,
+                progress_stage_unit="stages",
+                message=f"{label} · {completed}/7 stages",
+            )
+
+        cleanup_orphans(self.db, progress=progress)
         self.store.update_run(
             run_id,
             state="completed",

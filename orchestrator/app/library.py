@@ -901,7 +901,18 @@ class LibraryScanner:
             context,
         )
         if persist:
-            self.store.update_job(job_id, message=stage)
+            current = context.get("current")
+            total = context.get("total")
+            self.store.update_job(
+                job_id,
+                message=stage if current is None or total is None else f"{stage} · {current}/{total}",
+                progress_phase="finalization" if any(token in stage.casefold() for token in ("prun", "refresh", "queue", "reconcil")) else "processing",
+                progress_label=stage,
+                progress_stage_current=current,
+                progress_stage_total=total,
+                progress_stage_unit=context.get("unit"),
+                progress_current_item=context.get("item"),
+            )
             self._last_stage_persisted_at = time.monotonic()
 
     def _start_heartbeat(self, library_id: str, job_id: str) -> None:
@@ -929,7 +940,16 @@ class LibraryScanner:
                     stage,
                     elapsed,
                 )
-                self.store.update_job(job_id, message=message)
+                self.store.update_job(
+                    job_id,
+                    message=message,
+                    progress_phase="processing",
+                    progress_label=stage,
+                    progress_stage_current=context.get("current"),
+                    progress_stage_total=context.get("total"),
+                    progress_stage_unit=context.get("unit"),
+                    progress_current_item=context.get("item"),
+                )
 
         self._heartbeat_thread = threading.Thread(
             target=heartbeat,

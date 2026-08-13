@@ -499,7 +499,37 @@ class JobStore:
                 item["options"] = {}
             triggers.append(item)
         definition["triggers"] = triggers
+        definition["optionDefinitions"] = self.option_definitions(definition["kind"])
         return definition
+
+    @staticmethod
+    def option_definitions(kind: str) -> list[dict]:
+        if kind == "metadata_refresh":
+            return [{
+                "key": "preserveCachedAssets",
+                "label": "Preserve cached assets",
+                "type": "boolean",
+                "default": False,
+                "description": "Reuse valid cached artwork and portraits instead of forcing a refresh.",
+            }]
+        return []
+
+    @classmethod
+    def validate_options(cls, kind: str, options: dict | None) -> dict:
+        values = options or {}
+        if not isinstance(values, dict):
+            raise ValueError("options must be an object")
+        definitions = {item["key"]: item for item in cls.option_definitions(kind)}
+        unknown = set(values) - set(definitions)
+        if unknown:
+            raise ValueError(f"Unsupported task option: {sorted(unknown)[0]}")
+        result = {}
+        for key, definition in definitions.items():
+            value = values.get(key, definition.get("default"))
+            if definition["type"] == "boolean" and not isinstance(value, bool):
+                raise ValueError(f"{key} must be a boolean")
+            result[key] = value
+        return result
 
     @staticmethod
     def _run(row) -> dict:

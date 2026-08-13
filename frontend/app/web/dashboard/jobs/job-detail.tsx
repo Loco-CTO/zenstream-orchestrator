@@ -36,6 +36,14 @@ function triggerLabel(trigger: JobTrigger) {
 	return `Every ${seconds} seconds`;
 }
 
+function runProgress(run: Job["recentRuns"][number] | undefined) {
+	if (!run || !run.progressTotal) return undefined;
+	return Math.max(
+		0,
+		Math.min(100, (run.progressCurrent / run.progressTotal) * 100),
+	);
+}
+
 const fieldStyle: React.CSSProperties = {
 	width: "100%",
 	background: "#1a1a1a",
@@ -384,6 +392,48 @@ export default function JobDetailPage() {
 					<IconRefresh size={15} />
 				</button>
 			</div>
+			{activeRun && runProgress(activeRun) !== undefined && (
+				<div
+					style={{
+						marginTop: 16,
+						background: "#080808",
+						borderRadius: 10,
+						padding: "12px 14px",
+					}}
+				>
+					<div
+						style={{
+							display: "flex",
+							justifyContent: "space-between",
+							color: "#777",
+							fontSize: 11,
+							marginBottom: 7,
+						}}
+					>
+						<span>{activeRun.message || activeRun.state}</span>
+						<span style={{ fontFamily: "var(--font-mono)" }}>
+							{Math.round(runProgress(activeRun) || 0)}%
+						</span>
+					</div>
+					<div
+						style={{
+							height: 3,
+							background: "#151515",
+							borderRadius: 3,
+							overflow: "hidden",
+						}}
+					>
+						<div
+							style={{
+								height: "100%",
+								width: `${runProgress(activeRun)}%`,
+								background: "var(--primary)",
+								transition: "width .4s ease",
+							}}
+						/>
+					</div>
+				</div>
+			)}
 			<div style={{ marginBottom: 16 }}>
 				<Btn icon={<IconPlus size={14} />} onClick={() => setAddingTrigger(true)}>
 					Add trigger

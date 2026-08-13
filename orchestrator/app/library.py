@@ -21,6 +21,7 @@ from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
 from app.logging_config import get_logger
 from app.worker_config import configured_worker_limit
+from app.progress import WholeJobProgress
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -557,6 +558,15 @@ def language_name(language: str | None, role: str) -> str:
 class LibraryStore:
     def __init__(self):
         self.db = Config().database
+        self._progress: dict[str, WholeJobProgress] = {}
+
+    def begin_progress(self, job_id: str, kind: str) -> None:
+        if not hasattr(self, "_progress"):
+            self._progress = {}
+        self._progress[job_id] = WholeJobProgress(kind)
+
+    def end_progress(self, job_id: str) -> None:
+        getattr(self, "_progress", {}).pop(job_id, None)
 
     def list(self) -> list[dict]:
         rows = self.db.execute(
@@ -789,6 +799,9 @@ class LibraryStore:
         ]  # type: ignore[list-item]
 
     def update_job(self, job_id: str, **values) -> None:
+        tracker = getattr(self, "_progress", {}).get(job_id)
+        if tracker is not None:
+            values = tracker.apply(values)
         allowed = {
             "state",
             "progress_current",
@@ -916,6 +929,8 @@ class LibraryScanner:
         root = Path(library["directory"])
         if not root.is_dir():
             raise ValueError("Library directory is no longer available")
+        progress_kind = "reconcile" if targets is not None else f"scan:{library['type']}"
+        self.store.begin_progress(job_id, progress_kind)
         started = now()
         self.store.set_scan_state(library_id, "scanning", started=started, error=None)
         self.store.update_job(
@@ -1076,6 +1091,7 @@ class LibraryScanner:
             )
             raise
         finally:
+            self.store.end_progress(job_id)
             self._stop_heartbeat()
 
     @staticmethod
@@ -4140,6 +4156,7 @@ class LibraryScanner:
         library = self.store.get(library_id)
         if not library:
             raise ValueError("Library not found")
+        self.store.begin_progress(job_id, "collection_rebuild")
         sources = self.store.sources(library_id)
         self.store.set_scan_state(library_id, "scanning", started=now(), error=None)
         self.store.update_job(
@@ -4333,6 +4350,8 @@ class LibraryScanner:
                 library_id, "error", error=summary, finished=now()
             )
             raise
+        finally:
+            self.store.end_progress(job_id)
 
 
 def _inventory_query(relative_path: str) -> tuple[str, str | None]:

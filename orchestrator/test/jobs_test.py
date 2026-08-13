@@ -13,6 +13,7 @@ from app.jobs import (
     _metadata_document_gaps,
     _repair_missing_tv_child_identities,
 )
+from app.progress import PROGRESS_TOTAL, WholeJobProgress
 
 
 class DatabaseRollbackTest(unittest.TestCase):
@@ -57,6 +58,35 @@ class DatabaseRollbackTest(unittest.TestCase):
                 self.assertEqual(errors, [])
             finally:
                 db.close()
+
+
+class WholeJobProgressTest(unittest.TestCase):
+    def test_progress_is_fixed_and_monotonic_across_stage_counter_resets(self):
+        progress = WholeJobProgress("scan")
+        first = progress.apply(
+            {"state": "running", "progress_current": 1, "progress_total": 10, "message": "Indexed One"}
+        )
+        second = progress.apply(
+            {"progress_current": 0, "progress_total": 50, "message": "Resolving new metadata"}
+        )
+        completed = progress.apply({"state": "completed", "message": "Indexed 1 entries"})
+
+        self.assertEqual(first["progress_total"], PROGRESS_TOTAL)
+        self.assertGreaterEqual(second["progress_current"], first["progress_current"])
+        self.assertEqual(completed["progress_current"], PROGRESS_TOTAL)
+        self.assertEqual(completed["progress_total"], PROGRESS_TOTAL)
+
+    def test_terminal_failure_keeps_progress_partial(self):
+        progress = WholeJobProgress("metadata_refresh")
+        progress.apply(
+            {"state": "running", "progress_current": 5, "progress_total": 10, "message": "Processing 5/10"}
+        )
+        failed = progress.apply(
+            {"state": "failed", "progress_current": 5, "progress_total": 10, "message": "5 repair errors"}
+        )
+
+        self.assertLess(failed["progress_current"], PROGRESS_TOTAL)
+        self.assertEqual(failed["progress_total"], PROGRESS_TOTAL)
 
 
 class MetadataMissingInspectionTest(unittest.TestCase):

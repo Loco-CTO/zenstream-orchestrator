@@ -24,6 +24,7 @@ from app.metadata_services import (
 )
 from app.models.metadata import MetadataLanguageSettings
 from app.providers import ProviderError
+from app.progress import WholeJobProgress
 from app.trickplay import TrickplayExtractor
 
 logger = get_logger("jobs")
@@ -393,6 +394,15 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
 class JobStore:
     def __init__(self):
         self.db = Config().database
+        self._progress: dict[str, WholeJobProgress] = {}
+
+    def begin_progress(self, run_id: str, kind: str) -> None:
+        if not hasattr(self, "_progress"):
+            self._progress = {}
+        self._progress[run_id] = WholeJobProgress(kind)
+
+    def end_progress(self, run_id: str) -> None:
+        getattr(self, "_progress", {}).pop(run_id, None)
 
     @staticmethod
     def _definition(row) -> dict:
@@ -960,6 +970,9 @@ class JobStore:
         )
 
     def update_run(self, run_id: str, **values) -> None:
+        tracker = getattr(self, "_progress", {}).get(run_id)
+        if tracker is not None:
+            values = tracker.apply(values)
         allowed = {
             "state",
             "progress_current",
@@ -1749,6 +1762,7 @@ class JobScheduler:
                 "config": config,
                 "name": name,
             }
+            self.store.begin_progress(run_id, kind)
             if kind == "metadata_missing":
                 MetadataMissingJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
@@ -1812,6 +1826,7 @@ class JobScheduler:
                 finished_at=now(),
             )
         finally:
+            self.store.end_progress(run_id)
             with self.active_lock:
                 self.active.discard(run_id)
                 self.cancel_events.pop(run_id, None)

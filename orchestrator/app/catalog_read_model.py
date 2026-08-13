@@ -701,7 +701,8 @@ class CatalogReadModel:
                                     provider,
                                     str(local_path),
                                     choice.get("blurHash"),
-                                    choice.get("version") or _artwork_version(str(local_path)),
+                                    choice.get("version")
+                                    or _artwork_version(str(local_path)),
                                     now,
                                 )
                             )

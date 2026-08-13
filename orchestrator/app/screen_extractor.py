@@ -4,9 +4,9 @@ import hashlib
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
 
 from app.config import Config
 from app.images import (
@@ -16,7 +16,6 @@ from app.images import (
 )
 from app.logging_config import get_logger
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
-
 
 logger = get_logger("screen_extractor")
 SCREEN_EXTRACTOR_PROVIDER = "screen_extractor"
@@ -32,7 +31,9 @@ def eligible(entity_type: str) -> bool:
     return entity_type in ELIGIBLE_ENTITY_TYPES
 
 
-def _provider_primary_ready_for_all_locales(db, entity_id: str, entity_type: str) -> bool:
+def _provider_primary_ready_for_all_locales(
+    db, entity_id: str, entity_type: str
+) -> bool:
     """Return true only when every configured locale has a usable remote Primary."""
     try:
         from app.models.metadata import MetadataLanguageSettings
@@ -46,7 +47,10 @@ def _provider_primary_ready_for_all_locales(db, entity_id: str, entity_type: str
         "SELECT relative_path,quick_fingerprint FROM media_files WHERE entity_id=? AND role='image'",
         (entity_id,),
     )
-    if any(Path(str(path or "")).stem.casefold() in local_names and fingerprint for path, fingerprint in local_rows):
+    if any(
+        Path(str(path or "")).stem.casefold() in local_names and fingerprint
+        for path, fingerprint in local_rows
+    ):
         return True
     try:
         from app.metadata_services import MetadataReadService
@@ -64,8 +68,13 @@ def _provider_primary_ready_for_all_locales(db, entity_id: str, entity_type: str
     for locale in locales:
         raw = reader.resolve_raw(entity_type, identities, locale)
         if not reader.ready_artwork(
-            entity_type, identities, raw.get("images", []), locale,
-            "Primary", raw.get("originalLanguage"), reader.providers(entity_type),
+            entity_type,
+            identities,
+            raw.get("images", []),
+            locale,
+            "Primary",
+            raw.get("originalLanguage"),
+            reader.providers(entity_type),
         ):
             return False
     return True
@@ -142,10 +151,7 @@ class ScreenExtractorStore:
     def source_fingerprint(
         quick_fingerprint: object, size: object, modified_ns: object
     ) -> str:
-        return str(
-            quick_fingerprint
-            or f"{int(size or 0)}:{int(modified_ns or 0)}"
-        )
+        return str(quick_fingerprint or f"{int(size or 0)}:{int(modified_ns or 0)}")
 
     @staticmethod
     def output_key(
@@ -159,7 +165,7 @@ class ScreenExtractorStore:
             (
                 f"{source_fingerprint}:{extraction_version}:"
                 f"{seek_fraction:.8f}:{max_dimension}"
-            ).encode("utf-8")
+            ).encode()
         ).hexdigest()
 
     @classmethod
@@ -331,9 +337,7 @@ class ScreenExtractorStore:
 
     def _claim_query(self, entity_id: str | None = None) -> tuple[str, list[object]]:
         timestamp = now()
-        asset_columns = ",".join(
-            f"a.{column}" for column in self._ASSET_COLUMN_NAMES
-        )
+        asset_columns = ",".join(f"a.{column}" for column in self._ASSET_COLUMN_NAMES)
         query = (
             f"SELECT {asset_columns},l.directory,f.relative_path,"
             "s.duration_seconds,s.width,s.height,e.entity_type "
@@ -420,7 +424,9 @@ class ScreenExtractorStore:
     def mark_retry(self, asset: dict, code: str, message: str) -> bool:
         attempt = int(asset.get("attemptCount") or 0) + 1
         delay = _RETRY_DELAYS_SECONDS[min(attempt - 1, len(_RETRY_DELAYS_SECONDS) - 1)]
-        next_attempt = (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+        next_attempt = (
+            datetime.now(timezone.utc) + timedelta(seconds=delay)
+        ).isoformat()
         with self.db.transaction() as cursor:
             cursor.execute(
                 "UPDATE screen_extractor_assets SET state='retry',attempt_count=?,"
@@ -599,8 +605,7 @@ class ScreenExtractor:
             f".{destination.stem}.{uuid.uuid4().hex}.webp"
         )
         seek_seconds = (
-            float(asset.get("durationSeconds") or 0)
-            * SCREEN_EXTRACTOR_SEEK_FRACTION
+            float(asset.get("durationSeconds") or 0) * SCREEN_EXTRACTOR_SEEK_FRACTION
         )
         try:
             process = subprocess.Popen(
@@ -727,7 +732,11 @@ class ScreenExtractor:
         ):
             return asset
         claimed = self.store.claim_next(entity_id)
-        return self.process(claimed, should_terminate) if claimed else self.store.get(entity_id)
+        return (
+            self.process(claimed, should_terminate)
+            if claimed
+            else self.store.get(entity_id)
+        )
 
 
 def ready_artwork(db, entity_id: str, entity_type: str) -> dict | None:

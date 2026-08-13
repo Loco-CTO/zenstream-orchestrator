@@ -1987,7 +1987,11 @@ class LibraryScanner:
 
             extract_entity(self.db, row[0], "movie", should_terminate=should_terminate)
         except Exception as error:
-            logger.warning("screen extractor movie fallback failed entity_id=%s error=%s", row[0], error)
+            logger.warning(
+                "screen extractor movie fallback failed entity_id=%s error=%s",
+                row[0],
+                error,
+            )
         self._publish_root(row[0])
 
     def _queue_metadata_repair(
@@ -2694,9 +2698,19 @@ class LibraryScanner:
                 if entity_type == "episode":
                     try:
                         from app.screen_extractor import extract_entity
-                        extract_entity(self.db, entity_id, entity_type, should_terminate=should_terminate)
+
+                        extract_entity(
+                            self.db,
+                            entity_id,
+                            entity_type,
+                            should_terminate=should_terminate,
+                        )
                     except Exception as error:
-                        logger.warning("screen extractor episode fallback failed entity_id=%s error=%s", entity_id, error)
+                        logger.warning(
+                            "screen extractor episode fallback failed entity_id=%s error=%s",
+                            entity_id,
+                            error,
+                        )
                 continue
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?",
@@ -2705,9 +2719,19 @@ class LibraryScanner:
             if entity_type == "episode":
                 try:
                     from app.screen_extractor import extract_entity
-                    extract_entity(self.db, entity_id, entity_type, should_terminate=should_terminate)
+
+                    extract_entity(
+                        self.db,
+                        entity_id,
+                        entity_type,
+                        should_terminate=should_terminate,
+                    )
                 except Exception as error:
-                    logger.warning("screen extractor episode fallback failed entity_id=%s error=%s", entity_id, error)
+                    logger.warning(
+                        "screen extractor episode fallback failed entity_id=%s error=%s",
+                        entity_id,
+                        error,
+                    )
             self.store.update_job(
                 job_id,
                 progress_current=index,

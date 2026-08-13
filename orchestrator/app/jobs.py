@@ -1225,19 +1225,32 @@ class MetadataMissingJob:
                 if should_terminate():
                     raise JobTerminated()
                 try:
-                    extract_entity(self.db, entity_id, entity_type, force=False, should_terminate=should_terminate)
+                    extract_entity(
+                        self.db,
+                        entity_id,
+                        entity_type,
+                        force=False,
+                        should_terminate=should_terminate,
+                    )
                 except Exception as error:
-                    extractor_failures.append({"entityId": entity_id, "error": f"{type(error).__name__}: {error}"})
+                    extractor_failures.append(
+                        {
+                            "entityId": entity_id,
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    )
         except JobTerminated:
             raise
         except Exception as error:
             extractor_failures.append({"error": f"{type(error).__name__}: {error}"})
         if extractor_failures:
             incomplete_repairs.extend(
-                {"kind": "screen_extractor", **failure} for failure in extractor_failures
+                {"kind": "screen_extractor", **failure}
+                for failure in extractor_failures
             )
         try:
             from app.catalog_read_model import CatalogReadModel
+
             roots = self.db.execute(
                 "SELECT id FROM library_entities WHERE entity_type IN ('movie','series','collection') AND parent_id IS NULL"
             )

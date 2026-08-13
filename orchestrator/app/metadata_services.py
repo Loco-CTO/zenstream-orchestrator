@@ -1154,7 +1154,11 @@ class MetadataReadService:
             )
             if rows and ("local_path" not in columns or _ready_file(rows[0][1])):
                 return candidate
-        if entity_id and image_type == "Primary" and entity_type in {"movie", "episode"}:
+        if (
+            entity_id
+            and image_type == "Primary"
+            and entity_type in {"movie", "episode"}
+        ):
             from app.screen_extractor import ready_artwork
 
             generated = ready_artwork(self.db, entity_id, entity_type)

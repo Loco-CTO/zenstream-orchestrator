@@ -124,7 +124,8 @@ def _delete_entity_rows(cursor, tables: set[str], entity_ids: list[str]) -> None
             )
         if "screen_extractor_assets" in tables:
             cursor.execute(
-                f"DELETE FROM screen_extractor_assets WHERE entity_id IN ({placeholders})", batch
+                f"DELETE FROM screen_extractor_assets WHERE entity_id IN ({placeholders})",
+                batch,
             )
         cursor.execute(
             f"DELETE FROM entity_provider_ids WHERE entity_id IN ({placeholders})",
@@ -335,16 +336,24 @@ def _remove_screen_extractor_files(db, tables: set[str], paths: set[str]) -> Non
             path = Path(raw_path)
             resolved = path.resolve()
             resolved.relative_to(root)
-            referenced = db.execute("SELECT 1 FROM screen_extractor_assets WHERE local_path=? LIMIT 1", (str(path),))
+            referenced = db.execute(
+                "SELECT 1 FROM screen_extractor_assets WHERE local_path=? LIMIT 1",
+                (str(path),),
+            )
             if not referenced and "catalog_artwork_selection" in tables:
-                referenced = db.execute("SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1", (str(path),))
+                referenced = db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                    (str(path),),
+                )
             if not referenced:
                 resolved.unlink(missing_ok=True)
         except (OSError, ValueError):
             continue
 
 
-def _sweep_screen_extractor_cache(db, tables: set[str], grace_seconds: int = 86400) -> None:
+def _sweep_screen_extractor_cache(
+    db, tables: set[str], grace_seconds: int = 86400
+) -> None:
     if "screen_extractor_assets" not in tables or not db.db_file:
         return
     root = (Path(db.db_file).parent / "screen-extractor-cache").resolve()
@@ -357,9 +366,15 @@ def _sweep_screen_extractor_cache(db, tables: set[str], grace_seconds: int = 864
             resolved.relative_to(root)
             if path.stat().st_mtime > cutoff:
                 continue
-            referenced = db.execute("SELECT 1 FROM screen_extractor_assets WHERE local_path=? LIMIT 1", (str(path),))
+            referenced = db.execute(
+                "SELECT 1 FROM screen_extractor_assets WHERE local_path=? LIMIT 1",
+                (str(path),),
+            )
             if not referenced and "catalog_artwork_selection" in tables:
-                referenced = db.execute("SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1", (str(path),))
+                referenced = db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                    (str(path),),
+                )
             if not referenced:
                 resolved.unlink(missing_ok=True)
         except (OSError, ValueError):

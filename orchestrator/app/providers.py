@@ -29,6 +29,10 @@ class ProviderError(RuntimeError):
     pass
 
 
+class ProviderNotFoundError(ProviderError):
+    pass
+
+
 logger = get_logger("providers")
 
 
@@ -335,6 +339,14 @@ class ProviderClient:
                 )
                 time.sleep(delay)
             assert response is not None
+            if response.status_code == 404:
+                logger.info(
+                    "metadata provider resource not found client=%s url=%s duration_seconds=%.1f",
+                    client_name,
+                    url,
+                    time.monotonic() - started,
+                )
+                raise ProviderNotFoundError("provider resource not found")
             response.raise_for_status()
             payload = response.json()
             logger.info(
@@ -510,26 +522,40 @@ class TMDBClient(ProviderClient):
         )
         if entity_type == "season":
             series_id, season = provider_id.split(":", 1)
-            payload = self._request(
-                f"/tv/{quote(series_id)}/season/{quote(season)}",
-                params={
-                    "language": language,
-                    "include_image_language": image_language,
-                    "include_video_language": video_language,
-                    "append_to_response": "images,external_ids,videos,translations",
-                },
-            )
+            try:
+                payload = self._request(
+                    f"/tv/{quote(series_id)}/season/{quote(season)}",
+                    params={
+                        "language": language,
+                        "include_image_language": image_language,
+                        "include_video_language": video_language,
+                        "append_to_response": "images,external_ids,videos,translations",
+                    },
+                )
+            except ProviderNotFoundError:
+                logger.info(
+                    "TMDB season layout has no matching resource provider_id=%s",
+                    provider_id,
+                )
+                payload = {}
         elif entity_type == "episode":
             series_id, season, episode = provider_id.split(":", 2)
-            payload = self._request(
-                f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}",
-                params={
-                    "language": language,
-                    "include_image_language": image_language,
-                    "include_video_language": video_language,
-                    "append_to_response": "images,external_ids,videos,translations",
-                },
-            )
+            try:
+                payload = self._request(
+                    f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}",
+                    params={
+                        "language": language,
+                        "include_image_language": image_language,
+                        "include_video_language": video_language,
+                        "append_to_response": "images,external_ids,videos,translations",
+                    },
+                )
+            except ProviderNotFoundError:
+                logger.info(
+                    "TMDB episode layout has no matching resource provider_id=%s",
+                    provider_id,
+                )
+                payload = {}
         else:
             kind = "tv" if entity_type == "series" else "movie"
             payload = self._request(

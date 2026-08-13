@@ -36,6 +36,7 @@ from app.providers import (
     MetadataService,
     ProviderError,
     ProviderLanguageCatalog,
+    ProviderNotFoundError,
     TMDBClient,
     TVDBClient,
     _select_match,
@@ -2161,6 +2162,45 @@ class LibraryMetadataTest(unittest.TestCase):
 
         params = provider_request.call_args.kwargs["params"]
         self.assertEqual(params["include_video_language"], "en,ja")
+
+    def test_tmdb_missing_season_or_episode_layout_is_an_empty_result(self):
+        client = TMDBClient({"value": "test"})
+
+        for entity_type, provider_id in (
+            ("season", "10:2"),
+            ("episode", "10:2:1"),
+        ):
+            with (
+                self.subTest(entity_type=entity_type),
+                patch.object(
+                    client, "_language_code", side_effect=lambda value: value
+                ),
+                patch.object(
+                    client,
+                    "_request",
+                    side_effect=ProviderNotFoundError("provider resource not found"),
+                ),
+            ):
+                self.assertEqual(
+                    client.details_all_locales(
+                        entity_type, provider_id, ["en-US", "ja-JP"]
+                    ),
+                    {"en-US": {}, "ja-JP": {}},
+                )
+
+    def test_tmdb_missing_series_remains_a_provider_failure(self):
+        client = TMDBClient({"value": "test"})
+
+        with (
+            patch.object(client, "_language_code", return_value="en-US"),
+            patch.object(
+                client,
+                "_request",
+                side_effect=ProviderNotFoundError("provider resource not found"),
+            ),
+            self.assertRaises(ProviderNotFoundError),
+        ):
+            client.details_all_locales("series", "10", ["en-US"])
 
     def test_provider_language_catalogs_pass_unknown_locale_through(self):
         tvdb = TVDBClient({"apiKey": "test"})

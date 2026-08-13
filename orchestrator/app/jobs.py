@@ -1583,6 +1583,8 @@ class MetadataCleanupJob:
             completed += 1
             self.store.update_run(
                 run_id,
+                progress_current=completed,
+                progress_total=7,
                 progress_phase="cleanup",
                 progress_label=label,
                 progress_stage_current=completed,

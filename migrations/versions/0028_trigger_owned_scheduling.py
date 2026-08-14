@@ -46,24 +46,12 @@ def upgrade() -> None:
             bind.execute(sa.text("UPDATE job_schedule_triggers SET options=:options WHERE definition_id=:id"), {"options": options, "id": definition_id})
             config.pop("preserveCachedAssets", None)
             bind.execute(sa.text("UPDATE job_definitions SET config=:config WHERE id=:id"), {"config": json.dumps(config), "id": definition_id})
+        bind.execute(sa.text("UPDATE job_definitions SET next_run_at=(SELECT MIN(next_run_at) FROM job_schedule_triggers t WHERE t.definition_id=job_definitions.id AND t.next_run_at IS NOT NULL)"))
         bind.execute(sa.text("DROP INDEX IF EXISTS idx_job_definitions_due"))
-        bind.execute(sa.text("PRAGMA foreign_keys=OFF"))
-        bind.execute(sa.text("""CREATE TABLE job_definitions_new (
-            id TEXT PRIMARY KEY NOT NULL, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
-            description TEXT, kind TEXT NOT NULL, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT,
-            last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle',
-            last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-        )"""))
-        bind.execute(sa.text("""INSERT INTO job_definitions_new
-            (id,job_key,name,description,kind,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at)
-            SELECT id,job_key,name,description,kind,config,
-              CASE WHEN enabled=1 THEN (SELECT MIN(next_run_at) FROM job_schedule_triggers t WHERE t.definition_id=job_definitions.id AND t.next_run_at IS NOT NULL) ELSE NULL END,
-              last_run_at,last_run_id,last_state,last_message,created_at,updated_at
-            FROM job_definitions"""))
-        bind.execute(sa.text("DROP TABLE job_definitions"))
-        bind.execute(sa.text("ALTER TABLE job_definitions_new RENAME TO job_definitions"))
+        with op.batch_alter_table("job_definitions", recreate="always") as batch:
+            batch.drop_column("interval_minutes")
+            batch.drop_column("enabled")
         bind.execute(sa.text("CREATE INDEX IF NOT EXISTS idx_job_definitions_due ON job_definitions(next_run_at)"))
-        bind.execute(sa.text("PRAGMA foreign_keys=ON"))
 
 
 def downgrade() -> None:

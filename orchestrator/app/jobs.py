@@ -425,7 +425,8 @@ class JobStore:
             )
         ]
 
-    def _progress_detail(self, row: tuple, offset: int) -> dict | None:
+    @staticmethod
+    def _progress_detail(row: tuple, offset: int) -> dict | None:
         values = row[offset : offset + 6]
         if not any(value is not None for value in values):
             return None
@@ -437,6 +438,7 @@ class JobStore:
             "unit": values[4],
             "item": values[5],
         }
+        return value
 
     @staticmethod
     def _definition(row) -> dict:

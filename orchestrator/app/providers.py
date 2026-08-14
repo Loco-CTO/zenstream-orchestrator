@@ -443,9 +443,7 @@ class TMDBClient(ProviderClient):
                         "TMDB language catalog unavailable; using locale fallback"
                     )
                 self.__class__._language_codes_loaded = True
-        return self._language_catalog.provider(
-            normalize_language(locale, allow_unsupported=True)
-        )
+        return self._language_catalog.provider(_normalize_language_tag(locale))
 
     def _canonical_language(self, value: str | None) -> tuple[str | None, str | None]:
         if not value:
@@ -957,9 +955,7 @@ class TVDBClient(ProviderClient):
         # Keep unknown locale values intact when the provider catalog cannot
         # resolve them. This lets newly supported locales pass through
         # without another provider-specific hard-coded table.
-        return self._language_catalog.provider(
-            normalize_language(locale, allow_unsupported=True)
-        )
+        return self._language_catalog.provider(_normalize_language_tag(locale))
 
     def _language_code_for_artwork(self, value: str | None) -> str | None:
         if not value:

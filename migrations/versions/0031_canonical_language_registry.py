@@ -1,5 +1,3 @@
-"""Canonicalize configured language values through the ZenStream registry."""
-
 import json
 from datetime import datetime, timezone
 

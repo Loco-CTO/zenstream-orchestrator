@@ -297,7 +297,7 @@ async def auth_bootstrap(request: Request):
         "metadataLanguage": metadata_language,
         "subtitleStyle": subtitles,
         "languages": languages,
-        "languageOptions": language_options(),
+        "languageOptions": language_options(locale),
     }
 
 
@@ -454,9 +454,13 @@ async def metadata_languages(request: Request):
 
 
 @router.get("/api/languages")
-async def supported_languages(request: Request):
-    await _require_account(request)
-    return {"languages": language_options()}
+async def supported_languages(
+    request: Request,
+    display_language: str | None = Query(None, alias="displayLanguage"),
+):
+    account, _ = await _require_account(request)
+    display_language = display_language or AccountPreference(account["id"]).locale()
+    return {"languages": language_options(display_language)}
 
 
 @router.get("/api/preferences/locale")

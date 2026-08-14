@@ -1,5 +1,7 @@
 import unittest
 
+from langcodes import Language
+
 from app.language_registry import (
     SUPPORTED_LANGUAGE_SET,
     language_options,
@@ -34,4 +36,18 @@ class LanguageRegistryTest(unittest.TestCase):
         options = language_options()
         self.assertEqual({option["value"] for option in options}, SUPPORTED_LANGUAGE_SET)
         self.assertTrue(all(option["metadata"] and option["tracks"] for option in options))
+        zh_tw = next(option for option in options if option["value"] == "zh-TW")
+        language = Language.get("zh-TW")
+        self.assertEqual(
+            zh_tw["label"],
+            f"{language.display_name('en')} ({language.autonym()})",
+        )
 
+        english_in_japanese = next(
+            option for option in language_options("ja") if option["value"] == "en"
+        )
+        english = Language.get("en")
+        self.assertEqual(
+            english_in_japanese["label"],
+            f"{english.display_name('ja')} ({english.autonym()})",
+        )

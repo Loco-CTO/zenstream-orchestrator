@@ -104,10 +104,8 @@ SUPPORTED_LANGUAGE_SET = frozenset(SUPPORTED_LANGUAGE_CODES)
 # BCP-47 parsers.  The values are canonical ZenStream values.
 LANGUAGE_ALIASES = {
     "zhtw": "zh-TW",
-    "zh-tw": "zh-TW",
     "zht": "zh-TW",
-    "ja-jp": "ja",
-    "jpn-jp": "ja",
+    "jap": "ja",
 }
 
 
@@ -119,9 +117,25 @@ class SupportedLanguage:
     tracks: bool = True
 
 
-def _display_name(code: str) -> str:
+def _display_language(value: object) -> str:
+    """Choose a supported language used to render registry labels."""
+    raw = str(value or "en").strip().replace("_", "-")
+    alias = LANGUAGE_ALIASES.get(raw.casefold())
+    if alias:
+        raw = alias
     try:
-        return Language.get(code).display_name("en")
+        normalized = standardize_tag(raw)
+    except (LanguageTagError, LookupError, TypeError, ValueError):
+        return "en"
+    if normalized.casefold() == "ja-jp":
+        normalized = "ja"
+    return normalized if normalized in SUPPORTED_LANGUAGE_SET else "en"
+
+
+def _display_name(code: str, display_language: object = "en") -> str:
+    try:
+        language = Language.get(code)
+        return f"{language.display_name(_display_language(display_language))} ({language.autonym()})"
     except (LookupError, ValueError):
         return code
 
@@ -131,12 +145,13 @@ SUPPORTED_LANGUAGES = tuple(
 )
 
 
-def language_options() -> list[dict[str, object]]:
-    """Return the stable client-facing language registry."""
+def language_options(display_language: object = "en") -> list[dict[str, object]]:
+    """Return registry options named in the requested display language."""
+    display_language = _display_language(display_language)
     return [
         {
             "value": language.code,
-            "label": language.label,
+            "label": _display_name(language.code, display_language),
             "metadata": language.metadata,
             "tracks": language.tracks,
         }
@@ -144,13 +159,9 @@ def language_options() -> list[dict[str, object]]:
     ]
 
 
-def language_label(value: object) -> str:
+def language_label(value: object, display_language: object = "en") -> str:
     try:
-        return next(
-            language.label
-            for language in SUPPORTED_LANGUAGES
-            if language.code == normalize_language(value)
-        )
+        return _display_name(normalize_language(value), display_language)
     except (StopIteration, ValueError):
         return str(value or "")
 

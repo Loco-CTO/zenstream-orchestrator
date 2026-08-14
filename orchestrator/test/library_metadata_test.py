@@ -503,7 +503,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 "subtitle",
                 media_paths,
             ),
-            "AI 音声認識 - Japanese",
+            "AI 音声認識 - Japanese (日本語)",
         )
         self.assertEqual(
             sidecar_display_title(
@@ -512,7 +512,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 "subtitle",
                 media_paths,
             ),
-            "Japanese",
+            "Japanese (日本語)",
         )
         self.assertEqual(
             sidecar_display_title(
@@ -521,7 +521,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 "subtitle",
                 media_paths,
             ),
-            "Japanese",
+            "Japanese (日本語)",
         )
 
         self.assertEqual(
@@ -531,7 +531,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 "subtitle",
                 media_paths,
             ),
-            "AI 生成 - Chinese (Traditional)",
+            "AI 生成 - Chinese (Taiwan) (Chinese（Taiwan）)",
         )
 
     def test_sidecar_display_title_does_not_use_unmatched_movie_title_as_descriptor(
@@ -544,7 +544,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 "subtitle",
                 ["Mr.Robot.mkv"],
             ),
-            "English",
+            "English (English)",
         )
 
     def test_sidecar_scan_is_stat_only_and_retains_inaccessible_existing_rows(self):

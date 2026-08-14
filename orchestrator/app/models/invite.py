@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -203,7 +204,7 @@ class Invite:
                     "VALUES(?,?,?,?,0)",
                     (user_id, username, _hasher.hash(password), "argon2id"),
                 )
-            except Exception as error:
+            except sqlite3.IntegrityError as error:
                 raise ValueError("Username is already in use.") from error
             cursor.executemany(
                 "INSERT INTO user_library_access(user_id,library_id,created_at) "

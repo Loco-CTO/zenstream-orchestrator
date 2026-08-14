@@ -465,9 +465,6 @@ class JobStore:
             "createdAt": row[13 + offset],
             "updatedAt": row[14 + offset],
         }
-        if offset == 0:
-            value["intervalMinutes"] = interval_minutes
-            value["enabled"] = bool(enabled)
         return value
 
     def _definition_select(self) -> str:
@@ -1031,11 +1028,16 @@ class JobStore:
 
     def due_triggers(self) -> list[dict]:
         current = now()
-        rows = self.db.execute(
-            "SELECT t.id,t.definition_id,t.trigger_type,t.interval_seconds,t.time_of_day,t.weekday,t.next_run_at,t.options "
-            "FROM job_schedule_triggers t WHERE t.next_run_at IS NOT NULL AND t.next_run_at<=? ORDER BY t.next_run_at,t.created_at",
-            (current,),
-        )
+        try:
+            rows = self.db.execute(
+                "SELECT t.id,t.definition_id,t.trigger_type,t.interval_seconds,t.time_of_day,t.weekday,t.next_run_at,t.options FROM job_schedule_triggers t WHERE t.next_run_at IS NOT NULL AND t.next_run_at<=? ORDER BY t.next_run_at,t.created_at",
+                (current,),
+            )
+        except Exception:
+            rows = self.db.execute(
+                "SELECT t.id,t.definition_id,t.trigger_type,t.interval_seconds,t.time_of_day,t.weekday,t.next_run_at,NULL FROM job_schedule_triggers t WHERE t.next_run_at IS NOT NULL AND t.next_run_at<=? ORDER BY t.next_run_at,t.created_at",
+                (current,),
+            )
         values = []
         for row in rows:
             definition = self.definition(row[1])

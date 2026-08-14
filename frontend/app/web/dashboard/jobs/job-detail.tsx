@@ -250,30 +250,13 @@ export default function JobDetailPage() {
 
 	async function addTrigger() {
 		const id = crypto.randomUUID();
-		const trigger: JobTrigger =
-			triggerType === "startup"
-				? { id, type: "startup", options: triggerOptions }
-				: triggerType === "daily"
-					? { id, type: "daily", time: triggerTime, options: triggerOptions }
-					: triggerType === "weekly"
-						? { id, type: "weekly", weekday: Number(triggerDay), time: triggerTime, options: triggerOptions }
-						: {
-								id,
-								type: "interval",
-								intervalSeconds: Math.min(
-									2592000,
-									Math.max(
-										1,
-										Number(triggerIntervalVal) *
-											(triggerIntervalUnit === "hours"
-												? 3600
-												: triggerIntervalUnit === "minutes"
-													? 60
-													: 1),
-															),
-															options: triggerOptions,
-								),
-							};
+		const trigger: JobTrigger = triggerType === "startup"
+			? { id, type: "startup", options: triggerOptions }
+			: triggerType === "daily"
+				? { id, type: "daily", time: triggerTime, options: triggerOptions }
+				: triggerType === "weekly"
+					? { id, type: "weekly", weekday: Number(triggerDay), time: triggerTime, options: triggerOptions }
+					: { id, type: "interval", intervalSeconds: Math.min(2592000, Math.max(1, Number(triggerIntervalVal) * (triggerIntervalUnit === "hours" ? 3600 : triggerIntervalUnit === "minutes" ? 60 : 1))), options: triggerOptions };
 		if (!session || !selected) return;
 		const response = await adminFetch(`/api/admin/jobs/${selected.id}/triggers`, session, {
 			method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(trigger),
@@ -685,7 +668,7 @@ export default function JobDetailPage() {
 							))
 						)}
 					</div>
-						{false && <div
+							{false && <div
 							style={{
 								display: "flex",
 								alignItems: "center",
@@ -702,7 +685,7 @@ export default function JobDetailPage() {
 								type="number"
 								min={1}
 								max={43200}
-								value={selected.intervalMinutes}
+								value={selected?.intervalMinutes ?? 0}
 								onChange={(event) =>
 									updateSelected((job) => ({
 										...job,
@@ -715,18 +698,18 @@ export default function JobDetailPage() {
 						<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
 							<input
 								type="checkbox"
-								checked={selected.enabled}
+								checked={Boolean(selected?.enabled)}
 								onChange={(event) =>
 									updateSelected((job) => ({ ...job, enabled: event.target.checked }))
 								}
 							/>{" "}
 							Enabled
 						</label>
-						{selected.kind === "metadata_refresh" && (
+							{selected?.kind === "metadata_refresh" && (
 							<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
 								<input
 									type="checkbox"
-									checked={Boolean(selected.config?.preserveCachedAssets)}
+												checked={Boolean(selected?.config?.preserveCachedAssets)}
 									onChange={(event) =>
 										updateSelected((job) => ({
 											...job,
@@ -740,7 +723,7 @@ export default function JobDetailPage() {
 								Preserve cached assets
 							</label>
 						)}
-					</div>}
+						</div>}
 					<div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
 						<Btn
 							variant="ghost"

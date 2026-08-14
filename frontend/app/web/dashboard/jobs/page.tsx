@@ -65,7 +65,9 @@ const TaskRow = memo(function TaskRow({
 	const activeRun = task.recentRuns?.find((run) => activeStates.has(run.state));
 	const active = Boolean(activeRun);
 	const progress = progressFor(task);
-	const progressDetail = progressDetailText(activeRun?.progressDetail);
+	const progressDetailValue = progressDetailText(activeRun?.progressDetail);
+	const progressDetail =
+		progressDetailValue !== activeRun?.message ? progressDetailValue : "";
 
 	return (
 		<div>

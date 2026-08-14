@@ -15,6 +15,7 @@ type PlaybackSettings = {
 	trickplayFrameWidth: number;
 	trickplayIntervalSeconds: number;
 	trickplayWorkers: number;
+	trickplayFfmpegThreads: number;
 };
 
 const DEFAULTS: PlaybackSettings = {
@@ -23,12 +24,14 @@ const DEFAULTS: PlaybackSettings = {
 	trickplayFrameWidth: 320,
 	trickplayIntervalSeconds: 10,
 	trickplayWorkers: 1,
+	trickplayFfmpegThreads: 4,
 };
 
 function validTrickplaySettings(
 	width: number,
 	intervalSeconds: number,
 	workers: number,
+	ffmpegThreads: number,
 ) {
 	return (
 		Number.isInteger(width) &&
@@ -40,7 +43,10 @@ function validTrickplaySettings(
 		intervalSeconds <= 60 &&
 		Number.isInteger(workers) &&
 		workers >= 1 &&
-		workers <= 64
+		workers <= 64 &&
+		Number.isInteger(ffmpegThreads) &&
+		ffmpegThreads >= 0 &&
+		ffmpegThreads <= 64
 	);
 }
 
@@ -61,6 +67,7 @@ export default function PlaybackPage() {
 			const trickplayFrameWidth = Number(data?.trickplayFrameWidth);
 			const trickplayIntervalSeconds = Number(data?.trickplayIntervalSeconds);
 			const trickplayWorkers = Number(data?.trickplayWorkers);
+			const trickplayFfmpegThreads = Number(data?.trickplayFfmpegThreads);
 			setSettings({
 				maxTranscodes: Number.isFinite(maxTranscodes)
 					? maxTranscodes
@@ -80,6 +87,10 @@ export default function PlaybackPage() {
 					Number.isFinite(trickplayWorkers) && trickplayWorkers >= 1
 						? trickplayWorkers
 						: DEFAULTS.trickplayWorkers,
+				trickplayFfmpegThreads:
+					Number.isFinite(trickplayFfmpegThreads) && trickplayFfmpegThreads >= 0
+						? trickplayFfmpegThreads
+						: DEFAULTS.trickplayFfmpegThreads,
 			});
 		} else {
 			setMessage(data?.detail || "Could not load playback settings.");
@@ -103,10 +114,11 @@ export default function PlaybackPage() {
 				settings.trickplayFrameWidth,
 				settings.trickplayIntervalSeconds,
 				settings.trickplayWorkers,
+				settings.trickplayFfmpegThreads,
 			)
 		) {
 			setMessage(
-				"Choose a frame width from 160 to 640 in 16 px steps, an interval from 1 to 60 seconds, and 1 to 64 workers.",
+				"Choose a frame width from 160 to 640 in 16 px steps, an interval from 1 to 60 seconds, 1 to 64 workers, and 0 to 64 FFmpeg threads.",
 			);
 			return;
 		}
@@ -148,6 +160,11 @@ export default function PlaybackPage() {
 					Number(data.trickplayWorkers) >= 1
 						? Number(data.trickplayWorkers)
 						: current.trickplayWorkers,
+				trickplayFfmpegThreads:
+					Number.isFinite(Number(data?.trickplayFfmpegThreads)) &&
+					Number(data.trickplayFfmpegThreads) >= 0
+						? Number(data.trickplayFfmpegThreads)
+						: current.trickplayFfmpegThreads,
 			}));
 		}
 		setSaving(false);
@@ -159,6 +176,7 @@ export default function PlaybackPage() {
 		settings.trickplayFrameWidth,
 		settings.trickplayIntervalSeconds,
 		settings.trickplayWorkers,
+		settings.trickplayFfmpegThreads,
 	);
 
 	return (
@@ -207,6 +225,26 @@ export default function PlaybackPage() {
 								setSettings((current) => ({
 									...current,
 									maxTranscodes: Number(event.target.value),
+								}))
+							}
+							className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none"
+						/>
+					</label>
+					<label className="block">
+						<span className="text-sm font-semibold">Trickplay FFmpeg threads per process</span>
+						<span className="mt-1 block text-xs console-muted">
+							Explicit per-process FFmpeg threads; 0 lets FFmpeg choose automatically. Total pressure is approximately workers × threads.
+						</span>
+						<input
+							type="number"
+							min={0}
+							max={64}
+							step={1}
+							value={settings.trickplayFfmpegThreads}
+							onChange={(event) =>
+								setSettings((current) => ({
+									...current,
+									trickplayFfmpegThreads: Number(event.target.value),
 								}))
 							}
 							className="console-input mt-3 h-11 w-full rounded-xl px-4 text-sm outline-none"

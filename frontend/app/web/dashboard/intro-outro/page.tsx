@@ -32,6 +32,7 @@ type Settings = {
 	maximumTimeSkipSeconds: number;
 	invertedIndexShift: number;
 	introOutroWorkers: number;
+	introOutroFfmpegThreads: number;
 };
 
 const defaults: Settings = {
@@ -48,6 +49,7 @@ const defaults: Settings = {
 	maximumTimeSkipSeconds: 3.5,
 	invertedIndexShift: 2,
 	introOutroWorkers: 1,
+	introOutroFfmpegThreads: 4,
 };
 
 function NumberField({
@@ -236,6 +238,14 @@ export default function IntroOutroPage() {
 						minimum={1}
 						maximum={64}
 						onChange={(value) => update("introOutroWorkers", value)}
+					/>
+					<NumberField
+						label="Intro/outro FFmpeg threads per process"
+						hint="Explicit per-process FFmpeg threads; 0 lets FFmpeg choose automatically. Total pressure is approximately workers × threads."
+						value={settings.introOutroFfmpegThreads}
+						minimum={0}
+						maximum={64}
+						onChange={(value) => update("introOutroFfmpegThreads", value)}
 					/>
 					<NumberField
 						label="Opening analysis (%)"

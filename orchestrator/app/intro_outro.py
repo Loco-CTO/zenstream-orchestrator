@@ -240,7 +240,7 @@ class IntroOutroStore:
         ) in rows:
             source_fingerprint = self.source_key(quick_fingerprint, size, modified_ns)
             existing = self.db.execute(
-                "SELECT source_fingerprint,analysis_key FROM intro_outro_assets WHERE media_file_id=?",
+                "SELECT source_fingerprint,analysis_key,state FROM intro_outro_assets WHERE media_file_id=?",
                 (media_file_id,),
             )
             if (
@@ -248,7 +248,22 @@ class IntroOutroStore:
                 and existing[0][0] == source_fingerprint
                 and existing[0][1] == fingerprint_settings_key
             ):
-                continue
+                state = existing[0][2]
+                if state in {"scanned", "fingerprinted", "generating"}:
+                    continue
+                if state in {"queued", "failed"}:
+                    timestamp = now()
+                    self.db.execute(
+                        "UPDATE intro_outro_assets SET entity_id=?,season_id=?,state='queued',"
+                        "error=NULL,updated_at=? WHERE media_file_id=?",
+                        (entity_id, season_id, timestamp, media_file_id),
+                    )
+                    self.db.execute(
+                        "DELETE FROM intro_outro_segments WHERE media_file_id=?",
+                        (media_file_id,),
+                    )
+                    queued += 1
+                    continue
             timestamp = now()
             self.db.execute(
                 "INSERT INTO intro_outro_assets(media_file_id,entity_id,season_id,source_fingerprint,analysis_key,state,created_at,updated_at) "

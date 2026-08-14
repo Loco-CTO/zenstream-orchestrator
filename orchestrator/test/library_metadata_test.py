@@ -524,6 +524,16 @@ class LibraryMetadataTest(unittest.TestCase):
             "Japanese",
         )
 
+        self.assertEqual(
+            sidecar_display_title(
+                "5 Centimeters per Second/5 Centimeters per Second.AI 生成.zh-TW.srt",
+                "zh-TW",
+                "subtitle",
+                media_paths,
+            ),
+            "AI 生成 - Chinese (Traditional)",
+        )
+
     def test_sidecar_display_title_does_not_use_unmatched_movie_title_as_descriptor(
         self,
     ):

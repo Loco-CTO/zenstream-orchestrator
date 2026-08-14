@@ -162,6 +162,14 @@ alembic -c alembic.ini upgrade head
 
 ## 🖥️ For Developers
 
+When the public `zenstream` web client is deployed separately from the
+administrator dashboard, build the dashboard with
+`NEXT_PUBLIC_ZENSTREAM_WEB_URL` set to the public web origin (for example
+`http://localhost:9086`). Invite links then target `/register` on that origin;
+they never target the dashboard's `/web` routes. Add the public web origin to
+`CORS_ORIGINS` so registration can submit credentials and receive its secure
+session cookie.
+
 Please see [`DEVELOPER`](/DEVELOPER.md) for more information.
 
 ## 📜 License

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
 	IconClock,
 	IconPlayerPlay,
@@ -49,6 +49,162 @@ function progressFor(job: Job) {
 	);
 }
 
+type TaskRowProps = {
+	task: Job;
+	isLast: boolean;
+	onOpen: (taskId: string) => void;
+	onToggleRun: (task: Job, event: React.MouseEvent<HTMLButtonElement>) => void;
+};
+
+const TaskRow = memo(function TaskRow({
+	task,
+	isLast,
+	onOpen,
+	onToggleRun,
+}: TaskRowProps) {
+	const activeRun = task.recentRuns?.find((run) => activeStates.has(run.state));
+	const active = Boolean(activeRun);
+	const progress = progressFor(task);
+	const progressDetail = progressDetailText(activeRun?.progressDetail);
+
+	return (
+		<div>
+			<div style={{ padding: "0 18px" }}>
+				<div
+					role="button"
+					tabIndex={0}
+					onClick={() => onOpen(task.id)}
+					onKeyDown={(event) => {
+						if (event.key === "Enter" || event.key === " ") {
+							event.preventDefault();
+							onOpen(task.id);
+						}
+					}}
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 14,
+						paddingTop: 13,
+						paddingBottom: active ? 8 : 13,
+						cursor: "pointer",
+					}}
+				>
+					<div
+						style={{
+							width: 32,
+							height: 32,
+							borderRadius: "50%",
+							background: "var(--primary-dim)",
+							border: "1px solid rgba(94,227,216,0.15)",
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "center",
+							flexShrink: 0,
+							color: "var(--primary)",
+						}}
+					>
+						<IconClock size={14} />
+					</div>
+					<div style={{ flex: 1, minWidth: 0 }}>
+						<div style={{ fontSize: 14, fontWeight: 500, color: "#ddd" }}>
+							{task.name}
+						</div>
+						<div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+							{activeRun
+								? activeRun.message || activeRun.state
+								: `Last run ${relativeTime(task.lastRunAt)} · ${runDuration(task)}`}
+						</div>
+					</div>
+					{!task.historyOnly && (
+						<button
+							type="button"
+							onClick={(event) => onToggleRun(task, event)}
+							aria-label={active ? `Stop ${task.name}` : `Run ${task.name}`}
+							style={{
+								width: 28,
+								height: 28,
+								borderRadius: 6,
+								background: "none",
+								border: "none",
+								color: active ? "#888" : "#444",
+								cursor: "pointer",
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								flexShrink: 0,
+							}}
+						>
+							{active ? <IconPlayerStop size={12} /> : <IconPlayerPlay size={12} />}
+						</button>
+					)}
+				</div>
+				{active && (
+					<div style={{ paddingBottom: 12 }}>
+						{progress === undefined ? (
+							<progress
+								aria-label={`${task.name} preparation progress`}
+								style={{
+									width: "100%",
+									height: 3,
+									marginBottom: 5,
+									accentColor: "var(--primary)",
+								}}
+							/>
+						) : (
+							<div
+								style={{
+									height: 2,
+									background: "#111",
+									borderRadius: 2,
+									overflow: "hidden",
+									marginBottom: 5,
+								}}
+							>
+								<div
+									style={{
+										height: "100%",
+										width: `${progress}%`,
+										background: "var(--primary)",
+										borderRadius: 2,
+										transition: "width 0.4s ease",
+									}}
+								/>
+							</div>
+						)}
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								gap: 12,
+								fontSize: 11,
+								color: "#555",
+								fontFamily: "var(--font-mono)",
+							}}
+						>
+							<span
+								style={{
+									minWidth: 0,
+									flex: 1,
+									overflow: "hidden",
+									textOverflow: "ellipsis",
+									whiteSpace: "nowrap",
+								}}
+							>
+								{progressDetail}
+							</span>
+							<span style={{ flexShrink: 0 }}>
+								{progress === undefined ? "Preparing…" : `${Math.round(progress)}%`}
+							</span>
+						</div>
+					</div>
+				)}
+			</div>
+			{!isLast && <div style={{ height: 1, background: "#111", margin: 0 }} />}
+		</div>
+	);
+});
+
 export default function JobsPage() {
 	const router = useRouter();
 	const params = useSearchParams();
@@ -72,6 +228,33 @@ export default function JobsPage() {
 		setLoading(false);
 	}, []);
 
+	const refreshTask = useCallback(async (current: Session | null, taskId: string) => {
+		if (!current) return null;
+		const response = await adminFetch(
+			`/api/admin/jobs/${encodeURIComponent(taskId)}`,
+			current,
+		);
+		if (!response.ok) return null;
+		return (await response.json()) as Job;
+	}, []);
+
+	const refreshActiveTasks = useCallback(
+		async (current: Session, taskIds: string[]) => {
+			const results = await Promise.allSettled(
+				taskIds.map((taskId) => refreshTask(current, taskId)),
+			);
+			const updates = results.flatMap((result) =>
+				result.status === "fulfilled" && result.value ? [result.value] : [],
+			);
+			if (!updates.length) return;
+			const byId = new Map(updates.map((task) => [task.id, task]));
+			setJobs((currentJobs) =>
+				currentJobs.map((task) => byId.get(task.id) || task),
+			);
+		},
+		[refreshTask],
+	);
+
 	useEffect(() => {
 		const legacyId = params.get("jobId");
 		if (legacyId) {
@@ -86,10 +269,24 @@ export default function JobsPage() {
 	}, [load, params, router]);
 
 	useEffect(() => {
-		if (!session || !jobs.some((job) => activeStates.has(job.lastState))) return;
-		const timer = window.setInterval(() => void load(session), 2000);
+		if (!session) return;
+		const activeTaskIds = jobs
+			.filter((job) => job.recentRuns?.some((run) => activeStates.has(run.state)))
+			.map((job) => job.id);
+		if (!activeTaskIds.length) return;
+		let polling = false;
+		const poll = async () => {
+			if (polling) return;
+			polling = true;
+			try {
+				await refreshActiveTasks(session, activeTaskIds);
+			} finally {
+				polling = false;
+			}
+		};
+		const timer = window.setInterval(() => void poll(), 2000);
 		return () => window.clearInterval(timer);
-	}, [jobs, load, session]);
+	}, [jobs, refreshActiveTasks, session]);
 
 	const groups = useMemo<TaskGroup[]>(
 		() =>
@@ -100,7 +297,17 @@ export default function JobsPage() {
 		[jobs],
 	);
 
-	async function toggleRun(task: Job, event: React.MouseEvent) {
+	const openTask = useCallback(
+		(taskId: string) => {
+			router.push(
+				`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(taskId)}`,
+			);
+		},
+		[router],
+	);
+
+	const toggleRun = useCallback(
+		async (task: Job, event: React.MouseEvent<HTMLButtonElement>) => {
 		event.stopPropagation();
 		if (task.historyOnly) return;
 		if (!session) return;
@@ -125,10 +332,17 @@ export default function JobsPage() {
 				method: "POST",
 			});
 		}
-		await load(session);
-	}
+		const updated = await refreshTask(session, task.id);
+		if (updated) {
+			setJobs((current) =>
+				current.map((item) => (item.id === updated.id ? updated : item)),
+			);
+		}
+		},
+		[refreshTask, session],
+	);
 
-	async function confirmRun() {
+	const confirmRun = useCallback(async () => {
 		if (!session || !runTask) return;
 		await adminFetch(`/api/admin/jobs/${runTask.id}/run`, session, {
 			method: "POST",
@@ -136,8 +350,13 @@ export default function JobsPage() {
 			body: JSON.stringify({ options: runOptions }),
 		});
 		setRunTask(null);
-		await load(session);
-	}
+		const updated = await refreshTask(session, runTask.id);
+		if (updated) {
+			setJobs((current) =>
+				current.map((item) => (item.id === updated.id ? updated : item)),
+			);
+		}
+	}, [refreshTask, runTask, session]);
 
 	return (
 		<div className="dashboard-page dashboard-design">
@@ -306,162 +525,15 @@ export default function JobsPage() {
 								{group.group}
 							</div>
 							<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
-								{group.tasks.map((task, index) => {
-									const activeRun = task.recentRuns?.find((run) =>
-										activeStates.has(run.state),
-									);
-									const active = Boolean(activeRun);
-									const progress = progressFor(task);
-									const progressDetail = progressDetailText(activeRun?.progressDetail);
-									return (
-										<div key={task.id}>
-											<div style={{ padding: "0 18px" }}>
-												<div
-													role="button"
-													tabIndex={0}
-													onClick={() =>
-														router.push(
-															`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(task.id)}`,
-														)
-													}
-													onKeyDown={(event) => {
-														if (event.key === "Enter" || event.key === " ") {
-															event.preventDefault();
-															router.push(
-																`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(task.id)}`,
-															);
-														}
-													}}
-													style={{
-														display: "flex",
-														alignItems: "center",
-														gap: 14,
-														paddingTop: 13,
-														paddingBottom: active ? 8 : 13,
-														cursor: "pointer",
-													}}
-												>
-													<div
-														style={{
-															width: 32,
-															height: 32,
-															borderRadius: "50%",
-															background: "var(--primary-dim)",
-															border: "1px solid rgba(94,227,216,0.15)",
-															display: "flex",
-															alignItems: "center",
-															justifyContent: "center",
-															flexShrink: 0,
-															color: "var(--primary)",
-														}}
-													>
-														<IconClock size={14} />
-													</div>
-													<div style={{ flex: 1, minWidth: 0 }}>
-														<div style={{ fontSize: 14, fontWeight: 500, color: "#ddd" }}>
-															{task.name}
-														</div>
-														<div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
-															{activeRun
-																? activeRun.message || activeRun.state
-																: `Last run ${relativeTime(task.lastRunAt)} · ${runDuration(task)}`}
-														</div>
-														{activeRun &&
-															progressDetail &&
-															progressDetail !== activeRun.message && (
-																<div
-																	style={{
-																		fontSize: 11,
-																		color: "#777",
-																		marginTop: 2,
-																		fontFamily: "var(--font-mono)",
-																	}}
-																>
-																	{progressDetail}
-																</div>
-															)}
-													</div>
-													{!task.historyOnly && (
-														<button
-															type="button"
-															onClick={(event) => void toggleRun(task, event)}
-															aria-label={active ? `Stop ${task.name}` : `Run ${task.name}`}
-															style={{
-																width: 28,
-																height: 28,
-																borderRadius: 6,
-																background: "none",
-																border: "none",
-																color: active ? "#888" : "#444",
-																cursor: "pointer",
-																display: "flex",
-																alignItems: "center",
-																justifyContent: "center",
-																flexShrink: 0,
-															}}
-														>
-															{active ? (
-																<IconPlayerStop size={12} />
-															) : (
-																<IconPlayerPlay size={12} />
-															)}
-														</button>
-													)}
-												</div>
-												{active && (
-													<div style={{ paddingBottom: 12 }}>
-														{progress === undefined ? (
-															<progress
-																aria-label={`${task.name} preparation progress`}
-																style={{
-																	width: "100%",
-																	height: 3,
-																	marginBottom: 5,
-																	accentColor: "var(--primary)",
-																}}
-															/>
-														) : (
-															<div
-																style={{
-																	height: 2,
-																	background: "#111",
-																	borderRadius: 2,
-																	overflow: "hidden",
-																	marginBottom: 5,
-																}}
-															>
-																<div
-																	style={{
-																		height: "100%",
-																		width: `${progress}%`,
-																		background: "var(--primary)",
-																		borderRadius: 2,
-																		transition: "width 0.4s ease",
-																	}}
-																/>
-															</div>
-														)}
-														<div
-															style={{
-																fontSize: 11,
-																color: "#555",
-																textAlign: "right",
-																fontFamily: "var(--font-mono)",
-															}}
-														>
-															{progress === undefined
-																? "Preparing…"
-																: `${Math.round(progress)}%`}
-														</div>
-													</div>
-												)}
-											</div>
-											{index < group.tasks.length - 1 && (
-												<div style={{ height: 1, background: "#111", margin: 0 }} />
-											)}
-										</div>
-									);
-								})}
+								{group.tasks.map((task, index) => (
+									<TaskRow
+										key={task.id}
+										task={task}
+										isLast={index === group.tasks.length - 1}
+										onOpen={openTask}
+										onToggleRun={toggleRun}
+									/>
+								))}
 							</div>
 						</div>
 					))}

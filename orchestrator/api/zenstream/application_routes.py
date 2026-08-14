@@ -6,6 +6,7 @@ from pathlib import Path
 from app.client_auth import (
     administrator_origin_allowed,
     cookie_secure,
+    DEV_CLIENT_SESSION_COOKIE,
     require_account,
     session_cookie_name,
     websocket_account,
@@ -46,7 +47,6 @@ def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
     group_id = state.get("id")
     if group_id and SyncplayGroup(group_id).member(user_id, participant):
         return state
-    active_invites = sum(1 for invite in Invite().list() if invite["status"] == "active")
     return {
         **state,
         "hostUserId": None,
@@ -377,6 +377,9 @@ async def admin_overview(
     counts = db.execute(
         "SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users"
     )[0]
+    active_invites = sum(
+        1 for invite in Invite().list() if invite["status"] == "active"
+    )
     return {
         "users": counts[0] or 0,
         "active_users": counts[1] or 0,
@@ -608,6 +611,13 @@ async def register_client(request: Request):
         result["sessionToken"],
         max_age=7 * 24 * 60 * 60,
         secure=cookie_secure(request),
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    response.delete_cookie(
+        DEV_CLIENT_SESSION_COOKIE,
+        secure=False,
         httponly=True,
         samesite="strict",
         path="/",

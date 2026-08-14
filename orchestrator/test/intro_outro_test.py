@@ -240,10 +240,14 @@ class IntroOutroTest(unittest.TestCase):
                 return 0
 
         class JobStore:
-            def update_run(self, *args, **kwargs):
-                return None
+            def __init__(self):
+                self.updates = []
+
+            def update_run(self, run_id, **values):
+                self.updates.append((run_id, values))
 
         store = Store()
+        job_store = JobStore()
         detector = IntroOutroDetector(store)
         active = 0
         maximum = 0
@@ -260,9 +264,18 @@ class IntroOutroTest(unittest.TestCase):
             return b"\0\0\0\0"
 
         detector._fingerprint = fingerprint
-        detector.run("run", JobStore())
+        detector.run("run", job_store)
         self.assertEqual(
             set(store.processed), {f"episode-{index}" for index in range(4)}
         )
         self.assertEqual(len(store.processed), 4)
         self.assertEqual(maximum, 2)
+        self.assertTrue(job_store.updates)
+        self.assertTrue(all(run_id == "run" for run_id, _ in job_store.updates))
+        self.assertIn(
+            "fingerprinting",
+            {values.get("progress_phase") for _, values in job_store.updates},
+        )
+        self.assertIn(
+            "completed", {values.get("state") for _, values in job_store.updates}
+        )

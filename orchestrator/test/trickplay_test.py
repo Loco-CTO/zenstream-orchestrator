@@ -196,10 +196,14 @@ class TrickplayTest(unittest.TestCase):
                 raise AssertionError(error)
 
         class JobStore:
-            def update_run(self, *args, **kwargs):
-                return None
+            def __init__(self):
+                self.updates = []
+
+            def update_run(self, run_id, **values):
+                self.updates.append((run_id, values))
 
         store = Store()
+        job_store = JobStore()
         extractor = TrickplayExtractor(store)
         extractor.remove_orphan_cache = lambda: None
         active = 0
@@ -221,7 +225,16 @@ class TrickplayTest(unittest.TestCase):
         with patch(
             "app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 2}
         ):
-            extractor.run("run", JobStore())
+            extractor.run("run", job_store)
         self.assertEqual(set(store.processed), {f"media-{index}" for index in range(4)})
         self.assertEqual(len(store.processed), 4)
         self.assertEqual(maximum, 2)
+        self.assertTrue(job_store.updates)
+        self.assertTrue(all(run_id == "run" for run_id, _ in job_store.updates))
+        self.assertIn(
+            "extraction",
+            {values.get("progress_phase") for _, values in job_store.updates},
+        )
+        self.assertIn(
+            "completed", {values.get("state") for _, values in job_store.updates}
+        )

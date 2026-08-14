@@ -83,7 +83,6 @@ SUPPORTED_LANGUAGE_CODES = (
     "ur",
     "uz",
     "vi",
-    "zh",
     "zu",
     "en-GB",
     "en-US",
@@ -147,7 +146,8 @@ def _display_name(code: str, display_language: object = "en") -> str:
 
 def _label_key(value: str) -> str:
     """Compare labels without treating full-width punctuation as distinct."""
-    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+    normalized = " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+    return normalized.replace(" (", "(").replace("( ", "(").replace(" )", ")")
 
 
 SUPPORTED_LANGUAGES = tuple(

@@ -496,7 +496,10 @@ def sidecar_language(path: Path) -> str | None:
 
 
 def _sidecar_suffix_tokens(value: str) -> list[str]:
-    return [token.strip() for token in re.split(r"[._-]+", value) if token.strip()]
+    # Periods delimit descriptor, marker, and language components. Keep
+    # hyphens intact because they are part of BCP-47 language tags such as
+    # ``zh-TW`` and may also be part of a descriptor.
+    return [token.strip() for token in value.split(".") if token.strip()]
 
 
 def sidecar_descriptor(

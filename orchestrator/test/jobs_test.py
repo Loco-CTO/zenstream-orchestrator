@@ -747,6 +747,44 @@ class JobMappingTest(unittest.TestCase):
         self.assertEqual(value["progressCurrent"], 4)
         self.assertEqual(value["threadName"], "worker")
 
+    def test_run_mapping_accepts_structured_progress_detail(self):
+        row = (
+            "run",
+            "definition",
+            None,
+            "trickplay_extract",
+            "running",
+            1200,
+            10000,
+            "Extracting trickplay",
+            None,
+            None,
+            "created",
+            "started",
+            None,
+            "worker",
+            "extraction",
+            "Extracting trickplay",
+            12,
+            87,
+            "videos",
+            "Dune.mkv",
+            None,
+            "{}",
+        )
+        value = JobStore._run(row)
+        self.assertEqual(
+            value["progressDetail"],
+            {
+                "phase": "extraction",
+                "label": "Extracting trickplay",
+                "current": 12,
+                "total": 87,
+                "unit": "videos",
+                "item": "Dune.mkv",
+            },
+        )
+
     def test_default_tasks_include_orphan_cleanup(self):
         db, store = self._scheduler_store()
         try:

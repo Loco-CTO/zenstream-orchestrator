@@ -465,10 +465,11 @@ class JobStore:
             "createdAt": row[13 + offset],
             "updatedAt": row[14 + offset],
         }
-        return value
 
     def _definition_select(self) -> str:
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")}
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")
+        }
         legacy = {"interval_minutes", "enabled"}.issubset(columns)
         if legacy:
             return "id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at"
@@ -512,13 +513,15 @@ class JobStore:
     @staticmethod
     def option_definitions(kind: str) -> list[dict]:
         if kind == "metadata_refresh":
-            return [{
-                "key": "preserveCachedAssets",
-                "label": "Preserve cached assets",
-                "type": "boolean",
-                "default": False,
-                "description": "Reuse valid cached artwork and portraits instead of forcing a refresh.",
-            }]
+            return [
+                {
+                    "key": "preserveCachedAssets",
+                    "label": "Preserve cached assets",
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Reuse valid cached artwork and portraits instead of forcing a refresh.",
+                }
+            ]
         return []
 
     @classmethod
@@ -567,15 +570,23 @@ class JobStore:
         return value
 
     def definitions(self) -> list[dict]:
-        rows = self.db.execute(f"SELECT {self._definition_select()} FROM job_definitions ORDER BY name COLLATE NOCASE")
+        rows = self.db.execute(
+            f"SELECT {self._definition_select()} FROM job_definitions ORDER BY name COLLATE NOCASE"
+        )
         return [self._with_triggers(self._definition(row)) for row in rows]
 
     def definition(self, definition_id: str) -> dict | None:
-        rows = self.db.execute(f"SELECT {self._definition_select()} FROM job_definitions WHERE id=?", (definition_id,))
+        rows = self.db.execute(
+            f"SELECT {self._definition_select()} FROM job_definitions WHERE id=?",
+            (definition_id,),
+        )
         return self._with_triggers(self._definition(rows[0])) if rows else None
 
     def by_key(self, key: str) -> dict | None:
-        rows = self.db.execute(f"SELECT {self._definition_select()} FROM job_definitions WHERE job_key=?", (key,))
+        rows = self.db.execute(
+            f"SELECT {self._definition_select()} FROM job_definitions WHERE job_key=?",
+            (key,),
+        )
         return self._with_triggers(self._definition(rows[0])) if rows else None
 
     def ensure(
@@ -593,21 +604,50 @@ class JobStore:
             return existing
         timestamp = now()
         definition_id = new_id()
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")}
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")
+        }
         if {"interval_minutes", "enabled"}.issubset(columns):
             self.db.execute(
                 "INSERT INTO job_definitions(id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (definition_id, key, name, description, kind, max(5, min(43200, int(interval or 1440))), int(enabled), json.dumps(config or {}, ensure_ascii=False), None, timestamp, timestamp),
+                (
+                    definition_id,
+                    key,
+                    name,
+                    description,
+                    kind,
+                    max(5, min(43200, int(interval or 1440))),
+                    int(enabled),
+                    json.dumps(config or {}, ensure_ascii=False),
+                    None,
+                    timestamp,
+                    timestamp,
+                ),
             )
         else:
             self.db.execute(
                 "INSERT INTO job_definitions(id,job_key,name,description,kind,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (definition_id, key, name, description, kind, json.dumps(config or {}, ensure_ascii=False), None, timestamp, timestamp),
+                (
+                    definition_id,
+                    key,
+                    name,
+                    description,
+                    kind,
+                    json.dumps(config or {}, ensure_ascii=False),
+                    None,
+                    timestamp,
+                    timestamp,
+                ),
             )
         if enabled:
             self._replace_triggers(
                 definition_id,
-                [{"type": "interval", "intervalSeconds": max(1, int(interval or 1440) * 60)}],
+                [
+                    {
+                        "type": "interval",
+                        "intervalSeconds": max(1, int(interval or 1440) * 60),
+                    }
+                ],
             )
         return self.definition(definition_id)  # type: ignore[return-value]
 
@@ -836,7 +876,9 @@ class JobStore:
             {
                 **self._validate_trigger(trigger),
                 "id": str(trigger.get("id") or new_id()),
-                "options": self.validate_options(definition["kind"], trigger.get("options")),
+                "options": self.validate_options(
+                    definition["kind"], trigger.get("options")
+                ),
             }
             for trigger in triggers
         ]
@@ -848,12 +890,33 @@ class JobStore:
             try:
                 self.db.execute(
                     "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,options,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (trigger["id"], definition_id, trigger["type"], trigger.get("intervalSeconds"), trigger.get("time"), trigger.get("weekday"), self._next_for_trigger(trigger), json.dumps(trigger["options"], ensure_ascii=False), timestamp, timestamp),
+                    (
+                        trigger["id"],
+                        definition_id,
+                        trigger["type"],
+                        trigger.get("intervalSeconds"),
+                        trigger.get("time"),
+                        trigger.get("weekday"),
+                        self._next_for_trigger(trigger),
+                        json.dumps(trigger["options"], ensure_ascii=False),
+                        timestamp,
+                        timestamp,
+                    ),
                 )
             except Exception:
                 self.db.execute(
                     "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (trigger["id"], definition_id, trigger["type"], trigger.get("intervalSeconds"), trigger.get("time"), trigger.get("weekday"), self._next_for_trigger(trigger), timestamp, timestamp),
+                    (
+                        trigger["id"],
+                        definition_id,
+                        trigger["type"],
+                        trigger.get("intervalSeconds"),
+                        trigger.get("time"),
+                        trigger.get("weekday"),
+                        self._next_for_trigger(trigger),
+                        timestamp,
+                        timestamp,
+                    ),
                 )
 
     def add_trigger(self, definition_id: str, trigger: dict) -> dict:
@@ -861,31 +924,66 @@ class JobStore:
         if not definition:
             raise KeyError("Job definition not found")
         validated = self._validate_trigger(trigger)
-        validated["options"] = self.validate_options(definition["kind"], trigger.get("options"))
+        validated["options"] = self.validate_options(
+            definition["kind"], trigger.get("options")
+        )
         trigger_id = str(trigger.get("id") or new_id())
         timestamp = now()
         try:
             self.db.execute(
                 "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,options,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (trigger_id, definition_id, validated["type"], validated.get("intervalSeconds"), validated.get("time"), validated.get("weekday"), self._next_for_trigger(validated), json.dumps(validated["options"], ensure_ascii=False), timestamp, timestamp),
+                (
+                    trigger_id,
+                    definition_id,
+                    validated["type"],
+                    validated.get("intervalSeconds"),
+                    validated.get("time"),
+                    validated.get("weekday"),
+                    self._next_for_trigger(validated),
+                    json.dumps(validated["options"], ensure_ascii=False),
+                    timestamp,
+                    timestamp,
+                ),
             )
         except Exception:
             self.db.execute(
                 "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (trigger_id, definition_id, validated["type"], validated.get("intervalSeconds"), validated.get("time"), validated.get("weekday"), self._next_for_trigger(validated), timestamp, timestamp),
+                (
+                    trigger_id,
+                    definition_id,
+                    validated["type"],
+                    validated.get("intervalSeconds"),
+                    validated.get("time"),
+                    validated.get("weekday"),
+                    self._next_for_trigger(validated),
+                    timestamp,
+                    timestamp,
+                ),
             )
-        self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (self._earliest_next(definition_id), timestamp, definition_id))
+        self.db.execute(
+            "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+            (self._earliest_next(definition_id), timestamp, definition_id),
+        )
         return self.definition(definition_id)  # type: ignore[return-value]
 
     def remove_trigger(self, definition_id: str, trigger_id: str) -> dict:
         definition = self.definition(definition_id)
         if not definition:
             raise KeyError("Job definition not found")
-        exists = self.db.execute("SELECT 1 FROM job_schedule_triggers WHERE id=? AND definition_id=?", (trigger_id, definition_id))
+        exists = self.db.execute(
+            "SELECT 1 FROM job_schedule_triggers WHERE id=? AND definition_id=?",
+            (trigger_id, definition_id),
+        )
         if not exists:
             raise KeyError("Trigger not found")
-        self.db.execute("DELETE FROM job_schedule_triggers WHERE id=? AND definition_id=?", (trigger_id, definition_id))
-        self.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (self._earliest_next(definition_id), now(), definition_id))
+        self.db.execute(
+            "DELETE FROM job_schedule_triggers WHERE id=? AND definition_id=?",
+            (trigger_id, definition_id),
+        )
+        self.db.execute(
+            "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+            (self._earliest_next(definition_id), now(), definition_id),
+        )
         return self.definition(definition_id)  # type: ignore[return-value]
 
     def _earliest_next(self, definition_id: str) -> str | None:
@@ -909,14 +1007,24 @@ class JobStore:
         config = values.get("config", definition["config"])
         self.db.execute(
             "UPDATE job_definitions SET name=?,config=?,next_run_at=?,updated_at=? WHERE id=?",
-            (name, json.dumps(config or {}, ensure_ascii=False), self._earliest_next(definition_id), now(), definition_id),
+            (
+                name,
+                json.dumps(config or {}, ensure_ascii=False),
+                self._earliest_next(definition_id),
+                now(),
+                definition_id,
+            ),
         )
         return self.definition(definition_id)  # type: ignore[return-value]
 
     def runs(self, definition_id: str | None = None, limit: int = 100) -> list[dict]:
         detail = ",".join(self._progress_columns("job_runs"))
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}
-        snapshot = ",source_trigger_id,options" if {"source_trigger_id", "options"}.issubset(columns) else ",NULL,NULL"
+        snapshot = (
+            ",source_trigger_id,options"
+            if {"source_trigger_id", "options"}.issubset(columns)
+            else ",NULL,NULL"
+        )
         if definition_id:
             rows = self.db.execute(
                 f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail}{snapshot} FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
@@ -936,8 +1044,9 @@ class JobStore:
         kinds: set[str] | None = None,
     ) -> list[dict]:
         query = (
-            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at," 
-            + ",".join(self._progress_columns("library_jobs")) + ",NULL,NULL "
+            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,"
+            + ",".join(self._progress_columns("library_jobs"))
+            + ",NULL,NULL "
             "FROM library_jobs WHERE library_id=?"
         )
         params: list[object] = [library_id]
@@ -983,7 +1092,12 @@ class JobStore:
         )
         return self.runs(definition["id"], 1)[0]
 
-    def create_or_get_active_run(self, definition: dict, options: dict | None = None, source_trigger_id: str | None = None) -> tuple[dict, bool]:
+    def create_or_get_active_run(
+        self,
+        definition: dict,
+        options: dict | None = None,
+        source_trigger_id: str | None = None,
+    ) -> tuple[dict, bool]:
         """Atomically keep at most one queued/running run for a task definition."""
         timestamp = now()
         with self.db.transaction() as cursor:
@@ -999,16 +1113,32 @@ class JobStore:
                 run_id = new_id()
                 library_id = (definition.get("config") or {}).get("libraryId")
                 values = self.validate_options(definition["kind"], options)
-                columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}
+                columns = {
+                    row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")
+                }
                 if {"source_trigger_id", "options"}.issubset(columns):
                     cursor.execute(
                         "INSERT INTO job_runs(id,definition_id,library_id,kind,source_trigger_id,options,created_at) VALUES(?,?,?,?,?,?,?)",
-                        (run_id, definition["id"], library_id, definition["kind"], source_trigger_id, json.dumps(values, ensure_ascii=False), timestamp),
+                        (
+                            run_id,
+                            definition["id"],
+                            library_id,
+                            definition["kind"],
+                            source_trigger_id,
+                            json.dumps(values, ensure_ascii=False),
+                            timestamp,
+                        ),
                     )
                 else:
                     cursor.execute(
                         "INSERT INTO job_runs(id,definition_id,library_id,kind,created_at) VALUES(?,?,?,?,?)",
-                        (run_id, definition["id"], library_id, definition["kind"], timestamp),
+                        (
+                            run_id,
+                            definition["id"],
+                            library_id,
+                            definition["kind"],
+                            timestamp,
+                        ),
                     )
                 cursor.execute(
                     "UPDATE job_definitions SET last_state='queued',last_message=?,updated_at=? WHERE id=?",
@@ -1044,15 +1174,26 @@ class JobStore:
             if not definition:
                 continue
             trigger = {"id": row[0], "type": row[2], "nextRunAt": row[6]}
-            if row[2] == "interval": trigger["intervalSeconds"] = row[3]
-            elif row[2] == "daily": trigger["time"] = row[4]
-            elif row[2] == "weekly": trigger["weekday"], trigger["time"] = row[5], row[4]
-            try: trigger["options"] = json.loads(row[7] or "{}")
-            except (TypeError, json.JSONDecodeError): trigger["options"] = {}
+            if row[2] == "interval":
+                trigger["intervalSeconds"] = row[3]
+            elif row[2] == "daily":
+                trigger["time"] = row[4]
+            elif row[2] == "weekly":
+                trigger["weekday"], trigger["time"] = row[5], row[4]
+            try:
+                trigger["options"] = json.loads(row[7] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                trigger["options"] = {}
             values.append({"definition": definition, "trigger": trigger})
         return values
 
-    def mark_trigger_scheduled(self, definition_id: str, trigger: dict, run_id: str | None, message: str = "Queued") -> None:
+    def mark_trigger_scheduled(
+        self,
+        definition_id: str,
+        trigger: dict,
+        run_id: str | None,
+        message: str = "Queued",
+    ) -> None:
         current = now()
         next_trigger = self._next_for_trigger(trigger, datetime.now(timezone.utc))
         self.db.execute(
@@ -1061,7 +1202,14 @@ class JobStore:
         )
         self.db.execute(
             "UPDATE job_definitions SET next_run_at=?,last_run_at=?,last_run_id=?,last_state='queued',last_message=?,updated_at=? WHERE id=?",
-            (self._earliest_next(definition_id), current, run_id, message, current, definition_id),
+            (
+                self._earliest_next(definition_id),
+                current,
+                run_id,
+                message,
+                current,
+                definition_id,
+            ),
         )
 
     def update_run(self, run_id: str, **values) -> None:
@@ -1212,7 +1360,10 @@ class MetadataMissingJob:
             progress_stage_total=total + extractor_total,
             progress_stage_unit="documents",
             message=format_progress_message(
-                "Discovering metadata work", current=0, total=total + extractor_total, unit="documents"
+                "Discovering metadata work",
+                current=0,
+                total=total + extractor_total,
+                unit="documents",
             ),
         )
 
@@ -1507,11 +1658,15 @@ class MetadataMissingJob:
                         progress_stage_current=total + extractor_index,
                         progress_stage_total=total + extractor_total,
                         progress_stage_unit="documents",
-                        progress_current_item=resolve_progress_item(self.db, entity_id, entity_id),
+                        progress_current_item=resolve_progress_item(
+                            self.db, entity_id, entity_id
+                        ),
                         message=(
                             format_progress_message(
                                 "Extracting fallback artwork",
-                                item=resolve_progress_item(self.db, entity_id, entity_id),
+                                item=resolve_progress_item(
+                                    self.db, entity_id, entity_id
+                                ),
                                 current=total + extractor_index,
                                 total=total + extractor_total,
                                 unit="documents",
@@ -1698,7 +1853,10 @@ class JobScheduler:
                     "UPDATE job_schedule_triggers SET next_run_at=?,updated_at=? WHERE id=?",
                     (now(), now(), trigger_id),
                 )
-                self.store.db.execute("UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?", (now(), now(), definition_id))
+                self.store.db.execute(
+                    "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+                    (now(), now(), definition_id),
+                )
         except Exception:
             pass
         self._recover_active_runs()
@@ -1720,15 +1878,26 @@ class JobScheduler:
         desired = max(1, int(library.get("scanIntervalMinutes") or 1440)) * 60
         triggers = definition.get("triggers") or []
         if library.get("watchEnabled", True):
-            interval = next((item for item in triggers if item["type"] == "interval"), None)
+            interval = next(
+                (item for item in triggers if item["type"] == "interval"), None
+            )
             if interval:
                 if interval.get("intervalSeconds") != desired:
-                    self.store._replace_triggers(definition["id"], [{**interval, "intervalSeconds": desired}])
+                    self.store._replace_triggers(
+                        definition["id"], [{**interval, "intervalSeconds": desired}]
+                    )
             else:
-                self.store._replace_triggers(definition["id"], [{"type": "interval", "intervalSeconds": desired}])
+                self.store._replace_triggers(
+                    definition["id"], [{"type": "interval", "intervalSeconds": desired}]
+                )
         else:
-            self.store._replace_triggers(definition["id"], [item for item in triggers if item["type"] != "interval"])
-        return self.store.update_definition(definition["id"], {"config": {"libraryId": library["id"]}})
+            self.store._replace_triggers(
+                definition["id"],
+                [item for item in triggers if item["type"] != "interval"],
+            )
+        return self.store.update_definition(
+            definition["id"], {"config": {"libraryId": library["id"]}}
+        )
 
     def remove_library_definition(self, library_id: str):
         self.store.remove_library_definitions(library_id)
@@ -1872,9 +2041,15 @@ class JobScheduler:
                 library_id = (definition.get("config") or {}).get("libraryId")
                 if library_id:
                     self.library_runtime.enqueue(library_id, "scan")
-                self.store.mark_trigger_scheduled(definition["id"], trigger, None, "Library scan queued")
+                self.store.mark_trigger_scheduled(
+                    definition["id"], trigger, None, "Library scan queued"
+                )
             else:
-                run, created = self.store.create_or_get_active_run(definition, options=trigger.get("options"), source_trigger_id=trigger["id"])
+                run, created = self.store.create_or_get_active_run(
+                    definition,
+                    options=trigger.get("options"),
+                    source_trigger_id=trigger["id"],
+                )
                 if not created:
                     continue
                 self.store.mark_trigger_scheduled(definition["id"], trigger, run["id"])
@@ -1918,7 +2093,9 @@ class JobScheduler:
 
     def _execute(self, run_id: str):
         try:
-            columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(job_runs)")}
+            columns = {
+                row[1] for row in self.store.db.execute("PRAGMA table_info(job_runs)")
+            }
             snapshot = ",r.options" if "options" in columns else ",NULL"
             rows = self.store.db.execute(
                 f"SELECT r.id,r.definition_id,d.kind,d.config,d.name{snapshot} FROM job_runs r JOIN job_definitions d ON d.id=r.definition_id WHERE r.id=?",
@@ -1952,7 +2129,9 @@ class JobScheduler:
                     definition,
                     self.cancel_events[run_id].is_set,
                     force=True,
-                    force_assets=not bool(run_options.get("preserveCachedAssets", False)),
+                    force_assets=not bool(
+                        run_options.get("preserveCachedAssets", False)
+                    ),
                 )
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(

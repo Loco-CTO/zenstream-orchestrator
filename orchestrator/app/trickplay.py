@@ -131,7 +131,7 @@ class TrickplayStore:
         ) in rows:
             fingerprint = self.fingerprint(quick_fingerprint, size, modified_ns)
             existing = self.db.execute(
-                "SELECT source_fingerprint,frame_width,frame_height,interval_seconds,state "
+                "SELECT source_fingerprint,frame_width,frame_height,interval_seconds,state,output_key "
                 "FROM trickplay_assets WHERE media_file_id=?",
                 (media_file_id,),
             )
@@ -154,14 +154,59 @@ class TrickplayStore:
                 )
                 queued += 1
                 continue
-            old_fingerprint, old_width, old_height, old_interval, state = existing[0]
-            if old_fingerprint != fingerprint:
+            old_fingerprint, old_width, old_height, old_interval, state, output_key = (
+                existing[0]
+            )
+            ready = (
+                state == "ready"
+                and old_fingerprint == fingerprint
+                and self._ready_output_valid(
+                    media_file_id, output_key, duration_seconds, int(old_interval)
+                )
+            )
+            if old_fingerprint != fingerprint or (state == "ready" and not ready):
                 self.db.execute(
                     "UPDATE trickplay_assets SET entity_id=?,source_fingerprint=?,frame_width=?,frame_height=?,interval_seconds=?,"
                     "state='queued',output_key=NULL,error=NULL,updated_at=? WHERE media_file_id=?",
                     (
                         entity_id,
                         fingerprint,
+                        width,
+                        height,
+                        interval,
+                        timestamp,
+                        media_file_id,
+                    ),
+                )
+                self.db.execute(
+                    "DELETE FROM trickplay_sheets WHERE media_file_id=?",
+                    (media_file_id,),
+                )
+                queued += 1
+            elif state in {"queued", "failed"}:
+                self.db.execute(
+                    "UPDATE trickplay_assets SET entity_id=?,frame_width=?,frame_height=?,interval_seconds=?,"
+                    "state='queued',output_key=NULL,error=NULL,updated_at=? WHERE media_file_id=?",
+                    (
+                        entity_id,
+                        width,
+                        height,
+                        interval,
+                        timestamp,
+                        media_file_id,
+                    ),
+                )
+                self.db.execute(
+                    "DELETE FROM trickplay_sheets WHERE media_file_id=?",
+                    (media_file_id,),
+                )
+                queued += 1
+            elif state not in {"ready", "generating"}:
+                self.db.execute(
+                    "UPDATE trickplay_assets SET entity_id=?,frame_width=?,frame_height=?,interval_seconds=?,"
+                    "state='queued',output_key=NULL,error=NULL,updated_at=? WHERE media_file_id=?",
+                    (
+                        entity_id,
                         width,
                         height,
                         interval,

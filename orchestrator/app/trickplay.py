@@ -29,6 +29,7 @@ SHEET_COLUMNS = 10
 SHEET_ROWS = 10
 FRAMES_PER_SHEET = SHEET_COLUMNS * SHEET_ROWS
 logger = get_logger("trickplay")
+DEFAULT_TRICKPLAY_FFMPEG_THREADS = 4
 
 
 def now() -> str:
@@ -329,12 +330,17 @@ class TrickplayExtractor:
     def __init__(self, store=None):
         self.store = store or TrickplayStore()
         self.db = self.store.db
+        self.ffmpeg_threads = DEFAULT_TRICKPLAY_FFMPEG_THREADS
 
     def cache_root(self) -> Path:
         return Path(self.db.db_file).parent / "trickplay-cache"
 
     @staticmethod
-    def command(asset: dict, output_pattern: Path) -> list[str]:
+    def command(
+        asset: dict,
+        output_pattern: Path,
+        ffmpeg_threads: int = DEFAULT_TRICKPLAY_FFMPEG_THREADS,
+    ) -> list[str]:
         executable = ffmpeg_path()
         if not executable:
             raise RuntimeError("FFmpeg is not available.")
@@ -356,7 +362,7 @@ class TrickplayExtractor:
             "-progress",
             "pipe:1",
             "-threads",
-            "4",
+            str(ffmpeg_threads),
             "-y",
             "-i",
             str(asset["path"]),
@@ -397,7 +403,11 @@ class TrickplayExtractor:
                 on_progress(max(0.0, seconds), max(0.0, asset["durationSeconds"]))
 
             run_ffmpeg(
-                self.command(asset, temporary_root / "sheet-%05d.webp"),
+                self.command(
+                    asset,
+                    temporary_root / "sheet-%05d.webp",
+                    getattr(self, "ffmpeg_threads", DEFAULT_TRICKPLAY_FFMPEG_THREADS),
+                ),
                 should_terminate=should_terminate,
                 progress=progress,
             )
@@ -484,6 +494,7 @@ class TrickplayExtractor:
         self.remove_orphan_cache()
         self.store.recover_generating()
         settings = PlaybackSettings(self.store.db).get()
+        self.ffmpeg_threads = settings["trickplayFfmpegThreads"]
         discovered = self.store.queue_pending(settings=settings)
         workers = settings["trickplayWorkers"]
         job_store.update_run(

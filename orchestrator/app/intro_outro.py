@@ -22,6 +22,7 @@ from app.progress import (
 from fastapi import HTTPException
 
 logger = get_logger("intro_outro")
+DEFAULT_INTRO_OUTRO_FFMPEG_THREADS = 4
 SAMPLE_SECONDS = 4096.0 / 11025.0 / 3.0
 MIN_MATCH_DENSITY = 0.55
 DEFAULTS = {
@@ -38,6 +39,7 @@ DEFAULTS = {
     "maximumTimeSkipSeconds": 3.5,
     "invertedIndexShift": 2,
     "introOutroWorkers": 1,
+    "introOutroFfmpegThreads": 4,
 }
 
 
@@ -78,6 +80,7 @@ def normalize_settings(values: dict | None = None) -> dict:
         "maximumTimeSkipSeconds": decimal("maximumTimeSkipSeconds", 0.1, 10),
         "invertedIndexShift": integer("invertedIndexShift", 0, 8),
         "introOutroWorkers": integer("introOutroWorkers", 1, 64),
+        "introOutroFfmpegThreads": integer("introOutroFfmpegThreads", 0, 64),
     }
     result["maximumIntroDuration"] = max(
         result["minimumIntroDuration"], result["maximumIntroDuration"]
@@ -146,6 +149,7 @@ class IntroOutroStore:
             ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"),
             ("invertedIndexShift", "inverted_index_shift"),
             ("introOutroWorkers", "intro_outro_workers"),
+            ("introOutroFfmpegThreads", "intro_outro_ffmpeg_threads"),
         ]
         selected = [(key, column) for key, column in names if column in columns]
         rows = self.db.execute(
@@ -180,6 +184,7 @@ class IntroOutroStore:
             ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"),
             ("invertedIndexShift", "inverted_index_shift"),
             ("introOutroWorkers", "intro_outro_workers"),
+            ("introOutroFfmpegThreads", "intro_outro_ffmpeg_threads"),
         ]
         selected = [(key, column) for key, column in mappings if column in columns]
         self.db.execute(
@@ -735,9 +740,15 @@ def _select_region(
 class IntroOutroDetector:
     def __init__(self, store=None):
         self.store = store or IntroOutroStore()
+        self.ffmpeg_threads = DEFAULT_INTRO_OUTRO_FFMPEG_THREADS
 
     @staticmethod
-    def fingerprint_command(path: Path, start: float, duration: float) -> list[str]:
+    def fingerprint_command(
+        path: Path,
+        start: float,
+        duration: float,
+        ffmpeg_threads: int = DEFAULT_INTRO_OUTRO_FFMPEG_THREADS,
+    ) -> list[str]:
         executable = ffmpeg_path()
         if not executable:
             raise RuntimeError("FFmpeg is not available.")
@@ -748,7 +759,7 @@ class IntroOutroDetector:
             "error",
             "-nostdin",
             "-threads",
-            "1",
+            str(ffmpeg_threads),
             "-ss",
             str(start),
             "-i",
@@ -772,7 +783,11 @@ class IntroOutroDetector:
         if not path.is_file():
             raise RuntimeError("Media source is unavailable.")
         output = run_ffmpeg(
-            self.fingerprint_command(path, start, duration),
+            self.fingerprint_command(
+                path, start, duration, getattr(
+                    self, "ffmpeg_threads", DEFAULT_INTRO_OUTRO_FFMPEG_THREADS
+                )
+            ),
             should_terminate=should_terminate,
         )
         if not output or len(output) % 4:
@@ -787,6 +802,7 @@ class IntroOutroDetector:
         if recover is not None:
             recover()
         settings = self.store.settings()
+        self.ffmpeg_threads = settings["introOutroFfmpegThreads"]
         queued = self.store.queue_pending(settings=settings)
         workers = settings["introOutroWorkers"]
         job_store.update_run(

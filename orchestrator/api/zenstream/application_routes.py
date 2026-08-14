@@ -419,6 +419,7 @@ async def update_admin_playback_settings(
             height,
             data.get("trickplayIntervalSeconds", current["trickplayIntervalSeconds"]),
             data.get("trickplayWorkers", current["trickplayWorkers"]),
+            data.get("trickplayFfmpegThreads", current["trickplayFfmpegThreads"]),
         )
         return values
     except ValueError as error:

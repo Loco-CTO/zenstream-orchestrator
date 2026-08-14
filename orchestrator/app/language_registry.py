@@ -9,6 +9,7 @@ provider and track values at the boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import unicodedata
 
 from langcodes import Language, LanguageTagError, standardize_tag, tag_is_valid
 
@@ -135,9 +136,18 @@ def _display_language(value: object) -> str:
 def _display_name(code: str, display_language: object = "en") -> str:
     try:
         language = Language.get(code)
-        return f"{language.display_name(_display_language(display_language))} ({language.autonym()})"
+        display_name = language.display_name(_display_language(display_language))
+        autonym = language.autonym()
+        if _label_key(display_name) == _label_key(autonym):
+            return display_name
+        return f"{display_name} ({autonym})"
     except (LookupError, ValueError):
         return code
+
+
+def _label_key(value: str) -> str:
+    """Compare labels without treating full-width punctuation as distinct."""
+    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
 
 
 SUPPORTED_LANGUAGES = tuple(

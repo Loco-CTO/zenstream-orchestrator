@@ -69,7 +69,14 @@ class PersistenceMigrationTest(unittest.TestCase):
                 }
                 self.assertIn(playback_columns["trickplay_workers"][4], {"1", "'1'"})
                 self.assertIn(
+                    playback_columns["trickplay_ffmpeg_threads"][4], {"4", "'4'"}
+                )
+                self.assertIn(
                     intro_outro_columns["intro_outro_workers"][4], {"1", "'1'"}
+                )
+                self.assertIn(
+                    intro_outro_columns["intro_outro_ffmpeg_threads"][4],
+                    {"4", "'4'"},
                 )
                 tables = {
                     row[0]

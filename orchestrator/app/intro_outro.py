@@ -52,9 +52,12 @@ def normalize_settings(values: dict | None = None) -> dict:
 
     def integer(key: str, minimum: int, maximum: int):
         try:
-            return max(minimum, min(maximum, int(values[key])))
+            integer_value = int(values[key])
         except (TypeError, ValueError):
             return DEFAULTS[key]
+        if key == "introOutroFfmpegThreads" and not minimum <= integer_value <= maximum:
+            raise ValueError(f"{key} must be between {minimum} and {maximum}.")
+        return max(minimum, min(maximum, integer_value))
 
     def decimal(key: str, minimum: float, maximum: float):
         try:

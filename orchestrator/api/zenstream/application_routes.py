@@ -445,7 +445,10 @@ async def update_admin_intro_outro_settings(
     TOKEN: str | None = Header(None),
 ):
     _admin_request(request, Username, TOKEN)
-    settings = IntroOutroStore().update_settings(await request.json())
+    try:
+        settings = IntroOutroStore().update_settings(await request.json())
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
     scheduler.enqueue_intro_outro_detection()
     return settings
 

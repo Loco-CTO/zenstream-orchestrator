@@ -143,8 +143,13 @@ class IntroOutroTest(unittest.TestCase):
         self.assertEqual(command[command.index("-f") + 1], "chromaprint")
         self.assertEqual(command[command.index("-fp_format") + 1], "raw")
         self.assertEqual(command[command.index("-map") + 1], "0:a:0")
-        self.assertEqual(command[command.index("-threads") + 1], "1")
+        self.assertEqual(command[command.index("-threads") + 1], "4")
         self.assertIn("-nostdin", command)
+
+        automatic = IntroOutroDetector.fingerprint_command(
+            Path("episode.mkv"), 0, 600, 0
+        )
+        self.assertEqual(automatic[automatic.index("-threads") + 1], "0")
 
     def test_decodes_little_endian_fingerprint_points(self):
         self.assertEqual(decode_fingerprint(struct.pack("<3I", 1, 2, 3)), (1, 2, 3))
@@ -204,6 +209,26 @@ class IntroOutroTest(unittest.TestCase):
             normalize_settings({"introOutroWorkers": 0})["introOutroWorkers"],
             1,
         )
+        self.assertEqual(
+            normalize_settings({"introOutroFfmpegThreads": 0})[
+                "introOutroFfmpegThreads"
+            ],
+            0,
+        )
+        self.assertEqual(
+            normalize_settings({"introOutroFfmpegThreads": 64})[
+                "introOutroFfmpegThreads"
+            ],
+            64,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "introOutroFfmpegThreads must be between 0 and 64"
+        ):
+            normalize_settings({"introOutroFfmpegThreads": -1})
+        with self.assertRaisesRegex(
+            ValueError, "introOutroFfmpegThreads must be between 0 and 64"
+        ):
+            normalize_settings({"introOutroFfmpegThreads": 65})
 
     def test_detection_uses_configured_workers_and_claims_each_asset_once(self):
         class Store:

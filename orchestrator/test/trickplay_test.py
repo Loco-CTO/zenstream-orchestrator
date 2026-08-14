@@ -140,6 +140,17 @@ class TrickplayTest(unittest.TestCase):
         self.assertIn("-nostdin", command)
         self.assertEqual(command[command.index("-compression_level") + 1], "5")
         self.assertIn("-progress", command)
+        automatic = TrickplayExtractor.command(
+            {
+                "path": Path("movie.mkv"),
+                "width": 320,
+                "height": 180,
+                "intervalSeconds": 10,
+            },
+            Path("sheet-%05d.webp"),
+            0,
+        )
+        self.assertEqual(automatic[automatic.index("-threads") + 1], "0")
 
     def test_output_keys_change_for_source_or_extraction_settings(self):
         self.assertNotEqual(

@@ -494,7 +494,9 @@ class TrickplayExtractor:
         self.remove_orphan_cache()
         self.store.recover_generating()
         settings = PlaybackSettings(self.store.db).get()
-        self.ffmpeg_threads = settings["trickplayFfmpegThreads"]
+        self.ffmpeg_threads = settings.get(
+            "trickplayFfmpegThreads", DEFAULT_TRICKPLAY_FFMPEG_THREADS
+        )
         discovered = self.store.queue_pending(settings=settings)
         workers = settings["trickplayWorkers"]
         job_store.update_run(

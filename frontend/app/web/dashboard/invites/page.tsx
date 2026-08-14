@@ -232,7 +232,7 @@ export default function InvitesPage() {
 					/>
 					<form
 						onSubmit={createInvite}
-						className="dashboard-dialog max-w-2xl"
+						className="dashboard-dialog max-w-[420px]"
 						role="dialog"
 						aria-modal="true"
 						aria-labelledby="invite-dialog-title"
@@ -321,7 +321,7 @@ export default function InvitesPage() {
 												value={maxUses}
 												disabled={unlimitedUses}
 												onChange={(event) => setMaxUses(event.target.value)}
-												className="console-input w-full"
+												className="console-input h-10 w-full rounded-lg px-3 text-sm outline-none"
 											/>
 											<label className="flex items-center gap-2 whitespace-nowrap text-sm console-muted">
 												<input
@@ -344,7 +344,7 @@ export default function InvitesPage() {
 												value={expiryValue}
 												disabled={neverExpires}
 												onChange={(event) => setExpiryValue(event.target.value)}
-												className="console-input min-w-0 flex-1"
+												className="console-input h-10 min-w-0 flex-1 rounded-lg px-3 text-sm outline-none"
 											/>
 											<select
 												value={expiryUnit}
@@ -352,7 +352,7 @@ export default function InvitesPage() {
 												onChange={(event) =>
 													setExpiryUnit(event.target.value as DurationUnit)
 												}
-												className="console-input w-28"
+												className="console-input h-10 w-28 rounded-lg px-3 text-sm outline-none"
 											>
 												<option value="seconds">seconds</option>
 												<option value="minutes">minutes</option>

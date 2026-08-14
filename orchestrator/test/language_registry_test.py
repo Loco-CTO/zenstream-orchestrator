@@ -40,7 +40,17 @@ class LanguageRegistryTest(unittest.TestCase):
         language = Language.get("zh-TW")
         self.assertEqual(
             zh_tw["label"],
-            f"{language.display_name('en')} ({language.autonym()})",
+            language.display_name("en"),
+        )
+
+        en_gb = next(option for option in options if option["value"] == "en-GB")
+        self.assertEqual(en_gb["label"], Language.get("en-GB").display_name("en"))
+
+        zh_cn = next(option for option in options if option["value"] == "zh-CN")
+        zh_cn_language = Language.get("zh-CN")
+        self.assertEqual(
+            zh_cn["label"],
+            f"{zh_cn_language.display_name('en')} ({zh_cn_language.autonym()})",
         )
 
         english_in_japanese = next(

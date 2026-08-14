@@ -531,7 +531,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 "subtitle",
                 media_paths,
             ),
-            "AI 生成 - Chinese (Taiwan) (Chinese（Taiwan）)",
+            "AI 生成 - Chinese (Taiwan)",
         )
 
     def test_sidecar_display_title_does_not_use_unmatched_movie_title_as_descriptor(

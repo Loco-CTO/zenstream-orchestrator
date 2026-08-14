@@ -118,6 +118,48 @@ class PersistenceMigrationTest(unittest.TestCase):
                 self.assertEqual(
                     session_columns, {"username", "token_hash", "expires_at"}
                 )
+                invite_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(invites)")
+                }
+                self.assertTrue(
+                    {"id", "url", "max_uses", "used_uses", "expires_at", "created_at"}
+                    <= invite_columns
+                )
+                self.assertIn(
+                    "invite_library_access",
+                    tables,
+                )
+            finally:
+                connection.close()
+
+    def test_legacy_invites_are_migrated_to_single_use_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "0013_invite_hardening")
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "INSERT INTO invites(url,expires_at,consumed_at) VALUES(?,?,?)",
+                    ("legacy-hash", "2030-01-01T00:00:00+00:00", None),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT max_uses,used_uses,expires_at FROM invites WHERE url='legacy-hash'"
+                    ).fetchone(),
+                    (1, 0, "2030-01-01T00:00:00+00:00"),
+                )
+                self.assertTrue(
+                    connection.execute(
+                        "SELECT id FROM invites WHERE url='legacy-hash'"
+                    ).fetchone()[0]
+                )
             finally:
                 connection.close()
 

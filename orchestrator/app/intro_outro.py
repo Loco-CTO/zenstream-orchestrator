@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Lock
 
 from app.config import Config
+from app.ffmpeg_supervisor import run_ffmpeg
 from app.logging_config import get_logger
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
 from app.progress import (
@@ -745,6 +746,7 @@ class IntroOutroDetector:
             "-hide_banner",
             "-loglevel",
             "error",
+            "-nostdin",
             "-threads",
             "1",
             "-ss",
@@ -769,27 +771,13 @@ class IntroOutroDetector:
     ) -> bytes:
         if not path.is_file():
             raise RuntimeError("Media source is unavailable.")
-        process = subprocess.Popen(
+        output = run_ffmpeg(
             self.fingerprint_command(path, start, duration),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            should_terminate=should_terminate,
         )
-        while True:
-            try:
-                output, error = process.communicate(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            if should_terminate():
-                process.terminate()
-                process.communicate(timeout=10)
-                raise RuntimeError("Terminated by administrator")
-        if process.returncode or not output or len(output) % 4:
+        if not output or len(output) % 4:
             raise RuntimeError(
-                (
-                    error.decode("utf-8", "replace")
-                    or "FFmpeg did not return a raw Chromaprint fingerprint."
-                ).strip()[-1000:]
+                "FFmpeg did not return a raw Chromaprint fingerprint."
             )
         return output
 

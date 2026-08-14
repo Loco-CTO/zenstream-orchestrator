@@ -144,6 +144,7 @@ class IntroOutroTest(unittest.TestCase):
         self.assertEqual(command[command.index("-fp_format") + 1], "raw")
         self.assertEqual(command[command.index("-map") + 1], "0:a:0")
         self.assertEqual(command[command.index("-threads") + 1], "1")
+        self.assertIn("-nostdin", command)
 
     def test_decodes_little_endian_fingerprint_points(self):
         self.assertEqual(decode_fingerprint(struct.pack("<3I", 1, 2, 3)), (1, 2, 3))

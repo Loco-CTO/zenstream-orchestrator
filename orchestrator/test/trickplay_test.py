@@ -136,7 +136,10 @@ class TrickplayTest(unittest.TestCase):
         self.assertEqual(FRAMES_PER_SHEET, 100)
         self.assertEqual(command[command.index("-c:v") + 1], "libwebp")
         self.assertEqual(command[command.index("-quality") + 1], "85")
-        self.assertEqual(command[command.index("-threads") + 1], "1")
+        self.assertEqual(command[command.index("-threads") + 1], "4")
+        self.assertIn("-nostdin", command)
+        self.assertEqual(command[command.index("-compression_level") + 1], "5")
+        self.assertIn("-progress", command)
 
     def test_output_keys_change_for_source_or_extraction_settings(self):
         self.assertNotEqual(

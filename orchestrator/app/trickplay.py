@@ -4,9 +4,7 @@ import hashlib
 import inspect
 import math
 import shutil
-import subprocess
 import tempfile
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
@@ -19,6 +17,7 @@ from app.images import WEBP_QUALITY
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
+from app.ffmpeg_supervisor import run_ffmpeg
 from app.progress import (
     ProgressReporter,
     format_progress_message,
@@ -353,8 +352,11 @@ class TrickplayExtractor:
             "-hide_banner",
             "-loglevel",
             "error",
+            "-nostdin",
+            "-progress",
+            "pipe:1",
             "-threads",
-            "1",
+            "4",
             "-y",
             "-i",
             str(asset["path"]),
@@ -368,13 +370,13 @@ class TrickplayExtractor:
             "-quality",
             str(WEBP_QUALITY),
             "-compression_level",
-            "6",
+            "5",
             "-start_number",
             "0",
             str(output_pattern),
         ]
 
-    def extract(self, asset: dict, should_terminate=None) -> None:
+    def extract(self, asset: dict, should_terminate=None, on_progress=None) -> None:
         should_terminate = should_terminate or (lambda: False)
         if not asset["path"].is_file():
             raise RuntimeError("Media source is unavailable.")
@@ -382,36 +384,23 @@ class TrickplayExtractor:
         root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=root, prefix=".tmp-") as temporary:
             temporary_root = Path(temporary)
-            process = subprocess.Popen(
-                self.command(asset, temporary_root / "sheet-%05d.webp"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-            started = time.monotonic()
-            while True:
+            def progress(record: dict[str, str]) -> None:
+                if on_progress is None:
+                    return
+                raw = record.get("out_time_ms")
+                if raw is None:
+                    return
                 try:
-                    stdout, stderr = process.communicate(timeout=0.25)
-                    break
-                except subprocess.TimeoutExpired:
-                    if should_terminate() or time.monotonic() - started >= 3600:
-                        process.terminate()
-                        try:
-                            stdout, stderr = process.communicate(timeout=10)
-                        except subprocess.TimeoutExpired:
-                            process.kill()
-                            stdout, stderr = process.communicate()
-                        raise RuntimeError(
-                            "Terminated by administrator"
-                            if should_terminate()
-                            else "FFmpeg trickplay extraction timed out."
-                        )
-            if process.returncode != 0:
-                raise RuntimeError(
-                    (stderr or "FFmpeg trickplay extraction failed.").strip()[-1000:]
-                )
+                    seconds = float(raw) / 1_000_000.0
+                except (TypeError, ValueError):
+                    return
+                on_progress(max(0.0, seconds), max(0.0, asset["durationSeconds"]))
+
+            run_ffmpeg(
+                self.command(asset, temporary_root / "sheet-%05d.webp"),
+                should_terminate=should_terminate,
+                progress=progress,
+            )
             images = sorted(temporary_root.glob("sheet-*.webp"))
             if not images:
                 raise RuntimeError("FFmpeg did not produce trickplay sheets.")
@@ -530,7 +519,15 @@ class TrickplayExtractor:
                     )
                     reporter.start(item_label)
                     extractor = self.extract
-                    if len(inspect.signature(extractor).parameters) >= 2:
+                    if len(inspect.signature(extractor).parameters) >= 3:
+                        extractor(
+                            asset,
+                            should_terminate,
+                            lambda current, total: reporter.item_progress(
+                                item_label, current, total
+                            ),
+                        )
+                    elif len(inspect.signature(extractor).parameters) >= 2:
                         extractor(asset, should_terminate)
                     else:
                         extractor(asset)

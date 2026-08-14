@@ -7,6 +7,7 @@ from app.client_auth import (
     administrator_origin_allowed,
     cookie_secure,
     require_account,
+    session_cookie_name,
     websocket_account,
 )
 from app.intro_outro import IntroOutroStore
@@ -28,6 +29,7 @@ from fastapi import (
     APIRouter,
     Header,
     HTTPException,
+    Query,
     Request,
     WebSocket,
     WebSocketDisconnect,
@@ -44,6 +46,7 @@ def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
     group_id = state.get("id")
     if group_id and SyncplayGroup(group_id).member(user_id, participant):
         return state
+    active_invites = sum(1 for invite in Invite().list() if invite["status"] == "active")
     return {
         **state,
         "hostUserId": None,
@@ -381,7 +384,7 @@ async def admin_overview(
         "administrators": db.execute("SELECT COUNT(*) FROM admins WHERE disabled = 0")[
             0
         ][0],
-        "pending_invites": db.execute("SELECT COUNT(*) FROM invites")[0][0],
+        "pending_invites": active_invites,
     }
 
 
@@ -514,15 +517,56 @@ async def admin_create_invite(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _root_admin_request(request, Username, TOKEN)
-    return {"inviteid": Invite().generate()}
+    _admin_request(request, Username, TOKEN)
+    data = await _bounded_json_object(request)
+    try:
+        max_uses = data.get("maxUses", 1)
+        expires_in_seconds = data.get("expiresInSeconds", 7 * 24 * 60 * 60)
+        if max_uses is not None:
+            max_uses = int(max_uses)
+        if expires_in_seconds is not None:
+            expires_in_seconds = int(expires_in_seconds)
+        return Invite().create(
+            library_ids=data.get("libraryIds") or [],
+            max_uses=max_uses,
+            expires_in_seconds=expires_in_seconds,
+        )
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@router.get("/api/admin/invites")
+async def admin_list_invites(
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    _admin_request(request, Username, TOKEN)
+    return {"invites": Invite().list()}
+
+
+@router.delete("/api/admin/invites/{invite_id}", status_code=204)
+async def admin_delete_invite(
+    invite_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    _admin_request(request, Username, TOKEN)
+    if not Invite().delete(invite_id):
+        raise HTTPException(404, "Invite not found.")
+    return Response(status_code=204)
 
 
 @router.get("/api/user/check_invite")
-async def check_invite(url: str | None = Header(None)):
-    if not isinstance(url, str) or not Invite().validate(url.strip()):
+async def check_invite(
+    invite: str | None = Query(None),
+    url: str | None = Header(None),
+):
+    token = invite if isinstance(invite, str) else url
+    if not isinstance(token, str) or not Invite().validate(token.strip()):
         raise HTTPException(403, "Invalid invite.")
-    return JSONResponse({}, status_code=202)
+    return JSONResponse({"valid": True}, status_code=200)
 
 
 @router.get("/api/version")
@@ -552,14 +596,23 @@ async def register_client(request: Request):
         data.get("username") or request.headers.get("username") or ""
     ).strip()
     password = str(data.get("password") or request.headers.get("password") or "")
-    if not Invite().validate(invite_id):
-        raise HTTPException(403, "Invalid invite.")
     try:
-        account = Account().create(username, password)
+        result = Invite().register(invite_id, username, password)
+    except PermissionError as error:
+        raise HTTPException(403, str(error)) from error
     except ValueError as error:
         raise HTTPException(409, str(error)) from error
-    Invite().delete(invite_id)
-    return {"user": account}
+    response = JSONResponse({"user": result["user"]}, status_code=201)
+    response.set_cookie(
+        session_cookie_name(request),
+        result["sessionToken"],
+        max_age=7 * 24 * 60 * 60,
+        secure=cookie_secure(request),
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
 
 
 def _sync_identity(request: Request):

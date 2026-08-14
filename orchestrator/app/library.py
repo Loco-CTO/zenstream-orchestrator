@@ -19,6 +19,7 @@ from queue import Empty
 
 from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
+from app.language_registry import language_options, normalize_track_language
 from app.logging_config import get_logger
 from app.progress import WholeJobProgress
 from app.worker_config import configured_worker_limit
@@ -104,42 +105,9 @@ LYRIC_EXTENSIONS = {
     ".irc",
     ".yrc",
 }
-LANGUAGE_ALIASES = {
-    "eng": "en",
-    "jpn": "ja",
-    "jap": "ja",
-    "deu": "de",
-    "ger": "de",
-    "fra": "fr",
-    "fre": "fr",
-    "spa": "es",
-    "ita": "it",
-    "kor": "ko",
-    "por": "pt",
-    "rus": "ru",
-    "zho": "zh",
-    "chi": "zh",
-    "tha": "th",
-    "vie": "vi",
-    "ara": "ar",
-    "und": None,
-}
 LANGUAGE_NAMES = {
-    "en": "English",
-    "ja": "Japanese",
-    "de": "German",
-    "fr": "French",
-    "es": "Spanish",
-    "it": "Italian",
-    "ko": "Korean",
-    "pt": "Portuguese",
-    "ru": "Russian",
-    "zh": "Chinese",
-    "zh-CN": "Chinese (Simplified)",
-    "zh-TW": "Chinese (Traditional)",
-    "th": "Thai",
-    "vi": "Vietnamese",
-    "ar": "Arabic",
+    str(option["value"]): str(option["label"])
+    for option in language_options()
 }
 LANGUAGE_MARKERS = {
     "default",
@@ -486,12 +454,9 @@ def sidecar_language(path: Path) -> str | None:
         lowered = candidate.lower()
         if lowered in LANGUAGE_MARKERS:
             continue
-        if lowered in LANGUAGE_ALIASES:
-            return LANGUAGE_ALIASES[lowered]
-        if re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?", candidate):
-            base, _, region = candidate.partition("-")
-            if len(base) in {2, 3}:
-                return f"{base.lower()}-{region.upper()}" if region else base.lower()
+        normalized = normalize_track_language(candidate)
+        if normalized:
+            return normalized
     return None
 
 
@@ -531,9 +496,7 @@ def sidecar_descriptor(
     if tokens:
         candidate = tokens[-1]
         lowered = candidate.casefold()
-        if lowered in LANGUAGE_ALIASES or re.fullmatch(
-            r"[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?", candidate
-        ):
+        if normalize_track_language(candidate):
             tokens.pop()
     while tokens and tokens[-1].casefold() in LANGUAGE_MARKERS:
         tokens.pop()

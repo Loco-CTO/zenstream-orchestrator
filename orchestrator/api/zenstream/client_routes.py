@@ -28,6 +28,7 @@ from app.client_auth import (
 from app.foreground import run_foreground
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore
+from app.language_registry import language_options
 from app.logging_config import get_logger
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
@@ -296,6 +297,7 @@ async def auth_bootstrap(request: Request):
         "metadataLanguage": metadata_language,
         "subtitleStyle": subtitles,
         "languages": languages,
+        "languageOptions": language_options(),
     }
 
 
@@ -449,6 +451,12 @@ async def catalog_socket(websocket: WebSocket):
 async def metadata_languages(request: Request):
     await _require_account(request)
     return {"languages": MetadataLanguageSettings().get()}
+
+
+@router.get("/api/languages")
+async def supported_languages(request: Request):
+    await _require_account(request)
+    return {"languages": language_options()}
 
 
 @router.get("/api/preferences/locale")

@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from app.images import LocalArtworkCache, blurhash_for_image, encode_webp_bytes
+from app.language_registry import normalize_language
 from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORIES,
@@ -234,24 +235,12 @@ asset_executor = MetadataAssetExecutor()
 
 
 def _canonical_metadata_language(value: object) -> str | None:
-    raw = str(value or "").strip().replace("_", "-")
-    if not raw:
+    if not str(value or "").strip():
         return None
-    parts = raw.split("-", 1)
-    base = parts[0].lower()
-    base = {
-        "deu": "de",
-        "eng": "en",
-        "fra": "fr",
-        "ita": "it",
-        "jpn": "ja",
-        "kor": "ko",
-        "por": "pt",
-        "rus": "ru",
-        "spa": "es",
-        "zho": "zh",
-    }.get(base, base)
-    return base if len(parts) == 1 else f"{base}-{parts[1].upper()}"
+    try:
+        return normalize_language(value, allow_unsupported=True)
+    except ValueError:
+        return None
 
 
 def _usable_projection_value(value) -> bool:

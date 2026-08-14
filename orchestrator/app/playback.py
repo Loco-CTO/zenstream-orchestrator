@@ -18,7 +18,8 @@ from pathlib import Path
 from app.catalog import Catalog
 from app.client_auth import issue_ticket
 from app.config import Config
-from app.library import LANGUAGE_ALIASES, language_name, sidecar_display_title
+from app.language_registry import normalize_track_language
+from app.library import language_name, sidecar_display_title
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
 from fastapi import HTTPException
@@ -388,9 +389,7 @@ class PlaybackManager:
             raw_language = str(
                 tags.get("language") or tags.get("LANGUAGE") or ""
             ).strip()
-            language = LANGUAGE_ALIASES.get(
-                raw_language.lower(), raw_language.lower() or None
-            )
+            language = normalize_track_language(raw_language)
             if language:
                 tags["language"] = language
             if str(value.get("codec_type") or "").lower() == "subtitle":

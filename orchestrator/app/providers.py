@@ -15,6 +15,8 @@ from urllib.parse import quote
 
 import httpx
 import pycountry
+from app.language_registry import language_options as registry_language_options
+from app.language_registry import normalize_language
 from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORIES,
@@ -169,14 +171,18 @@ def _names(values: Any) -> list[str]:
 
 
 def _normalize_language_tag(value: str | None) -> str:
-    parts = str(value or "").strip().replace("_", "-").split("-", 1)
-    if not parts[0]:
+    raw = str(value or "").strip()
+    if not raw:
         return ""
-    return (
-        parts[0].lower()
-        if len(parts) == 1
-        else f"{parts[0].lower()}-{parts[1].upper()}"
-    )
+    try:
+        return normalize_language(raw, allow_unsupported=True)
+    except ValueError:
+        parts = raw.replace("_", "-").split("-", 1)
+        return (
+            parts[0].lower()
+            if len(parts) == 1
+            else f"{parts[0].lower()}-{parts[1].upper()}"
+        )
 
 
 def _catalog_language_tag(
@@ -437,7 +443,9 @@ class TMDBClient(ProviderClient):
                         "TMDB language catalog unavailable; using locale fallback"
                     )
                 self.__class__._language_codes_loaded = True
-        return self._language_catalog.provider(locale)
+        return self._language_catalog.provider(
+            normalize_language(locale, allow_unsupported=True)
+        )
 
     def _canonical_language(self, value: str | None) -> tuple[str | None, str | None]:
         if not value:
@@ -735,7 +743,11 @@ class TMDBClient(ProviderClient):
             "originalCountry": (payload.get("origin_country") or [None])[0],
             "year": (dates or "")[:4] or None,
             "tags": _names(genres),
-            "originalLanguage": payload.get("original_language"),
+            "originalLanguage": normalize_language(
+                payload.get("original_language"), allow_unsupported=True
+            )
+            if payload.get("original_language")
+            else None,
             "communityRating": payload.get("vote_average"),
             "trailers": videos,
             "people": people,
@@ -945,7 +957,9 @@ class TVDBClient(ProviderClient):
         # Keep unknown locale values intact when the provider catalog cannot
         # resolve them. This lets newly supported locales pass through
         # without another provider-specific hard-coded table.
-        return self._language_catalog.provider(locale)
+        return self._language_catalog.provider(
+            normalize_language(locale, allow_unsupported=True)
+        )
 
     def _language_code_for_artwork(self, value: str | None) -> str | None:
         if not value:
@@ -1265,10 +1279,12 @@ class TVDBClient(ProviderClient):
             ),
             "year": str(data.get("year") or dates or "")[:4] or None,
             "tags": _names(genres),
-            "originalLanguage": _catalog_language_tag(
-                str(data.get("originalLanguage") or "")
+            "originalLanguage": normalize_language(
+                _catalog_language_tag(str(data.get("originalLanguage") or "")),
+                allow_unsupported=True,
             )
-            or data.get("originalLanguage"),
+            if data.get("originalLanguage")
+            else None,
             "trailers": trailers,
             "people": people,
             "credits": normalized_credits,
@@ -1609,38 +1625,13 @@ class MetadataService:
         self._clients = {}
         self._clients_lock = threading.Lock()
 
-    def language_options(self) -> list[dict[str, str]]:
-        """Return canonical metadata locales known by configured providers."""
-        values = {
-            "en",
-            "ja",
-            "zh-CN",
-            "zh-TW",
-            "ko",
-            "fr",
-            "de",
-            "es",
-            "it",
-            "pt",
-            "ru",
-        }
-        for provider, client_type in (("tmdb", TMDBClient), ("tvdb", TVDBClient)):
-            try:
-                client = self.client(provider)
-                client._language_code("en")
-                values.update(
-                    client_type._language_catalog.provider_to_canonical.values()
-                )
-            except Exception:
-                logger.debug(
-                    "metadata language catalog unavailable provider=%s",
-                    provider,
-                    exc_info=True,
-                )
-        return [
-            {"value": value, "label": value}
-            for value in sorted(values, key=lambda item: (item != "en", item.lower()))
-        ]
+    def language_options(self) -> list[dict[str, object]]:
+        """Return the stable ZenStream language registry.
+
+        Provider catalogs remain request-code adapters; they must not change
+        which locales ZenStream advertises or stores.
+        """
+        return registry_language_options()
 
     @classmethod
     def _lock_for(

@@ -4,10 +4,10 @@ import base64
 import hashlib
 import json
 import os
-import re
 from datetime import datetime, timedelta, timezone
 
 from app.config import Config
+from app.language_registry import normalize_metadata_locale
 from app.metadata_domain import ARTWORK_CATEGORY_SET
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -15,25 +15,6 @@ IMAGE_LANGUAGE_SCHEMA = 3
 
 PROVIDERS = {"tmdb", "tvdb"}
 DEFAULT_METADATA_LOCALES = ["en"]
-_LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
-
-
-def normalize_metadata_locale(value: str) -> str:
-    parts = str(value or "").strip().replace("_", "-").split("-")
-    if not parts or not parts[0]:
-        raise ValueError("Metadata languages must be valid language tags.")
-    normalized = "-".join(
-        [
-            parts[0].lower(),
-            *[
-                part.upper() if len(part) == 2 or part.isdigit() else part
-                for part in parts[1:]
-            ],
-        ]
-    )
-    if not _LOCALE_RE.fullmatch(normalized):
-        raise ValueError(f"Invalid metadata language '{value}'.")
-    return normalized
 
 
 class MetadataLanguageSettings:

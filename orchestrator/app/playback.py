@@ -287,6 +287,12 @@ class PlaybackManager:
             (entity_id, PLAYABLE_ROLE),
         )
         values = []
+        track_index_statements = []
+        has_track_index = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_track_languages'"
+            )
+        )
         for media_file_id, directory, relative_path in rows:
             root = Path(directory).resolve()
             path = root / relative_path
@@ -367,7 +373,40 @@ class PlaybackManager:
                     _iso(),
                 ),
             )
+            if has_track_index:
+                track_index_statements.append(
+                    (
+                        "DELETE FROM media_track_languages WHERE media_file_id=?",
+                        (media_file_id,),
+                    )
+                )
+                indexed_languages = set()
+                for stream in streams:
+                    if not isinstance(stream, dict):
+                        continue
+                    track_type = {
+                        "audio": "audio",
+                        "subtitle": "subtitle",
+                    }.get(str(stream.get("codec_type") or "").lower())
+                    if track_type is None:
+                        continue
+                    tags = stream.get("tags")
+                    tags = tags if isinstance(tags, dict) else {}
+                    language = normalize_track_language(
+                        tags.get("language") or tags.get("LANGUAGE")
+                    )
+                    if language:
+                        indexed_languages.add((track_type, language))
+                track_index_statements.extend(
+                    (
+                        "INSERT OR IGNORE INTO media_track_languages(media_file_id,track_type,language) VALUES(?,?,?)",
+                        (media_file_id, track_type, language),
+                    )
+                    for track_type, language in sorted(indexed_languages)
+                )
             values.append(value)
+        if track_index_statements:
+            self.db.write_many(track_index_statements)
         return values
 
     def sources(self, user_id: str, entity_id: str) -> list[dict]:

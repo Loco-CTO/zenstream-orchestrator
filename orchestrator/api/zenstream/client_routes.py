@@ -516,6 +516,25 @@ async def set_subtitles(request: Request):
         raise HTTPException(400, str(error)) from error
 
 
+@router.get("/api/preferences/playback")
+async def get_playback_preferences(request: Request):
+    account, _ = await _require_account(request)
+    return await run_foreground(AccountPreference(account["id"]).playback)
+
+
+@router.patch("/api/preferences/playback")
+async def set_playback_preferences(request: Request):
+    account, _ = await _require_account(request)
+    try:
+        value = await _bounded_json_object(request)
+        return await run_foreground(
+            AccountPreference(account["id"]).set_playback,
+            value,
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
 @router.get("/api/catalog/libraries")
 async def libraries(
     request: Request,

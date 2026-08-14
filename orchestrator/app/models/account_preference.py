@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from app.config import Config
-from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
+from app.language_registry import (
+    language_options,
+    normalize_metadata_locale,
+    normalize_track_language,
+)
+from app.models.metadata import MetadataLanguageSettings
 from app.models.subtitle_style import (
     DEFAULT_SUBTITLE_STYLE,
     SUPPORTED_LOCALES,
@@ -117,3 +122,76 @@ class AccountPreference:
             ),
         )
         return style
+
+    def _track_language_sets(self) -> tuple[set[str], set[str]]:
+        rows = self.db.read_execute(
+            "SELECT DISTINCT m.track_type,m.language "
+            "FROM media_track_languages m "
+            "JOIN media_files f ON f.id=m.media_file_id "
+            "JOIN library_entities e ON e.id=f.entity_id "
+            "JOIN user_library_access a ON a.library_id=e.library_id "
+            "WHERE a.user_id=? "
+            "UNION "
+            "SELECT DISTINCT 'subtitle',f.language "
+            "FROM media_files f "
+            "JOIN library_entities e ON e.id=f.entity_id "
+            "JOIN user_library_access a ON a.library_id=e.library_id "
+            "WHERE a.user_id=? AND f.role='subtitle' AND f.language IS NOT NULL",
+            (self.user_id, self.user_id),
+        )
+        audio = {row[1] for row in rows if row[0] == "audio" and row[1]}
+        subtitles = {row[1] for row in rows if row[0] == "subtitle" and row[1]}
+        return audio, subtitles
+
+    def playback(self) -> dict:
+        audio_languages, subtitle_languages = self._track_language_sets()
+        rows = self.db.read_execute(
+            "SELECT audio_language,subtitle_language "
+            "FROM account_preferences WHERE user_id=?",
+            (self.user_id,),
+        )
+        audio_value = rows[0][0] if rows else None
+        subtitle_value = rows[0][1] if rows else None
+        if audio_value not in audio_languages:
+            audio_value = None
+        if subtitle_value != "off" and subtitle_value not in subtitle_languages:
+            subtitle_value = None
+        labels = {
+            str(option["value"]): str(option["label"])
+            for option in language_options(self.locale())
+            if option.get("tracks")
+        }
+        return {
+            "audioLanguage": audio_value,
+            "subtitleLanguage": subtitle_value,
+            "audioLanguages": [
+                {"value": value, "label": labels.get(value, value)}
+                for value in sorted(audio_languages)
+            ],
+            "subtitleLanguages": [
+                {"value": value, "label": labels.get(value, value)}
+                for value in sorted(subtitle_languages)
+            ],
+        }
+
+    def set_playback(self, value: dict) -> dict:
+        if not isinstance(value, dict):
+            raise ValueError("Playback preferences must be an object.")
+        audio_languages, subtitle_languages = self._track_language_sets()
+        current = self.playback()
+        audio_value = value.get("audioLanguage", current["audioLanguage"])
+        subtitle_value = value.get("subtitleLanguage", current["subtitleLanguage"])
+        if audio_value is not None:
+            audio_value = normalize_track_language(audio_value)
+            if audio_value not in audio_languages:
+                raise ValueError("Audio language is not available.")
+        if subtitle_value not in {None, "off"}:
+            subtitle_value = normalize_track_language(subtitle_value)
+            if subtitle_value not in subtitle_languages:
+                raise ValueError("Subtitle language is not available.")
+        self._ensure()
+        self.db.execute(
+            "UPDATE account_preferences SET audio_language=?,subtitle_language=? WHERE user_id=?",
+            (audio_value, subtitle_value, self.user_id),
+        )
+        return self.playback()

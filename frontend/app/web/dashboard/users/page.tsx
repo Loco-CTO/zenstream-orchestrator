@@ -7,6 +7,7 @@ import {
 	IconPlus,
 	IconRefresh,
 	IconTrash,
+	IconX,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import {
@@ -55,6 +56,15 @@ export default function UsersPage() {
 		setSession(current);
 		if (current) void load(current);
 	}, []);
+
+	useEffect(() => {
+		if (!accountDialog) return;
+		const closeOnEscape = (event: KeyboardEvent) => {
+			if (event.key === "Escape" && !accountBusy) setAccountDialog(null);
+		};
+		window.addEventListener("keydown", closeOnEscape);
+		return () => window.removeEventListener("keydown", closeOnEscape);
+	}, [accountBusy, accountDialog]);
 
 	const filtered = useMemo(
 		() =>
@@ -202,12 +212,25 @@ export default function UsersPage() {
 						aria-modal="true"
 						aria-labelledby="account-dialog-title"
 					>
-						<p className="console-kicker">Account access</p>
-						<h2 id="account-dialog-title" className="mt-2 text-xl font-semibold">
-							{accountDialog === "create"
-								? "Create user"
-								: `Reset ${targetUser?.username || "user"} password`}
-						</h2>
+						<div className="flex items-start justify-between gap-4">
+							<div>
+								<p className="console-kicker">Account access</p>
+								<h2 id="account-dialog-title" className="mt-2 text-xl font-semibold">
+									{accountDialog === "create"
+										? "Create user"
+										: `Reset ${targetUser?.username || "user"} password`}
+								</h2>
+							</div>
+							<button
+								type="button"
+								disabled={accountBusy}
+								onClick={() => setAccountDialog(null)}
+								className="material-icon-button"
+								aria-label="Close dialog"
+							>
+								<IconX size={18} />
+							</button>
+						</div>
 						<p className="mt-3 text-sm leading-6 console-muted">
 							{accountDialog === "create"
 								? "New accounts start with no library access."

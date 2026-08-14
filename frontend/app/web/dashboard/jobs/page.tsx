@@ -9,6 +9,7 @@ import {
 	IconRefresh,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { DashboardModal } from "../components/dashboard-surface";
 import { Job, activeStates, progressDetailText } from "./job-types";
 
 type TaskGroup = { group: string; tasks: Job[] };
@@ -230,15 +231,18 @@ export default function JobsPage() {
 		setLoading(false);
 	}, []);
 
-	const refreshTask = useCallback(async (current: Session | null, taskId: string) => {
-		if (!current) return null;
-		const response = await adminFetch(
-			`/api/admin/jobs/${encodeURIComponent(taskId)}`,
-			current,
-		);
-		if (!response.ok) return null;
-		return (await response.json()) as Job;
-	}, []);
+	const refreshTask = useCallback(
+		async (current: Session | null, taskId: string) => {
+			if (!current) return null;
+			const response = await adminFetch(
+				`/api/admin/jobs/${encodeURIComponent(taskId)}`,
+				current,
+			);
+			if (!response.ok) return null;
+			return (await response.json()) as Job;
+		},
+		[],
+	);
 
 	const refreshActiveTasks = useCallback(
 		async (current: Session, taskIds: string[]) => {
@@ -310,36 +314,38 @@ export default function JobsPage() {
 
 	const toggleRun = useCallback(
 		async (task: Job, event: React.MouseEvent<HTMLButtonElement>) => {
-		event.stopPropagation();
-		if (task.historyOnly) return;
-		if (!session) return;
-		const activeRun = task.recentRuns?.find((run) => activeStates.has(run.state));
-		if (activeRun) {
-			await adminFetch(
-				`/api/admin/jobs/${task.id}/runs/${activeRun.id}/terminate`,
-				session,
-				{ method: "POST" },
+			event.stopPropagation();
+			if (task.historyOnly) return;
+			if (!session) return;
+			const activeRun = task.recentRuns?.find((run) =>
+				activeStates.has(run.state),
 			);
-		} else {
-			if (task.optionDefinitions?.length) {
-				setRunOptions(
-					Object.fromEntries(
-						task.optionDefinitions.map((item) => [item.key, item.default ?? false]),
-					),
+			if (activeRun) {
+				await adminFetch(
+					`/api/admin/jobs/${task.id}/runs/${activeRun.id}/terminate`,
+					session,
+					{ method: "POST" },
 				);
-				setRunTask(task);
-				return;
+			} else {
+				if (task.optionDefinitions?.length) {
+					setRunOptions(
+						Object.fromEntries(
+							task.optionDefinitions.map((item) => [item.key, item.default ?? false]),
+						),
+					);
+					setRunTask(task);
+					return;
+				}
+				await adminFetch(`/api/admin/jobs/${task.id}/run`, session, {
+					method: "POST",
+				});
 			}
-			await adminFetch(`/api/admin/jobs/${task.id}/run`, session, {
-				method: "POST",
-			});
-		}
-		const updated = await refreshTask(session, task.id);
-		if (updated) {
-			setJobs((current) =>
-				current.map((item) => (item.id === updated.id ? updated : item)),
-			);
-		}
+			const updated = await refreshTask(session, task.id);
+			if (updated) {
+				setJobs((current) =>
+					current.map((item) => (item.id === updated.id ? updated : item)),
+				);
+			}
 		},
 		[refreshTask, session],
 	);
@@ -362,81 +368,52 @@ export default function JobsPage() {
 
 	return (
 		<div className="dashboard-page dashboard-design">
-			{runTask && (
-				<div
-					role="presentation"
-					onMouseDown={(event) =>
-						event.target === event.currentTarget && setRunTask(null)
-					}
-					style={{
-						position: "fixed",
-						inset: 0,
-						zIndex: 50,
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "center",
-						background: "rgba(0,0,0,.72)",
-						padding: 20,
-					}}
-				>
-					<div
-						role="dialog"
-						aria-modal="true"
+			<DashboardModal
+				open={Boolean(runTask)}
+				onClose={() => setRunTask(null)}
+				title={runTask ? `Run ${runTask.name}` : "Run task"}
+			>
+				{runTask?.optionDefinitions?.map((option) => (
+					<label
+						key={option.key}
 						style={{
-							width: "100%",
-							maxWidth: 420,
-							background: "#101010",
-							border: "1px solid var(--border-strong)",
-							borderRadius: 12,
-							padding: 22,
+							display: "flex",
+							gap: 8,
+							color: "#aaa",
+							fontSize: 12,
+							marginBottom: 14,
 						}}
 					>
-						<h2 style={{ margin: "0 0 20px", fontSize: 16, color: "#fff" }}>
-							Run {runTask.name}
-						</h2>
-						{runTask.optionDefinitions?.map((option) => (
-							<label
-								key={option.key}
-								style={{
-									display: "flex",
-									gap: 8,
-									color: "#aaa",
-									fontSize: 12,
-									marginBottom: 14,
-								}}
-							>
-								<input
-									type="checkbox"
-									checked={Boolean(runOptions[option.key] ?? option.default)}
-									onChange={(event) =>
-										setRunOptions((current) => ({
-											...current,
-											[option.key]: event.target.checked,
-										}))
-									}
-								/>
-								{option.label}
-							</label>
-						))}
-						<div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-							<button
-								type="button"
-								onClick={() => setRunTask(null)}
-								className="rounded-lg border console-divider px-3 py-2 text-sm"
-							>
-								Cancel
-							</button>
-							<button
-								type="button"
-								onClick={() => void confirmRun()}
-								className="console-button rounded-lg px-3 py-2 text-sm"
-							>
-								Run now
-							</button>
-						</div>
-					</div>
+						<input
+							type="checkbox"
+							checked={Boolean(runOptions[option.key] ?? option.default)}
+							onChange={(event) =>
+								setRunOptions((current) => ({
+									...current,
+									[option.key]: event.target.checked,
+								}))
+							}
+						/>
+						{option.label}
+					</label>
+				))}
+				<div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+					<button
+						type="button"
+						onClick={() => setRunTask(null)}
+						className="rounded-lg border console-divider px-3 py-2 text-sm"
+					>
+						Cancel
+					</button>
+					<button
+						type="button"
+						onClick={() => void confirmRun()}
+						className="console-button rounded-lg px-3 py-2 text-sm"
+					>
+						Run now
+					</button>
 				</div>
-			)}
+			</DashboardModal>
 			<div
 				style={{
 					display: "flex",

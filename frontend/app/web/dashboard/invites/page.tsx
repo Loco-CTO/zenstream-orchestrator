@@ -1,13 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import {
-	IconCopy,
-	IconKey,
-	IconPlus,
-	IconTrash,
-	IconX,
-} from "@tabler/icons-react";
+import { IconCopy, IconKey, IconPlus, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import {
 	ConfirmDialog,
@@ -15,6 +9,7 @@ import {
 	PageHeader,
 	StatusMessage,
 	SurfaceCard,
+	DashboardModal,
 } from "../components/dashboard-surface";
 
 type Library = { id: string; name: string; type: string };
@@ -221,178 +216,151 @@ export default function InvitesPage() {
 				onClose={() => setInviteToDelete(null)}
 				onConfirm={() => inviteToDelete && void deleteInvite(inviteToDelete)}
 			/>
-			{createOpen && (
-				<div className="dashboard-dialog-layer" role="presentation">
-					<button
-						type="button"
-						className="dashboard-dialog-backdrop"
-						aria-label="Close dialog"
-						disabled={busy}
-						onClick={closeCreate}
-					/>
-					<form
-						onSubmit={createInvite}
-						className="dashboard-dialog max-w-[420px]"
-						role="dialog"
-						aria-modal="true"
-						aria-labelledby="invite-dialog-title"
-					>
-						<div className="flex items-start justify-between gap-4">
-							<div>
-								<p className="console-kicker">Registration access</p>
-								<h2 id="invite-dialog-title" className="mt-2 text-xl font-semibold">
-									{inviteLink ? "Invite link ready" : "Create invite"}
-								</h2>
+			<DashboardModal
+				open={createOpen}
+				onClose={closeCreate}
+				title={inviteLink ? "Invite link ready" : "Create invite"}
+				closeDisabled={busy}
+			>
+				<form onSubmit={createInvite}>
+					{inviteLink ? (
+						<>
+							<p className="mt-5 text-sm leading-6 console-muted">
+								Treat this link as a credential. It is shown only once.
+							</p>
+							<div className="mt-5 break-all rounded-xl border border-[#5ee3d8]/25 bg-[#5ee3d8]/10 p-4 text-sm text-[#d8fffb]">
+								{inviteLink}
 							</div>
-							<button
-								type="button"
-								disabled={busy}
-								onClick={closeCreate}
-								className="material-icon-button"
-								aria-label="Close dialog"
-							>
-								<IconX size={18} />
-							</button>
-						</div>
-						{inviteLink ? (
-							<>
-								<p className="mt-5 text-sm leading-6 console-muted">
-									Treat this link as a credential. It is shown only once.
-								</p>
-								<div className="mt-5 break-all rounded-xl border border-[#5ee3d8]/25 bg-[#5ee3d8]/10 p-4 text-sm text-[#d8fffb]">
-									{inviteLink}
-								</div>
-								<div className="mt-6 flex justify-end gap-3">
-									<button
-										type="button"
-										onClick={copyLink}
-										className="console-button flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold"
-									>
-										<IconCopy size={16} /> Copy link
-									</button>
-									<button
-										type="button"
-										onClick={closeCreate}
-										className="material-icon-button h-11 px-4 text-sm font-semibold"
-									>
-										Done
-									</button>
-								</div>
-							</>
-						) : (
-							<>
-								<p className="mt-5 text-sm leading-6 console-muted">
-									Choose the libraries and limits for the new account.
-								</p>
-								<label className="mt-6 block text-sm font-semibold text-white">
-									Libraries
-								</label>
-								<div className="mt-3 grid max-h-44 gap-2 overflow-y-auto rounded-xl border console-divider p-3 sm:grid-cols-2">
-									{libraries.length ? (
-										libraries.map((library) => (
-											<label
-												key={library.id}
-												className="flex items-center gap-3 rounded-lg px-2 py-2 text-sm console-muted hover:bg-white/5"
-											>
-												<input
-													type="checkbox"
-													checked={selectedLibraries.includes(library.id)}
-													onChange={() => toggleLibrary(library.id)}
-												/>
-												<span>{library.name}</span>
-											</label>
-										))
-									) : (
-										<span className="col-span-full p-2 text-sm console-muted">
-											No libraries configured. The account will start without catalog
-											access.
-										</span>
-									)}
-								</div>
-								<div className="mt-6 grid gap-5 sm:grid-cols-2">
-									<div>
-										<label className="block text-sm font-semibold text-white">
-											Usage limit
-										</label>
-										<div className="mt-2 flex gap-2">
-											<input
-												type="number"
-												min={1}
-												value={maxUses}
-												disabled={unlimitedUses}
-												onChange={(event) => setMaxUses(event.target.value)}
-												className="console-input h-10 w-full rounded-lg px-3 text-sm outline-none"
-											/>
-											<label className="flex items-center gap-2 whitespace-nowrap text-sm console-muted">
-												<input
-													type="checkbox"
-													checked={unlimitedUses}
-													onChange={(event) => setUnlimitedUses(event.target.checked)}
-												/>{" "}
-												Unlimited
-											</label>
-										</div>
-									</div>
-									<div>
-										<label className="block text-sm font-semibold text-white">
-											Expiry
-										</label>
-										<div className="mt-2 flex gap-2">
-											<input
-												type="number"
-												min={1}
-												value={expiryValue}
-												disabled={neverExpires}
-												onChange={(event) => setExpiryValue(event.target.value)}
-												className="console-input h-10 min-w-0 flex-1 rounded-lg px-3 text-sm outline-none"
-											/>
-											<select
-												value={expiryUnit}
-												disabled={neverExpires}
-												onChange={(event) =>
-													setExpiryUnit(event.target.value as DurationUnit)
-												}
-												className="console-input h-10 w-28 rounded-lg px-3 text-sm outline-none"
-											>
-												<option value="seconds">seconds</option>
-												<option value="minutes">minutes</option>
-												<option value="hours">hours</option>
-												<option value="days">days</option>
-											</select>
-										</div>
-										<label className="mt-2 flex items-center gap-2 text-sm console-muted">
+							<div className="mt-6 flex justify-end gap-3">
+								<button
+									type="button"
+									onClick={copyLink}
+									className="console-button flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold"
+								>
+									<IconCopy size={16} /> Copy link
+								</button>
+								<button
+									type="button"
+									onClick={closeCreate}
+									className="material-icon-button h-11 px-4 text-sm font-semibold"
+								>
+									Done
+								</button>
+							</div>
+						</>
+					) : (
+						<>
+							<p className="mt-5 text-sm leading-6 console-muted">
+								Choose the libraries and limits for the new account.
+							</p>
+							<label className="mt-6 block text-sm font-semibold text-white">
+								Libraries
+							</label>
+							<div className="mt-3 grid max-h-44 gap-2 overflow-y-auto rounded-xl border console-divider p-3 sm:grid-cols-2">
+								{libraries.length ? (
+									libraries.map((library) => (
+										<label
+											key={library.id}
+											className="flex items-center gap-3 rounded-lg px-2 py-2 text-sm console-muted hover:bg-white/5"
+										>
 											<input
 												type="checkbox"
-												checked={neverExpires}
-												onChange={(event) => setNeverExpires(event.target.checked)}
+												checked={selectedLibraries.includes(library.id)}
+												onChange={() => toggleLibrary(library.id)}
+											/>
+											<span>{library.name}</span>
+										</label>
+									))
+								) : (
+									<span className="col-span-full p-2 text-sm console-muted">
+										No libraries configured. The account will start without catalog
+										access.
+									</span>
+								)}
+							</div>
+							<div className="mt-6 grid gap-5 sm:grid-cols-2">
+								<div>
+									<label className="block text-sm font-semibold text-white">
+										Usage limit
+									</label>
+									<div className="mt-2 flex gap-2">
+										<input
+											type="number"
+											min={1}
+											value={maxUses}
+											disabled={unlimitedUses}
+											onChange={(event) => setMaxUses(event.target.value)}
+											className="console-input h-10 w-full rounded-lg px-3 text-sm outline-none"
+										/>
+										<label className="flex items-center gap-2 whitespace-nowrap text-sm console-muted">
+											<input
+												type="checkbox"
+												checked={unlimitedUses}
+												onChange={(event) => setUnlimitedUses(event.target.checked)}
 											/>{" "}
-											Never expires
+											Unlimited
 										</label>
 									</div>
 								</div>
-								{message && <StatusMessage>{message}</StatusMessage>}
-								<div className="mt-7 flex justify-end gap-3">
-									<button
-										type="button"
-										disabled={busy}
-										onClick={closeCreate}
-										className="material-icon-button h-11 px-4 text-sm font-semibold"
-									>
-										Cancel
-									</button>
-									<button
-										type="submit"
-										disabled={busy}
-										className="console-button h-11 rounded-xl px-4 text-sm font-semibold disabled:opacity-60"
-									>
-										{busy ? "Creating…" : "Create invite"}
-									</button>
+								<div>
+									<label className="block text-sm font-semibold text-white">
+										Expiry
+									</label>
+									<div className="mt-2 flex gap-2">
+										<input
+											type="number"
+											min={1}
+											value={expiryValue}
+											disabled={neverExpires}
+											onChange={(event) => setExpiryValue(event.target.value)}
+											className="console-input h-10 min-w-0 flex-1 rounded-lg px-3 text-sm outline-none"
+										/>
+										<select
+											value={expiryUnit}
+											disabled={neverExpires}
+											onChange={(event) =>
+												setExpiryUnit(event.target.value as DurationUnit)
+											}
+											className="console-input h-10 w-28 rounded-lg px-3 text-sm outline-none"
+										>
+											<option value="seconds">seconds</option>
+											<option value="minutes">minutes</option>
+											<option value="hours">hours</option>
+											<option value="days">days</option>
+										</select>
+									</div>
+									<label className="mt-2 flex items-center gap-2 text-sm console-muted">
+										<input
+											type="checkbox"
+											checked={neverExpires}
+											onChange={(event) => setNeverExpires(event.target.checked)}
+										/>{" "}
+										Never expires
+									</label>
 								</div>
-							</>
-						)}
-					</form>
-				</div>
-			)}
+							</div>
+							{message && <StatusMessage>{message}</StatusMessage>}
+							<div className="mt-7 flex justify-end gap-3">
+								<button
+									type="button"
+									disabled={busy}
+									onClick={closeCreate}
+									className="material-icon-button h-11 px-4 text-sm font-semibold"
+								>
+									Cancel
+								</button>
+								<button
+									type="submit"
+									disabled={busy}
+									className="console-button h-11 rounded-xl px-4 text-sm font-semibold disabled:opacity-60"
+								>
+									{busy ? "Creating…" : "Create invite"}
+								</button>
+							</div>
+						</>
+					)}
+				</form>
+			</DashboardModal>
 
 			<PageHeader
 				title="Invites"

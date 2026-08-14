@@ -8,9 +8,9 @@ import {
 	IconPlus,
 	IconRefresh,
 	IconTrash,
-	IconX,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { DashboardModal } from "../components/dashboard-surface";
 
 type Library = {
 	id: string;
@@ -39,78 +39,6 @@ const inputStyle: React.CSSProperties = {
 	fontSize: 14,
 	fontFamily: "var(--font-sans)",
 };
-
-function Modal({
-	open,
-	onClose,
-	title,
-	children,
-}: {
-	open: boolean;
-	onClose: () => void;
-	title: string;
-	children: React.ReactNode;
-}) {
-	if (!open) return null;
-	return (
-		<div
-			role="presentation"
-			onMouseDown={(event) => event.target === event.currentTarget && onClose()}
-			style={{
-				position: "fixed",
-				inset: 0,
-				zIndex: 50,
-				display: "flex",
-				alignItems: "center",
-				justifyContent: "center",
-				background: "rgba(0,0,0,.72)",
-				padding: 20,
-			}}
-		>
-			<div
-				role="dialog"
-				aria-modal="true"
-				aria-label={title}
-				style={{
-					width: "100%",
-					maxWidth: 440,
-					background: "#101010",
-					border: "1px solid var(--border-strong)",
-					borderRadius: 12,
-					padding: 22,
-					boxShadow: "0 24px 80px rgba(0,0,0,.5)",
-				}}
-			>
-				<div
-					style={{
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						marginBottom: 20,
-					}}
-				>
-					<h2 style={{ margin: 0, fontSize: 16, color: "#fff", fontWeight: 600 }}>
-						{title}
-					</h2>
-					<button
-						type="button"
-						onClick={onClose}
-						aria-label="Close"
-						style={{
-							background: "none",
-							border: 0,
-							color: "#666",
-							cursor: "pointer",
-						}}
-					>
-						<IconX size={18} />
-					</button>
-				</div>
-				{children}
-			</div>
-		</div>
-	);
-}
 
 export default function LibrariesPage() {
 	const [session, setSession] = useState<Session | null>(null);
@@ -407,7 +335,7 @@ export default function LibrariesPage() {
 					</div>
 				)}
 			</div>
-			<Modal
+			<DashboardModal
 				open={addModal}
 				onClose={() => setAddModal(false)}
 				title="Add library"
@@ -580,8 +508,8 @@ export default function LibrariesPage() {
 						</button>
 					</div>
 				</form>
-			</Modal>
-			<Modal
+			</DashboardModal>
+			<DashboardModal
 				open={Boolean(deleteModal)}
 				onClose={() => setDeleteModal(null)}
 				title="Delete library"
@@ -630,7 +558,7 @@ export default function LibrariesPage() {
 						<IconTrash size={14} /> Delete
 					</button>
 				</div>
-			</Modal>
+			</DashboardModal>
 		</div>
 	);
 }

@@ -1,6 +1,93 @@
 "use client";
 
 import { ReactNode, useEffect, useRef } from "react";
+import { IconX } from "@tabler/icons-react";
+
+export function DashboardModal({
+	open,
+	onClose,
+	title,
+	children,
+	closeDisabled = false,
+}: {
+	open: boolean;
+	onClose: () => void;
+	title: string;
+	children: ReactNode;
+	closeDisabled?: boolean;
+}) {
+	useEffect(() => {
+		if (!open || closeDisabled) return;
+		const closeOnEscape = (event: KeyboardEvent) => {
+			if (event.key === "Escape") onClose();
+		};
+		window.addEventListener("keydown", closeOnEscape);
+		return () => window.removeEventListener("keydown", closeOnEscape);
+	}, [closeDisabled, onClose, open]);
+
+	if (!open) return null;
+	return (
+		<div
+			role="presentation"
+			onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+			style={{
+				position: "fixed",
+				inset: 0,
+				zIndex: 50,
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				background: "rgba(0,0,0,.72)",
+				padding: 20,
+			}}
+		>
+			<div
+				role="dialog"
+				aria-modal="true"
+				aria-label={title}
+				style={{
+					width: "100%",
+					maxWidth: 440,
+					maxHeight: "calc(100vh - 40px)",
+					overflowY: "auto",
+					background: "#101010",
+					border: "1px solid var(--border-strong)",
+					borderRadius: 12,
+					padding: 22,
+					boxShadow: "0 24px 80px rgba(0,0,0,.5)",
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						marginBottom: 20,
+					}}
+				>
+					<h2 style={{ margin: 0, fontSize: 16, color: "#fff", fontWeight: 600 }}>
+						{title}
+					</h2>
+					<button
+						type="button"
+						disabled={closeDisabled}
+						onClick={onClose}
+						aria-label="Close"
+						style={{
+							background: "none",
+							border: 0,
+							color: "#666",
+							cursor: closeDisabled ? "default" : "pointer",
+						}}
+					>
+						<IconX size={18} />
+					</button>
+				</div>
+				{children}
+			</div>
+		</div>
+	);
+}
 
 export function PageHeader({
 	title,
@@ -183,40 +270,13 @@ export function ConfirmDialog({
 	useEffect(() => {
 		if (!open) return;
 		cancelRef.current?.focus();
-		const closeOnEscape = (event: KeyboardEvent) => {
-			if (event.key === "Escape" && !busy) onClose();
-		};
-		window.addEventListener("keydown", closeOnEscape);
-		return () => window.removeEventListener("keydown", closeOnEscape);
-	}, [busy, onClose, open]);
+	}, [open]);
 
 	if (!open) return null;
 	return (
-		<div className="dashboard-dialog-layer" role="presentation">
-			<button
-				type="button"
-				className="dashboard-dialog-backdrop"
-				aria-label="Close dialog"
-				disabled={busy}
-				onClick={onClose}
-			/>
-			<section
-				role="dialog"
-				aria-modal="true"
-				aria-labelledby="dashboard-dialog-title"
-				aria-describedby="dashboard-dialog-description"
-				className="dashboard-dialog"
-			>
-				<p className="console-kicker">Confirmation required</p>
-				<h2 id="dashboard-dialog-title" className="mt-2 text-xl font-semibold">
-					{title}
-				</h2>
-				<p
-					id="dashboard-dialog-description"
-					className="mt-3 text-sm leading-6 console-muted"
-				>
-					{description}
-				</p>
+		<DashboardModal open onClose={onClose} title={title} closeDisabled={busy}>
+			<div>
+				<p className="text-sm leading-6 console-muted">{description}</p>
 				<div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
 					<button
 						ref={cancelRef}
@@ -236,7 +296,7 @@ export function ConfirmDialog({
 						{busy ? "Working…" : confirmLabel}
 					</button>
 				</div>
-			</section>
-		</div>
+			</div>
+		</DashboardModal>
 	);
 }

@@ -7,11 +7,11 @@ import {
 	IconPlus,
 	IconRefresh,
 	IconTrash,
-	IconX,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import {
 	ConfirmDialog,
+	DashboardModal,
 	EmptyState,
 	PageHeader,
 	StatusMessage,
@@ -196,94 +196,69 @@ export default function UsersPage() {
 				onClose={() => setUserToDelete(null)}
 				onConfirm={() => userToDelete && void deleteUser(userToDelete)}
 			/>
-			{accountDialog && (
-				<div className="dashboard-dialog-layer" role="presentation">
-					<button
-						type="button"
-						className="dashboard-dialog-backdrop"
-						aria-label="Close dialog"
-						disabled={accountBusy}
-						onClick={() => setAccountDialog(null)}
-					/>
-					<form
-						onSubmit={submitAccount}
-						className="dashboard-dialog"
-						role="dialog"
-						aria-modal="true"
-						aria-labelledby="account-dialog-title"
-					>
-						<div className="flex items-start justify-between gap-4">
-							<div>
-								<p className="console-kicker">Account access</p>
-								<h2 id="account-dialog-title" className="mt-2 text-xl font-semibold">
-									{accountDialog === "create"
-										? "Create user"
-										: `Reset ${targetUser?.username || "user"} password`}
-								</h2>
-							</div>
-							<button
-								type="button"
-								disabled={accountBusy}
-								onClick={() => setAccountDialog(null)}
-								className="material-icon-button"
-								aria-label="Close dialog"
-							>
-								<IconX size={18} />
-							</button>
-						</div>
-						<p className="mt-3 text-sm leading-6 console-muted">
-							{accountDialog === "create"
-								? "New accounts start with no library access."
-								: "Existing sessions will be revoked after the password is reset."}
-						</p>
-						{accountDialog === "create" && (
-							<label className="mt-6 block text-sm">
-								<span className="console-muted">Username</span>
-								<input
-									autoFocus
-									required
-									value={draftUsername}
-									onChange={(event) => setDraftUsername(event.target.value)}
-									className="console-input mt-2 h-11 w-full rounded-xl px-3 outline-none"
-								/>
-							</label>
-						)}
-						<label className="mt-5 block text-sm">
-							<span className="console-muted">
-								{accountDialog === "create" ? "Temporary password" : "New password"}
-							</span>
+			<DashboardModal
+				open={Boolean(accountDialog)}
+				onClose={() => setAccountDialog(null)}
+				title={
+					accountDialog === "create"
+						? "Create user"
+						: `Reset ${targetUser?.username || "user"} password`
+				}
+				closeDisabled={accountBusy}
+			>
+				<form onSubmit={submitAccount}>
+					<p className="mt-3 text-sm leading-6 console-muted">
+						{accountDialog === "create"
+							? "New accounts start with no library access."
+							: "Existing sessions will be revoked after the password is reset."}
+					</p>
+					{accountDialog === "create" && (
+						<label className="mt-6 block text-sm">
+							<span className="console-muted">Username</span>
 							<input
+								autoFocus
 								required
-								minLength={8}
-								type="password"
-								value={draftPassword}
-								onChange={(event) => setDraftPassword(event.target.value)}
+								value={draftUsername}
+								onChange={(event) => setDraftUsername(event.target.value)}
 								className="console-input mt-2 h-11 w-full rounded-xl px-3 outline-none"
 							/>
 						</label>
-						<div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
-							<button
-								type="button"
-								disabled={accountBusy}
-								onClick={() => setAccountDialog(null)}
-								className="material-icon-button h-11 px-4 text-sm font-semibold"
-							>
-								Cancel
-							</button>
-							<button
-								disabled={accountBusy}
-								className="console-button h-11 rounded-xl px-4 text-sm font-semibold disabled:opacity-60"
-							>
-								{accountBusy
-									? "Saving…"
-									: accountDialog === "create"
-										? "Create user"
-										: "Reset password"}
-							</button>
-						</div>
-					</form>
-				</div>
-			)}
+					)}
+					<label className="mt-5 block text-sm">
+						<span className="console-muted">
+							{accountDialog === "create" ? "Temporary password" : "New password"}
+						</span>
+						<input
+							required
+							minLength={8}
+							type="password"
+							value={draftPassword}
+							onChange={(event) => setDraftPassword(event.target.value)}
+							className="console-input mt-2 h-11 w-full rounded-xl px-3 outline-none"
+						/>
+					</label>
+					<div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+						<button
+							type="button"
+							disabled={accountBusy}
+							onClick={() => setAccountDialog(null)}
+							className="material-icon-button h-11 px-4 text-sm font-semibold"
+						>
+							Cancel
+						</button>
+						<button
+							disabled={accountBusy}
+							className="console-button h-11 rounded-xl px-4 text-sm font-semibold disabled:opacity-60"
+						>
+							{accountBusy
+								? "Saving…"
+								: accountDialog === "create"
+									? "Create user"
+									: "Reset password"}
+						</button>
+					</div>
+				</form>
+			</DashboardModal>
 			<PageHeader
 				title="Users"
 				description="Create accounts, manage access to libraries, and control user sessions."

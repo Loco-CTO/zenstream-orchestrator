@@ -13,6 +13,7 @@ import {
 	IconRefresh,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { DashboardModal } from "../components/dashboard-surface";
 import {
 	Job,
 	JobTrigger,
@@ -95,79 +96,6 @@ function Btn({
 			{icon}
 			{children}
 		</button>
-	);
-}
-
-function Modal({
-	open,
-	onClose,
-	title,
-	children,
-}: {
-	open: boolean;
-	onClose: () => void;
-	title: string;
-	children: React.ReactNode;
-}) {
-	if (!open) return null;
-	return (
-		<div
-			role="presentation"
-			onMouseDown={(event) => event.target === event.currentTarget && onClose()}
-			style={{
-				position: "fixed",
-				inset: 0,
-				zIndex: 50,
-				display: "flex",
-				alignItems: "center",
-				justifyContent: "center",
-				background: "rgba(0,0,0,.72)",
-				padding: 20,
-			}}
-		>
-			<div
-				role="dialog"
-				aria-modal="true"
-				aria-label={title}
-				style={{
-					width: "100%",
-					maxWidth: 420,
-					background: "#101010",
-					border: "1px solid var(--border-strong)",
-					borderRadius: 12,
-					padding: 22,
-					boxShadow: "0 24px 80px rgba(0,0,0,.5)",
-				}}
-			>
-				<div
-					style={{
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "space-between",
-						marginBottom: 20,
-					}}
-				>
-					<h2 style={{ margin: 0, fontSize: 16, color: "#fff", fontWeight: 600 }}>
-						{title}
-					</h2>
-					<button
-						type="button"
-						onClick={onClose}
-						aria-label="Close"
-						style={{
-							border: 0,
-							background: "none",
-							color: "#666",
-							cursor: "pointer",
-							fontSize: 20,
-						}}
-					>
-						×
-					</button>
-				</div>
-				{children}
-			</div>
-		</div>
 	);
 }
 
@@ -509,7 +437,7 @@ export default function JobDetailPage() {
 							{message}
 						</div>
 					)}
-					<Modal
+					<DashboardModal
 						open={addingTrigger}
 						onClose={() => setAddingTrigger(false)}
 						title="Add trigger"
@@ -659,8 +587,8 @@ export default function JobDetailPage() {
 								<Btn onClick={addTrigger}>Add</Btn>
 							</div>
 						</div>
-					</Modal>
-					<Modal
+					</DashboardModal>
+					<DashboardModal
 						open={runOptionsOpen}
 						onClose={() => setRunOptionsOpen(false)}
 						title="Run task"
@@ -711,7 +639,7 @@ export default function JobDetailPage() {
 								</Btn>
 							</div>
 						</div>
-					</Modal>
+					</DashboardModal>
 					<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
 						<div
 							style={{

@@ -49,6 +49,43 @@ class TrickplayStore:
             f"{fingerprint}:{width}x{height}:{interval}".encode()
         ).hexdigest()
 
+    def _ready_output_valid(
+        self,
+        media_file_id: str,
+        output_key: str | None,
+        duration_seconds: float | int | None,
+        interval_seconds: int,
+    ) -> bool:
+        """Verify that a ready asset still has its complete, safe cache output."""
+        if not output_key:
+            return False
+        expected_frames = max(
+            1, int(math.ceil(float(duration_seconds or 0) / max(1, interval_seconds)))
+        )
+        expected_sheets = max(1, int(math.ceil(expected_frames / FRAMES_PER_SHEET)))
+        rows = self.db.execute(
+            "SELECT sheet_index,frame_count,relative_path FROM trickplay_sheets "
+            "WHERE media_file_id=? AND output_key=? ORDER BY sheet_index",
+            (media_file_id, output_key),
+        )
+        if len(rows) != expected_sheets:
+            return False
+        cache_root = self.cache_root().resolve()
+        for expected_index, (sheet_index, frame_count, relative_path) in enumerate(rows):
+            if sheet_index != expected_index or not 0 < int(frame_count) <= FRAMES_PER_SHEET:
+                return False
+            relative = Path(str(relative_path))
+            if relative.is_absolute() or ".." in relative.parts:
+                return False
+            try:
+                resolved = (cache_root / relative).resolve()
+                resolved.relative_to(cache_root)
+            except (OSError, ValueError):
+                return False
+            if not resolved.is_file():
+                return False
+        return True
+
     def queue_pending(
         self, library_id: str | None = None, settings: dict | None = None
     ) -> int:
@@ -58,7 +95,12 @@ class TrickplayStore:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        if not {"media_files", "media_sources", "trickplay_assets"}.issubset(tables):
+        if not {
+            "media_files",
+            "media_sources",
+            "trickplay_assets",
+            "trickplay_sheets",
+        }.issubset(tables):
             return 0
         settings = settings or PlaybackSettings(self.db).get()
         width = settings["trickplayFrameWidth"]
@@ -70,7 +112,7 @@ class TrickplayStore:
             scope = " AND e.library_id=?"
             params.append(library_id)
         rows = self.db.execute(
-            "SELECT f.id,f.entity_id,f.quick_fingerprint,f.size,f.modified_ns "
+            "SELECT f.id,f.entity_id,f.quick_fingerprint,f.size,f.modified_ns,s.duration_seconds "
             "FROM media_files f "
             "JOIN library_entities e ON e.id=f.entity_id "
             "JOIN media_sources s ON s.media_file_id=f.id "
@@ -79,7 +121,14 @@ class TrickplayStore:
             params,
         )
         queued = 0
-        for media_file_id, entity_id, quick_fingerprint, size, modified_ns in rows:
+        for (
+            media_file_id,
+            entity_id,
+            quick_fingerprint,
+            size,
+            modified_ns,
+            duration_seconds,
+        ) in rows:
             fingerprint = self.fingerprint(quick_fingerprint, size, modified_ns)
             existing = self.db.execute(
                 "SELECT source_fingerprint,frame_width,frame_height,interval_seconds,state "

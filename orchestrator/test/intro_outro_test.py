@@ -1,9 +1,9 @@
+import sqlite3
 import struct
 import tempfile
 import threading
 import time
 import unittest
-import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -127,7 +127,9 @@ class IntroOutroTest(unittest.TestCase):
             queued = IntroOutroStore(db).queue_pending(settings=settings)
 
             self.assertEqual(queued, 4)
-            states = dict(db.execute("SELECT media_file_id,state FROM intro_outro_assets"))
+            states = dict(
+                db.execute("SELECT media_file_id,state FROM intro_outro_assets")
+            )
             self.assertEqual(states["scanned"], "scanned")
             self.assertEqual(states["failed"], "queued")
             self.assertEqual(states["queued"], "queued")

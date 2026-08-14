@@ -56,7 +56,7 @@ class TrickplayStore:
         self,
         media_file_id: str,
         output_key: str | None,
-        duration_seconds: float | int | None,
+        duration_seconds: float | None,
         interval_seconds: int,
     ) -> bool:
         """Verify that a ready asset still has its complete, safe cache output."""
@@ -74,8 +74,13 @@ class TrickplayStore:
         if len(rows) != expected_sheets:
             return False
         cache_root = self.cache_root().resolve()
-        for expected_index, (sheet_index, frame_count, relative_path) in enumerate(rows):
-            if sheet_index != expected_index or not 0 < int(frame_count) <= FRAMES_PER_SHEET:
+        for expected_index, (sheet_index, frame_count, relative_path) in enumerate(
+            rows
+        ):
+            if (
+                sheet_index != expected_index
+                or not 0 < int(frame_count) <= FRAMES_PER_SHEET
+            ):
                 return False
             relative = Path(str(relative_path))
             if relative.is_absolute() or ".." in relative.parts:

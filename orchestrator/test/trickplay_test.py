@@ -1,8 +1,8 @@
+import sqlite3
 import tempfile
 import threading
 import time
 import unittest
-import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,7 +46,11 @@ class TrickplayTest(unittest.TestCase):
                 );
                 """
             )
-            settings = {"trickplayFrameWidth": 320, "trickplayFrameHeight": 180, "trickplayIntervalSeconds": 10}
+            settings = {
+                "trickplayFrameWidth": 320,
+                "trickplayFrameHeight": 180,
+                "trickplayIntervalSeconds": 10,
+            }
             media = [
                 ("ready", "entity-ready", "fp-ready", "lib-a"),
                 ("invalid", "entity-invalid", "fp-invalid", "lib-b"),
@@ -100,7 +104,9 @@ class TrickplayTest(unittest.TestCase):
             queued = TrickplayStore(db).queue_pending(settings=settings)
 
             self.assertEqual(queued, 4)
-            states = dict(db.execute("SELECT media_file_id,state FROM trickplay_assets"))
+            states = dict(
+                db.execute("SELECT media_file_id,state FROM trickplay_assets")
+            )
             self.assertEqual(states["ready"], "ready")
             self.assertEqual(states["invalid"], "queued")
             self.assertEqual(states["queued"], "queued")

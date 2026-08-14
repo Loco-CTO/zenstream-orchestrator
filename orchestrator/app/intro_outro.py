@@ -6,6 +6,7 @@ import struct
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from threading import Lock
 
@@ -815,7 +816,9 @@ class IntroOutroDetector:
         )
         completed = failures = markers = 0
         progress_lock = Lock()
-        reporter = ProgressReporter(job_store.update_run, unit="episodes")
+        reporter = ProgressReporter(
+            partial(job_store.update_run, run_id), unit="episodes"
+        )
         reporter.stage("fingerprinting", "Fingerprinting intros/outros", total=queued)
 
         def process_assets():

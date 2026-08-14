@@ -9,6 +9,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from threading import Lock
 
@@ -512,7 +513,9 @@ class TrickplayExtractor:
         completed = 0
         failures = []
         progress_lock = Lock()
-        reporter = ProgressReporter(job_store.update_run, unit="videos")
+        reporter = ProgressReporter(
+            partial(job_store.update_run, run_id), unit="videos"
+        )
         reporter.stage("extraction", "Extracting trickplay", total=discovered)
 
         def process_assets():

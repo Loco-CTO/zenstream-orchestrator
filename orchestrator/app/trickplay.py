@@ -39,6 +39,9 @@ class TrickplayStore:
     def __init__(self, db=None):
         self.db = db or Config().database
 
+    def cache_root(self) -> Path:
+        return Path(self.db.db_file).parent / "trickplay-cache"
+
     @staticmethod
     def fingerprint(quick_fingerprint, size, modified_ns) -> str:
         return str(quick_fingerprint or f"{int(size or 0)}:{int(modified_ns or 0)}")

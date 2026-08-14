@@ -7,7 +7,9 @@ from alembic import op
 try:
     from app.language_registry import normalize_metadata_locale
     from app.language_registry import normalize_track_language
-except ModuleNotFoundError:  # Alembic may run from the workspace root.
+except ModuleNotFoundError as error:  # Alembic may run from the workspace root.
+    if error.name not in {"app", "app.language_registry"}:
+        raise
     from orchestrator.app.language_registry import normalize_metadata_locale
     from orchestrator.app.language_registry import normalize_track_language
 

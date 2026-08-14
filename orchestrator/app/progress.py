@@ -190,6 +190,46 @@ class ProgressReporter:
                 self.failed += 1
             self._publish_locked(force=force)
 
+    def item_progress(
+        self,
+        item: Any,
+        current: float | int,
+        total: float | int,
+        *,
+        unit: str = "seconds",
+    ) -> None:
+        """Publish bounded progress for the currently active item.
+
+        Stage counts intentionally remain settled assets.  This is an
+        observational update for long-running subprocesses so the dashboard
+        can distinguish active work from a stalled worker.
+        """
+        with self.lock:
+            safe = sanitize_progress_item(item) or "item"
+            self.active = [value for value in self.active if value != safe]
+            self.active.append(safe)
+            now = time.monotonic()
+            if now - self._last_emit < self.min_interval:
+                return
+            self._last_emit = now
+            bounded_total = max(0.0, float(total))
+            bounded_current = max(0.0, min(float(current), bounded_total))
+            detail = f"{bounded_current:.1f}/{bounded_total:.1f} {unit}"
+            values = {
+                "message": format_progress_message(
+                    self.label, item=safe, detail=detail
+                ),
+                "progress_current": self.settled,
+                "progress_total": self.total if self.total is not None else 0,
+                "progress_phase": self.phase,
+                "progress_label": self.label,
+                "progress_stage_current": self.settled,
+                "progress_stage_total": self.total,
+                "progress_stage_unit": self.unit,
+                "progress_current_item": safe,
+            }
+            self.emit(**values)
+
     def finish(self, *, failed: bool = False) -> None:
         with self.lock:
             self._publish_locked(force=True, terminal=failed)

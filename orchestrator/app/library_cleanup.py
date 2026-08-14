@@ -381,7 +381,9 @@ def _sweep_screen_extractor_cache(
             continue
 
 
-def _cleanup(db, entity_ids: list[str], library_id: str | None = None, progress=None) -> bool:
+def _cleanup(
+    db, entity_ids: list[str], library_id: str | None = None, progress=None
+) -> bool:
     tables = _table_names(db)
     if "library_entities" not in tables or "entity_provider_ids" not in tables:
         raise RuntimeError("Library inventory schema is incomplete.")

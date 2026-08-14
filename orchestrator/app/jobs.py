@@ -23,8 +23,11 @@ from app.metadata_services import (
     metadata_task_results,
 )
 from app.models.metadata import MetadataLanguageSettings
-from app.progress import WholeJobProgress
-from app.progress import format_progress_message, resolve_progress_item
+from app.progress import (
+    WholeJobProgress,
+    format_progress_message,
+    resolve_progress_item,
+)
 from app.providers import ProviderError
 from app.trickplay import TrickplayExtractor
 

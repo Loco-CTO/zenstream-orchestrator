@@ -47,15 +47,9 @@ def _watcher_task_id(library_id: str) -> str:
 
 
 def _watcher_task(library: dict, limit: int = 10) -> dict:
-    recent = scheduler.store.library_runs(
-        library["id"], limit, kinds={"reconcile"}
-    )
+    recent = scheduler.store.library_runs(library["id"], limit, kinds={"reconcile"})
     current = next(
-        (
-            run
-            for run in recent
-            if run["state"] in {"queued", "running", "terminating"}
-        ),
+        (run for run in recent if run["state"] in {"queued", "running", "terminating"}),
         None,
     )
     latest = recent[0] if recent else None
@@ -67,11 +61,11 @@ def _watcher_task(library: dict, limit: int = 10) -> dict:
         "kind": "library_watch",
         "nextRunAt": None,
         "lastRunAt": (
-            (latest.get("finishedAt") or latest.get("createdAt"))
-            if latest
-            else None
+            (latest.get("finishedAt") or latest.get("createdAt")) if latest else None
         ),
-        "lastState": current["state"] if current else (latest["state"] if latest else "idle"),
+        "lastState": current["state"]
+        if current
+        else (latest["state"] if latest else "idle"),
         "lastMessage": (
             (latest.get("message") or latest.get("error")) if latest else None
         ),
@@ -88,28 +82,26 @@ def _is_watcher_task_id(job_id: str) -> bool:
 
 def _require_mutable_task(job_id: str) -> None:
     if _is_watcher_task_id(job_id):
-        raise HTTPException(409, "Watcher history tasks cannot be configured or started.")
+        raise HTTPException(
+            409, "Watcher history tasks cannot be configured or started."
+        )
 
 
 def _full_scan_summary(definition: dict, recent: list[dict]) -> dict:
     """Project a library-scan definition from full-lane runs only."""
     current = next(
-        (
-            run
-            for run in recent
-            if run["state"] in {"queued", "running", "terminating"}
-        ),
+        (run for run in recent if run["state"] in {"queued", "running", "terminating"}),
         None,
     )
     latest = recent[0] if recent else None
     return {
         "lastRunAt": (
-            (latest.get("finishedAt") or latest.get("createdAt"))
-            if latest
-            else None
+            (latest.get("finishedAt") or latest.get("createdAt")) if latest else None
         ),
         "lastRunId": latest.get("id") if latest else None,
-        "lastState": current["state"] if current else (latest["state"] if latest else "idle"),
+        "lastState": current["state"]
+        if current
+        else (latest["state"] if latest else "idle"),
         "lastMessage": (
             (current.get("message") or current.get("error"))
             if current
@@ -789,12 +781,17 @@ async def list_jobs(
             {
                 **definition,
                 "historyOnly": False,
-                **(summary or {
-                    "lastState": current["state"] if current else definition["lastState"],
-                    "lastMessage": (current.get("message") or current.get("error"))
-                    if current
-                    else definition["lastMessage"],
-                }),
+                **(
+                    summary
+                    or {
+                        "lastState": current["state"]
+                        if current
+                        else definition["lastState"],
+                        "lastMessage": (current.get("message") or current.get("error"))
+                        if current
+                        else definition["lastMessage"],
+                    }
+                ),
                 "recentRuns": recent,
             }
         )
@@ -886,7 +883,10 @@ async def remove_scheduled_trigger(
 
 @router.post("/jobs/{job_id}/run", status_code=202)
 async def run_scheduled_job(
-    job_id: str, request: Request, Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    job_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
     _require_mutable_task(job_id)

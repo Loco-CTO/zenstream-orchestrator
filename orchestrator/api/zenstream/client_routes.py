@@ -582,9 +582,7 @@ async def home(
             limit,
         )
     if section == "derived":
-        result = await run_foreground(
-            catalog.home_derived, account["id"], preferred
-        )
+        result = await run_foreground(catalog.home_derived, account["id"], preferred)
         return _catalog_response(result, view, limit)
     if section == "library":
         if not libraryId:

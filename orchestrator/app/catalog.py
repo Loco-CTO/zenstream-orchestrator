@@ -475,8 +475,7 @@ class Catalog:
             raise HTTPException(400, "Metadata language is not configured.")
         context = self._context(user_id)
         projection_loaded = bool(
-            context
-            and (entity_id, language) in context.projected_metadata_loaded
+            context and (entity_id, language) in context.projected_metadata_loaded
         )
         projected = (
             context.projected_metadata.get((entity_id, language)) if context else None
@@ -2442,9 +2441,7 @@ class Catalog:
                     )
                     episode_total = int(count_rows[0][0] or 0) if count_rows else 0
                     episode_query += " LIMIT ? OFFSET ?"
-                    episode_params.extend(
-                        [page_size, max(0, page - 1) * page_size]
-                    )
+                    episode_params.extend([page_size, max(0, page - 1) * page_size])
                 if section in {None, "episodes"}:
                     episode_rows = self.db.execute(episode_query, episode_params)
                     if section is None:

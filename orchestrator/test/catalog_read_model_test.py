@@ -359,13 +359,12 @@ class CatalogReadModelTest(unittest.TestCase):
             catalog._preload_projected_metadata(
                 "user", ["series", "series", "episode-2"], "en"
             )
-            catalog._preload_projected_metadata(
-                "user", ["episode-2", "series"], "en"
-            )
+            catalog._preload_projected_metadata("user", ["episode-2", "series"], "en")
             service = Mock()
             service.resolve_public.return_value = {"metadata": {"images": {}}}
-            with patch.object(catalog, "_read_service", return_value=service), patch.object(
-                catalog, "_provider_ids", return_value=[]
+            with (
+                patch.object(catalog, "_read_service", return_value=service),
+                patch.object(catalog, "_provider_ids", return_value=[]),
             ):
                 resolved = catalog.metadata("user", "episode-2", "en")
         finally:

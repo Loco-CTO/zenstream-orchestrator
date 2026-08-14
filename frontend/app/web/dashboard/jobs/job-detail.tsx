@@ -184,7 +184,9 @@ export default function JobDetailPage() {
 	const [triggerDay, setTriggerDay] = useState("0");
 	const [triggerIntervalVal, setTriggerIntervalVal] = useState("15");
 	const [triggerIntervalUnit, setTriggerIntervalUnit] = useState("minutes");
-	const [triggerOptions, setTriggerOptions] = useState<Record<string, unknown>>({});
+	const [triggerOptions, setTriggerOptions] = useState<Record<string, unknown>>(
+		{},
+	);
 	const [runOptionsOpen, setRunOptionsOpen] = useState(false);
 	const [runOptions, setRunOptions] = useState<Record<string, unknown>>({});
 	const selected = useMemo(
@@ -231,7 +233,11 @@ export default function JobDetailPage() {
 		const response = await adminFetch(
 			`/api/admin/jobs/${selected.id}/run`,
 			session,
-			{ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ options: options || {} }) },
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ options: options || {} }),
+			},
 		);
 		setMessage(
 			response.ok ? "Task queued in the background." : "Could not queue task.",
@@ -250,24 +256,64 @@ export default function JobDetailPage() {
 
 	async function addTrigger() {
 		const id = crypto.randomUUID();
-		const trigger: JobTrigger = triggerType === "startup"
-			? { id, type: "startup", options: triggerOptions }
-			: triggerType === "daily"
-				? { id, type: "daily", time: triggerTime, options: triggerOptions }
-				: triggerType === "weekly"
-					? { id, type: "weekly", weekday: Number(triggerDay), time: triggerTime, options: triggerOptions }
-					: { id, type: "interval", intervalSeconds: Math.min(2592000, Math.max(1, Number(triggerIntervalVal) * (triggerIntervalUnit === "hours" ? 3600 : triggerIntervalUnit === "minutes" ? 60 : 1))), options: triggerOptions };
+		const trigger: JobTrigger =
+			triggerType === "startup"
+				? { id, type: "startup", options: triggerOptions }
+				: triggerType === "daily"
+					? { id, type: "daily", time: triggerTime, options: triggerOptions }
+					: triggerType === "weekly"
+						? {
+								id,
+								type: "weekly",
+								weekday: Number(triggerDay),
+								time: triggerTime,
+								options: triggerOptions,
+							}
+						: {
+								id,
+								type: "interval",
+								intervalSeconds: Math.min(
+									2592000,
+									Math.max(
+										1,
+										Number(triggerIntervalVal) *
+											(triggerIntervalUnit === "hours"
+												? 3600
+												: triggerIntervalUnit === "minutes"
+													? 60
+													: 1),
+									),
+								),
+								options: triggerOptions,
+							};
 		if (!session || !selected) return;
-		const response = await adminFetch(`/api/admin/jobs/${selected.id}/triggers`, session, {
-			method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(trigger),
-		});
+		const response = await adminFetch(
+			`/api/admin/jobs/${selected.id}/triggers`,
+			session,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(trigger),
+			},
+		);
 		setMessage(response.ok ? "Trigger added." : "Could not add trigger.");
-		if (response.ok) { setAddingTrigger(false); setTriggerOptions({}); await load(session, false); }
+		if (response.ok) {
+			setAddingTrigger(false);
+			setTriggerOptions({});
+			await load(session, false);
+		}
 	}
 
 	function openRunNow() {
-		if (!selected?.optionDefinitions?.length) { void runNow(); return; }
-		setRunOptions(Object.fromEntries(selected.optionDefinitions.map((item) => [item.key, item.default ?? false])));
+		if (!selected?.optionDefinitions?.length) {
+			void runNow();
+			return;
+		}
+		setRunOptions(
+			Object.fromEntries(
+				selected.optionDefinitions.map((item) => [item.key, item.default ?? false]),
+			),
+		);
 		setRunOptionsOpen(true);
 	}
 
@@ -384,7 +430,7 @@ export default function JobDetailPage() {
 						padding: "12px 14px",
 					}}
 				>
-						<div
+					<div
 						style={{
 							display: "flex",
 							justifyContent: "space-between",
@@ -445,7 +491,13 @@ export default function JobDetailPage() {
 			{!selected.historyOnly && (
 				<>
 					<div style={{ marginBottom: 16 }}>
-						<Btn icon={<IconPlus size={14} />} onClick={() => { setTriggerOptions({}); setAddingTrigger(true); }}>
+						<Btn
+							icon={<IconPlus size={14} />}
+							onClick={() => {
+								setTriggerOptions({});
+								setAddingTrigger(true);
+							}}
+						>
 							Add trigger
 						</Btn>
 					</div>
@@ -563,9 +615,34 @@ export default function JobDetailPage() {
 								</div>
 							)}
 							{selected.optionDefinitions?.map((option) => (
-								<label key={option.key} style={{ display: "flex", alignItems: "flex-start", gap: 8, color: "#aaa", fontSize: 12 }}>
-									<input type="checkbox" checked={Boolean(triggerOptions[option.key] ?? option.default)} onChange={(event) => setTriggerOptions((current) => ({ ...current, [option.key]: event.target.checked }))} />
-									<span><span style={{ color: "#ddd" }}>{option.label}</span>{option.description && <span style={{ display: "block", color: "#666", marginTop: 3 }}>{option.description}</span>}</span>
+								<label
+									key={option.key}
+									style={{
+										display: "flex",
+										alignItems: "flex-start",
+										gap: 8,
+										color: "#aaa",
+										fontSize: 12,
+									}}
+								>
+									<input
+										type="checkbox"
+										checked={Boolean(triggerOptions[option.key] ?? option.default)}
+										onChange={(event) =>
+											setTriggerOptions((current) => ({
+												...current,
+												[option.key]: event.target.checked,
+											}))
+										}
+									/>
+									<span>
+										<span style={{ color: "#ddd" }}>{option.label}</span>
+										{option.description && (
+											<span style={{ display: "block", color: "#666", marginTop: 3 }}>
+												{option.description}
+											</span>
+										)}
+									</span>
 								</label>
 							))}
 							<div
@@ -583,17 +660,55 @@ export default function JobDetailPage() {
 							</div>
 						</div>
 					</Modal>
-					<Modal open={runOptionsOpen} onClose={() => setRunOptionsOpen(false)} title="Run task">
+					<Modal
+						open={runOptionsOpen}
+						onClose={() => setRunOptionsOpen(false)}
+						title="Run task"
+					>
 						<div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
 							{selected.optionDefinitions?.map((option) => (
-								<label key={option.key} style={{ display: "flex", alignItems: "flex-start", gap: 8, color: "#aaa", fontSize: 12 }}>
-									<input type="checkbox" checked={Boolean(runOptions[option.key] ?? option.default)} onChange={(event) => setRunOptions((current) => ({ ...current, [option.key]: event.target.checked }))} />
-									<span>{option.label}{option.description && <span style={{ display: "block", color: "#666", marginTop: 3 }}>{option.description}</span>}</span>
+								<label
+									key={option.key}
+									style={{
+										display: "flex",
+										alignItems: "flex-start",
+										gap: 8,
+										color: "#aaa",
+										fontSize: 12,
+									}}
+								>
+									<input
+										type="checkbox"
+										checked={Boolean(runOptions[option.key] ?? option.default)}
+										onChange={(event) =>
+											setRunOptions((current) => ({
+												...current,
+												[option.key]: event.target.checked,
+											}))
+										}
+									/>
+									<span>
+										{option.label}
+										{option.description && (
+											<span style={{ display: "block", color: "#666", marginTop: 3 }}>
+												{option.description}
+											</span>
+										)}
+									</span>
 								</label>
 							))}
 							<div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-								<Btn variant="ghost" onClick={() => setRunOptionsOpen(false)}>Cancel</Btn>
-								<Btn onClick={() => { setRunOptionsOpen(false); void runNow(runOptions); }}>Run now</Btn>
+								<Btn variant="ghost" onClick={() => setRunOptionsOpen(false)}>
+									Cancel
+								</Btn>
+								<Btn
+									onClick={() => {
+										setRunOptionsOpen(false);
+										void runNow(runOptions);
+									}}
+								>
+									Run now
+								</Btn>
 							</div>
 						</div>
 					</Modal>
@@ -620,7 +735,8 @@ export default function JobDetailPage() {
 						<div style={{ height: 1, background: "#111" }} />
 						{(selected.triggers || []).length === 0 ? (
 							<div style={{ padding: "20px 18px", fontSize: 13, color: "#333" }}>
-								No triggers configured. This task is disabled. Add one above to enable it.
+								No triggers configured. This task is disabled. Add one above to enable
+								it.
 							</div>
 						) : (
 							selected.triggers.map((trigger, index) => (
@@ -634,17 +750,28 @@ export default function JobDetailPage() {
 										}}
 									>
 										<span style={{ fontSize: 14, color: "#ccc", fontWeight: 500 }}>
-											{triggerLabel(trigger)}{trigger.options?.preserveCachedAssets === true ? " · Preserve cached assets" : selected.kind === "metadata_refresh" ? " · Refresh cached assets" : ""}
+											{triggerLabel(trigger)}
+											{trigger.options?.preserveCachedAssets === true
+												? " · Preserve cached assets"
+												: selected.kind === "metadata_refresh"
+													? " · Refresh cached assets"
+													: ""}
 										</span>
 										<button
 											type="button"
 											aria-label="Remove trigger"
-							onClick={async () => {
-								if (!session || !selected) return;
-								const response = await adminFetch(`/api/admin/jobs/${selected.id}/triggers/${trigger.id}`, session, { method: "DELETE" });
-								setMessage(response.ok ? "Trigger removed." : "Could not remove trigger.");
-								if (response.ok) await load(session, false);
-							}}
+											onClick={async () => {
+												if (!session || !selected) return;
+												const response = await adminFetch(
+													`/api/admin/jobs/${selected.id}/triggers/${trigger.id}`,
+													session,
+													{ method: "DELETE" },
+												);
+												setMessage(
+													response.ok ? "Trigger removed." : "Could not remove trigger.",
+												);
+												if (response.ok) await load(session, false);
+											}}
 											style={{
 												width: 22,
 												height: 22,
@@ -668,62 +795,64 @@ export default function JobDetailPage() {
 							))
 						)}
 					</div>
-							{false && <div
+					{false && (
+						<div
 							style={{
 								display: "flex",
 								alignItems: "center",
 								gap: 18,
-							marginTop: 16,
-							padding: "12px 2px",
-							color: "#777",
-							fontSize: 12,
-						}}
-					>
-						<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-							Interval (minutes)
-							<input
-								type="number"
-								min={1}
-								max={43200}
-								value={selected?.intervalMinutes ?? 0}
-								onChange={(event) =>
-									updateSelected((job) => ({
-										...job,
-										intervalMinutes: Number(event.target.value),
-									}))
-								}
-								style={{ ...fieldStyle, width: 96, padding: "7px 9px", fontSize: 12 }}
-							/>
-						</label>
-						<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-							<input
-								type="checkbox"
-								checked={Boolean(selected?.enabled)}
-								onChange={(event) =>
-									updateSelected((job) => ({ ...job, enabled: event.target.checked }))
-								}
-							/>{" "}
-							Enabled
-						</label>
-							{selected?.kind === "metadata_refresh" && (
+								marginTop: 16,
+								padding: "12px 2px",
+								color: "#777",
+								fontSize: 12,
+							}}
+						>
 							<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+								Interval (minutes)
 								<input
-									type="checkbox"
-												checked={Boolean(selected?.config?.preserveCachedAssets)}
+									type="number"
+									min={1}
+									max={43200}
+									value={selected?.intervalMinutes ?? 0}
 									onChange={(event) =>
 										updateSelected((job) => ({
 											...job,
-											config: {
-												...(job.config || {}),
-												preserveCachedAssets: event.target.checked,
-											},
+											intervalMinutes: Number(event.target.value),
 										}))
 									}
-								/>{" "}
-								Preserve cached assets
+									style={{ ...fieldStyle, width: 96, padding: "7px 9px", fontSize: 12 }}
+								/>
 							</label>
-						)}
-						</div>}
+							<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+								<input
+									type="checkbox"
+									checked={Boolean(selected?.enabled)}
+									onChange={(event) =>
+										updateSelected((job) => ({ ...job, enabled: event.target.checked }))
+									}
+								/>{" "}
+								Enabled
+							</label>
+							{selected?.kind === "metadata_refresh" && (
+								<label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+									<input
+										type="checkbox"
+										checked={Boolean(selected?.config?.preserveCachedAssets)}
+										onChange={(event) =>
+											updateSelected((job) => ({
+												...job,
+												config: {
+													...(job.config || {}),
+													preserveCachedAssets: event.target.checked,
+												},
+											}))
+										}
+									/>{" "}
+									Preserve cached assets
+								</label>
+							)}
+						</div>
+					)}
 					<div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
 						<Btn
 							variant="ghost"
@@ -760,7 +889,11 @@ export default function JobDetailPage() {
 							color: stateColor[selected.lastState] ? undefined : "#666",
 						}}
 					>
-						{selected.historyOnly ? selected.lastState : selected.triggers?.length ? selected.lastState : "paused"}
+						{selected.historyOnly
+							? selected.lastState
+							: selected.triggers?.length
+								? selected.lastState
+								: "paused"}
 					</span>
 				</div>
 				{selected.recentRuns?.slice(0, 8).map((run) => (

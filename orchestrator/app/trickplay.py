@@ -16,9 +16,13 @@ from app.client_auth import issue_ticket
 from app.config import Config
 from app.images import WEBP_QUALITY
 from app.logging_config import get_logger
-from app.progress import ProgressReporter, resolve_progress_item, format_progress_message
 from app.models.playback_settings import PlaybackSettings
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
+from app.progress import (
+    ProgressReporter,
+    format_progress_message,
+    resolve_progress_item,
+)
 from fastapi import HTTPException
 
 SHEET_COLUMNS = 10
@@ -416,7 +420,9 @@ class TrickplayExtractor:
                 if not asset:
                     return
                 try:
-                    item_label = resolve_progress_item(self.db, asset.get("entityId"), asset.get("path"))
+                    item_label = resolve_progress_item(
+                        self.db, asset.get("entityId"), asset.get("path")
+                    )
                     reporter.start(item_label)
                     extractor = self.extract
                     if len(inspect.signature(extractor).parameters) >= 2:
@@ -435,7 +441,9 @@ class TrickplayExtractor:
                     with progress_lock:
                         failures.append(asset["mediaFileId"])
                     reporter.settle(
-                        resolve_progress_item(self.db, asset.get("entityId"), asset.get("path")),
+                        resolve_progress_item(
+                            self.db, asset.get("entityId"), asset.get("path")
+                        ),
                         failed=True,
                     )
                     logger.warning(

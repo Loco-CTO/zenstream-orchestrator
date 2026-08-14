@@ -6,12 +6,13 @@ jobs.  It does not schedule work, claim items, or alter job state transitions.
 
 from __future__ import annotations
 
-import time
 import re
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 PROGRESS_TOTAL = 10_000
 
@@ -113,14 +114,32 @@ def resolve_progress_item(db, entity_id: str | None, fallback: Any = None) -> st
                         series_title = None
             episode_title = sanitize_progress_item(title or fallback_label)
             if series_title:
-                number = f"S{int(season_number):02d}E{int(episode_number):02d}" if season_number is not None and episode_number is not None else None
-                return sanitize_progress_item(" — ".join(value for value in (series_title, number, episode_title) if value)) or "episode"
+                number = (
+                    f"S{int(season_number):02d}E{int(episode_number):02d}"
+                    if season_number is not None and episode_number is not None
+                    else None
+                )
+                return (
+                    sanitize_progress_item(
+                        " — ".join(
+                            value
+                            for value in (series_title, number, episode_title)
+                            if value
+                        )
+                    )
+                    or "episode"
+                )
         relative_label = (
             re.split(r"[\\/]", str(relative_path).rstrip("\\/"))[-1]
             if relative_path
             else None
         )
-        return sanitize_progress_item(title or fallback_label or relative_label or entity_id) or "item"
+        return (
+            sanitize_progress_item(
+                title or fallback_label or relative_label or entity_id
+            )
+            or "item"
+        )
     except Exception:
         return fallback_label or sanitize_progress_item(entity_id) or "item"
 
@@ -128,7 +147,9 @@ def resolve_progress_item(db, entity_id: str | None, fallback: Any = None) -> st
 class ProgressReporter:
     """Thread-safe latest-snapshot reporter for concurrent background work."""
 
-    def __init__(self, emit: Callable[..., None], *, unit: str, min_interval: float = 0.5):
+    def __init__(
+        self, emit: Callable[..., None], *, unit: str, min_interval: float = 0.5
+    ):
         self.emit = emit
         self.unit = unit
         self.min_interval = min_interval
@@ -141,7 +162,9 @@ class ProgressReporter:
         self.active: list[str] = []
         self._last_emit = 0.0
 
-    def stage(self, phase: str, label: str, *, total: int | None = None, force: bool = True) -> None:
+    def stage(
+        self, phase: str, label: str, *, total: int | None = None, force: bool = True
+    ) -> None:
         with self.lock:
             self.phase, self.label = phase, label
             if total is not None:
@@ -155,7 +178,9 @@ class ProgressReporter:
             self.active.append(safe)
             self._publish_locked(force=self._last_emit < 0.001)
 
-    def settle(self, item: Any = None, *, failed: bool = False, force: bool = False) -> None:
+    def settle(
+        self, item: Any = None, *, failed: bool = False, force: bool = False
+    ) -> None:
         with self.lock:
             safe = sanitize_progress_item(item)
             if safe:

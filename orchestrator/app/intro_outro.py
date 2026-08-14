@@ -11,8 +11,12 @@ from threading import Lock
 
 from app.config import Config
 from app.logging_config import get_logger
-from app.progress import ProgressReporter, resolve_progress_item, format_progress_message
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
+from app.progress import (
+    ProgressReporter,
+    format_progress_message,
+    resolve_progress_item,
+)
 from fastapi import HTTPException
 
 logger = get_logger("intro_outro")
@@ -806,7 +810,11 @@ class IntroOutroDetector:
                 if not asset:
                     return
                 try:
-                    item_label = resolve_progress_item(getattr(self.store, "db", None), asset.get("entityId"), asset.get("path"))
+                    item_label = resolve_progress_item(
+                        getattr(self.store, "db", None),
+                        asset.get("entityId"),
+                        asset.get("path"),
+                    )
                     reporter.start(item_label)
                     duration = asset["durationSeconds"]
                     intro_duration = min(
@@ -843,7 +851,11 @@ class IntroOutroDetector:
                     with progress_lock:
                         failures += 1
                     reporter.settle(
-                        resolve_progress_item(getattr(self.store, "db", None), asset.get("entityId"), asset.get("path")),
+                        resolve_progress_item(
+                            getattr(self.store, "db", None),
+                            asset.get("entityId"),
+                            asset.get("path"),
+                        ),
                         failed=True,
                     )
                     logger.warning(
@@ -881,25 +893,31 @@ class IntroOutroDetector:
         else:
             reporter.stage("comparison", "Comparing fingerprints", total=None)
             comparison_progress = lambda current, total, season: job_store.update_run(
-                    run_id,
-                    progress_current=current,
-                    progress_total=total,
-                    progress_phase="comparison",
-                    progress_label="Comparing fingerprints",
-                    progress_stage_current=current,
-                    progress_stage_total=total,
-                    progress_stage_unit="seasons",
-                    progress_current_item=resolve_progress_item(getattr(self.store, "db", None), season, season),
-                    message=format_progress_message(
-                        "Comparing fingerprints",
-                        item=resolve_progress_item(getattr(self.store, "db", None), season, season),
-                        current=current,
-                        total=total,
-                        unit="seasons",
+                run_id,
+                progress_current=current,
+                progress_total=total,
+                progress_phase="comparison",
+                progress_label="Comparing fingerprints",
+                progress_stage_current=current,
+                progress_stage_total=total,
+                progress_stage_unit="seasons",
+                progress_current_item=resolve_progress_item(
+                    getattr(self.store, "db", None), season, season
+                ),
+                message=format_progress_message(
+                    "Comparing fingerprints",
+                    item=resolve_progress_item(
+                        getattr(self.store, "db", None), season, season
                     ),
-                )
+                    current=current,
+                    total=total,
+                    unit="seasons",
+                ),
+            )
             try:
-                markers = self.store.recompute_all(settings, progress=comparison_progress)
+                markers = self.store.recompute_all(
+                    settings, progress=comparison_progress
+                )
             except TypeError as error:
                 if "progress" not in str(error):
                     raise

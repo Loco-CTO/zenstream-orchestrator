@@ -1,7 +1,6 @@
 from alembic import op
 from sqlalchemy import Column, Integer, Text
 
-
 revision = "0027_job_progress_detail"
 down_revision = "0026_catalog_user_state_indexes"
 branch_labels = None

@@ -865,9 +865,7 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("USE TEMP B-TREE FOR ORDER BY", plan_text)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_continue_watching_plan_streams_from_partial_state_index(
-        self, _languages
-    ):
+    def test_continue_watching_plan_streams_from_partial_state_index(self, _languages):
         user_id = self.account().create("continue-plan", "password-123")["id"]
         self.db.execute(
             "INSERT INTO user_library_access VALUES(?,?,?)",

@@ -29,7 +29,13 @@ export type JobTrigger =
 			options?: Record<string, unknown>;
 			nextRunAt?: string | null;
 	  }
-	| { id: string; type: "daily"; time: string; options?: Record<string, unknown>; nextRunAt?: string | null }
+	| {
+			id: string;
+			type: "daily";
+			time: string;
+			options?: Record<string, unknown>;
+			nextRunAt?: string | null;
+	  }
 	| {
 			id: string;
 			type: "weekly";
@@ -38,7 +44,12 @@ export type JobTrigger =
 			options?: Record<string, unknown>;
 			nextRunAt?: string | null;
 	  }
-	| { id: string; type: "startup"; options?: Record<string, unknown>; nextRunAt?: string | null };
+	| {
+			id: string;
+			type: "startup";
+			options?: Record<string, unknown>;
+			nextRunAt?: string | null;
+	  };
 
 export type JobOptionDefinition = {
 	key: string;

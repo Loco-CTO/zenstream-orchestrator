@@ -113,7 +113,11 @@ export default function JobsPage() {
 			);
 		} else {
 			if (task.optionDefinitions?.length) {
-				setRunOptions(Object.fromEntries(task.optionDefinitions.map((item) => [item.key, item.default ?? false])));
+				setRunOptions(
+					Object.fromEntries(
+						task.optionDefinitions.map((item) => [item.key, item.default ?? false]),
+					),
+				);
 				setRunTask(task);
 				return;
 			}
@@ -127,7 +131,9 @@ export default function JobsPage() {
 	async function confirmRun() {
 		if (!session || !runTask) return;
 		await adminFetch(`/api/admin/jobs/${runTask.id}/run`, session, {
-			method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ options: runOptions }),
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ options: runOptions }),
 		});
 		setRunTask(null);
 		await load(session);
@@ -136,11 +142,77 @@ export default function JobsPage() {
 	return (
 		<div className="dashboard-page dashboard-design">
 			{runTask && (
-				<div role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setRunTask(null)} style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.72)", padding: 20 }}>
-					<div role="dialog" aria-modal="true" style={{ width: "100%", maxWidth: 420, background: "#101010", border: "1px solid var(--border-strong)", borderRadius: 12, padding: 22 }}>
-						<h2 style={{ margin: "0 0 20px", fontSize: 16, color: "#fff" }}>Run {runTask.name}</h2>
-						{runTask.optionDefinitions?.map((option) => <label key={option.key} style={{ display: "flex", gap: 8, color: "#aaa", fontSize: 12, marginBottom: 14 }}><input type="checkbox" checked={Boolean(runOptions[option.key] ?? option.default)} onChange={(event) => setRunOptions((current) => ({ ...current, [option.key]: event.target.checked }))} />{option.label}</label>)}
-						<div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}><button type="button" onClick={() => setRunTask(null)} className="rounded-lg border console-divider px-3 py-2 text-sm">Cancel</button><button type="button" onClick={() => void confirmRun()} className="console-button rounded-lg px-3 py-2 text-sm">Run now</button></div>
+				<div
+					role="presentation"
+					onMouseDown={(event) =>
+						event.target === event.currentTarget && setRunTask(null)
+					}
+					style={{
+						position: "fixed",
+						inset: 0,
+						zIndex: 50,
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						background: "rgba(0,0,0,.72)",
+						padding: 20,
+					}}
+				>
+					<div
+						role="dialog"
+						aria-modal="true"
+						style={{
+							width: "100%",
+							maxWidth: 420,
+							background: "#101010",
+							border: "1px solid var(--border-strong)",
+							borderRadius: 12,
+							padding: 22,
+						}}
+					>
+						<h2 style={{ margin: "0 0 20px", fontSize: 16, color: "#fff" }}>
+							Run {runTask.name}
+						</h2>
+						{runTask.optionDefinitions?.map((option) => (
+							<label
+								key={option.key}
+								style={{
+									display: "flex",
+									gap: 8,
+									color: "#aaa",
+									fontSize: 12,
+									marginBottom: 14,
+								}}
+							>
+								<input
+									type="checkbox"
+									checked={Boolean(runOptions[option.key] ?? option.default)}
+									onChange={(event) =>
+										setRunOptions((current) => ({
+											...current,
+											[option.key]: event.target.checked,
+										}))
+									}
+								/>
+								{option.label}
+							</label>
+						))}
+						<div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+							<button
+								type="button"
+								onClick={() => setRunTask(null)}
+								className="rounded-lg border console-divider px-3 py-2 text-sm"
+							>
+								Cancel
+							</button>
+							<button
+								type="button"
+								onClick={() => void confirmRun()}
+								className="console-button rounded-lg px-3 py-2 text-sm"
+							>
+								Run now
+							</button>
+						</div>
 					</div>
 				</div>
 			)}

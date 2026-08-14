@@ -95,20 +95,14 @@ export default function IntroOutroPage() {
 
 	const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
 		setSettings((current) => ({ ...current, [key]: value }));
-	const load = useCallback(
-		async (current: Session | null) => {
-			if (!current) return;
-			const response = await adminFetch(
-				"/api/admin/intro-outro/settings",
-				current,
-			);
-			if (!response.ok) return;
-			const value = await response.json();
-			setSettings({ ...defaults, ...value });
-			setTask(value.task || null);
-		},
-		[],
-	);
+	const load = useCallback(async (current: Session | null) => {
+		if (!current) return;
+		const response = await adminFetch("/api/admin/intro-outro/settings", current);
+		if (!response.ok) return;
+		const value = await response.json();
+		setSettings({ ...defaults, ...value });
+		setTask(value.task || null);
+	}, []);
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
@@ -334,7 +328,15 @@ export default function IntroOutroPage() {
 						</p>
 						<p>
 							<span className="console-muted">Schedule: </span>
-							{task.triggers?.length ? task.triggers.map((trigger) => trigger.type === "interval" ? `every ${Math.round((trigger.intervalSeconds || 0) / 60)} minutes` : trigger.type).join(", ") : "disabled (no triggers)"}
+							{task.triggers?.length
+								? task.triggers
+										.map((trigger) =>
+											trigger.type === "interval"
+												? `every ${Math.round((trigger.intervalSeconds || 0) / 60)} minutes`
+												: trigger.type,
+										)
+										.join(", ")
+								: "disabled (no triggers)"}
 						</p>
 						{task.lastMessage && <p className="console-muted">{task.lastMessage}</p>}
 						{task.nextRunAt && (

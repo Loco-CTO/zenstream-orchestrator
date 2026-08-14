@@ -744,7 +744,9 @@ class LibraryStore:
 
     def job(self, job_id: str) -> dict | None:
         try:
-            columns = {row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")}
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")
+            }
         except Exception:
             columns = set()
         detail_columns = [
@@ -759,7 +761,9 @@ class LibraryStore:
             )
         ]
         rows = self.db.execute(
-            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at," + ",".join(detail_columns) + " FROM library_jobs WHERE id=?",
+            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,"
+            + ",".join(detail_columns)
+            + " FROM library_jobs WHERE id=?",
             (job_id,),
         )
         if not rows:
@@ -847,7 +851,9 @@ class LibraryStore:
             "progress_current_item",
         }
         try:
-            columns = {row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")}
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")
+            }
             allowed = {key for key in allowed if key in columns}
         except Exception:
             pass
@@ -910,8 +916,15 @@ class LibraryScanner:
             total = context.get("total")
             self.store.update_job(
                 job_id,
-                message=stage if current is None or total is None else f"{stage} · {current}/{total}",
-                progress_phase="finalization" if any(token in stage.casefold() for token in ("prun", "refresh", "queue", "reconcil")) else "processing",
+                message=stage
+                if current is None or total is None
+                else f"{stage} · {current}/{total}",
+                progress_phase="finalization"
+                if any(
+                    token in stage.casefold()
+                    for token in ("prun", "refresh", "queue", "reconcil")
+                )
+                else "processing",
                 progress_label=stage,
                 progress_stage_current=current,
                 progress_stage_total=total,

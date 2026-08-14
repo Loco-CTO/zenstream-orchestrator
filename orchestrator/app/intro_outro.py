@@ -787,16 +787,15 @@ class IntroOutroDetector:
             raise RuntimeError("Media source is unavailable.")
         output = run_ffmpeg(
             self.fingerprint_command(
-                path, start, duration, getattr(
-                    self, "ffmpeg_threads", DEFAULT_INTRO_OUTRO_FFMPEG_THREADS
-                )
+                path,
+                start,
+                duration,
+                getattr(self, "ffmpeg_threads", DEFAULT_INTRO_OUTRO_FFMPEG_THREADS),
             ),
             should_terminate=should_terminate,
         )
         if not output or len(output) % 4:
-            raise RuntimeError(
-                "FFmpeg did not return a raw Chromaprint fingerprint."
-            )
+            raise RuntimeError("FFmpeg did not return a raw Chromaprint fingerprint.")
         return output
 
     def run(self, run_id: str, job_store, should_terminate=None) -> None:

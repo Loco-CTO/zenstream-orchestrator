@@ -193,8 +193,8 @@ class ProgressReporter:
     def item_progress(
         self,
         item: Any,
-        current: float | int,
-        total: float | int,
+        current: float,
+        total: float,
         *,
         unit: str = "seconds",
     ) -> None:

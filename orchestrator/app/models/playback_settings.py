@@ -67,7 +67,10 @@ class PlaybackSettings:
                 raise ValueError(
                     f"{name} must be between 1 and {MAX_ALLOWED_TRANSCODES}."
                 )
-            if name == "trickplayFfmpegThreads" and not 0 <= integer <= MAX_ALLOWED_TRANSCODES:
+            if (
+                name == "trickplayFfmpegThreads"
+                and not 0 <= integer <= MAX_ALLOWED_TRANSCODES
+            ):
                 raise ValueError(
                     f"{name} must be between 0 and {MAX_ALLOWED_TRANSCODES}."
                 )
@@ -122,7 +125,13 @@ class PlaybackSettings:
             return defaults
         try:
             return self.normalize(
-                rows[0][0], rows[0][1], rows[0][2], rows[0][3], rows[0][4], rows[0][5], rows[0][6]
+                rows[0][0],
+                rows[0][1],
+                rows[0][2],
+                rows[0][3],
+                rows[0][4],
+                rows[0][5],
+                rows[0][6],
             )
         except (IndexError, TypeError, ValueError):
             return defaults

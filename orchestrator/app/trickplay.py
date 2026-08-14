@@ -13,11 +13,11 @@ from threading import Lock
 
 from app.client_auth import issue_ticket
 from app.config import Config
+from app.ffmpeg_supervisor import run_ffmpeg
 from app.images import WEBP_QUALITY
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
-from app.ffmpeg_supervisor import run_ffmpeg
 from app.progress import (
     ProgressReporter,
     format_progress_message,
@@ -390,6 +390,7 @@ class TrickplayExtractor:
         root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=root, prefix=".tmp-") as temporary:
             temporary_root = Path(temporary)
+
             def progress(record: dict[str, str]) -> None:
                 if on_progress is None:
                     return

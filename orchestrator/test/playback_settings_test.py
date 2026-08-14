@@ -174,7 +174,11 @@ class PlaybackSettingsTest(unittest.TestCase):
             ],
             64,
         )
-        with self.assertRaisesRegex(ValueError, "trickplayFfmpegThreads must be between 0 and 64"):
+        with self.assertRaisesRegex(
+            ValueError, "trickplayFfmpegThreads must be between 0 and 64"
+        ):
             PlaybackSettings.normalize(0, 0, 320, 180, 10, 1, -1)
-        with self.assertRaisesRegex(ValueError, "trickplayFfmpegThreads must be between 0 and 64"):
+        with self.assertRaisesRegex(
+            ValueError, "trickplayFfmpegThreads must be between 0 and 64"
+        ):
             PlaybackSettings.normalize(0, 0, 320, 180, 10, 1, 65)

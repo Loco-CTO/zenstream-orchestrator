@@ -74,9 +74,7 @@ def run_ffmpeg(
         "text": False,
     }
     if progress is not None:
-        popen_kwargs.update(
-            text=True, encoding="utf-8", errors="replace", bufsize=1
-        )
+        popen_kwargs.update(text=True, encoding="utf-8", errors="replace", bufsize=1)
     process = subprocess.Popen(list(command), **popen_kwargs)
     stdout_chunks: list[bytes] = []
     stderr_chunks: list[bytes] = []
@@ -120,8 +118,12 @@ def run_ffmpeg(
         except BaseException as error:  # pragma: no cover - defensive cleanup
             reader_errors.append(error)
 
-    stdout_thread = threading.Thread(target=read_stdout, name="ffmpeg-stdout", daemon=True)
-    stderr_thread = threading.Thread(target=read_stderr, name="ffmpeg-stderr", daemon=True)
+    stdout_thread = threading.Thread(
+        target=read_stdout, name="ffmpeg-stdout", daemon=True
+    )
+    stderr_thread = threading.Thread(
+        target=read_stderr, name="ffmpeg-stderr", daemon=True
+    )
     stdout_thread.start()
     stderr_thread.start()
     started = time.monotonic()

@@ -13,12 +13,8 @@ from app.ffmpeg_supervisor import (
 
 class FakeProcess:
     def __init__(self, *, stdout=b"", stderr=b"", running=False, resist=False):
-        self.stdout = (
-            stdout if hasattr(stdout, "read") else io.BytesIO(stdout)
-        )
-        self.stderr = (
-            stderr if hasattr(stderr, "read") else io.BytesIO(stderr)
-        )
+        self.stdout = stdout if hasattr(stdout, "read") else io.BytesIO(stdout)
+        self.stderr = stderr if hasattr(stderr, "read") else io.BytesIO(stderr)
         self.returncode = None if running else 0
         self.resist = resist
         self.terminate_calls = 0

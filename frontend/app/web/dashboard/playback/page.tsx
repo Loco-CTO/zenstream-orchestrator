@@ -231,9 +231,12 @@ export default function PlaybackPage() {
 						/>
 					</label>
 					<label className="block">
-						<span className="text-sm font-semibold">Trickplay FFmpeg threads per process</span>
+						<span className="text-sm font-semibold">
+							Trickplay FFmpeg threads per process
+						</span>
 						<span className="mt-1 block text-xs console-muted">
-							Explicit per-process FFmpeg threads; 0 lets FFmpeg choose automatically. Total pressure is approximately workers × threads.
+							Explicit per-process FFmpeg threads; 0 lets FFmpeg choose automatically.
+							Total pressure is approximately workers × threads.
 						</span>
 						<input
 							type="number"

@@ -15,12 +15,13 @@ from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import browser_origins
-from app.config import load_config
+from app.config import Config, load_config
 from app.foreground import (
     active_auth_work,
     active_control_work,
     active_requests,
     metrics as foreground_metrics,
+    run_auth,
     run_control,
     run_foreground,
 )
@@ -37,6 +38,15 @@ from fastapi.staticfiles import StaticFiles
 from version import __version__
 
 request_logger = get_logger("http")
+
+
+def _authenticate_bearer(token: str):
+    return Account().authenticate_token(token)
+
+
+def _database_metrics():
+    instance = Config._instance
+    return instance.database.metrics() if instance is not None else {}
 
 
 @asynccontextmanager
@@ -63,12 +73,16 @@ async def lifespan(_app: FastAPI):
             current = loop.time()
             lag = current - expected
             if lag >= 0.25:
+                socket_metrics = await hub.queue_metrics()
                 get_logger("event_loop").warning(
-                    "event loop lag lag_ms=%.1f foreground_active=%s control_active=%s auth_active=%s",
+                    "event loop lag lag_ms=%.1f foreground_active=%s control_active=%s auth_active=%s foreground_metrics=%s sqlite_metrics=%s websocket_metrics=%s",
                     lag * 1000,
                     active_requests(),
                     active_control_work(),
                     active_auth_work(),
+                    foreground_metrics(),
+                    _database_metrics(),
+                    socket_metrics,
                 )
             expected = current + interval
 
@@ -119,19 +133,16 @@ async def request_timing(request, call_next):
     auth_ms = 0.0
     if authorization:
         from app.client_auth import bearer_token
-        from app.models.account import Account
 
         token = bearer_token(authorization)
         if token:
-            request.state.authenticated = await run_foreground(
-                Account().authenticate_token, token
-            )
+            request.state.authenticated = await run_auth(_authenticate_bearer, token)
             auth_ms = (time.perf_counter() - auth_started) * 1000
     response = await call_next(request)
     duration_ms = (time.perf_counter() - started) * 1000
     log = request_logger.warning if duration_ms >= 500 else request_logger.debug
     log(
-        "request complete method=%s path=%s status=%s duration_ms=%.1f auth_ms=%.1f foreground_active=%s control_active=%s auth_active=%s foreground_metrics=%s",
+        "request complete method=%s path=%s status=%s duration_ms=%.1f auth_ms=%.1f foreground_active=%s control_active=%s auth_active=%s foreground_metrics=%s sqlite_metrics=%s",
         request.method,
         request.url.path,
         response.status_code,
@@ -141,6 +152,7 @@ async def request_timing(request, call_next):
         active_control_work(),
         active_auth_work(),
         foreground_metrics(),
+        _database_metrics(),
     )
     return response
 

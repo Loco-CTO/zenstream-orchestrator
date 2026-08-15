@@ -55,6 +55,7 @@ export default function InvitesPage() {
 	const [createOpen, setCreateOpen] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [inviteLink, setInviteLink] = useState("");
+	const [publicWebUrl, setPublicWebUrl] = useState("");
 	const [inviteToDelete, setInviteToDelete] = useState<Invite | null>(null);
 	const [selectedLibraries, setSelectedLibraries] = useState<string[]>([]);
 	const [unlimitedUses, setUnlimitedUses] = useState(false);
@@ -63,17 +64,13 @@ export default function InvitesPage() {
 	const [expiryValue, setExpiryValue] = useState("7");
 	const [expiryUnit, setExpiryUnit] = useState<DurationUnit>("days");
 
-	const publicWebUrl = (process.env.NEXT_PUBLIC_ZENSTREAM_WEB_URL || "").replace(
-		/\/+$/,
-		"",
-	);
-
 	async function load(current = session) {
 		if (!current) return;
 		setLoading(true);
-		const [inviteResponse, libraryResponse] = await Promise.all([
+		const [inviteResponse, libraryResponse, publicWebResponse] = await Promise.all([
 			adminFetch("/api/admin/invites", current),
 			adminFetch("/api/admin/libraries", current),
+			adminFetch("/api/config/public-web-url", current),
 		]);
 		if (inviteResponse.ok) {
 			const payload = (await inviteResponse.json()) as { invites?: Invite[] };
@@ -81,6 +78,12 @@ export default function InvitesPage() {
 		}
 		if (libraryResponse.ok)
 			setLibraries((await libraryResponse.json()) as Library[]);
+		if (publicWebResponse.ok) {
+			const payload = (await publicWebResponse.json()) as {
+				publicWebUrl?: string;
+			};
+			setPublicWebUrl((payload.publicWebUrl || "").replace(/\/+$/, ""));
+		} else setPublicWebUrl("");
 		if (!inviteResponse.ok || !libraryResponse.ok)
 			setMessage("Could not load invite information.");
 		setLoading(false);

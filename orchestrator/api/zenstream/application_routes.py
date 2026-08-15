@@ -444,7 +444,7 @@ async def admin_login(
     Password: str | None = Header(None),
 ):
     username, password = _user_headers(Username, Password)
-    token = Admin(username).login(password)
+    token = await run_auth(Admin(username).login, password)
     if not token:
         raise HTTPException(403, "Invalid administrator credentials.")
     response = JSONResponse({"username": username}, status_code=202)
@@ -466,8 +466,8 @@ async def admin_logout(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, token = _admin_request(request, Username, TOKEN)
-    Admin(username).logout(token)
+    username, token = await _admin_request_async(request, Username, TOKEN)
+    await run_control(Admin(username).logout, token)
     response = Response(status_code=204)
     response.delete_cookie(
         ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session",
@@ -488,11 +488,11 @@ async def admin_profile(
     TOKEN: str | None = Header(None),
 ):
     username, _ = (
-        _admin_request(request, Username, TOKEN)
+        await _admin_request_async(request, Username, TOKEN)
         if request is not None
-        else _admin_headers(Username, TOKEN)
+        else await run_auth(_admin_headers, Username, TOKEN)
     )
-    profile = Admin(username).profile()
+    profile = await run_control(Admin(username).profile)
     if not profile:
         raise HTTPException(404, "Administrator account not found.")
     return profile
@@ -507,12 +507,14 @@ async def admin_update_profile(
     TOKEN: str | None = Header(None),
 ):
     username, token = (
-        _admin_request(request, Username, TOKEN)
+        await _admin_request_async(request, Username, TOKEN)
         if request is not None
-        else _admin_headers(Username, TOKEN)
+        else await run_auth(_admin_headers, Username, TOKEN)
     )
     try:
-        result = Admin(username).update_profile(New_Username, New_Password, token)
+        result = await run_auth(
+            Admin(username).update_profile, New_Username, New_Password, token
+        )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     return {"username": result["username"]}
@@ -524,23 +526,27 @@ async def admin_overview(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _admin_request(request, Username, TOKEN)
-    db = Admin(username)._db
-    counts = db.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users"
-    )[0]
-    active_invites = sum(
-        1 for invite in Invite().list() if invite["status"] == "active"
-    )
-    return {
-        "users": counts[0] or 0,
-        "active_users": counts[1] or 0,
-        "disabled_users": counts[2] or 0,
-        "administrators": db.execute("SELECT COUNT(*) FROM admins WHERE disabled = 0")[
-            0
-        ][0],
-        "pending_invites": active_invites,
-    }
+    username, _ = await _admin_request_async(request, Username, TOKEN)
+
+    def overview():
+        db = Admin(username)._db
+        counts = db.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users"
+        )[0]
+        active_invites = sum(
+            1 for invite in Invite().list() if invite["status"] == "active"
+        )
+        return {
+            "users": counts[0] or 0,
+            "active_users": counts[1] or 0,
+            "disabled_users": counts[2] or 0,
+            "administrators": db.execute(
+                "SELECT COUNT(*) FROM admins WHERE disabled = 0"
+            )[0][0],
+            "pending_invites": active_invites,
+        }
+
+    return await run_control(overview)
 
 
 @router.get("/api/admin/playback/settings")
@@ -549,8 +555,8 @@ async def admin_playback_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    return PlaybackSettings().get()
+    await _admin_request_async(request, Username, TOKEN)
+    return await run_control(PlaybackSettings().get)
 
 
 @router.put("/api/admin/playback/settings")
@@ -559,9 +565,9 @@ async def update_admin_playback_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
+    await _admin_request_async(request, Username, TOKEN)
     data = await request.json()
-    current = PlaybackSettings().get()
+    current = await run_control(PlaybackSettings().get)
     width = data.get("trickplayFrameWidth", current["trickplayFrameWidth"])
     height = data.get("trickplayFrameHeight")
     if height is None:
@@ -570,7 +576,8 @@ async def update_admin_playback_settings(
         except (TypeError, ValueError):
             height = current["trickplayFrameHeight"]
     try:
-        values = PlaybackSettings().set(
+        values = await run_control(
+            PlaybackSettings().set,
             data.get("maxTranscodes", current["maxTranscodes"]),
             data.get("maxTranscodesPerUser", current["maxTranscodesPerUser"]),
             width,
@@ -590,10 +597,14 @@ async def admin_intro_outro_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    store = IntroOutroStore()
-    definition = scheduler.store.by_key("intro_outro_detect")
-    return {**store.settings(), "task": definition}
+    await _admin_request_async(request, Username, TOKEN)
+
+    def settings():
+        store = IntroOutroStore()
+        definition = scheduler.store.by_key("intro_outro_detect")
+        return {**store.settings(), "task": definition}
+
+    return await run_control(settings)
 
 
 @router.put("/api/admin/intro-outro/settings")
@@ -602,12 +613,17 @@ async def update_admin_intro_outro_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
+    await _admin_request_async(request, Username, TOKEN)
+    data = await request.json()
     try:
-        settings = IntroOutroStore().update_settings(await request.json())
+        def update():
+            settings = IntroOutroStore().update_settings(data)
+            scheduler.enqueue_intro_outro_detection()
+            return settings
+
+        settings = await run_control(update)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
-    scheduler.enqueue_intro_outro_detection()
     return settings
 
 
@@ -617,8 +633,8 @@ async def clear_admin_intro_outro_segments(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    return {"removedSegments": IntroOutroStore().clear_segments()}
+    await _admin_request_async(request, Username, TOKEN)
+    return {"removedSegments": await run_control(IntroOutroStore().clear_segments)}
 
 
 @router.get("/api/admin/accounts")
@@ -627,8 +643,8 @@ async def admin_accounts(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _admin_request(request, Username, TOKEN)
-    return Admin(username).list_accounts()
+    username, _ = await _admin_request_async(request, Username, TOKEN)
+    return await run_control(Admin(username).list_accounts)
 
 
 @router.post("/api/admin/accounts", status_code=201)
@@ -639,12 +655,12 @@ async def admin_create_account(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _admin_request(request, Username, TOKEN)
+    username, _ = await _admin_request_async(request, Username, TOKEN)
     if (
         not Target_Username
         or not New_Password
         or len(New_Password) < 8
-        or not Admin(username).create(Target_Username, New_Password)
+        or not await run_auth(Admin(username).create, Target_Username, New_Password)
     ):
         raise HTTPException(400, "Invalid or duplicate administrator account.")
 
@@ -657,10 +673,14 @@ async def admin_set_account_disabled(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _root_admin_request(request, Username, TOKEN)
-    if not Admin(username).set_disabled(target_username.strip(), disabled):
-        raise HTTPException(404, "Administrator account not found.")
-    profile = Admin(target_username.strip()).profile()
+    username, _ = await _root_admin_request_async(request, Username, TOKEN)
+
+    def update_admin():
+        if not Admin(username).set_disabled(target_username.strip(), disabled):
+            return None
+        return Admin(target_username.strip()).profile()
+
+    profile = await run_control(update_admin)
     if not profile:
         raise HTTPException(404, "Administrator account not found.")
     return profile
@@ -672,7 +692,7 @@ async def admin_create_invite(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
+    await _admin_request_async(request, Username, TOKEN)
     data = await _bounded_json_object(request)
     try:
         max_uses = data.get("maxUses", 1)
@@ -681,7 +701,8 @@ async def admin_create_invite(
             max_uses = int(max_uses)
         if expires_in_seconds is not None:
             expires_in_seconds = int(expires_in_seconds)
-        return Invite().create(
+        return await run_control(
+            Invite().create,
             library_ids=data.get("libraryIds") or [],
             max_uses=max_uses,
             expires_in_seconds=expires_in_seconds,
@@ -696,8 +717,8 @@ async def admin_list_invites(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    return {"invites": Invite().list()}
+    await _admin_request_async(request, Username, TOKEN)
+    return {"invites": await run_control(Invite().list)}
 
 
 @router.delete("/api/admin/invites/{invite_id}", status_code=204)
@@ -707,8 +728,8 @@ async def admin_delete_invite(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    if not Invite().delete(invite_id):
+    await _admin_request_async(request, Username, TOKEN)
+    if not await run_control(Invite().delete, invite_id):
         raise HTTPException(404, "Invite not found.")
     return Response(status_code=204)
 
@@ -719,7 +740,7 @@ async def check_invite(
     url: str | None = Header(None),
 ):
     token = invite if isinstance(invite, str) else url
-    if not isinstance(token, str) or not Invite().validate(token.strip()):
+    if not isinstance(token, str) or not await run_control(Invite().validate, token.strip()):
         raise HTTPException(403, "Invalid invite.")
     return JSONResponse({"valid": True}, status_code=200)
 
@@ -740,8 +761,7 @@ async def public_web_url():
 
 @router.get("/api/config")
 async def mobile_config():
-    ffmpeg = ffmpeg_path()
-    ffprobe = ffprobe_path()
+    ffmpeg, ffprobe = await run_control(lambda: (ffmpeg_path(), ffprobe_path()))
     return {
         "apiVersion": 2,
         "catalog": True,
@@ -761,7 +781,7 @@ async def register_client(request: Request):
     ).strip()
     password = str(data.get("password") or request.headers.get("password") or "")
     try:
-        result = Invite().register(invite_id, username, password)
+        result = await run_auth(Invite().register, invite_id, username, password)
     except PermissionError as error:
         raise HTTPException(403, str(error)) from error
     except ValueError as error:

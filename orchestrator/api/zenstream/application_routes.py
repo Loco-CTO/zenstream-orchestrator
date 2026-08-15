@@ -14,9 +14,9 @@ from app.client_auth import (
     session_cookie_name,
     websocket_account,
 )
+from app.foreground import run_auth, run_control
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
-from app.foreground import run_auth, run_control
 from app.models import Invite
 from app.models.account import Account
 from app.models.admin import ADMIN_SESSION_COOKIE, Admin
@@ -49,8 +49,7 @@ from api.zenstream.version import _main_version
 def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
     """Return full state to members and a safe lobby projection to everyone else."""
     is_member = any(
-        member.get("userId") == user_id
-        and member.get("participantId") == participant
+        member.get("userId") == user_id and member.get("participantId") == participant
         for member in state.get("members", [])
     )
     if is_member:
@@ -185,9 +184,7 @@ class WebSocketHub:
                 self.disconnect_epochs[identity] = (
                     self.disconnect_epochs.get(identity, 0) + 1
                 )
-            epoch = self.disconnect_epochs.get(
-                identity, 0
-            ) if identity else None
+            epoch = self.disconnect_epochs.get(identity, 0) if identity else None
         current = asyncio.current_task()
         if sender is not None and sender is not current:
             sender.cancel()
@@ -625,6 +622,7 @@ async def update_admin_intro_outro_settings(
     await _admin_request_async(request, Username, TOKEN)
     data = await request.json()
     try:
+
         def update():
             settings = IntroOutroStore().update_settings(data)
             scheduler.enqueue_intro_outro_detection()
@@ -749,7 +747,9 @@ async def check_invite(
     url: str | None = Header(None),
 ):
     token = invite if isinstance(invite, str) else url
-    if not isinstance(token, str) or not await run_control(Invite().validate, token.strip()):
+    if not isinstance(token, str) or not await run_control(
+        Invite().validate, token.strip()
+    ):
         raise HTTPException(403, "Invalid invite.")
     return JSONResponse({"valid": True}, status_code=200)
 
@@ -1227,9 +1227,7 @@ async def syncplay_presence(group_id: str, request: Request):
             bool(data.get("loading")),
         )
 
-    state = await run_control(
-        group.mutate, user, None, data.get("operationId"), apply
-    )
+    state = await run_control(group.mutate, user, None, data.get("operationId"), apply)
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
 

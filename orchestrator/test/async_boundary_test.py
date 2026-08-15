@@ -250,7 +250,9 @@ class AsyncRouteBlockingGuardTests(unittest.TestCase):
                     self.generic_visit(node)
                     self.bridge_depth -= 1
                     return
-                attribute = node.func.attr if isinstance(node.func, ast.Attribute) else None
+                attribute = (
+                    node.func.attr if isinstance(node.func, ast.Attribute) else None
+                )
                 root = (
                     AsyncRouteBlockingGuardTests._root_name(node.func.value)
                     if isinstance(node.func, ast.Attribute)

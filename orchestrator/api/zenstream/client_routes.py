@@ -275,9 +275,7 @@ async def login(request: Request):
     data = await _bounded_json_object(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
-    authenticated = await run_auth(
-        _authenticate_and_create_session, username, password
-    )
+    authenticated = await run_auth(_authenticate_and_create_session, username, password)
     if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
     account, session = authenticated
@@ -332,9 +330,7 @@ async def browser_login(request: Request):
     data = await _bounded_json_object(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
-    authenticated = await run_auth(
-        _authenticate_and_create_session, username, password
-    )
+    authenticated = await run_auth(_authenticate_and_create_session, username, password)
     if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
     account, session = authenticated
@@ -486,18 +482,14 @@ async def supported_languages(
 ):
     account, _ = await _require_account(request)
     if not display_language:
-        display_language = await run_control(
-            AccountPreference(account["id"]).locale
-        )
+        display_language = await run_control(AccountPreference(account["id"]).locale)
     return {"languages": language_options(display_language)}
 
 
 @router.get("/api/preferences/locale")
 async def get_locale(request: Request):
     account, _ = await _require_account(request)
-    return {
-        "locale": await run_control(AccountPreference(account["id"]).locale)
-    }
+    return {"locale": await run_control(AccountPreference(account["id"]).locale)}
 
 
 @router.patch("/api/preferences/locale")
@@ -881,9 +873,7 @@ async def item_image(
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
     account = await _require_access(request)
-    image = await run_control(
-        catalog.person_image, account["id"], entity_id, person_id
-    )
+    image = await run_control(catalog.person_image, account["id"], entity_id, person_id)
     if image is None:
         raise HTTPException(404, "Person image not found.")
     return FileResponse(
@@ -982,9 +972,7 @@ async def trickplay_sheet(
 ):
     account = await _require_access(request)
     await run_control(catalog.require_entity, account["id"], entity_id)
-    path = await run_control(
-        trickplay.sheet_path, entity_id, generation, sheet_index
-    )
+    path = await run_control(trickplay.sheet_path, entity_id, generation, sheet_index)
     return FileResponse(
         path,
         media_type="image/webp",
@@ -1059,15 +1047,11 @@ async def playback_output(session_id: str, filename: str, request: Request):
         filename,
         account["id"],
     )
-    path = await run_control(
-        media.session_file, account["id"], session_id, filename
-    )
+    path = await run_control(media.session_file, account["id"], session_id, filename)
     if path.suffix.lower() == ".m3u8":
         access = request.query_params.get("access") or ""
         playlist = await run_control(_read_playlist, path, access)
-        return Response(
-            playlist, media_type="application/vnd.apple.mpegurl"
-        )
+        return Response(playlist, media_type="application/vnd.apple.mpegurl")
     logger.debug(
         "playback segment response session_id=%s filename=%s user_id=%s",
         session_id,

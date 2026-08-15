@@ -20,10 +20,11 @@ from app.foreground import (
     active_auth_work,
     active_control_work,
     active_requests,
-    metrics as foreground_metrics,
     run_auth,
     run_control,
-    run_foreground,
+)
+from app.foreground import (
+    metrics as foreground_metrics,
 )
 from app.foreground import shutdown as shutdown_foreground
 from app.jobs import scheduler as job_scheduler

@@ -199,7 +199,9 @@ class SyncplayGroup:
             if member[0] is not None:
                 members.setdefault(group_id, []).append(member)
         return [
-            cls._state_from_values(group_id, snapshots[group_id], members.get(group_id, []))
+            cls._state_from_values(
+                group_id, snapshots[group_id], members.get(group_id, [])
+            )
             for group_id in snapshots
         ]
 

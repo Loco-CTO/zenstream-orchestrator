@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.client_auth import administrator_origin_allowed
+from app.foreground import run_auth, run_control, run_foreground
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore, render_audio_preview
 from app.jobs import scheduler
-from app.foreground import run_auth, run_control, run_foreground
 from app.library import LibraryStore, runtime
 from app.logging_config import get_logger
 from app.metadata_domain import choose_artwork
@@ -307,9 +307,7 @@ def _list_jobs_sync():
                         "lastState": current["state"]
                         if current
                         else definition["lastState"],
-                        "lastMessage": (
-                            current.get("message") or current.get("error")
-                        )
+                        "lastMessage": (current.get("message") or current.get("error"))
                         if current
                         else definition["lastMessage"],
                     }
@@ -719,9 +717,7 @@ async def update_metadata_languages(
     require_admin(Username, TOKEN)
     data = await request.json()
     try:
-        locales = await run_control(
-            MetadataLanguageSettings().set, data.get("locales")
-        )
+        locales = await run_control(MetadataLanguageSettings().set, data.get("locales"))
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     run = await run_control(scheduler.enqueue_metadata_refresh)
@@ -750,6 +746,7 @@ async def update_provider(
         raise HTTPException(400, "Only TMDB and TheTVDB credentials can be configured.")
     data = await request.json()
     if data.get("clear"):
+
         def clear_provider():
             credentials.clear(provider)
             return credentials.configured()[provider]
@@ -779,6 +776,7 @@ async def update_provider(
             )
         except ProviderError as error:
             raise HTTPException(400, f"Provider validation failed: {error}") from error
+
     def save_provider():
         credentials.set(provider, credential, credential_type)
         return credentials.configured()[provider]
@@ -862,7 +860,9 @@ async def update_library(
 ):
     require_admin(Username, TOKEN)
     try:
-        library = await run_control(_update_library_sync, library_id, await request.json())
+        library = await run_control(
+            _update_library_sync, library_id, await request.json()
+        )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except (ValueError, TypeError) as error:
@@ -965,9 +965,7 @@ async def remove_scheduled_trigger(
     require_admin(Username, TOKEN)
     _require_mutable_task(job_id)
     try:
-        return await run_control(
-            _remove_scheduled_trigger_sync, job_id, trigger_id
-        )
+        return await run_control(_remove_scheduled_trigger_sync, job_id, trigger_id)
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
 
@@ -1464,9 +1462,14 @@ async def find_matches(
     matches = []
     for provider in providers:
         try:
+
             def search_provider():
                 client = MetadataService().client(provider)
-                return client.search(item["type"], search_text) if hasattr(client, "search") else []
+                return (
+                    client.search(item["type"], search_text)
+                    if hasattr(client, "search")
+                    else []
+                )
 
             matches.extend(await run_foreground(search_provider))
         except ProviderError:

@@ -277,6 +277,9 @@ class MetadataSearchProjection:
         columns: set[str],
     ) -> tuple[dict, tuple] | None:
         """Return the first provider-ordered candidate with a ready file."""
+        prefer_no_language_for_backdrop = (
+            MetadataLanguageSettings().prefer_no_language_for_backdrop()
+        )
         for candidate in rank_artwork_candidates(
             images,
             locale,
@@ -287,6 +290,7 @@ class MetadataSearchProjection:
                 language_family(value) == "en"
                 for value in MetadataLanguageSettings().get()
             ),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
         ):
             path_column = "local_path" in columns
             selected = self.db.execute(
@@ -1116,7 +1120,7 @@ class MetadataReadService:
             tuple[str, tuple[tuple[str, str], ...]], dict[tuple[str, str], dict]
         ] = {}
         self._public_resolutions: dict[
-            tuple[str, str, tuple[tuple[str, str], ...], str], dict
+            tuple[str, str, tuple[tuple[str, str], ...], str, bool], dict
         ] = {}
 
     @staticmethod
@@ -1269,7 +1273,16 @@ class MetadataReadService:
                 if identity.get("provider") and identity.get("id")
             )
         )
-        cache_key = (entity_id, entity_type, identities, requested)
+        prefer_no_language_for_backdrop = (
+            MetadataLanguageSettings().prefer_no_language_for_backdrop()
+        )
+        cache_key = (
+            entity_id,
+            entity_type,
+            identities,
+            requested,
+            prefer_no_language_for_backdrop,
+        )
         cached = self._public_resolutions.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
@@ -1287,6 +1300,7 @@ class MetadataReadService:
                 original,
                 providers,
                 entity_id=entity_id,
+                prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
             )
             if choice:
                 image = {
@@ -1336,8 +1350,13 @@ class MetadataReadService:
         original: str | None,
         providers: list[str] | None = None,
         entity_id: str | None = None,
+        prefer_no_language_for_backdrop: bool | None = None,
     ) -> dict | None:
         """Select the first provider-ordered candidate with a ready file."""
+        if prefer_no_language_for_backdrop is None:
+            prefer_no_language_for_backdrop = (
+                MetadataLanguageSettings().prefer_no_language_for_backdrop()
+            )
         identities = {
             str(identity.get("provider")): str(identity.get("id"))
             for identity in provider_ids
@@ -1365,6 +1384,7 @@ class MetadataReadService:
                 language_family(value) == "en"
                 for value in MetadataLanguageSettings().get()
             ),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
         ):
             provider = str(candidate.get("provider") or "")
             provider_id = identities.get(provider)
@@ -2023,6 +2043,9 @@ class MetadataImageIngestService:
         }
         if "metadata_images" not in tables:
             return
+        prefer_no_language_for_backdrop = (
+            MetadataLanguageSettings().prefer_no_language_for_backdrop()
+        )
         for image_type in ARTWORK_CATEGORIES:
             winners: set[str] = set()
             complete = True
@@ -2040,6 +2063,7 @@ class MetadataImageIngestService:
                         language_family(value) == "en"
                         for value in MetadataLanguageSettings().get()
                     ),
+                    prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
                 )
                 choice = next(
                     (
@@ -2114,6 +2138,9 @@ class MetadataImageIngestService:
         ready = failed = skipped = 0
         outcomes: dict[str, str] = {}
         preserved: dict[str, set[str]] = {}
+        prefer_no_language_for_backdrop = (
+            MetadataLanguageSettings().prefer_no_language_for_backdrop()
+        )
         for locale, document in documents.items():
             images = document.get("images", []) if isinstance(document, dict) else []
             if not isinstance(images, list):
@@ -2129,6 +2156,7 @@ class MetadataImageIngestService:
                         language_family(value) == "en"
                         for value in MetadataLanguageSettings().get()
                     ),
+                    prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
                 )
                 if not candidates:
                     continue

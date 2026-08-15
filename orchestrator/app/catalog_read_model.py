@@ -677,6 +677,9 @@ class CatalogReadModel:
             )
             original = raw.get("originalLanguage")
             providers = reader.providers(entity_type)
+            prefer_no_language_for_backdrop = (
+                MetadataLanguageSettings().prefer_no_language_for_backdrop()
+            )
             for image_type in ("Primary", "Backdrop", "Logo", "Banner"):
                 choice = reader.ready_artwork(
                     entity_type,
@@ -687,6 +690,7 @@ class CatalogReadModel:
                     original,
                     providers,
                     entity_id=entity_id,
+                    prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
                 )
                 if choice:
                     provider = str(choice.get("provider") or "")

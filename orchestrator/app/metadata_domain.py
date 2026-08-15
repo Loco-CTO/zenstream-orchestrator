@@ -91,13 +91,16 @@ def image_language_rank(
     original: str | None,
     *,
     include_english: bool = True,
+    prefer_no_language_for_backdrop: bool = False,
 ) -> int:
     language = str(image.get("language") or "").lower()
     requested = str(requested or "").lower()
-    if language == requested:
+    if prefer_no_language_for_backdrop and not language:
         return 0
+    if language == requested:
+        return 1 if prefer_no_language_for_backdrop else 0
     if language and language_family(language) == language_family(requested):
-        return 1
+        return 2 if prefer_no_language_for_backdrop else 1
     if not language:
         return 2
     if include_english and language == "en":
@@ -119,6 +122,7 @@ def choose_artwork(
     providers: list[str],
     *,
     include_english: bool = True,
+    prefer_no_language_for_backdrop: bool = False,
 ) -> dict | None:
     ranked = rank_artwork_candidates(
         images,
@@ -127,6 +131,7 @@ def choose_artwork(
         original,
         providers,
         include_english=include_english,
+        prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
     )
     return ranked[0] if ranked else None
 
@@ -139,6 +144,7 @@ def rank_artwork_candidates(
     providers: list[str],
     *,
     include_english: bool = True,
+    prefer_no_language_for_backdrop: bool = False,
 ) -> list[dict]:
     """Return provider-ordered artwork candidates for one locale/category.
 
@@ -161,6 +167,9 @@ def rank_artwork_candidates(
             requested,
             original,
             include_english=include_english,
+            prefer_no_language_for_backdrop=(
+                prefer_no_language_for_backdrop and image_type == "Backdrop"
+            ),
         )
         if language_rank >= 99:
             continue

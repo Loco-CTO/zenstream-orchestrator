@@ -15,6 +15,9 @@ IMAGE_LANGUAGE_SCHEMA = 3
 
 PROVIDERS = {"tmdb", "tvdb"}
 DEFAULT_METADATA_LOCALES = ["en"]
+PREFER_NO_LANGUAGE_FOR_BACKDROP_KEY = "prefer_no_language_for_backdrop"
+DEFAULT_PREFER_NO_LANGUAGE_FOR_BACKDROP = False
+_UNSET = object()
 
 
 class MetadataLanguageSettings:
@@ -33,6 +36,28 @@ class MetadataLanguageSettings:
         except (TypeError, ValueError, json.JSONDecodeError):
             return list(DEFAULT_METADATA_LOCALES)
 
+    def prefer_no_language_for_backdrop(self) -> bool:
+        try:
+            rows = self.db.read_execute(
+                "SELECT value FROM metadata_settings WHERE key=?",
+                (PREFER_NO_LANGUAGE_FOR_BACKDROP_KEY,),
+            )
+        except Exception:
+            return DEFAULT_PREFER_NO_LANGUAGE_FOR_BACKDROP
+        if not rows:
+            return DEFAULT_PREFER_NO_LANGUAGE_FOR_BACKDROP
+        try:
+            value = json.loads(rows[0][0])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return DEFAULT_PREFER_NO_LANGUAGE_FOR_BACKDROP
+        return value if type(value) is bool else DEFAULT_PREFER_NO_LANGUAGE_FOR_BACKDROP
+
+    def get_settings(self) -> dict:
+        return {
+            "locales": self.get(),
+            "preferNoLanguageForBackdrop": self.prefer_no_language_for_backdrop(),
+        }
+
     @staticmethod
     def normalize(values) -> list[str]:
         if not isinstance(values, list):
@@ -47,22 +72,50 @@ class MetadataLanguageSettings:
         return result
 
     def set(self, values) -> list[str]:
+        return self.update(values)["locales"]
+
+    def update(
+        self,
+        values,
+        prefer_no_language_for_backdrop=_UNSET,
+    ) -> dict:
         locales = self.normalize(values)
-        self.db.execute(
-            "INSERT INTO metadata_settings(key,value,updated_at) VALUES('locales',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-            (json.dumps(locales, ensure_ascii=False), iso_now()),
-        )
-        # An explicit user preference may only point at a configured
-        # language. Removed languages fall back to automatic selection.
-        if self.db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='account_preferences'"
-        ):
-            placeholders = ",".join("?" for _ in locales)
-            self.db.execute(
-                f"UPDATE account_preferences SET metadata_language=NULL WHERE metadata_language IS NOT NULL AND metadata_language NOT IN ({placeholders})",
-                locales,
+        if prefer_no_language_for_backdrop is _UNSET:
+            prefer_no_language_for_backdrop = (
+                self.prefer_no_language_for_backdrop()
             )
-        return locales
+        elif type(prefer_no_language_for_backdrop) is not bool:
+            raise ValueError("preferNoLanguageForBackdrop must be a boolean.")
+
+        timestamp = iso_now()
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "INSERT INTO metadata_settings(key,value,updated_at) VALUES('locales',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (json.dumps(locales, ensure_ascii=False), timestamp),
+            )
+            cursor.execute(
+                "INSERT INTO metadata_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (
+                    PREFER_NO_LANGUAGE_FOR_BACKDROP_KEY,
+                    json.dumps(prefer_no_language_for_backdrop),
+                    timestamp,
+                ),
+            )
+            # An explicit user preference may only point at a configured
+            # language. Removed languages fall back to automatic selection.
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='account_preferences'"
+            )
+            if cursor.fetchall():
+                placeholders = ",".join("?" for _ in locales)
+                cursor.execute(
+                    f"UPDATE account_preferences SET metadata_language=NULL WHERE metadata_language IS NOT NULL AND metadata_language NOT IN ({placeholders})",
+                    locales,
+                )
+        return {
+            "locales": locales,
+            "preferNoLanguageForBackdrop": prefer_no_language_for_backdrop,
+        }
 
 
 def utc_now() -> datetime:

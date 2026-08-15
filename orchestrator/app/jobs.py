@@ -42,6 +42,10 @@ def _english_configured() -> bool:
     )
 
 
+def _prefer_no_language_for_backdrop() -> bool:
+    return MetadataLanguageSettings().prefer_no_language_for_backdrop()
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -105,6 +109,7 @@ def _metadata_document_gaps(
         return {"identity:orphaned"}, []
 
     projected_fields = TEXT_FIELDS | FACT_FIELDS
+    prefer_no_language_for_backdrop = _prefer_no_language_for_backdrop()
     source_images = set()
     for image_type in ARTWORK_TYPES:
         expected = choose_artwork(
@@ -114,6 +119,7 @@ def _metadata_document_gaps(
             document.get("originalLanguage"),
             [provider],
             include_english=_english_configured(),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
         )
         if expected and expected.get("url"):
             source_images.add((image_type, str(expected["url"])))
@@ -194,6 +200,7 @@ def _metadata_document_gaps(
                 document.get("originalLanguage"),
                 [provider],
                 include_english=_english_configured(),
+                prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
             )
             if expected and image_type not in projected_images:
                 gaps.add(f"projection-artwork:{image_type}")

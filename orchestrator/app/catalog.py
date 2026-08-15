@@ -742,6 +742,9 @@ class Catalog:
             image_type,
             raw.get("originalLanguage"),
             service.providers(row[3]),
+            prefer_no_language_for_backdrop=(
+                MetadataLanguageSettings().prefer_no_language_for_backdrop()
+            ),
         )
 
     @_catalog_read

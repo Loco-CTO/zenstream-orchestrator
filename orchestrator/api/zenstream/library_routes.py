@@ -703,7 +703,9 @@ async def metadata_languages(
 ):
     require_admin(Username, TOKEN)
     return {
-        "locales": await run_control(MetadataLanguageSettings().get),
+        **(
+            await run_control(MetadataLanguageSettings().get_settings)
+        ),
         "options": await run_foreground(MetadataService().language_options),
     }
 
@@ -717,11 +719,19 @@ async def update_metadata_languages(
     require_admin(Username, TOKEN)
     data = await request.json()
     try:
-        locales = await run_control(MetadataLanguageSettings().set, data.get("locales"))
+        settings = MetadataLanguageSettings()
+        if "preferNoLanguageForBackdrop" in data:
+            saved = await run_control(
+                settings.update,
+                data.get("locales"),
+                data["preferNoLanguageForBackdrop"],
+            )
+        else:
+            saved = await run_control(settings.update, data.get("locales"))
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     run = await run_control(scheduler.enqueue_metadata_refresh)
-    return {"locales": locales, "backfill": run}
+    return {**saved, "backfill": run}
 
 
 @router.post("/metadata/refresh")
@@ -1551,6 +1561,9 @@ def _get_image_sync(entity_id: str, image_type: str, locale: str):
             image_type,
             metadata.get("originalLanguage"),
             read_service.providers(candidate["type"]),
+            prefer_no_language_for_backdrop=(
+                MetadataLanguageSettings().prefer_no_language_for_backdrop()
+            ),
         )
         if image:
             image_item = candidate

@@ -30,6 +30,8 @@ export default function MetadataPage() {
 	const [pin, setPin] = useState("");
 	const [message, setMessage] = useState("");
 	const [locales, setLocales] = useState<string[]>(["en"]);
+	const [preferNoLanguageForBackdrop, setPreferNoLanguageForBackdrop] =
+		useState(false);
 	const [languageOptions, setLanguageOptions] = useState<LanguageOption[]>([]);
 	const [languageToAdd, setLanguageToAdd] = useState("");
 
@@ -49,6 +51,9 @@ export default function MetadataPage() {
 		if (languageResponse.ok) {
 			const languageData = await languageResponse.json();
 			setLocales(languageData.locales || ["en"]);
+			setPreferNoLanguageForBackdrop(
+				languageData.preferNoLanguageForBackdrop === true,
+			);
 			setLanguageOptions(languageData.options || []);
 		}
 	}
@@ -58,7 +63,7 @@ export default function MetadataPage() {
 		const response = await adminFetch("/api/admin/metadata/languages", session, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ locales }),
+			body: JSON.stringify({ locales, preferNoLanguageForBackdrop }),
 		});
 		const data = await response.json().catch(() => null);
 		setMessage(
@@ -66,7 +71,12 @@ export default function MetadataPage() {
 				? "Metadata languages saved; existing metadata backfill queued."
 				: data?.detail || "Could not save metadata languages.",
 		);
-		if (response.ok) setLocales(data.locales || locales);
+		if (response.ok) {
+			setLocales(data.locales || locales);
+			setPreferNoLanguageForBackdrop(
+				data.preferNoLanguageForBackdrop === true,
+			);
+		}
 	}
 
 	async function refreshMetadata() {
@@ -228,6 +238,27 @@ export default function MetadataPage() {
 							<IconRefresh size={16} />
 							Refresh metadata
 						</button>
+						<label className="flex w-full items-start gap-3 rounded-xl border console-divider p-4 text-sm">
+							<input
+								type="checkbox"
+								checked={preferNoLanguageForBackdrop}
+								onChange={(event) =>
+									setPreferNoLanguageForBackdrop(event.target.checked)
+								}
+								className="mt-1 h-4 w-4 accent-[#5ee3d8]"
+								aria-describedby="backdrop-language-help"
+							/>
+							<span>
+								<span className="font-semibold">Prefer language-neutral backdrops</span>
+								<span
+									id="backdrop-language-help"
+									className="mt-1 block leading-5 console-muted"
+								>
+									When enabled, a backdrop without a language is selected before the
+									requested language. Other artwork types keep their current order.
+								</span>
+							</span>
+						</label>
 					</div>
 				</section>
 				<form

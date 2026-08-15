@@ -139,8 +139,16 @@ class AccountPreference:
             "WHERE a.user_id=? AND f.role='subtitle' AND f.language IS NOT NULL",
             (self.user_id, self.user_id),
         )
-        audio = {row[1] for row in rows if row[0] == "audio" and row[1]}
-        subtitles = {row[1] for row in rows if row[0] == "subtitle" and row[1]}
+        audio: set[str] = set()
+        subtitles: set[str] = set()
+        for track_type, raw_language in rows:
+            language = normalize_track_language(raw_language)
+            if not language:
+                continue
+            if track_type == "audio":
+                audio.add(language)
+            elif track_type == "subtitle":
+                subtitles.add(language)
         return audio, subtitles
 
     def playback(self) -> dict:

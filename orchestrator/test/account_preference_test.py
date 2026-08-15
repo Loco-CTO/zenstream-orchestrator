@@ -54,10 +54,10 @@ class AccountPreferenceTest(unittest.TestCase):
             "INSERT INTO user_library_access(user_id,library_id) VALUES('user','allowed')"
         )
         self.db.execute(
-            "INSERT INTO media_files(id,entity_id,role,language) VALUES('sidecar-a','entity-a','subtitle','ja'),('sidecar-b','entity-b','subtitle','fr')"
+            "INSERT INTO media_files(id,entity_id,role,language) VALUES('sidecar-a','entity-a','subtitle','ja'),('sidecar-und','entity-a','subtitle','und'),('lyrics-a','entity-a','lyrics','fr'),('sidecar-b','entity-b','subtitle','fr')"
         )
         self.db.execute(
-            "INSERT INTO media_track_languages(media_file_id,track_type,language) VALUES('sidecar-a','audio','en'),('sidecar-a','subtitle','ja'),('sidecar-b','audio','fr')"
+            "INSERT INTO media_track_languages(media_file_id,track_type,language) VALUES('sidecar-a','audio','en'),('sidecar-a','subtitle','ja'),('sidecar-a','audio','und'),('sidecar-a','subtitle','xx'),('sidecar-b','audio','fr')"
         )
 
         value = self.preference.playback()

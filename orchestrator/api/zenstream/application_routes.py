@@ -1,7 +1,9 @@
 import asyncio
+import contextlib
 import math
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.client_auth import (
@@ -14,6 +16,7 @@ from app.client_auth import (
 )
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
+from app.foreground import run_auth, run_control
 from app.models import Invite
 from app.models.account import Account
 from app.models.admin import ADMIN_SESSION_COOKIE, Admin
@@ -45,8 +48,12 @@ from api.zenstream.version import _main_version
 
 def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
     """Return full state to members and a safe lobby projection to everyone else."""
-    group_id = state.get("id")
-    if group_id and SyncplayGroup(group_id).member(user_id, participant):
+    is_member = any(
+        member.get("userId") == user_id
+        and member.get("participantId") == participant
+        for member in state.get("members", [])
+    )
+    if is_member:
         return state
     return {
         **state,
@@ -66,20 +73,90 @@ def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
     }
 
 
+@dataclass
+class _SocketClient:
+    websocket: WebSocket
+    identity: tuple[str, str]
+    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=128))
+    pending: list[dict] = field(default_factory=list)
+    initializing: bool = False
+    sender: asyncio.Task | None = None
+
+
 class WebSocketHub:
     def __init__(self):
         self.clients: set[WebSocket] = set()
         self.identities: dict[WebSocket, tuple[str, str]] = {}
+        self._connections: dict[WebSocket, _SocketClient] = {}
         self.disconnect_epochs: dict[tuple[str, str], int] = {}
+        self._queue_overflows = 0
         self.lock = asyncio.Lock()
 
-    async def connect(self, websocket: WebSocket, user: str, participant: str):
+    async def connect(
+        self,
+        websocket: WebSocket,
+        user: str,
+        participant: str,
+        *,
+        initialize: bool = False,
+    ):
         await websocket.accept()
+        connection = _SocketClient(
+            websocket=websocket,
+            identity=(user, participant),
+            initializing=initialize,
+        )
         async with self.lock:
             self.clients.add(websocket)
             self.identities[websocket] = (user, participant)
+            self._connections[websocket] = connection
             key = (user, participant)
             self.disconnect_epochs[key] = self.disconnect_epochs.get(key, 0) + 1
+            connection.sender = asyncio.create_task(self._sender(connection))
+
+    async def _sender(self, connection: _SocketClient):
+        websocket = connection.websocket
+        try:
+            while True:
+                payload = await connection.queue.get()
+                await websocket.send_json(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self.remove(websocket)
+
+    def _enqueue_locked(self, connection: _SocketClient, payload: dict) -> bool:
+        try:
+            if connection.initializing:
+                if len(connection.pending) >= connection.queue.maxsize:
+                    raise asyncio.QueueFull
+                connection.pending.append(payload)
+            else:
+                connection.queue.put_nowait(payload)
+            return True
+        except asyncio.QueueFull:
+            self._queue_overflows += 1
+            return False
+
+    async def finish_initial(self, websocket: WebSocket, payload: dict) -> bool:
+        overflow = False
+        async with self.lock:
+            connection = self._connections.get(websocket)
+            if connection is None:
+                return False
+            try:
+                connection.queue.put_nowait(payload)
+                for pending in connection.pending:
+                    connection.queue.put_nowait(pending)
+            except asyncio.QueueFull:
+                overflow = True
+            else:
+                connection.pending.clear()
+                connection.initializing = False
+        if overflow:
+            asyncio.create_task(self.remove(websocket))
+            return False
+        return True
 
     async def epoch(self, user: str, participant: str):
         async with self.lock:
@@ -94,41 +171,82 @@ class WebSocketHub:
             )
 
     async def remove(self, websocket: WebSocket):
+        sender = None
         async with self.lock:
             self.clients.discard(websocket)
             identity = self.identities.pop(websocket, None)
+            connection = self._connections.pop(websocket, None)
+            if connection is not None:
+                sender = connection.sender
             if identity and not any(
                 value == identity for value in self.identities.values()
             ):
                 self.disconnect_epochs[identity] = (
                     self.disconnect_epochs.get(identity, 0) + 1
                 )
-            return identity, self.disconnect_epochs.get(
+            epoch = self.disconnect_epochs.get(
                 identity, 0
             ) if identity else None
+        current = asyncio.current_task()
+        if sender is not None and sender is not current:
+            sender.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sender
+        return identity, epoch
+
+    async def send(self, websocket: WebSocket, payload: dict) -> bool:
+        overflow = False
+        async with self.lock:
+            connection = self._connections.get(websocket)
+            if connection is None:
+                return False
+            if not self._enqueue_locked(connection, payload):
+                overflow = True
+        if overflow:
+            asyncio.create_task(self.remove(websocket))
+            return False
+        return True
+
+    async def send_to_identity(self, user: str, participant: str, payload: dict):
+        async with self.lock:
+            sockets = tuple(
+                socket
+                for socket, connection in self._connections.items()
+                if connection.identity == (user, participant)
+            )
+        for socket in sockets:
+            await self.send(socket, payload)
 
     async def broadcast(self, message: dict):
         async with self.lock:
-            clients = tuple(self.clients)
-        dead = []
-        for client in clients:
-            try:
+            connections = tuple(self._connections.values())
+            dead = []
+            for connection in connections:
                 payload = message
                 if message.get("type") == "group" and isinstance(
                     message.get("group"), dict
                 ):
-                    user_id, participant = self.identities.get(client, ("", ""))
                     payload = {
                         **message,
                         "group": _redact_syncplay_state(
-                            message["group"], user_id, participant
+                            message["group"], *connection.identity
                         ),
                     }
-                await client.send_json(payload)
-            except Exception:
-                dead.append(client)
+                if not self._enqueue_locked(connection, payload):
+                    dead.append(connection.websocket)
         for client in dead:
-            await self.remove(client)
+            asyncio.create_task(self.remove(client))
+
+    async def queue_metrics(self) -> dict[str, int]:
+        async with self.lock:
+            return {
+                "clients": len(self._connections),
+                "queued_messages": sum(
+                    connection.queue.qsize() + len(connection.pending)
+                    for connection in self._connections.values()
+                ),
+                "queue_overflows": self._queue_overflows,
+            }
 
 
 hub = WebSocketHub()
@@ -145,25 +263,20 @@ async def _disconnect_cleanup(user, participant, epoch):
         user, participant
     ):
         return
-    for group in SyncplayGroup.active_groups_for_user(user, participant):
-        state = group.state()
-        if state and state["hostUserId"] == user:
-            await _broadcast_group(group.mark_host_disconnected())
-        else:
-            await _broadcast_group(group.deactivate_member(user, participant))
+    states = await run_control(_mark_disconnected_sync, user, participant)
+    for state in states:
+        await _broadcast_group(state)
 
     await asyncio.sleep(270)
     if await hub.epoch(user, participant) != epoch or await hub.sockets_for(
         user, participant
     ):
         return
-    for group in SyncplayGroup.active_groups_for_user(user, participant):
-        state = group.remove_disconnected_member(user, participant)
-        if state and state["hostUserId"] != user:
+    states = await run_control(_expire_disconnected_sync, user, participant)
+    for kind, state in states:
+        if kind == "group":
             await _broadcast_group(state)
-            continue
-        state = group.expire_host_disconnect()
-        if state:
+        else:
             await hub.broadcast(
                 {
                     "version": 1,
@@ -172,6 +285,32 @@ async def _disconnect_cleanup(user, participant, epoch):
                     "revision": state["revision"],
                 }
             )
+
+
+def _mark_disconnected_sync(user, participant):
+    states = []
+    for group in SyncplayGroup.active_groups_for_user(user, participant):
+        state = group.state()
+        if state and state["hostUserId"] == user:
+            state = group.mark_host_disconnected()
+        elif state:
+            state = group.deactivate_member(user, participant)
+        if state:
+            states.append(state)
+    return states
+
+
+def _expire_disconnected_sync(user, participant):
+    results = []
+    for group in SyncplayGroup.active_groups_for_user(user, participant):
+        state = group.remove_disconnected_member(user, participant)
+        if state and state["hostUserId"] != user:
+            results.append(("group", state))
+            continue
+        state = group.expire_host_disconnect()
+        if state:
+            results.append(("ended", state))
+    return results
 
 
 def _static_roots():
@@ -224,6 +363,18 @@ def _root_admin_request(
     if not profile or not profile["is_root"]:
         raise HTTPException(403, "Root administrator access is required.")
     return username, token
+
+
+async def _admin_request_async(
+    request: Request, username: str | None = None, token: str | None = None
+):
+    return await run_auth(_admin_request, request, username, token)
+
+
+async def _root_admin_request_async(
+    request: Request, username: str | None = None, token: str | None = None
+):
+    return await run_auth(_root_admin_request, request, username, token)
 
 
 def _contained_static_file(root: Path, *parts: str) -> Path | None:
@@ -641,6 +792,10 @@ def _sync_identity(request: Request):
     if not participant:
         raise HTTPException(401, "Authentication required.")
     return account["id"], participant
+
+
+async def _sync_identity_async(request: Request):
+    return await run_auth(_sync_identity, request)
 
 
 @router.get("/api/syncplay/groups")

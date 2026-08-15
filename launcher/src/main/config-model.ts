@@ -13,6 +13,7 @@ export function defaultEnvironment(localAppData: string): EnvironmentConfig {
   return {
     ORCHESTRATOR_HOST: "127.0.0.1",
     ORCHESTRATOR_PORT: "9088",
+    ZENSTREAM_PUBLIC_WEB_URL: "",
     METADATA_PATH: path.join(
       localAppData,
       "ZenStream Orchestrator",
@@ -68,6 +69,20 @@ export function validateEnvironment(environment: EnvironmentConfig): string[] {
   const errors: string[] = [];
   if (!environment.ORCHESTRATOR_HOST) errors.push("Server host is required.");
   if (!environment.METADATA_PATH) errors.push("Metadata path is required.");
+  if (environment.ZENSTREAM_PUBLIC_WEB_URL) {
+    try {
+      const parsed = new URL(environment.ZENSTREAM_PUBLIC_WEB_URL);
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error("invalid protocol");
+      if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+        throw new Error("URL must be an origin");
+      }
+      if (parsed.pathname !== "/") throw new Error("URL must be an origin");
+    } catch {
+      errors.push(
+        "Public web URL must be a valid HTTP(S) origin, such as https://stream.example.com.",
+      );
+    }
+  }
   if (!environment.METADATA_IMAGE_HOST_ALLOWLIST) {
     errors.push("Metadata image host allowlist cannot be empty.");
   }

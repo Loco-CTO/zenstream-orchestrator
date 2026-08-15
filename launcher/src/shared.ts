@@ -52,6 +52,7 @@ export interface LauncherState {
 export const ENVIRONMENT_KEYS = [
   "ORCHESTRATOR_HOST",
   "ORCHESTRATOR_PORT",
+  "ZENSTREAM_PUBLIC_WEB_URL",
   "METADATA_PATH",
   "CORS_ORIGINS",
   "TRUSTED_PROXY_IPS",

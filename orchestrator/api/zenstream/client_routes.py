@@ -790,9 +790,9 @@ async def item_image(
     entity_id: str, image_type: str, request: Request, language: str = Query(...)
 ):
     requested_version = request.query_params.get("v")
+    account = await _require_access(request)
 
     def resolve_cached_image() -> Path | None:
-        account = account_from_access(request)
         row = catalog.require_entity(account["id"], entity_id)
         library_rows = catalog.db.execute(
             "SELECT directory FROM libraries WHERE id=?", (row[1],)
@@ -1181,7 +1181,7 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
     target = prepared["path"]
     if prepared["convert"]:
         try:
-            completed = await asyncio.to_thread(
+            completed = await run_foreground(
                 subprocess.run,
                 [
                     prepared["executable"],

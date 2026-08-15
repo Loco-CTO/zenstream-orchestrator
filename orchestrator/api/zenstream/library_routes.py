@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import json
 from datetime import datetime, timezone
@@ -275,6 +274,121 @@ def _scan_library_sync(library_id: str):
         library_id,
         "collection_rebuild" if library["type"] == "collection" else "scan",
     )
+
+
+def _list_jobs_sync():
+    definitions = scheduler.store.definitions()
+    values = []
+    for definition in definitions:
+        recent = scheduler.store.runs(definition["id"], 10)
+        summary = None
+        if definition["kind"] == "library_scan":
+            recent = scheduler.store.library_runs(
+                (definition.get("config") or {}).get("libraryId"),
+                10,
+                kinds=FULL_LIBRARY_RUN_KINDS,
+            )
+            summary = _full_scan_summary(definition, recent)
+        current = next(
+            (
+                run
+                for run in recent
+                if run["state"] in {"queued", "running", "terminating"}
+            ),
+            None,
+        )
+        values.append(
+            {
+                **definition,
+                "historyOnly": False,
+                **(
+                    summary
+                    or {
+                        "lastState": current["state"]
+                        if current
+                        else definition["lastState"],
+                        "lastMessage": (
+                            current.get("message") or current.get("error")
+                        )
+                        if current
+                        else definition["lastMessage"],
+                    }
+                ),
+                "recentRuns": recent,
+            }
+        )
+    for library in store.list():
+        if library["type"] != "collection":
+            values.append(_watcher_task(library, 10))
+    return {"jobs": values}
+
+
+def _get_scheduled_job_sync(job_id: str):
+    if _is_watcher_task_id(job_id):
+        library_id = job_id.removeprefix(WATCHER_TASK_PREFIX)
+        library = store.get(library_id)
+        if not library or library["type"] == "collection":
+            raise HTTPException(404, "Watcher task not found.")
+        return _watcher_task(library, 50)
+    definition = scheduler.store.definition(job_id)
+    if not definition:
+        raise HTTPException(404, "Scheduled job not found.")
+    recent = (
+        scheduler.store.library_runs(
+            (definition.get("config") or {}).get("libraryId"),
+            50,
+            kinds=FULL_LIBRARY_RUN_KINDS,
+        )
+        if definition["kind"] == "library_scan"
+        else scheduler.store.runs(job_id, 50)
+    )
+    summary = (
+        _full_scan_summary(definition, recent)
+        if definition["kind"] == "library_scan"
+        else {}
+    )
+    return {**definition, **summary, "recentRuns": recent, "historyOnly": False}
+
+
+def _update_scheduled_job_sync(job_id: str, values: dict):
+    _require_mutable_task(job_id)
+    return scheduler.store.update_definition(job_id, values)
+
+
+def _add_scheduled_trigger_sync(job_id: str, values: dict):
+    _require_mutable_task(job_id)
+    return scheduler.store.add_trigger(job_id, values)
+
+
+def _remove_scheduled_trigger_sync(job_id: str, trigger_id: str):
+    _require_mutable_task(job_id)
+    return scheduler.store.remove_trigger(job_id, trigger_id)
+
+
+def _run_scheduled_job_sync(job_id: str, options):
+    _require_mutable_task(job_id)
+    return scheduler.run_now(job_id, options)
+
+
+def _terminate_scheduled_job_sync(job_id: str, run_id: str):
+    _require_mutable_task(job_id)
+    definition = scheduler.store.definition(job_id)
+    if not definition:
+        raise HTTPException(404, "Scheduled job not found.")
+    if definition["kind"] == "library_scan":
+        library_id = (definition.get("config") or {}).get("libraryId")
+        run = store.job(run_id)
+        if (
+            not run
+            or run["libraryId"] != library_id
+            or run["kind"] not in FULL_LIBRARY_RUN_KINDS
+        ):
+            raise HTTPException(404, "Task run not found.")
+        return runtime.terminate(run_id)
+    run = scheduler.terminate(job_id, run_id)
+    if not run:
+        raise HTTPException(404, "Task run not found.")
+    return run
 
 
 def _entity_ids(entity_id: str) -> list[dict]:
@@ -711,11 +825,7 @@ async def list_libraries(
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
     require_admin(Username, TOKEN)
-    values = []
-    for library in store.list():
-        library["sourceLibraryIds"] = store.sources(library["id"])
-        values.append(library)
-    return values
+    return await run_control(_list_libraries_sync)
 
 
 @router.post("/libraries", status_code=201)
@@ -727,30 +837,9 @@ async def create_library(
     require_admin(Username, TOKEN)
     data = await request.json()
     try:
-        library = store.create(
-            str(data.get("name") or ""),
-            str(data.get("type") or ""),
-            data.get("directory"),
-            bool(data.get("watchEnabled", True)),
-            int(data.get("scanIntervalMinutes") or 1440),
-            data.get("sourceLibraryIds") or [],
-        )
+        library = await run_control(_create_library_sync, data)
     except (ValueError, TypeError) as error:
         raise HTTPException(400, str(error)) from error
-    scheduler.refresh_library_definition(library)
-    # Watchdog.stop()/join() and recursive scheduling can touch a large media
-    # tree.  Keep that synchronous filesystem work away from the ASGI event
-    # loop so a library change cannot make every request appear unavailable.
-    await asyncio.to_thread(runtime.refresh_watchers)
-    # Install Watchdog before the initial traversal begins.  The initial scan
-    # remains authoritative for everything already present, while events for
-    # files arriving during setup are durably queued for the reconcile lane.
-    job = runtime.enqueue(
-        library["id"],
-        "collection_rebuild" if library["type"] == "collection" else "scan",
-    )
-    library["sourceLibraryIds"] = store.sources(library["id"])
-    library["jobId"] = job["id"]
     return library
 
 
@@ -761,12 +850,7 @@ async def get_library(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    library = store.get(library_id)
-    if not library:
-        raise HTTPException(404, "Library not found.")
-    library["sourceLibraryIds"] = store.sources(library_id)
-    library["jobs"] = store.jobs(library_id)
-    return library
+    return await run_control(_get_library_sync, library_id)
 
 
 @router.patch("/libraries/{library_id}")
@@ -778,17 +862,11 @@ async def update_library(
 ):
     require_admin(Username, TOKEN)
     try:
-        library = store.update(library_id, await request.json())
+        library = await run_control(_update_library_sync, library_id, await request.json())
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except (ValueError, TypeError) as error:
         raise HTTPException(400, str(error)) from error
-    runtime.enqueue(
-        library_id, "collection_rebuild" if library["type"] == "collection" else "scan"
-    )
-    scheduler.refresh_library_definition(library)
-    await asyncio.to_thread(runtime.refresh_watchers)
-    library["sourceLibraryIds"] = store.sources(library_id)
     return library
 
 
@@ -799,12 +877,7 @@ async def delete_library(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    if not runtime.terminate_library(library_id):
-        raise HTTPException(409, "Library jobs are still stopping; try again shortly.")
-    if not store.delete(library_id):
-        raise HTTPException(404, "Library not found.")
-    scheduler.remove_library_definition(library_id)
-    await asyncio.to_thread(runtime.refresh_watchers)
+    await run_control(_delete_library_sync, library_id)
 
 
 @router.post("/libraries/{library_id}/scan", status_code=202)
@@ -814,12 +887,7 @@ async def scan_library(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    library = store.get(library_id)
-    if not library:
-        raise HTTPException(404, "Library not found.")
-    return runtime.enqueue(
-        library_id, "collection_rebuild" if library["type"] == "collection" else "scan"
-    )
+    return await run_control(_scan_library_sync, library_id)
 
 
 @router.get("/library-jobs/{job_id}")
@@ -827,7 +895,7 @@ async def get_job(
     job_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
     require_admin(Username, TOKEN)
-    job = store.job(job_id)
+    job = await run_control(store.job, job_id)
     if not job:
         raise HTTPException(404, "Job not found.")
     return job
@@ -838,48 +906,7 @@ async def list_jobs(
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
     require_admin(Username, TOKEN)
-    definitions = scheduler.store.definitions()
-    values = []
-    for definition in definitions:
-        recent = scheduler.store.runs(definition["id"], 10)
-        summary = None
-        if definition["kind"] == "library_scan":
-            recent = scheduler.store.library_runs(
-                (definition.get("config") or {}).get("libraryId"),
-                10,
-                kinds=FULL_LIBRARY_RUN_KINDS,
-            )
-            summary = _full_scan_summary(definition, recent)
-        current = next(
-            (
-                run
-                for run in recent
-                if run["state"] in {"queued", "running", "terminating"}
-            ),
-            None,
-        )
-        values.append(
-            {
-                **definition,
-                "historyOnly": False,
-                **(
-                    summary
-                    or {
-                        "lastState": current["state"]
-                        if current
-                        else definition["lastState"],
-                        "lastMessage": (current.get("message") or current.get("error"))
-                        if current
-                        else definition["lastMessage"],
-                    }
-                ),
-                "recentRuns": recent,
-            }
-        )
-    for library in store.list():
-        if library["type"] != "collection":
-            values.append(_watcher_task(library, 10))
-    return {"jobs": values}
+    return await run_control(_list_jobs_sync)
 
 
 @router.get("/jobs/{job_id}")
@@ -887,30 +914,7 @@ async def get_scheduled_job(
     job_id: str, Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
     require_admin(Username, TOKEN)
-    if _is_watcher_task_id(job_id):
-        library_id = job_id.removeprefix(WATCHER_TASK_PREFIX)
-        library = store.get(library_id)
-        if not library or library["type"] == "collection":
-            raise HTTPException(404, "Watcher task not found.")
-        return _watcher_task(library, 50)
-    definition = scheduler.store.definition(job_id)
-    if not definition:
-        raise HTTPException(404, "Scheduled job not found.")
-    recent = (
-        scheduler.store.library_runs(
-            (definition.get("config") or {}).get("libraryId"),
-            50,
-            kinds=FULL_LIBRARY_RUN_KINDS,
-        )
-        if definition["kind"] == "library_scan"
-        else scheduler.store.runs(job_id, 50)
-    )
-    summary = (
-        _full_scan_summary(definition, recent)
-        if definition["kind"] == "library_scan"
-        else {}
-    )
-    return {**definition, **summary, "recentRuns": recent, "historyOnly": False}
+    return await run_control(_get_scheduled_job_sync, job_id)
 
 
 @router.patch("/jobs/{job_id}")
@@ -923,7 +927,9 @@ async def update_scheduled_job(
     require_admin(Username, TOKEN)
     _require_mutable_task(job_id)
     try:
-        return scheduler.store.update_definition(job_id, await request.json())
+        return await run_control(
+            _update_scheduled_job_sync, job_id, await request.json()
+        )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except (TypeError, ValueError) as error:
@@ -940,7 +946,9 @@ async def add_scheduled_trigger(
     require_admin(Username, TOKEN)
     _require_mutable_task(job_id)
     try:
-        return scheduler.store.add_trigger(job_id, await request.json())
+        return await run_control(
+            _add_scheduled_trigger_sync, job_id, await request.json()
+        )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
     except (TypeError, ValueError) as error:
@@ -957,7 +965,9 @@ async def remove_scheduled_trigger(
     require_admin(Username, TOKEN)
     _require_mutable_task(job_id)
     try:
-        return scheduler.store.remove_trigger(job_id, trigger_id)
+        return await run_control(
+            _remove_scheduled_trigger_sync, job_id, trigger_id
+        )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
 
@@ -976,7 +986,9 @@ async def run_scheduled_job(
             payload = await request.json()
         except Exception:
             payload = {}
-        return scheduler.run_now(job_id, (payload or {}).get("options"))
+        return await run_control(
+            _run_scheduled_job_sync, job_id, (payload or {}).get("options")
+        )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
 
@@ -989,24 +1001,7 @@ async def terminate_scheduled_job(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    _require_mutable_task(job_id)
-    definition = scheduler.store.definition(job_id)
-    if not definition:
-        raise HTTPException(404, "Scheduled job not found.")
-    if definition["kind"] == "library_scan":
-        library_id = (definition.get("config") or {}).get("libraryId")
-        run = store.job(run_id)
-        if (
-            not run
-            or run["libraryId"] != library_id
-            or run["kind"] not in FULL_LIBRARY_RUN_KINDS
-        ):
-            raise HTTPException(404, "Task run not found.")
-        return runtime.terminate(run_id)
-    run = scheduler.terminate(job_id, run_id)
-    if not run:
-        raise HTTPException(404, "Task run not found.")
-    return run
+    return await run_control(_terminate_scheduled_job_sync, job_id, run_id)
 
 
 def _list_admin_items_sync(
@@ -1191,6 +1186,101 @@ def _list_admin_items_sync(
     }
 
 
+def _get_item_sync(entity_id: str, locale: str) -> dict:
+    item = _entity(entity_id, locale, include_metadata=True)
+    item["metadata"] = _metadata_for(item, locale, False, False)
+    return item
+
+
+def _get_trickplay_sheet_sync(entity_id: str, generation: str, sheet_index: int):
+    item = _entity(entity_id)
+    if item["type"] not in {"movie", "episode"}:
+        raise HTTPException(404, "Trickplay sheet not found.")
+    return TrickplayExtractor().sheet_path(entity_id, generation, sheet_index)
+
+
+def _get_intro_outro_inspection_sync(entity_id: str):
+    item = _entity(entity_id)
+    if item["type"] != "episode":
+        raise HTTPException(
+            404, "Intro and outro inspection is only available for episodes."
+        )
+    return IntroOutroStore(store.db).inspection(entity_id)
+
+
+def _get_intro_outro_clip_sync(entity_id: str, kind: str):
+    item = _entity(entity_id)
+    if item["type"] != "episode":
+        raise HTTPException(404, "Audio previews are only available for episodes.")
+    return IntroOutroStore(store.db).preview_clip(entity_id, kind)
+
+
+def _find_match_item_sync(entity_id: str):
+    item = _entity(entity_id)
+    return item, (Path(item["relativePath"] or "").stem).strip()
+
+
+def _set_match_sync(entity_id: str, provider: str, provider_id: str):
+    item = _entity(entity_id)
+    entity_type = item["type"]
+    identifier_type = (
+        "movie"
+        if entity_type == "movie"
+        else "series"
+        if entity_type in {"series", "episode", "season"}
+        else entity_type
+    )
+    store.db.execute("DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,))
+    store.db.execute(
+        "INSERT INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)",
+        (
+            entity_id,
+            provider,
+            identifier_type,
+            provider_id,
+            int(PRIMARY_PROVIDER_BY_ENTITY.get(entity_type) == provider),
+        ),
+    )
+    store.db.execute(
+        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='manual',updated_at=? WHERE id=?",
+        (datetime.now(timezone.utc).isoformat(), entity_id),
+    )
+    return _entity(entity_id)
+
+
+def _catalog_status_sync(library_id: str):
+    if not store.get(library_id):
+        raise HTTPException(404, "Library not found.")
+    has_summary = bool(
+        store.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_library_summary'"
+        )
+    )
+    generation_select = "COALESCE(s.generation,0)" if has_summary else "0"
+    summary_join = (
+        "LEFT JOIN catalog_library_summary s ON s.library_id=l.id"
+        if has_summary
+        else ""
+    )
+    rows = store.db.execute(
+        f"""
+        SELECT {generation_select}, l.scan_state,
+            EXISTS(SELECT 1 FROM library_jobs j WHERE j.library_id=l.id AND j.kind IN ('scan','collection_rebuild') AND j.state IN ('queued','running','terminating')),
+            EXISTS(SELECT 1 FROM library_jobs j WHERE j.library_id=l.id AND j.kind='reconcile' AND j.state IN ('queued','running','terminating'))
+        FROM libraries l {summary_join} WHERE l.id=?
+        """,
+        (library_id,),
+    )
+    if not rows:
+        raise HTTPException(404, "Library not found.")
+    return {
+        "catalogGeneration": int(rows[0][0] or 0),
+        "scanState": rows[0][1],
+        "activeScan": bool(rows[0][2]),
+        "activeReconcile": bool(rows[0][3]),
+    }
+
+
 def _entity_revision(entity_id: str, locale: str) -> str:
     """Return a stable card revision from inventory, projection, and artwork."""
     tables = {
@@ -1253,36 +1343,7 @@ async def catalog_status(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    if not store.get(library_id):
-        raise HTTPException(404, "Library not found.")
-    has_summary = bool(
-        store.db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_library_summary'"
-        )
-    )
-    generation_select = "COALESCE(s.generation,0)" if has_summary else "0"
-    summary_join = (
-        "LEFT JOIN catalog_library_summary s ON s.library_id=l.id"
-        if has_summary
-        else ""
-    )
-    rows = store.db.execute(
-        f"""
-        SELECT {generation_select}, l.scan_state,
-            EXISTS(SELECT 1 FROM library_jobs j WHERE j.library_id=l.id AND j.kind IN ('scan','collection_rebuild') AND j.state IN ('queued','running','terminating')),
-            EXISTS(SELECT 1 FROM library_jobs j WHERE j.library_id=l.id AND j.kind='reconcile' AND j.state IN ('queued','running','terminating'))
-        FROM libraries l {summary_join} WHERE l.id=?
-        """,
-        (library_id,),
-    )
-    if not rows:
-        raise HTTPException(404, "Library not found.")
-    return {
-        "catalogGeneration": int(rows[0][0] or 0),
-        "scanState": rows[0][1],
-        "activeScan": bool(rows[0][2]),
-        "activeReconcile": bool(rows[0][3]),
-    }
+    return await run_control(_catalog_status_sync, library_id)
 
 
 @router.get("/libraries/{library_id}/items")
@@ -1297,8 +1358,8 @@ async def list_items(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    locale = _configured_locale(locale)
-    return await asyncio.to_thread(
+    locale = await _configured_locale_async(locale)
+    return await run_control(
         _list_admin_items_sync,
         library_id,
         parentId,
@@ -1317,12 +1378,8 @@ async def get_item(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    locale = _configured_locale(locale)
-    item = _entity(entity_id, locale, include_metadata=True)
-    item["metadata"] = await asyncio.to_thread(
-        _metadata_for, item, locale, False, False
-    )
-    return item
+    locale = await _configured_locale_async(locale)
+    return await run_control(_get_item_sync, entity_id, locale)
 
 
 @router.post("/library-items/{entity_id}/metadata/refresh")
@@ -1332,7 +1389,7 @@ async def refresh_item_metadata(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    return await asyncio.to_thread(_refresh_item_metadata_sync, entity_id)
+    return await run_control(_refresh_item_metadata_sync, entity_id)
 
 
 @router.get("/library-items/{entity_id}/trickplay/{generation}/{sheet_index}.webp")
@@ -1344,10 +1401,9 @@ async def get_trickplay_sheet(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    item = _entity(entity_id)
-    if item["type"] not in {"movie", "episode"}:
-        raise HTTPException(404, "Trickplay sheet not found.")
-    path = TrickplayExtractor().sheet_path(entity_id, generation, sheet_index)
+    path = await run_control(
+        _get_trickplay_sheet_sync, entity_id, generation, sheet_index
+    )
     return FileResponse(
         path,
         media_type="image/webp",
@@ -1362,12 +1418,7 @@ async def get_intro_outro_inspection(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    item = _entity(entity_id)
-    if item["type"] != "episode":
-        raise HTTPException(
-            404, "Intro and outro inspection is only available for episodes."
-        )
-    return IntroOutroStore(store.db).inspection(entity_id)
+    return await run_control(_get_intro_outro_inspection_sync, entity_id)
 
 
 @router.get("/library-items/{entity_id}/intro-outro/{kind}.mp3")
@@ -1378,12 +1429,9 @@ async def get_intro_outro_audio_preview(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    item = _entity(entity_id)
-    if item["type"] != "episode":
-        raise HTTPException(404, "Audio previews are only available for episodes.")
     try:
-        clip = IntroOutroStore(store.db).preview_clip(entity_id, kind)
-        content = await asyncio.to_thread(
+        clip = await run_control(_get_intro_outro_clip_sync, entity_id, kind)
+        content = await run_foreground(
             render_audio_preview,
             clip["path"],
             clip["startSeconds"],
@@ -1408,20 +1456,19 @@ async def find_matches(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    item = _entity(entity_id)
-    search_text = (query or Path(item["relativePath"] or "").stem).strip()
-    service = MetadataService()
+    item, default_search_text = await run_control(_find_match_item_sync, entity_id)
+    search_text = (query or default_search_text).strip()
     providers = {"series": ["tvdb", "tmdb"], "movie": ["tmdb", "tvdb"]}.get(
         item["type"], []
     )
     matches = []
     for provider in providers:
         try:
-            client = service.client(provider)
-            if hasattr(client, "search"):
-                matches.extend(
-                    await asyncio.to_thread(client.search, item["type"], search_text)
-                )
+            def search_provider():
+                client = MetadataService().client(provider)
+                return client.search(item["type"], search_text) if hasattr(client, "search") else []
+
+            matches.extend(await run_foreground(search_provider))
         except ProviderError:
             continue
     return {"query": search_text, "matches": matches[:50]}
@@ -1435,56 +1482,23 @@ async def set_match(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
-    _entity(entity_id)
     data = await request.json()
     provider = str(data.get("provider") or "").lower()
     provider_id = str(data.get("providerId") or data.get("id") or "").strip()
     if provider not in {"tmdb", "tvdb", "musicbrainz"} or not provider_id:
         raise HTTPException(400, "A provider and provider ID are required.")
-    entity_type = _entity(entity_id)["type"]
-    identifier_type = (
-        "movie"
-        if entity_type == "movie"
-        else "series"
-        if entity_type in {"series", "episode", "season"}
-        else entity_type
-    )
-    store.db.execute("DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,))
-    store.db.execute(
-        "INSERT INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,?)",
-        (
-            entity_id,
-            provider,
-            identifier_type,
-            provider_id,
-            int(PRIMARY_PROVIDER_BY_ENTITY.get(entity_type) == provider),
-        ),
-    )
-    store.db.execute(
-        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='manual',updated_at=? WHERE id=?",
-        (datetime.now(timezone.utc).isoformat(), entity_id),
-    )
-    return _entity(entity_id)
+    return await run_control(_set_match_sync, entity_id, provider, provider_id)
 
 
-@router.get("/library-items/{entity_id}/image")
-async def get_image(
-    entity_id: str,
-    imageType: str = Query("Primary"),
-    locale: str | None = Query(None),
-    Username: str | None = Header(None),
-    TOKEN: str | None = Header(None),
-):
-    require_admin(Username, TOKEN)
-    locale = _configured_locale(locale)
-    if imageType not in IMAGE_TYPES:
+def _get_image_sync(entity_id: str, image_type: str, locale: str):
+    if image_type not in IMAGE_TYPES:
         raise HTTPException(
             400,
-            f"Unsupported image type '{imageType}'. Expected one of: {', '.join(sorted(IMAGE_TYPES))}",
+            f"Unsupported image type '{image_type}'. Expected one of: {', '.join(sorted(IMAGE_TYPES))}",
         )
     item = _entity(entity_id, locale)
     pending = False
-    for candidate in _image_entities(item, imageType):
+    for candidate in _image_entities(item, image_type):
         library = store.get(candidate["libraryId"])
         if not library:
             raise HTTPException(404, "Library not found.")
@@ -1494,7 +1508,7 @@ async def get_image(
         )
         if library["directory"]:
             for relative_path, content_hash in local:
-                if not _local_image_for_type(relative_path, imageType):
+                if not _local_image_for_type(relative_path, image_type):
                     continue
                 path = Path(library["directory"]) / relative_path
                 if path.is_file():
@@ -1505,16 +1519,14 @@ async def get_image(
                             media_type="image/webp",
                             headers={"X-ZenStream-Image-State": "ready"},
                         )
-                    continue
-    # Library previews must never turn a cache miss into provider work. Scans
-    # and the administrator-triggered backfill own metadata population.
+
     image = None
     image_item = item
-    for candidate in _image_entities(item, imageType):
+    for candidate in _image_entities(item, image_type):
         selected = store.db.execute(
             "SELECT local_path FROM catalog_artwork_selection "
             "WHERE entity_id=? AND locale=? AND image_type=? LIMIT 1",
-            (candidate["id"], locale, imageType),
+            (candidate["id"], locale, image_type),
         )
         if selected and selected[0][0] and Path(selected[0][0]).is_file():
             return FileResponse(
@@ -1525,9 +1537,7 @@ async def get_image(
         if selected:
             pending = True
             continue
-        metadata = await asyncio.to_thread(
-            _metadata_for, candidate, locale, False, False
-        )
+        metadata = _metadata_for(candidate, locale, False, False)
         if not metadata:
             pending = pending or bool(candidate.get("providerIds"))
             continue
@@ -1535,7 +1545,7 @@ async def get_image(
         image = choose_artwork(
             metadata.get("images", []),
             locale,
-            imageType,
+            image_type,
             metadata.get("originalLanguage"),
             read_service.providers(candidate["type"]),
         )
@@ -1548,7 +1558,7 @@ async def get_image(
                 "image pending entity_id=%s locale=%s image_type=%s",
                 entity_id,
                 locale,
-                imageType,
+                image_type,
             )
             return Response(
                 status_code=202,
@@ -1557,7 +1567,7 @@ async def get_image(
         logger.warning(
             "image unavailable because entity has no cached artwork entity_id=%s image_type=%s",
             entity_id,
-            imageType,
+            image_type,
         )
         return Response(status_code=404, headers={"X-ZenStream-Image-State": "missing"})
     cached_file = store.db.execute(
@@ -1574,7 +1584,7 @@ async def get_image(
                 ),
                 None,
             ),
-            imageType,
+            image_type,
             image["url"],
         ),
     )
@@ -1589,3 +1599,16 @@ async def get_image(
         status_code=202,
         headers={"Retry-After": "2", "X-ZenStream-Image-State": "pending"},
     )
+
+
+@router.get("/library-items/{entity_id}/image")
+async def get_image(
+    entity_id: str,
+    imageType: str = Query("Primary"),
+    locale: str | None = Query(None),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    locale = await _configured_locale_async(locale)
+    return await run_control(_get_image_sync, entity_id, imageType, locale)

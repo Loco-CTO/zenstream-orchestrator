@@ -11,9 +11,7 @@ class AccountPreferenceTest(unittest.TestCase):
         self.db.execute(
             "CREATE TABLE account_preferences(user_id TEXT PRIMARY KEY,locale TEXT,audio_language TEXT,subtitle_language TEXT,subtitle_renderer TEXT NOT NULL DEFAULT 'native',subtitle_font_family TEXT NOT NULL DEFAULT 'sans',subtitle_bold INTEGER NOT NULL DEFAULT 0,subtitle_text_scale REAL NOT NULL DEFAULT 100,subtitle_font_color TEXT NOT NULL DEFAULT '#ffffff',subtitle_border_size REAL NOT NULL DEFAULT 0,subtitle_border_color TEXT NOT NULL DEFAULT '#000000',subtitle_background_color TEXT NOT NULL DEFAULT '#000000',subtitle_background_opacity REAL NOT NULL DEFAULT 0)"
         )
-        self.db.execute(
-            "CREATE TABLE libraries(id TEXT PRIMARY KEY)"
-        )
+        self.db.execute("CREATE TABLE libraries(id TEXT PRIMARY KEY)")
         self.db.execute(
             "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT NOT NULL)"
         )

@@ -8,11 +8,10 @@ provider and track values at the boundary.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import unicodedata
+from dataclasses import dataclass
 
 from langcodes import Language, LanguageTagError, standardize_tag, tag_is_valid
-
 
 SUPPORTED_LANGUAGE_CODES = (
     "af",

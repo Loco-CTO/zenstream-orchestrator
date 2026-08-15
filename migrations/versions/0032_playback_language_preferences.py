@@ -18,15 +18,21 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("account_preferences", sa.Column("audio_language", sa.Text(), nullable=True))
-    op.add_column("account_preferences", sa.Column("subtitle_language", sa.Text(), nullable=True))
+    op.add_column(
+        "account_preferences", sa.Column("audio_language", sa.Text(), nullable=True)
+    )
+    op.add_column(
+        "account_preferences", sa.Column("subtitle_language", sa.Text(), nullable=True)
+    )
     op.create_table(
         "media_track_languages",
         sa.Column("media_file_id", sa.Text(), nullable=False),
         sa.Column("track_type", sa.Text(), nullable=False),
         sa.Column("language", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("media_file_id", "track_type", "language"),
-        sa.ForeignKeyConstraint(["media_file_id"], ["media_files.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["media_file_id"], ["media_files.id"], ondelete="CASCADE"
+        ),
         sa.CheckConstraint("track_type IN ('audio','subtitle')"),
     )
     op.create_index(
@@ -36,7 +42,9 @@ def upgrade() -> None:
     )
 
     bind = op.get_bind()
-    rows = bind.execute(sa.text("SELECT media_file_id,probe_payload FROM media_sources")).fetchall()
+    rows = bind.execute(
+        sa.text("SELECT media_file_id,probe_payload FROM media_sources")
+    ).fetchall()
     values: list[dict[str, str]] = []
     for media_file_id, raw_payload in rows:
         try:

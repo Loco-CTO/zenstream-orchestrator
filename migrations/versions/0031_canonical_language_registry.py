@@ -5,13 +5,17 @@ import sqlalchemy as sa
 from alembic import op
 
 try:
-    from app.language_registry import normalize_metadata_locale
-    from app.language_registry import normalize_track_language
+    from app.language_registry import (
+        normalize_metadata_locale,
+        normalize_track_language,
+    )
 except ModuleNotFoundError as error:  # Alembic may run from the workspace root.
     if error.name not in {"app", "app.language_registry"}:
         raise
-    from orchestrator.app.language_registry import normalize_metadata_locale
-    from orchestrator.app.language_registry import normalize_track_language
+    from orchestrator.app.language_registry import (
+        normalize_metadata_locale,
+        normalize_track_language,
+    )
 
 
 revision = "0031_canonical_language_registry"

@@ -4,9 +4,9 @@ import time
 from pathlib import Path
 
 from app.client_auth import (
+    DEV_CLIENT_SESSION_COOKIE,
     administrator_origin_allowed,
     cookie_secure,
-    DEV_CLIENT_SESSION_COOKIE,
     require_account,
     session_cookie_name,
     websocket_account,

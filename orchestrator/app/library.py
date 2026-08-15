@@ -106,8 +106,7 @@ LYRIC_EXTENSIONS = {
     ".yrc",
 }
 LANGUAGE_NAMES = {
-    str(option["value"]): str(option["label"])
-    for option in language_options()
+    str(option["value"]): str(option["label"]) for option in language_options()
 }
 LANGUAGE_MARKERS = {
     "default",

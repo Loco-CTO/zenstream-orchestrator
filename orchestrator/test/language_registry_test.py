@@ -1,13 +1,12 @@
 import unittest
 
-from langcodes import Language
-
 from app.language_registry import (
     SUPPORTED_LANGUAGE_SET,
     language_options,
     normalize_metadata_locale,
     normalize_track_language,
 )
+from langcodes import Language
 
 
 class LanguageRegistryTest(unittest.TestCase):
@@ -34,8 +33,12 @@ class LanguageRegistryTest(unittest.TestCase):
 
     def test_options_are_the_same_curated_registry(self):
         options = language_options()
-        self.assertEqual({option["value"] for option in options}, SUPPORTED_LANGUAGE_SET)
-        self.assertTrue(all(option["metadata"] and option["tracks"] for option in options))
+        self.assertEqual(
+            {option["value"] for option in options}, SUPPORTED_LANGUAGE_SET
+        )
+        self.assertTrue(
+            all(option["metadata"] and option["tracks"] for option in options)
+        )
         zh_tw = next(option for option in options if option["value"] == "zh-TW")
         language = Language.get("zh-TW")
         self.assertEqual(

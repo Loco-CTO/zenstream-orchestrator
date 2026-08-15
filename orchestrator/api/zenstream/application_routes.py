@@ -818,30 +818,49 @@ async def _sync_identity_async(request: Request):
     return await run_auth(_sync_identity, request)
 
 
+def _syncplay_create_sync(user: str, participant: str):
+    account = Account()._row(user_id=user, read_only=True)
+    return SyncplayGroup.create(
+        user, participant, account[1] if account else "ZenStream"
+    ).state()
+
+
+def _syncplay_group_snapshot_sync(group_id: str, user: str, participant: str):
+    group = SyncplayGroup(group_id)
+    state = group.state()
+    return group, state, bool(state and group.member(user, participant))
+
+
+def _syncplay_socket_initial_sync(user: str, participant: str):
+    changed = []
+    for group in SyncplayGroup.active_groups_for_user(user, participant):
+        state = group.clear_host_disconnected()
+        if state:
+            changed.append(state)
+    states = SyncplayGroup.states()
+    return changed, [
+        _redact_syncplay_state(state, user, participant) for state in states
+    ]
+
+
 @router.get("/api/syncplay/groups")
 async def syncplay_groups(
     request: Request,
 ):
-    user_id, participant = _sync_identity(request)
-    rows = SyncplayGroup("_").db.execute(
-        "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
-    )
+    user_id, participant = await _sync_identity_async(request)
+    states = await run_control(SyncplayGroup.states)
     return {
         "groups": [
-            _redact_syncplay_state(SyncplayGroup(row[0]).state(), user_id, participant)
-            for row in rows
+            _redact_syncplay_state(state, user_id, participant) for state in states
         ]
     }
 
 
 @router.post("/api/syncplay/groups")
 async def syncplay_create(request: Request):
-    user, participant = _sync_identity(request)
+    user, participant = await _sync_identity_async(request)
     try:
-        account = Account()._row(user_id=user, read_only=True)
-        state = SyncplayGroup.create(
-            user, participant, account[1] if account else "ZenStream"
-        ).state()
+        state = await run_control(_syncplay_create_sync, user, participant)
     except SyncplayMembershipConflict:
         raise HTTPException(409, "You already belong to an active Syncplay group.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
@@ -850,22 +869,25 @@ async def syncplay_create(request: Request):
 
 @router.get("/api/syncplay/groups/{group_id}")
 async def syncplay_group(group_id: str, request: Request):
-    user, participant = _sync_identity(request)
-    group = SyncplayGroup(group_id)
-    state = group.state()
+    user, participant = await _sync_identity_async(request)
+    group, state, is_member = await run_control(
+        _syncplay_group_snapshot_sync, group_id, user, participant
+    )
     if not state:
         raise HTTPException(404, "Group not found.")
-    if not group.member(user, participant):
+    if not is_member:
         raise HTTPException(403, "Join this group first.")
     return state
 
 
 async def _sync_group_context(group_id: str, request: Request):
-    user, participant = _sync_identity(request)
-    group = SyncplayGroup(group_id)
-    if not group.state():
+    user, participant = await _sync_identity_async(request)
+    group, state, is_member = await run_control(
+        _syncplay_group_snapshot_sync, group_id, user, participant
+    )
+    if not state:
         raise HTTPException(404, "Group not found.")
-    if not group.member(user, participant):
+    if not is_member:
         raise HTTPException(403, "Join this group first.")
     return (
         user,
@@ -879,9 +901,9 @@ async def _sync_group_context(group_id: str, request: Request):
 
 @router.post("/api/syncplay/groups/{group_id}/join")
 async def syncplay_join(group_id: str, request: Request):
-    user, participant = _sync_identity(request)
-    group = SyncplayGroup(group_id)
-    if not group.state():
+    user, participant = await _sync_identity_async(request)
+    group = await run_control(SyncplayGroup, group_id)
+    if not await run_control(group.state):
         raise HTTPException(404, "Group not found.")
     data = (
         await request.json()
@@ -889,6 +911,7 @@ async def syncplay_join(group_id: str, request: Request):
         else {}
     )
     replaced = []
+    username = request.headers.get("x-zenstream-username", "ZenStream")
     try:
 
         def apply(cursor, state):
@@ -913,30 +936,32 @@ async def syncplay_join(group_id: str, request: Request):
                     group_id,
                     user,
                     participant,
-                    request.headers.get("x-zenstream-username", "ZenStream"),
+                    username,
                 ),
             )
             group.transition(cursor, state)
 
-        state = group.mutate(
-            user, data.get("expectedRevision"), data.get("operationId"), apply
+        state = await run_control(
+            group.mutate,
+            user,
+            data.get("expectedRevision"),
+            data.get("operationId"),
+            apply,
         )
     except SyncplayMembershipConflict:
         raise HTTPException(409, "You must leave your current Syncplay group first.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     for old_participant in replaced:
-        for socket in await hub.sockets_for(user, old_participant):
-            try:
-                await socket.send_json(
-                    {
-                        "version": 1,
-                        "type": "participant-replaced",
-                        "id": group_id,
-                        "revision": state["revision"],
-                    }
-                )
-            except Exception:
-                pass
+        await hub.send_to_identity(
+            user,
+            old_participant,
+            {
+                "version": 1,
+                "type": "participant-replaced",
+                "id": group_id,
+                "revision": state["revision"],
+            },
+        )
     return state
 
 
@@ -964,8 +989,12 @@ async def syncplay_leave(group_id: str, request: Request):
             )
             group.transition(cursor, state)
 
-    state = group.mutate(
-        user, data.get("expectedRevision"), data.get("operationId"), apply
+    state = await run_control(
+        group.mutate,
+        user,
+        data.get("expectedRevision"),
+        data.get("operationId"),
+        apply,
     )
     await hub.broadcast(
         {
@@ -992,8 +1021,12 @@ async def syncplay_settings(group_id: str, request: Request):
         group.transition(cursor, state, allow_controls=int(value))
 
     try:
-        state = group.mutate(
-            user, data.get("expectedRevision"), data.get("operationId"), apply
+        state = await run_control(
+            group.mutate,
+            user,
+            data.get("expectedRevision"),
+            data.get("operationId"),
+            apply,
         )
     except PermissionError:
         raise HTTPException(403, "Only the host can change settings.")
@@ -1017,8 +1050,12 @@ async def syncplay_remove_member(group_id: str, member_id: str, request: Request
         group.reconcile_readiness(cursor, state)
 
     try:
-        state = group.mutate(
-            user, data.get("expectedRevision"), data.get("operationId"), apply
+        state = await run_control(
+            group.mutate,
+            user,
+            data.get("expectedRevision"),
+            data.get("operationId"),
+            apply,
         )
     except PermissionError:
         raise HTTPException(403, "Only the host can remove members.")
@@ -1127,8 +1164,12 @@ async def syncplay_command(group_id: str, request: Request):
             pause(group, cursor, state, "command")
 
     try:
-        state = group.mutate(
-            user, data.get("expectedRevision"), data.get("operationId"), apply
+        state = await run_control(
+            group.mutate,
+            user,
+            data.get("expectedRevision"),
+            data.get("operationId"),
+            apply,
         )
     except PermissionError:
         raise HTTPException(403, "Only the host can control playback.")
@@ -1176,7 +1217,9 @@ async def syncplay_presence(group_id: str, request: Request):
             bool(data.get("loading")),
         )
 
-    state = group.mutate(user, None, data.get("operationId"), apply)
+    state = await run_control(
+        group.mutate, user, None, data.get("operationId"), apply
+    )
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
 
@@ -1188,8 +1231,12 @@ async def syncplay_participation(group_id: str, request: Request):
     if not isinstance(watching, bool):
         raise HTTPException(400, "watchingTogether must be boolean.")
     try:
-        state = group.set_participation(
-            user, participant, watching, data.get("operationId")
+        state = await run_control(
+            group.set_participation,
+            user,
+            participant,
+            watching,
+            data.get("operationId"),
         )
     except StaleSyncplayState as error:
         raise HTTPException(

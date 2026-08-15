@@ -188,6 +188,34 @@ const groups: FieldGroup[] = [
         type: "number",
       },
       {
+        key: "CONTROL_WORKERS",
+        label: "Control workers",
+        description:
+          "Threads for bounded SyncPlay, administrator, library, metadata, and filesystem work (1–64).",
+        type: "number",
+      },
+      {
+        key: "AUTH_WORKERS",
+        label: "Authentication workers",
+        description:
+          "Threads for password, session, ticket, and administrator identity work (1–16).",
+        type: "number",
+      },
+      {
+        key: "CONTROL_QUEUE",
+        label: "Control queue",
+        description:
+          "Additional pending control-work slots; 0 disables pending slots (0–256).",
+        type: "number",
+      },
+      {
+        key: "AUTH_QUEUE",
+        label: "Authentication queue",
+        description:
+          "Additional pending authentication-work slots; 0 disables pending slots (0–128).",
+        type: "number",
+      },
+      {
         key: "METADATA_ROOT_WORKERS",
         label: "Metadata root workers",
         description:

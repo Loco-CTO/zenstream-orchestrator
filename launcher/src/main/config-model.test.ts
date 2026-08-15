@@ -13,6 +13,10 @@ describe("launcher environment configuration", () => {
     expect(values.ZENSTREAM_PUBLIC_WEB_URL).toBe("");
     expect(values.METADATA_PATH).toContain("ZenStream Orchestrator");
     expect(values.MAX_TRANSCODES).toBe("0");
+    expect(values.CONTROL_WORKERS).toBe("8");
+    expect(values.AUTH_WORKERS).toBe("4");
+    expect(values.CONTROL_QUEUE).toBe("32");
+    expect(values.AUTH_QUEUE).toBe("16");
   });
 
   it("merges missing stored values with current defaults", () => {
@@ -23,6 +27,10 @@ describe("launcher environment configuration", () => {
     );
     expect(normalized.ORCHESTRATOR_PORT).toBe("9191");
     expect(normalized.FOREGROUND_WORKERS).toBe("16");
+    expect(normalized.CONTROL_WORKERS).toBe("8");
+    expect(normalized.AUTH_WORKERS).toBe("4");
+    expect(normalized.CONTROL_QUEUE).toBe("32");
+    expect(normalized.AUTH_QUEUE).toBe("16");
   });
 
   it("rejects unsafe numeric and origin values", () => {
@@ -44,6 +52,23 @@ describe("launcher environment configuration", () => {
     values.ZENSTREAM_PUBLIC_WEB_URL = "https://stream.example.com/register";
     expect(validateEnvironment(values)).toEqual(
       expect.arrayContaining([expect.stringContaining("Public web URL")]),
+    );
+  });
+
+  it("validates control and authentication worker settings", () => {
+    const values = defaultEnvironment("C:\\Data");
+    values.CONTROL_WORKERS = "0";
+    values.AUTH_WORKERS = "17";
+    values.CONTROL_QUEUE = "-1";
+    values.AUTH_QUEUE = "129";
+
+    expect(validateEnvironment(values)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("CONTROL_WORKERS"),
+        expect.stringContaining("AUTH_WORKERS"),
+        expect.stringContaining("CONTROL_QUEUE"),
+        expect.stringContaining("AUTH_QUEUE"),
+      ]),
     );
   });
 });

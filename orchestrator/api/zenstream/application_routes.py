@@ -1252,44 +1252,35 @@ async def syncplay_socket(websocket: WebSocket):
     participant = websocket.headers.get(
         "x-zenstream-participant"
     ) or websocket.query_params.get("participantId")
-    account = websocket_account(websocket)
+    account = await run_auth(websocket_account, websocket)
     user_id = account["id"] if account else None
     if not user_id or not participant:
         await websocket.close(code=1008)
         return
-    await hub.connect(websocket, user_id, participant)
+    await hub.connect(websocket, user_id, participant, initialize=True)
     try:
-        for group in SyncplayGroup.active_groups_for_user(user_id, participant):
-            state = group.clear_host_disconnected()
-            if state:
-                await _broadcast_group(state)
-        rows = SyncplayGroup("_").db.execute(
-            "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
+        changed, groups = await run_control(
+            _syncplay_socket_initial_sync, user_id, participant
         )
-        await websocket.send_json(
-            {
-                "version": 1,
-                "type": "groups",
-                "groups": [
-                    _redact_syncplay_state(
-                        SyncplayGroup(row[0]).state(), user_id, participant
-                    )
-                    for row in rows
-                ],
-            }
+        for state in changed:
+            await _broadcast_group(state)
+        await hub.finish_initial(
+            websocket,
+            {"version": 1, "type": "groups", "groups": groups},
         )
         while True:
             message = await websocket.receive_json()
             if message.get("type") == "clock":
                 received = time.time()
-                await websocket.send_json(
+                await hub.send(
+                    websocket,
                     {
                         "version": 1,
                         "type": "clock",
                         "clientSentAt": message.get("clientSentAt"),
                         "serverReceivedAt": received,
                         "serverSentAt": time.time(),
-                    }
+                    },
                 )
     except WebSocketDisconnect:
         pass

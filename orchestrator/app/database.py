@@ -80,6 +80,11 @@ class DatabaseHandler:
         self._scheduled_maintenance_lock = threading.Lock()
         self._last_passive_checkpoint_at = 0.0
         self._last_passive_checkpoint_clean = False
+        self._timing_lock = threading.Lock()
+        self._writer_wait_seconds = 0.0
+        self._writer_operations = 0
+        self._reader_wait_seconds = 0.0
+        self._reader_operations = 0
         self.connect()
 
     def connect(self):
@@ -201,6 +206,7 @@ class DatabaseHandler:
 
     def read_execute(self, query, params=None):
         """Execute a read without waiting on writer or unrelated reader locks."""
+        started = time.monotonic()
         if self.db_file == ":memory:":
             connection = self.connection
             lock = self.read_lock
@@ -219,6 +225,7 @@ class DatabaseHandler:
                     print(f"Database read error: {e}")
                     raise
             with self.persistence.read_sessions() as session:
+                self._record_reader_timing(time.monotonic() - started)
                 connection = session.connection()
                 self.read_local.connection = connection
                 try:
@@ -243,7 +250,9 @@ class DatabaseHandler:
 
         if lock is not None:
             with lock:
+                self._record_reader_timing(time.monotonic() - started)
                 return execute_read()
+        self._record_reader_timing(time.monotonic() - started)
         return execute_read()
 
     def wal_bytes(self) -> int:
@@ -371,10 +380,26 @@ class DatabaseHandler:
         ).start()
         return True
 
-    @staticmethod
+    def _record_reader_timing(self, elapsed_seconds: float) -> None:
+        with self._timing_lock:
+            self._reader_operations += 1
+            self._reader_wait_seconds += max(0.0, elapsed_seconds)
+
+    def metrics(self) -> dict[str, float | int]:
+        with self._timing_lock:
+            return {
+                "writer_operations": self._writer_operations,
+                "writer_wait_seconds": self._writer_wait_seconds,
+                "reader_operations": self._reader_operations,
+                "reader_wait_seconds": self._reader_wait_seconds,
+            }
+
     def _log_writer_timing(
-        operation: str, wait_seconds: float, hold_seconds: float, started: float
+        self, operation: str, wait_seconds: float, hold_seconds: float, started: float
     ) -> None:
+        with self._timing_lock:
+            self._writer_operations += 1
+            self._writer_wait_seconds += max(0.0, wait_seconds)
         if wait_seconds >= 0.1 or hold_seconds >= 0.25:
             logger.warning(
                 "sqlite writer timing operation=%s wait_seconds=%.3f hold_seconds=%.3f total_seconds=%.3f",

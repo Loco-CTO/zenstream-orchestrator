@@ -73,6 +73,12 @@ const groups: FieldGroup[] = [
         type: "number",
       },
       {
+        key: "ZENSTREAM_PUBLIC_WEB_URL",
+        label: "Public web URL",
+        description:
+          "HTTP(S) origin of the public ZenStream web client used for invite links.",
+      },
+      {
         key: "CORS_ORIGINS",
         label: "CORS origins",
         description:

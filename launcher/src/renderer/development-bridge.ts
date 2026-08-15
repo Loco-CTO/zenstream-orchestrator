@@ -11,6 +11,7 @@ const config: EditableConfig = {
   environment: {
     ORCHESTRATOR_HOST: "127.0.0.1",
     ORCHESTRATOR_PORT: "9088",
+    ZENSTREAM_PUBLIC_WEB_URL: "",
     METADATA_PATH:
       "C:\\Users\\Example\\AppData\\Local\\ZenStream Orchestrator\\metadata",
     CORS_ORIGINS: "",

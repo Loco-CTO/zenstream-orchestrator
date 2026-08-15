@@ -1,5 +1,6 @@
 import asyncio
 import math
+import os
 import time
 from pathlib import Path
 
@@ -575,6 +576,15 @@ async def check_invite(
 @router.get("/api/version")
 async def version():
     return {"version": __version__, "main": _main_version()}
+
+
+@router.get("/api/config/public-web-url")
+async def public_web_url():
+    return {
+        "publicWebUrl": os.environ.get("ZENSTREAM_PUBLIC_WEB_URL", "")
+        .strip()
+        .rstrip("/")
+    }
 
 
 @router.get("/api/config")

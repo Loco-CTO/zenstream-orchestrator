@@ -9,7 +9,6 @@ import re
 import subprocess
 import time
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
@@ -57,10 +56,6 @@ logger = get_logger("playback_routes")
 AUTH_BODY_LIMIT_BYTES = 16 * 1024
 RESOURCE_TICKET_TTL_SECONDS = 15 * 60
 _RATE_LIMIT_EVENTS: dict[tuple[str, str], deque[float]] = defaultdict(deque)
-_ARTWORK_EXECUTOR = ThreadPoolExecutor(
-    max_workers=max(1, min(32, int(os.getenv("ARTWORK_RESOLVE_WORKERS", "8")))),
-    thread_name_prefix="zenstream-artwork",
-)
 CARD_METADATA_FIELDS = {
     "title",
     "date",

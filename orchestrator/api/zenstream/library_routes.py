@@ -10,6 +10,7 @@ from app.client_auth import administrator_origin_allowed
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore, render_audio_preview
 from app.jobs import scheduler
+from app.foreground import run_auth, run_control, run_foreground
 from app.library import LibraryStore, runtime
 from app.logging_config import get_logger
 from app.metadata_domain import choose_artwork
@@ -175,7 +176,7 @@ def authenticate_admin_request(
 
 
 async def _admin_boundary(request: Request):
-    identity = authenticate_admin_request(request)
+    identity = await run_auth(authenticate_admin_request, request)
     context_token = _admin_identity.set(identity)
     try:
         yield
@@ -202,6 +203,78 @@ def _configured_locale(value: str | None) -> str:
     if requested not in configured:
         raise HTTPException(400, "Metadata language is not configured.")
     return requested
+
+
+async def _configured_locale_async(value: str | None) -> str:
+    return await run_control(_configured_locale, value)
+
+
+def _list_libraries_sync():
+    values = []
+    for library in store.list():
+        library["sourceLibraryIds"] = store.sources(library["id"])
+        values.append(library)
+    return values
+
+
+def _create_library_sync(values: dict):
+    library = store.create(
+        str(values.get("name") or ""),
+        str(values.get("type") or ""),
+        values.get("directory"),
+        bool(values.get("watchEnabled", True)),
+        int(values.get("scanIntervalMinutes") or 1440),
+        values.get("sourceLibraryIds") or [],
+    )
+    scheduler.refresh_library_definition(library)
+    runtime.refresh_watchers()
+    job = runtime.enqueue(
+        library["id"],
+        "collection_rebuild" if library["type"] == "collection" else "scan",
+    )
+    library["sourceLibraryIds"] = store.sources(library["id"])
+    library["jobId"] = job["id"]
+    return library
+
+
+def _get_library_sync(library_id: str):
+    library = store.get(library_id)
+    if not library:
+        raise HTTPException(404, "Library not found.")
+    library["sourceLibraryIds"] = store.sources(library_id)
+    library["jobs"] = store.jobs(library_id)
+    return library
+
+
+def _update_library_sync(library_id: str, values: dict):
+    library = store.update(library_id, values)
+    runtime.enqueue(
+        library_id,
+        "collection_rebuild" if library["type"] == "collection" else "scan",
+    )
+    scheduler.refresh_library_definition(library)
+    runtime.refresh_watchers()
+    library["sourceLibraryIds"] = store.sources(library_id)
+    return library
+
+
+def _delete_library_sync(library_id: str):
+    if not runtime.terminate_library(library_id):
+        raise HTTPException(409, "Library jobs are still stopping; try again shortly.")
+    if not store.delete(library_id):
+        raise HTTPException(404, "Library not found.")
+    scheduler.remove_library_definition(library_id)
+    runtime.refresh_watchers()
+
+
+def _scan_library_sync(library_id: str):
+    library = store.get(library_id)
+    if not library:
+        raise HTTPException(404, "Library not found.")
+    return runtime.enqueue(
+        library_id,
+        "collection_rebuild" if library["type"] == "collection" else "scan",
+    )
 
 
 def _entity_ids(entity_id: str) -> list[dict]:
@@ -509,7 +582,7 @@ async def provider_status(
     Username: str | None = Header(None), TOKEN: str | None = Header(None)
 ):
     require_admin(Username, TOKEN)
-    return credentials.configured()
+    return await run_control(credentials.configured)
 
 
 @router.get("/metadata/languages")
@@ -518,8 +591,8 @@ async def metadata_languages(
 ):
     require_admin(Username, TOKEN)
     return {
-        "locales": MetadataLanguageSettings().get(),
-        "options": await asyncio.to_thread(MetadataService().language_options),
+        "locales": await run_control(MetadataLanguageSettings().get),
+        "options": await run_foreground(MetadataService().language_options),
     }
 
 
@@ -532,10 +605,12 @@ async def update_metadata_languages(
     require_admin(Username, TOKEN)
     data = await request.json()
     try:
-        locales = MetadataLanguageSettings().set(data.get("locales"))
+        locales = await run_control(
+            MetadataLanguageSettings().set, data.get("locales")
+        )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
-    run = scheduler.enqueue_metadata_refresh()
+    run = await run_control(scheduler.enqueue_metadata_refresh)
     return {"locales": locales, "backfill": run}
 
 
@@ -545,7 +620,7 @@ async def refresh_metadata(
 ):
     """Explicitly repair/refetch all indexed provider metadata and artwork."""
     require_admin(Username, TOKEN)
-    return {"backfill": scheduler.enqueue_metadata_refresh()}
+    return {"backfill": await run_control(scheduler.enqueue_metadata_refresh)}
 
 
 @router.put("/metadata/providers/{provider}")
@@ -561,8 +636,11 @@ async def update_provider(
         raise HTTPException(400, "Only TMDB and TheTVDB credentials can be configured.")
     data = await request.json()
     if data.get("clear"):
-        credentials.clear(provider)
-        return credentials.configured()[provider]
+        def clear_provider():
+            credentials.clear(provider)
+            return credentials.configured()[provider]
+
+        return await run_control(clear_provider)
     if provider == "tmdb":
         value = str(data.get("credential") or data.get("apiKey") or "").strip()
         credential_type = str(data.get("credentialType") or "api_key")
@@ -582,13 +660,16 @@ async def update_provider(
         credential = {"apiKey": value, "pin": str(data.get("pin") or "").strip()}
     if data.get("validate", True):
         try:
-            await asyncio.to_thread(
+            await run_foreground(
                 MetadataService().test, provider, credential, credential_type
             )
         except ProviderError as error:
             raise HTTPException(400, f"Provider validation failed: {error}") from error
-    credentials.set(provider, credential, credential_type)
-    return credentials.configured()[provider]
+    def save_provider():
+        credentials.set(provider, credential, credential_type)
+        return credentials.configured()[provider]
+
+    return await run_control(save_provider)
 
 
 @router.post("/metadata/providers/{provider}/test")
@@ -603,14 +684,14 @@ async def test_provider(
     try:
         if provider == "tmdb":
             credential = {"value": str(data.get("credential") or "")}
-            await asyncio.to_thread(
+            await run_foreground(
                 MetadataService().test,
                 provider,
                 credential,
                 str(data.get("credentialType") or "api_key"),
             )
         elif provider == "tvdb":
-            await asyncio.to_thread(
+            await run_foreground(
                 MetadataService().test,
                 provider,
                 {

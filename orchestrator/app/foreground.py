@@ -20,14 +20,16 @@ def _worker_count(name: str, default: int, minimum: int = 1, maximum: int = 64) 
     return max(minimum, min(maximum, value))
 
 
-_workers = _worker_count("FOREGROUND_WORKERS", 16, minimum=2, maximum=32)
-_control_workers = _worker_count("CONTROL_WORKERS", 4)
-_auth_workers = _worker_count("AUTH_WORKERS", 4)
+_workers = _worker_count("FOREGROUND_WORKERS", 16, minimum=1, maximum=128)
+_control_workers = _worker_count("CONTROL_WORKERS", 8, minimum=1, maximum=64)
+_auth_workers = _worker_count("AUTH_WORKERS", 4, minimum=1, maximum=16)
 _executor = ThreadPoolExecutor(max_workers=_workers, thread_name_prefix="foreground")
 _control_executor = ThreadPoolExecutor(
     max_workers=_control_workers, thread_name_prefix="control"
 )
-_auth_executor = ThreadPoolExecutor(max_workers=_auth_workers, thread_name_prefix="auth")
+_auth_executor = ThreadPoolExecutor(
+    max_workers=_auth_workers, thread_name_prefix="auth"
+)
 _active = {"foreground": 0, "control": 0, "auth": 0}
 _completed = {"foreground": 0, "control": 0, "auth": 0}
 _queued_seconds = {"foreground": 0.0, "control": 0.0, "auth": 0.0}

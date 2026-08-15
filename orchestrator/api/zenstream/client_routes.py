@@ -427,7 +427,7 @@ async def socket_ticket(request: Request):
 @router.get("/api/catalog/status")
 async def catalog_status(request: Request):
     account, _ = await _require_account(request)
-    return await asyncio.to_thread(_catalog_status_payload, account["id"])
+    return await run_foreground(_catalog_status_payload, account["id"])
 
 
 @router.websocket("/api/ws/catalog")
@@ -441,7 +441,7 @@ async def catalog_socket(websocket: WebSocket):
     last_sent = 0.0
     try:
         while True:
-            payload = await asyncio.to_thread(_catalog_status_payload, account["id"])
+            payload = await run_foreground(_catalog_status_payload, account["id"])
             fingerprint = _catalog_status_fingerprint(payload)
             current = asyncio.get_running_loop().time()
             changed = fingerprint != previous
@@ -1137,10 +1137,11 @@ def _vtt_time(seconds: float) -> str:
     return f"{int(hours):02d}:{int(minutes):02d}:{remainder:06.3f}"
 
 
-@router.get("/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt")
-async def subtitle(entity_id: str, media_file_id: str, request: Request):
-    account = account_from_access(request)
-    catalog.require_entity(account["id"], entity_id)
+def _prepare_subtitle(
+    account_id: str, entity_id: str, media_file_id: str
+) -> dict[str, object]:
+    """Authorize and prepare all subtitle filesystem/cache work in one worker."""
+    catalog.require_entity(account_id, entity_id)
     rows = catalog.db.execute(
         "SELECT f.relative_path,l.directory,f.role FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.id=? AND f.entity_id=? AND f.role IN ('subtitle','lyrics')",
         (media_file_id, entity_id),
@@ -1158,27 +1159,43 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
             or target.stat().st_mtime_ns < source.stat().st_mtime_ns
         ):
             target.write_text(_lyrics_to_vtt(source), encoding="utf-8")
-        return FileResponse(target, media_type="text/vtt")
+        return {"path": target, "convert": False}
     if source.suffix.lower() == ".vtt":
-        return FileResponse(source, media_type="text/vtt")
+        return {"path": source, "convert": False}
     executable = ffmpeg_path()
     if not executable:
         raise HTTPException(503, "FFmpeg is not available.")
     target_root = Path(catalog.db.db_file).parent / "subtitle-cache"
     target_root.mkdir(parents=True, exist_ok=True)
     target = target_root / f"{hashlib.sha256(str(source).encode()).hexdigest()}.vtt"
-    if not target.is_file() or target.stat().st_mtime_ns < source.stat().st_mtime_ns:
+    return {
+        "path": target,
+        "convert": not target.is_file()
+        or target.stat().st_mtime_ns < source.stat().st_mtime_ns,
+        "source": source,
+        "executable": executable,
+    }
+
+
+@router.get("/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt")
+async def subtitle(entity_id: str, media_file_id: str, request: Request):
+    account = await _require_access(request)
+    prepared = await run_control(
+        _prepare_subtitle, account["id"], entity_id, media_file_id
+    )
+    target = prepared["path"]
+    if prepared["convert"]:
         try:
             completed = await asyncio.to_thread(
                 subprocess.run,
                 [
-                    executable,
+                    prepared["executable"],
                     "-hide_banner",
                     "-loglevel",
                     "error",
                     "-y",
                     "-i",
-                    str(source),
+                    str(prepared["source"]),
                     str(target),
                 ],
                 stdout=subprocess.DEVNULL,
@@ -1200,8 +1217,8 @@ async def admin_users(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
-    return {"users": Account().list()}
+    await run_auth(authenticate_admin_request, request, TOKEN)
+    return {"users": await run_control(Account().list)}
 
 
 @router.post("/api/admin/users", status_code=201)
@@ -1210,11 +1227,13 @@ async def create_user(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
+    await run_auth(authenticate_admin_request, request, TOKEN)
     data = await request.json()
     try:
-        return Account().create(
-            str(data.get("username") or ""), str(data.get("password") or "")
+        return await run_auth(
+            Account().create,
+            str(data.get("username") or ""),
+            str(data.get("password") or ""),
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -1227,12 +1246,12 @@ async def set_user_libraries(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
+    await run_auth(authenticate_admin_request, request, TOKEN)
     data = await request.json()
     try:
         return {
-            "libraryIds": Account().set_library_ids(
-                user_id, data.get("libraryIds") or []
+            "libraryIds": await run_control(
+                Account().set_library_ids, user_id, data.get("libraryIds") or []
             )
         }
     except KeyError as error:
@@ -1248,10 +1267,12 @@ async def reset_user_password(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
+    await run_auth(authenticate_admin_request, request, TOKEN)
     try:
-        return Account().set_password(
-            user_id, str((await request.json()).get("password") or "")
+        return await run_auth(
+            Account().set_password,
+            user_id,
+            str((await request.json()).get("password") or ""),
         )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
@@ -1266,10 +1287,12 @@ async def update_user(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
+    await run_auth(authenticate_admin_request, request, TOKEN)
     try:
-        return Account().set_disabled(
-            user_id, bool((await request.json()).get("disabled"))
+        return await run_control(
+            Account().set_disabled,
+            user_id,
+            bool((await request.json()).get("disabled")),
         )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
@@ -1282,6 +1305,6 @@ async def delete_user(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
-    if not Account().delete(user_id):
+    await run_auth(authenticate_admin_request, request, TOKEN)
+    if not await run_control(Account().delete, user_id):
         raise HTTPException(404, "User not found.")

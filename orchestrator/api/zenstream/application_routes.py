@@ -150,6 +150,7 @@ class WebSocketHub:
                     connection.queue.put_nowait(pending)
             except asyncio.QueueFull:
                 overflow = True
+                self._queue_overflows += 1
             else:
                 connection.pending.clear()
                 connection.initializing = False
@@ -239,12 +240,14 @@ class WebSocketHub:
 
     async def queue_metrics(self) -> dict[str, int]:
         async with self.lock:
+            depths = [
+                connection.queue.qsize() + len(connection.pending)
+                for connection in self._connections.values()
+            ]
             return {
                 "clients": len(self._connections),
-                "queued_messages": sum(
-                    connection.queue.qsize() + len(connection.pending)
-                    for connection in self._connections.values()
-                ),
+                "queued_messages": sum(depths),
+                "max_queue_depth": max(depths, default=0),
                 "queue_overflows": self._queue_overflows,
             }
 
@@ -396,6 +399,17 @@ def _static_path_is_contained(root: Path, path: str) -> bool:
         return False
 
 
+def _dashboard_files(path: str):
+    """Resolve dashboard paths in the control lane before FileResponse runs."""
+    if not _static_path_is_contained(web_root, path):
+        raise HTTPException(404)
+    requested = _contained_static_file(web_root, path)
+    route = path.strip("/") or "login"
+    page = _contained_static_file(web_root, "web", route, "index.html")
+    fallback = _contained_static_file(web_root, "web", "login", "index.html")
+    return requested, page, fallback
+
+
 router = APIRouter()
 web_root, _assets_root = _static_roots()
 
@@ -412,7 +426,7 @@ async def docs_alias():
 
 @router.get("/favicon.ico")
 async def favicon():
-    path = _contained_static_file(web_root, "favicon.ico")
+    path = await run_control(_contained_static_file, web_root, "favicon.ico")
     if path is None:
         raise HTTPException(404)
     return FileResponse(path)
@@ -420,16 +434,11 @@ async def favicon():
 
 @router.get("/web/{path:path}")
 async def dashboard(path: str = ""):
-    if not _static_path_is_contained(web_root, path):
-        raise HTTPException(404)
-    requested = _contained_static_file(web_root, path)
+    requested, page, fallback = await run_control(_dashboard_files, path)
     if requested is not None:
         return FileResponse(requested)
-    route = path.strip("/") or "login"
-    page = _contained_static_file(web_root, "web", route, "index.html")
     if page is not None:
         return FileResponse(page)
-    fallback = _contained_static_file(web_root, "web", "login", "index.html")
     if fallback is not None:
         return FileResponse(fallback)
     return JSONResponse(
@@ -747,7 +756,7 @@ async def check_invite(
 
 @router.get("/api/version")
 async def version():
-    return {"version": __version__, "main": _main_version()}
+    return {"version": __version__, "main": await run_control(_main_version)}
 
 
 @router.get("/api/config/public-web-url")
@@ -762,12 +771,13 @@ async def public_web_url():
 @router.get("/api/config")
 async def mobile_config():
     ffmpeg, ffprobe = await run_control(lambda: (ffmpeg_path(), ffprobe_path()))
+    main_version = await run_control(_main_version)
     return {
         "apiVersion": 2,
         "catalog": True,
         "playback": bool(ffmpeg and ffprobe),
         "version": __version__,
-        "main": _main_version(),
+        "main": main_version,
     }
 
 
@@ -1264,10 +1274,11 @@ async def syncplay_socket(websocket: WebSocket):
         )
         for state in changed:
             await _broadcast_group(state)
-        await hub.finish_initial(
+        if not await hub.finish_initial(
             websocket,
             {"version": 1, "type": "groups", "groups": groups},
-        )
+        ):
+            return
         while True:
             message = await websocket.receive_json()
             if message.get("type") == "clock":

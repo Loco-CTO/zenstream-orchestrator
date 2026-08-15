@@ -67,11 +67,12 @@ export default function InvitesPage() {
 	async function load(current = session) {
 		if (!current) return;
 		setLoading(true);
-		const [inviteResponse, libraryResponse, publicWebResponse] = await Promise.all([
-			adminFetch("/api/admin/invites", current),
-			adminFetch("/api/admin/libraries", current),
-			adminFetch("/api/config/public-web-url", current),
-		]);
+		const [inviteResponse, libraryResponse, publicWebResponse] =
+			await Promise.all([
+				adminFetch("/api/admin/invites", current),
+				adminFetch("/api/admin/libraries", current),
+				adminFetch("/api/config/public-web-url", current),
+			]);
 		if (inviteResponse.ok) {
 			const payload = (await inviteResponse.json()) as { invites?: Invite[] };
 			setInvites(payload.invites || []);

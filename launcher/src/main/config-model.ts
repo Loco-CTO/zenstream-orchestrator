@@ -72,7 +72,8 @@ export function validateEnvironment(environment: EnvironmentConfig): string[] {
   if (environment.ZENSTREAM_PUBLIC_WEB_URL) {
     try {
       const parsed = new URL(environment.ZENSTREAM_PUBLIC_WEB_URL);
-      if (!/^https?:$/.test(parsed.protocol)) throw new Error("invalid protocol");
+      if (!/^https?:$/.test(parsed.protocol))
+        throw new Error("invalid protocol");
       if (parsed.username || parsed.password || parsed.search || parsed.hash) {
         throw new Error("URL must be an origin");
       }

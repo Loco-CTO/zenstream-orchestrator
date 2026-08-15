@@ -211,7 +211,8 @@ class SyncplayGroup:
         if participant_id is not None:
             query += " AND m.participant_id=?"
             args.append(participant_id)
-        rows = group.db.execute(query, tuple(args))
+        with group.db.read_session():
+            rows = group.db.read_execute(query, tuple(args))
         return [cls(row[0]) for row in rows]
 
     def _remembered(self, cursor, operation_id, user):
@@ -412,10 +413,12 @@ class SyncplayGroup:
     @classmethod
     def expire_due_host_disconnects(cls, now=None):
         now = time.time() if now is None else now
-        rows = cls("_").db.execute(
-            "SELECT id FROM syncplay_groups WHERE ended=0 AND host_disconnected_at IS NOT NULL AND host_disconnected_at<=?",
-            (now - 300,),
-        )
+        group = cls("_")
+        with group.db.read_session():
+            rows = group.db.read_execute(
+                "SELECT id FROM syncplay_groups WHERE ended=0 AND host_disconnected_at IS NOT NULL AND host_disconnected_at<=?",
+                (now - 300,),
+            )
         states = []
         for row in rows:
             state = cls(row[0]).expire_host_disconnect(now)

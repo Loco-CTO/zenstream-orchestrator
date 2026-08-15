@@ -863,9 +863,7 @@ async def item_image(
             raise HTTPException(404, "Image version is no longer available.")
         return None
 
-    cached_image = await asyncio.get_running_loop().run_in_executor(
-        _ARTWORK_EXECUTOR, resolve_cached_image
-    )
+    cached_image = await run_control(resolve_cached_image)
     if cached_image:
         versioned = bool(request.query_params.get("v"))
         return FileResponse(
@@ -887,11 +885,9 @@ async def item_image(
 
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
-    account = await asyncio.get_running_loop().run_in_executor(
-        _ARTWORK_EXECUTOR, account_from_access, request
-    )
-    image = await asyncio.get_running_loop().run_in_executor(
-        _ARTWORK_EXECUTOR, catalog.person_image, account["id"], entity_id, person_id
+    account = await _require_access(request)
+    image = await run_control(
+        catalog.person_image, account["id"], entity_id, person_id
     )
     if image is None:
         raise HTTPException(404, "Person image not found.")
@@ -934,16 +930,14 @@ async def item_detail(
 async def update_item_state(entity_id: str, request: Request):
     account, _ = await _require_account(request)
     state = await request.json()
-    return await asyncio.to_thread(
-        catalog.update_state, account["id"], entity_id, state
-    )
+    return await run_control(catalog.update_state, account["id"], entity_id, state)
 
 
 @router.post("/api/playback/items/{entity_id}/negotiate")
 async def negotiate_playback(entity_id: str, request: Request):
     account, token = await _require_account(request)
     session_id = await run_auth(session_id_for_token, token)
-    return await asyncio.to_thread(
+    return await run_foreground(
         media.negotiate,
         account["id"],
         entity_id,
@@ -955,7 +949,7 @@ async def negotiate_playback(entity_id: str, request: Request):
 @router.get("/api/playback/items/{entity_id}/source")
 async def playback_source_metadata(entity_id: str, request: Request):
     account, _ = await _require_account(request)
-    return await asyncio.to_thread(media.source_metadata, account["id"], entity_id)
+    return await run_foreground(media.source_metadata, account["id"], entity_id)
 
 
 @router.get("/api/playback/items/{entity_id}/trickplay")
@@ -963,9 +957,9 @@ async def trickplay_manifest(
     entity_id: str, request: Request, sourceId: str | None = Query(None)
 ):
     account, token = await _require_account(request)
-    session_id = await run_foreground(session_id_for_token, token)
+    session_id = await run_auth(session_id_for_token, token)
     await run_control(catalog.require_entity, account["id"], entity_id)
-    payload = await asyncio.to_thread(
+    payload = await run_foreground(
         trickplay.manifest, account["id"], entity_id, sourceId, session_id
     )
     if payload["state"] != "ready":

@@ -128,6 +128,8 @@ EPISODE_RE = re.compile(
 )
 SEASON_RE = re.compile(r"(?i)^(?:season\s*|s)(\d+)$")
 ACTIVE_JOB_STATES = ("queued", "running", "terminating")
+WATCHER_RECONCILE_DEBOUNCE_SECONDS = 5.0
+WATCHER_RECONCILE_FLUSH_INTERVAL_SECONDS = 1.0
 logger = get_logger("library")
 
 
@@ -4500,6 +4502,12 @@ class LibraryRuntime:
         self._active_lock = threading.RLock()
         self._root_locks: dict[tuple[str, str], threading.Lock] = {}
         self._root_locks_guard = threading.RLock()
+        self._reconcile_state_lock = threading.RLock()
+        self._reconcile_target_cache: dict[str, dict[str, dict[str, object]]] = {}
+        self._reconcile_cache_loaded: set[str] = set()
+        self._reconcile_pending: dict[str, set[str]] = {}
+        self._reconcile_table_available: bool | None = None
+        self._reconcile_last_flush = 0.0
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -4516,12 +4524,13 @@ class LibraryRuntime:
         self.stop_event.set()
         with self.condition:
             self.condition.notify_all()
-        if self.thread:
-            self.thread.join(timeout=5)
         if self.observer:
             self.observer.stop()
             self.observer.join(timeout=5)
             self.observer = None
+        if self.thread:
+            self.thread.join(timeout=5)
+        self._flush_reconcile_updates(force=True)
         self._watch_paths.clear()
 
     def refresh_watchers(self) -> None:
@@ -4636,6 +4645,16 @@ class LibraryRuntime:
             with self.condition:
                 self.condition.wait(timeout=min(0.25, remaining))
 
+    def has_active_inventory_jobs(self) -> bool:
+        """Return whether inventory work is queued or running."""
+
+        rows = self.store.db.execute(
+            "SELECT 1 FROM library_jobs "
+            "WHERE kind IN ('scan','reconcile','collection_rebuild') "
+            "AND state IN ('queued','running','terminating') LIMIT 1"
+        )
+        return bool(rows)
+
     def _recover_active_jobs(self) -> None:
         """Re-queue interrupted inventory jobs after an Orchestrator restart."""
         rows = self.store.db.execute(
@@ -4682,6 +4701,7 @@ class LibraryRuntime:
 
     def request_reconcile(self, library_id: str, *paths: str | None) -> None:
         """Persist and debounce watcher changes into top-level reconciles."""
+        self._ensure_reconcile_state()
         library = self.store.get(library_id)
         if not library:
             return
@@ -4702,13 +4722,9 @@ class LibraryRuntime:
                 self.enqueue(library_id, "scan")
         if not targets:
             return
-        deadline = time.time() + 5
+        deadline = time.time() + WATCHER_RECONCILE_DEBOUNCE_SECONDS
         timestamp = now()
-        has_queue = bool(
-            self.store.db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_reconcile_targets'"
-            )
-        )
+        has_queue = self._durable_reconcile_targets_available()
         if not has_queue:
             queued = self._reconcile_targets.setdefault(library_id, set())
             for target in targets:
@@ -4720,56 +4736,231 @@ class LibraryRuntime:
                     }
                 )
                 queued.add(target)
-            self._reconcile_due[library_id] = time.monotonic() + 5
+            self._reconcile_due[library_id] = (
+                time.monotonic() + WATCHER_RECONCILE_DEBOUNCE_SECONDS
+            )
             with self.condition:
                 self.condition.notify_all()
+            return
+        with self._reconcile_state_lock:
+            cache = self._load_reconcile_target_cache(library_id)
+            pending = self._reconcile_pending.setdefault(library_id, set())
+            new_records: list[dict[str, object]] = []
+            for target in targets:
+                key = _top_level_key(target)
+                record = cache.get(key)
+                if record is None:
+                    record = {
+                        "top_level_root": target,
+                        "stored_root": target,
+                        "debounce_until": deadline,
+                        "event_count": 1,
+                        "revision": 1,
+                        "first_seen_at": timestamp,
+                        "last_seen_at": timestamp,
+                    }
+                    cache[key] = record
+                    new_records.append(dict(record))
+                    continue
+                record["top_level_root"] = target
+                record["debounce_until"] = deadline
+                record["event_count"] = int(record["event_count"]) + 1
+                record["revision"] = int(record["revision"]) + 1
+                record["last_seen_at"] = timestamp
+                pending.add(key)
+            if new_records:
+                self._persist_new_reconcile_targets(library_id, new_records)
+        with self.condition:
+            self.condition.notify_all()
+
+    def _ensure_reconcile_state(self) -> None:
+        if not hasattr(self, "_reconcile_state_lock"):
+            self._reconcile_state_lock = threading.RLock()
+        if not hasattr(self, "_reconcile_target_cache"):
+            self._reconcile_target_cache = {}
+        if not hasattr(self, "_reconcile_cache_loaded"):
+            self._reconcile_cache_loaded = set()
+        if not hasattr(self, "_reconcile_pending"):
+            self._reconcile_pending = {}
+        if not hasattr(self, "_reconcile_table_available"):
+            self._reconcile_table_available = None
+        if not hasattr(self, "_reconcile_last_flush"):
+            self._reconcile_last_flush = 0.0
+
+    def _durable_reconcile_targets_available(self) -> bool:
+        self._ensure_reconcile_state()
+        available = getattr(self, "_reconcile_table_available", None)
+        if available is None:
+            available = bool(
+                self.store.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_reconcile_targets'"
+                )
+            )
+            self._reconcile_table_available = available
+        return available
+
+    def _load_reconcile_target_cache(
+        self, library_id: str
+    ) -> dict[str, dict[str, object]]:
+        self._ensure_reconcile_state()
+        cache = self._reconcile_target_cache.setdefault(library_id, {})
+        if library_id in self._reconcile_cache_loaded:
+            return cache
+        rows = self.store.db.execute(
+            "SELECT top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at "
+            "FROM library_reconcile_targets WHERE library_id=?",
+            (library_id,),
+        )
+        for root, deadline, event_count, revision, first_seen, last_seen in rows:
+            cache[_top_level_key(root)] = {
+                "top_level_root": root,
+                "stored_root": root,
+                "debounce_until": float(deadline),
+                "event_count": int(event_count),
+                "revision": int(revision),
+                "first_seen_at": first_seen,
+                "last_seen_at": last_seen,
+            }
+        self._reconcile_cache_loaded.add(library_id)
+        return cache
+
+    def _persist_new_reconcile_targets(
+        self, library_id: str, records: list[dict[str, object]]
+    ) -> None:
+        if not records:
             return
         with self.store.db.transaction() as cursor:
             cursor.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,))
             if not cursor.fetchone():
+                self._reconcile_target_cache.pop(library_id, None)
+                self._reconcile_pending.pop(library_id, None)
                 return
-            existing_rows = cursor.execute(
-                "SELECT top_level_root,revision FROM library_reconcile_targets WHERE library_id=?",
-                (library_id,),
-            ).fetchall()
-            for target in targets:
-                match = next(
+            for record in records:
+                cursor.execute(
+                    """
+                    INSERT INTO library_reconcile_targets
+                        (library_id,top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(library_id,top_level_root) DO UPDATE SET
+                        debounce_until=excluded.debounce_until,
+                        event_count=excluded.event_count,
+                        revision=excluded.revision,
+                        first_seen_at=excluded.first_seen_at,
+                        last_seen_at=excluded.last_seen_at
+                    """,
                     (
-                        row
-                        for row in existing_rows
-                        if _top_level_key(row[0]) == _top_level_key(target)
+                        library_id,
+                        record["top_level_root"],
+                        record["debounce_until"],
+                        record["event_count"],
+                        record["revision"],
+                        record["first_seen_at"],
+                        record["last_seen_at"],
                     ),
-                    None,
                 )
-                if match:
+
+    def _flush_reconcile_updates(self, *, force: bool = False) -> None:
+        if not self._durable_reconcile_targets_available():
+            return
+        self._ensure_reconcile_state()
+        current = time.monotonic()
+        with self._reconcile_state_lock:
+            if not force and (
+                current - self._reconcile_last_flush
+                < WATCHER_RECONCILE_FLUSH_INTERVAL_SECONDS
+            ):
+                return
+            snapshots: list[tuple[str, str, dict[str, object]]] = []
+            for library_id, keys in self._reconcile_pending.items():
+                cache = self._reconcile_target_cache.get(library_id, {})
+                for key in keys:
+                    record = cache.get(key)
+                    if record is not None:
+                        snapshots.append((library_id, key, dict(record)))
+            if not snapshots:
+                self._reconcile_last_flush = current
+                return
+            for library_id, key, _record in snapshots:
+                self._reconcile_pending.setdefault(library_id, set()).discard(key)
+
+        try:
+            with self.store.db.transaction() as cursor:
+                existing_libraries: dict[str, bool] = {}
+                for library_id, _key, record in snapshots:
+                    if library_id not in existing_libraries:
+                        cursor.execute(
+                            "SELECT 1 FROM libraries WHERE id=?", (library_id,)
+                        )
+                        existing_libraries[library_id] = bool(cursor.fetchone())
+                    if not existing_libraries[library_id]:
+                        continue
                     cursor.execute(
                         """
                         UPDATE library_reconcile_targets
-                        SET top_level_root=?, debounce_until=?, event_count=event_count+1,
-                            revision=revision+1, last_seen_at=?
+                        SET top_level_root=?, debounce_until=?, event_count=?,
+                            revision=?, first_seen_at=?, last_seen_at=?
                         WHERE library_id=? AND top_level_root=?
                         """,
-                        (target, deadline, timestamp, library_id, match[0]),
-                    )
-                    existing_rows = [
                         (
-                            target if row[0] == match[0] else row[0],
-                            row[1] + 1 if row[0] == match[0] else row[1],
-                        )
-                        for row in existing_rows
-                    ]
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO library_reconcile_targets
-                            (library_id,top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at)
-                        VALUES(?,?,?,1,1,?,?)
-                        """,
-                        (library_id, target, deadline, timestamp, timestamp),
+                            record["top_level_root"],
+                            record["debounce_until"],
+                            record["event_count"],
+                            record["revision"],
+                            record["first_seen_at"],
+                            record["last_seen_at"],
+                            library_id,
+                            record["stored_root"],
+                        ),
                     )
-                    existing_rows.append((target, 1))
-        with self.condition:
-            self.condition.notify_all()
+                    if cursor.rowcount == 0:
+                        cursor.execute(
+                            """
+                            INSERT INTO library_reconcile_targets
+                                (library_id,top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at)
+                            VALUES(?,?,?,?,?,?,?)
+                            """,
+                            (
+                                library_id,
+                                record["top_level_root"],
+                                record["debounce_until"],
+                                record["event_count"],
+                                record["revision"],
+                                record["first_seen_at"],
+                                record["last_seen_at"],
+                            ),
+                        )
+        except Exception:
+            with self._reconcile_state_lock:
+                for library_id, key, _record in snapshots:
+                    self._reconcile_pending.setdefault(library_id, set()).add(key)
+            logger.exception("durable watcher target flush failed")
+            return
+
+        with self._reconcile_state_lock:
+            for library_id, key, record in snapshots:
+                current_record = self._reconcile_target_cache.get(library_id, {}).get(
+                    key
+                )
+                if current_record is not None:
+                    current_record["stored_root"] = record["top_level_root"]
+            self._reconcile_last_flush = current
+
+    def _forget_reconcile_targets(
+        self, library_id: str, revisions: dict[str, int]
+    ) -> None:
+        if not revisions:
+            return
+        self._ensure_reconcile_state()
+        with self._reconcile_state_lock:
+            cache = self._reconcile_target_cache.get(library_id, {})
+            pending = self._reconcile_pending.get(library_id, set())
+            for target, revision in revisions.items():
+                key = _top_level_key(target)
+                record = cache.get(key)
+                if record is None or int(record["revision"]) != revision:
+                    continue
+                cache.pop(key, None)
+                pending.discard(key)
 
     def _root_lock(self, library_id: str, root: str) -> threading.Lock:
         key = (library_id, _top_level_key(root))
@@ -4845,11 +5036,10 @@ class LibraryRuntime:
 
     def _run(self):
         while not self.stop_event.is_set():
-            has_queue = bool(
-                self.store.db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_reconcile_targets'"
-                )
-            )
+            # Keep the durable first-seen target cheap, then batch the noisy
+            # follow-up event counters/revisions before the due-target query.
+            self._flush_reconcile_updates()
+            has_queue = self._durable_reconcile_targets_available()
             if has_queue:
                 due_rows = self.store.db.execute(
                     "SELECT DISTINCT library_id FROM library_reconcile_targets WHERE debounce_until<=?",
@@ -4909,11 +5099,11 @@ class LibraryRuntime:
                 targets = self._job_targets.pop(job_id, None)
                 target_revisions: dict[str, int] = {}
                 if kind == "reconcile" and targets is None:
-                    has_queue = bool(
-                        self.store.db.execute(
-                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_reconcile_targets'"
-                        )
-                    )
+                    # Watcher callbacks can continue while this worker is
+                    # being claimed.  Make the latest batched revision
+                    # visible before taking the due-target snapshot.
+                    self._flush_reconcile_updates(force=True)
+                    has_queue = self._durable_reconcile_targets_available()
                     if has_queue:
                         rows = self.store.db.execute(
                             "SELECT top_level_root,revision FROM library_reconcile_targets WHERE library_id=? AND debounce_until<=? ORDER BY top_level_root",
@@ -4979,6 +5169,7 @@ class LibraryRuntime:
                             "DELETE FROM library_reconcile_targets WHERE library_id=? AND top_level_root=? AND revision=?",
                             (library_id, target, revision),
                         )
+                self._forget_reconcile_targets(library_id, revisions)
             with self._active_lock:
                 self._active_jobs.discard(job_id)
                 self._cancel_events.pop(job_id, None)

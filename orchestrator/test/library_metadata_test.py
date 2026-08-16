@@ -3126,6 +3126,12 @@ class LibraryJobControlTest(unittest.TestCase):
         self.runtime._root_locks = {}
         self.runtime._root_locks_guard = threading.RLock()
         self.runtime._job_target_revisions = {}
+        self.runtime._reconcile_state_lock = threading.RLock()
+        self.runtime._reconcile_target_cache = {}
+        self.runtime._reconcile_cache_loaded = set()
+        self.runtime._reconcile_pending = {}
+        self.runtime._reconcile_table_available = None
+        self.runtime._reconcile_last_flush = 0.0
 
     def tearDown(self):
         self.db.close()
@@ -3332,11 +3338,45 @@ class LibraryJobControlTest(unittest.TestCase):
                 self.runtime.request_reconcile(
                     "library-1", str(root / "show" / "two.mkv")
                 )
+            self.runtime._flush_reconcile_updates(force=True)
             self.assertEqual(
                 self.db.execute(
                     "SELECT top_level_root,event_count,revision FROM library_reconcile_targets"
                 ),
                 [("show", 2, 2)],
+            )
+
+    def test_durable_reconcile_batches_follow_up_events_until_flush(self):
+        self.db.execute(
+            "CREATE TABLE library_reconcile_targets (library_id TEXT NOT NULL, top_level_root TEXT NOT NULL, debounce_until REAL NOT NULL, event_count INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, PRIMARY KEY (library_id,top_level_root))"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.db.execute(
+                "UPDATE libraries SET directory=? WHERE id='library-1'", (str(root),)
+            )
+            self.runtime.request_reconcile(
+                "library-1", str(root / "Show" / "Episode.mkv")
+            )
+            for index in range(100):
+                self.runtime.request_reconcile(
+                    "library-1", str(root / "Show" / f"Episode-{index}.mkv")
+                )
+
+            self.assertEqual(
+                self.db.execute(
+                    "SELECT event_count,revision FROM library_reconcile_targets"
+                ),
+                [(1, 1)],
+            )
+
+            self.runtime._flush_reconcile_updates(force=True)
+
+            self.assertEqual(
+                self.db.execute(
+                    "SELECT event_count,revision FROM library_reconcile_targets"
+                ),
+                [(101, 101)],
             )
 
     def test_root_locks_follow_platform_case_semantics(self):

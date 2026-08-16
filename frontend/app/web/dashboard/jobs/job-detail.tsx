@@ -19,6 +19,7 @@ import {
 	JobTrigger,
 	activeStates,
 	progressDetailText,
+	stateLabel,
 	stateColor,
 } from "./job-types";
 
@@ -818,9 +819,9 @@ export default function JobDetailPage() {
 						}}
 					>
 						{selected.historyOnly
-							? selected.lastState
+							? stateLabel(selected.lastState)
 							: selected.triggers?.length
-								? selected.lastState
+								? stateLabel(selected.lastState)
 								: "paused"}
 					</span>
 				</div>

@@ -10,7 +10,12 @@ import {
 	SessionDetailModal,
 	type LiveSession,
 } from "./components/session-viewer";
-import { Run, activeStates, progressDetailText } from "./jobs/job-types";
+import {
+	Run,
+	activeStates,
+	progressDetailText,
+	stateLabel,
+} from "./jobs/job-types";
 
 type Overview = {
 	users: number;
@@ -404,8 +409,8 @@ export default function DashboardOverview() {
 											</div>
 											<div style={{ fontSize: 11, color: "#777", marginTop: 2 }}>
 												{activeRun
-													? activeRun.message || activeRun.state
-													: `Last state ${task.triggers?.length ? task.lastState : "paused"}`}
+													? activeRun.message || stateLabel(activeRun.state)
+													: `Last state ${task.triggers?.length ? stateLabel(task.lastState) : "paused"}`}
 											</div>
 											{activeRun && detail && detail !== activeRun.message && (
 												<div

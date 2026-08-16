@@ -1150,12 +1150,19 @@ function IntroOutroInspectionPanel({
 			setLoadingAudio(null);
 		}
 	};
+	const partialWarning =
+		inspection?.state === "scanned" && Boolean(inspection.error);
 	const state =
 		inspection?.state === "scanned"
-			? "Ready"
+			? partialWarning
+				? "Ready with warnings"
+				: "Ready"
 			: inspection?.state === "failed"
 				? "Failed"
 				: "Pending";
+	const stateClass = partialWarning
+		? "border-[#f0bf6a]/30 text-[#f0bf6a]"
+		: "border-[#5ee3d8]/30 text-[#5ee3d8]";
 	return (
 		<section className="dashboard-card space-y-4 p-5">
 			<div className="flex flex-wrap items-center justify-between gap-3">
@@ -1166,11 +1173,19 @@ function IntroOutroInspectionPanel({
 						not an audio waveform.
 					</p>
 				</div>
-				<span className="rounded-full border border-[#5ee3d8]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#5ee3d8]">
+				<span
+					className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${stateClass}`}
+				>
 					{state}
 				</span>
 			</div>
 			{error && <p className="material-alert text-sm">{error}</p>}
+			{partialWarning && inspection?.error && (
+				<p className="rounded-lg border border-[#f0bf6a]/20 bg-[#f0bf6a]/5 px-3 py-2 text-sm text-[#f0bf6a]">
+					One fingerprint window could not be read; available fingerprint data and
+					matches are still shown. {inspection.error}
+				</p>
+			)}
 			{inspection ? (
 				<div className="grid gap-4 lg:grid-cols-2">
 					{(["intro", "outro"] as const).map((kind) => {

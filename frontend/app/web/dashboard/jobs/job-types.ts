@@ -81,6 +81,10 @@ export type Job = {
 
 export const activeStates = new Set(["queued", "running", "terminating"]);
 
+export function stateLabel(state?: string | null) {
+	return state ? state.replace(/_/g, " ") : "idle";
+}
+
 export function progressDetailText(detail?: ProgressDetail | null) {
 	if (!detail) return "";
 	const parts: string[] = [];
@@ -100,6 +104,7 @@ export function progressDetailText(detail?: ProgressDetail | null) {
 
 export const stateColor: Record<string, string> = {
 	completed: "text-[#5ee3d8]",
+	completed_with_warnings: "text-[#f0bf6a]",
 	running: "text-[#60b4e8]",
 	terminating: "text-[#f0bf6a]",
 	terminated: "text-[#8ca19f]",

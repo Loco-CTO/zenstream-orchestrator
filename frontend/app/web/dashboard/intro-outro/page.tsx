@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { IconPlayerPlay, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import { activeStates } from "../jobs/job-types";
+import { activeStates, stateLabel } from "../jobs/job-types";
 import {
 	ConfirmDialog,
 	PageHeader,
@@ -334,7 +334,7 @@ export default function IntroOutroPage() {
 					<div className="mt-3 space-y-2 text-sm">
 						<p>
 							<span className="console-muted">Status: </span>
-							{task.triggers?.length ? task.lastState || "idle" : "paused"}
+							{task.triggers?.length ? stateLabel(task.lastState) : "paused"}
 						</p>
 						<p>
 							<span className="console-muted">Schedule: </span>

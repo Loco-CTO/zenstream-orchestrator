@@ -10,6 +10,7 @@ from app.jobs import (
     JobScheduler,
     JobStore,
     MetadataMissingJob,
+    MetadataUpgradeJob,
     _metadata_document_gaps,
     _repair_missing_tv_child_identities,
 )
@@ -596,6 +597,73 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             )
 
         self.assertEqual(ingest.kwargs, {"force": True, "force_assets": False})
+
+    def test_upgrade_refetches_without_projecting_unchanged_documents(self):
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie-1",
+                "en",
+                json.dumps({"title": "Example", "overview": "Old overview", "images": {}}),
+            ),
+        )
+        previous = {"title": "Example", "overview": "Old overview", "images": []}
+        fresh = {"title": "Example", "overview": "New overview", "images": []}
+
+        class Cache:
+            def get(self, *_args):
+                return dict(previous)
+
+        class Service:
+            def __init__(self):
+                self.cache = Cache()
+                self.fetches = []
+
+            def fetch_locales(self, *args, **kwargs):
+                self.fetches.append((args, kwargs))
+                return {"en": dict(fresh)}
+
+        class Ingest:
+            def __init__(self):
+                self.metadata_service = Service()
+                self.materialized = []
+
+            def locales(self):
+                return ["en"]
+
+            def ingest_document(self, provider, entity_type, provider_id, locale, document, **kwargs):
+                self.materialized.append((provider, entity_type, provider_id, locale, kwargs))
+                self_db.execute(
+                    "UPDATE catalog_item_projection SET payload=? WHERE entity_id='movie-1' AND locale='en'",
+                    (json.dumps({"title": "Example", "overview": document["overview"], "images": {}}),),
+                )
+
+        self_db = self.db
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+        read_model = MagicMock()
+
+        with (
+            patch("app.jobs.MetadataIngestService", return_value=ingest),
+            patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
+        ):
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        self.assertEqual(ingest.metadata_service.fetches[0][1], {"force": True, "project": False})
+        self.assertEqual(ingest.materialized[0][-1], {"force_assets": False})
+        self.assertIn("upgraded 1", store.updates[-1]["message"])
+        self.assertEqual(json.loads(store.updates[-1]["error_details"])["upgraded"], 1)
+        read_model.refresh_roots.assert_called_once_with(["movie-1"])
 
 
 class MissingTvChildIdentityRepairTest(unittest.TestCase):

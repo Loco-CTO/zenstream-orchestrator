@@ -326,7 +326,7 @@ class WholeJobProgress:
             if any(token in value for token in ("clean", "refresh", "prun", "publish")):
                 return "finalization", ProgressRange(9_000, 10_000)
             return "processing", ProgressRange(1_000, 9_000)
-        if kind in {"metadata_missing", "metadata_refresh"}:
+        if kind in {"metadata_missing", "metadata_upgrade", "metadata_refresh"}:
             if any(token in value for token in ("discover", "repairing", "starting")):
                 return "discovery", ProgressRange(0, 1_000)
             if "extracting fallback artwork" in value:

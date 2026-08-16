@@ -1959,7 +1959,10 @@ class LibraryMetadataTest(unittest.TestCase):
 
     def test_metadata_language_update_queues_existing_entity_backfill(self):
         settings = MagicMock()
-        settings.set.return_value = ["en", "zh-TW"]
+        settings.update.return_value = {
+            "locales": ["en", "zh-TW"],
+            "preferNoLanguageForBackdrop": True,
+        }
         with (
             patch.object(library_routes, "require_admin"),
             patch.object(
@@ -1973,13 +1976,48 @@ class LibraryMetadataTest(unittest.TestCase):
         ):
             response = asyncio.run(
                 library_routes.update_metadata_languages(
-                    _JsonRequest({"locales": ["en", "zh-TW"]}),
+                    _JsonRequest(
+                        {
+                            "locales": ["en", "zh-TW"],
+                            "preferNoLanguageForBackdrop": True,
+                        }
+                    ),
                     Username="admin",
                     TOKEN="token",
                 )
             )
         self.assertEqual(response["locales"], ["en", "zh-TW"])
+        self.assertTrue(response["preferNoLanguageForBackdrop"])
+        settings.update.assert_called_once_with(["en", "zh-TW"], True)
         refresh.assert_called_once_with()
+
+    def test_metadata_language_update_preserves_option_when_omitted(self):
+        settings = MagicMock()
+        settings.update.return_value = {
+            "locales": ["en"],
+            "preferNoLanguageForBackdrop": True,
+        }
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(
+                library_routes, "MetadataLanguageSettings", return_value=settings
+            ),
+            patch.object(
+                library_routes.scheduler,
+                "enqueue_metadata_refresh",
+                return_value={"id": "run-1"},
+            ),
+        ):
+            response = asyncio.run(
+                library_routes.update_metadata_languages(
+                    _JsonRequest({"locales": ["en"]}),
+                    Username="admin",
+                    TOKEN="token",
+                )
+            )
+
+        self.assertTrue(response["preferNoLanguageForBackdrop"])
+        settings.update.assert_called_once_with(["en"])
 
     def test_explicit_metadata_refresh_queues_existing_entity_backfill(self):
         with (

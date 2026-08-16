@@ -56,6 +56,7 @@ intro_outro = IntroOutroStore()
 logger = get_logger("playback_routes")
 AUTH_BODY_LIMIT_BYTES = 16 * 1024
 RESOURCE_TICKET_TTL_SECONDS = 15 * 60
+CATALOG_SCAN_EVENT_INTERVAL_SECONDS = 5.0
 _RATE_LIMIT_EVENTS: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 CARD_METADATA_FIELDS = {
     "title",
@@ -329,6 +330,45 @@ def _catalog_status_fingerprint(payload: dict) -> tuple:
     )
 
 
+def _catalog_update_event(
+    previous_libraries: dict[str, tuple],
+    library: dict,
+    current_time: float,
+    last_scan_sent: dict[str, float],
+) -> dict | None:
+    current_value = (
+        library["id"],
+        library["scanState"],
+        library["lastScanFinishedAt"],
+        library["catalogGeneration"],
+        library["lastRootEntityId"],
+    )
+    if previous_libraries.get(library["id"]) == current_value:
+        return None
+
+    scanning = library["scanState"] == "scanning"
+    if scanning:
+        previous_time = last_scan_sent.get(library["id"])
+        if (
+            previous_time is not None
+            and current_time - previous_time < CATALOG_SCAN_EVENT_INTERVAL_SECONDS
+        ):
+            return None
+        last_scan_sent[library["id"]] = current_time
+    else:
+        # A ready/error/idle transition is the terminal refresh signal for
+        # the scan, regardless of when the last progress event was sent.
+        last_scan_sent.pop(library["id"], None)
+
+    return {
+        "type": "catalog.updated",
+        "libraryId": library["id"],
+        "rootEntityId": library["lastRootEntityId"],
+        "generation": library["catalogGeneration"],
+        "reason": "scan" if scanning else "refresh",
+    }
+
+
 @router.post("/api/auth/login")
 async def login(request: Request):
     _enforce_rate_limit(request, "login", 10)
@@ -342,6 +382,7 @@ async def login(request: Request):
         _request_device_metadata(data),
         _client_address(request),
     )
+
     if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
     account, session = authenticated
@@ -502,6 +543,7 @@ async def catalog_socket(websocket: WebSocket):
     await websocket.accept()
     previous = None
     last_sent = 0.0
+    last_scan_sent: dict[str, float] = {}
     try:
         while True:
             payload = await run_foreground(_catalog_status_payload, account["id"])
@@ -512,26 +554,15 @@ async def catalog_socket(websocket: WebSocket):
                 if previous is not None and changed:
                     previous_libraries = {value[0]: value for value in previous[2]}
                     for library in payload["libraries"]:
-                        current_value = (
-                            library["id"],
-                            library["scanState"],
-                            library["lastScanFinishedAt"],
-                            library["catalogGeneration"],
-                            library["lastRootEntityId"],
+                        event = _catalog_update_event(
+                            previous_libraries,
+                            library,
+                            current,
+                            last_scan_sent,
                         )
-                        if previous_libraries.get(library["id"]) == current_value:
+                        if event is None:
                             continue
-                        await websocket.send_json(
-                            {
-                                "type": "catalog.updated",
-                                "libraryId": library["id"],
-                                "rootEntityId": library["lastRootEntityId"],
-                                "generation": library["catalogGeneration"],
-                                "reason": "scan"
-                                if library["scanState"] != "idle"
-                                else "refresh",
-                            }
-                        )
+                        await websocket.send_json(event)
                 else:
                     await websocket.send_json({"type": "catalog.status", **payload})
                 previous = fingerprint

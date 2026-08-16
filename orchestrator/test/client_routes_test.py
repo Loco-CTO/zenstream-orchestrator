@@ -46,6 +46,47 @@ def _json_request(
     )
 
 
+class CatalogSocketEventTest(unittest.TestCase):
+    def test_scan_events_are_coalesced_but_idle_transition_is_sent(self):
+        previous = {
+            "library-1": ("library-1", "ready", "before", 1, "root-1")
+        }
+        last_scan_sent = {}
+        scanning = {
+            "id": "library-1",
+            "scanState": "scanning",
+            "lastScanFinishedAt": "before",
+            "catalogGeneration": 2,
+            "lastRootEntityId": "root-2",
+        }
+
+        first = client_routes._catalog_update_event(
+            previous, scanning, 100.0, last_scan_sent
+        )
+        self.assertEqual(first["reason"], "scan")
+        previous["library-1"] = (
+            scanning["id"],
+            scanning["scanState"],
+            scanning["lastScanFinishedAt"],
+            scanning["catalogGeneration"],
+            scanning["lastRootEntityId"],
+        )
+        self.assertIsNone(
+            client_routes._catalog_update_event(
+                previous,
+                {**scanning, "catalogGeneration": 3},
+                102.0,
+                last_scan_sent,
+            )
+        )
+
+        ready = {**scanning, "scanState": "ready", "catalogGeneration": 4}
+        terminal = client_routes._catalog_update_event(
+            previous, ready, 102.0, last_scan_sent
+        )
+        self.assertEqual(terminal["reason"], "refresh")
+
+
 class ClientBrowserLoginRouteTest(unittest.TestCase):
     def setUp(self):
         client_routes._RATE_LIMIT_EVENTS.clear()

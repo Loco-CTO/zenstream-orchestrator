@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 from app.intro_outro import (
     DEFAULTS,
-    EmptyFingerprint,
     SAMPLE_SECONDS,
+    EmptyFingerprint,
     IntroOutroDetector,
     IntroOutroStore,
     analysis_key,

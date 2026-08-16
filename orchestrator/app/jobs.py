@@ -34,6 +34,7 @@ from app.trickplay import TrickplayExtractor
 logger = get_logger("jobs")
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
 ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
+ANALYSIS_KINDS = {"trickplay_extract", "intro_outro_detect"}
 
 
 def _english_configured() -> bool:
@@ -2074,6 +2075,7 @@ class JobScheduler:
         self.active: set[str] = set()
         self.active_definitions: set[str] = set()
         self.cancel_events: dict[str, threading.Event] = {}
+        self.worker_threads: dict[str, threading.Thread] = {}
         self.active_lock = threading.RLock()
 
     def start(self):
@@ -2123,12 +2125,57 @@ class JobScheduler:
         )
         self.thread.start()
 
-    def stop(self):
+    def stop(self, timeout: float = 30.0):
         self.stop_event.set()
+        with self.active_lock:
+            active = list(self.cancel_events.items())
+        for run_id, cancel_event in active:
+            cancel_event.set()
+            try:
+                self.store.update_run(
+                    run_id,
+                    state="terminating",
+                    message="Termination requested during Orchestrator shutdown",
+                )
+            except Exception:
+                logger.warning(
+                    "could not mark scheduled run terminating during shutdown run_id=%s",
+                    run_id,
+                    exc_info=True,
+                )
         with self.condition:
             self.condition.notify_all()
         if self.thread:
             self.thread.join(timeout=5)
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self.active_lock:
+                workers = list(self.worker_threads.values())
+            workers = [worker for worker in workers if worker is not threading.current_thread()]
+            if not workers:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "scheduled jobs did not stop before shutdown timeout active=%s",
+                    len(workers),
+                )
+                return
+            for worker in workers:
+                worker.join(timeout=min(0.25, remaining))
+
+    def _library_work_active(self) -> bool:
+        runtime = getattr(self, "library_runtime", None)
+        checker = getattr(runtime, "has_active_inventory_jobs", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            # Do not start destructive/background analysis while the inventory
+            # state is unavailable during a concurrent lifecycle transition.
+            logger.warning("could not inspect library work before analysis", exc_info=True)
+            return True
 
     def refresh_library_definition(self, library: dict) -> dict:
         definition = self.store.ensure_library(library)
@@ -2328,6 +2375,8 @@ class JobScheduler:
             for run in queued:
                 if run["state"] != "queued":
                     continue
+                if run["kind"] in ANALYSIS_KINDS and self._library_work_active():
+                    continue
                 with self.active_lock:
                     if (
                         run["id"] in self.active
@@ -2354,6 +2403,8 @@ class JobScheduler:
                     name=f"zenstream-job-{run['id'][:8]}",
                     daemon=True,
                 )
+                with self.active_lock:
+                    self.worker_threads[run["id"]] = thread
                 thread.start()
             with self.condition:
                 self.condition.wait(timeout=1)
@@ -2434,11 +2485,30 @@ class JobScheduler:
             self.store.update_run(
                 run_id,
                 state="terminated",
-                message="Terminated by administrator",
+                message=(
+                    "Terminated during Orchestrator shutdown"
+                    if self.stop_event.is_set()
+                    else "Terminated by administrator"
+                ),
                 error=None,
                 finished_at=now(),
             )
         except Exception as error:
+            if self.stop_event.is_set() and isinstance(error, RuntimeError) and (
+                "cannot schedule new futures after" in str(error).lower()
+            ):
+                logger.warning(
+                    "scheduled job stopped while executors were shutting down run_id=%s",
+                    run_id,
+                )
+                self.store.update_run(
+                    run_id,
+                    state="terminated",
+                    message="Terminated during Orchestrator shutdown",
+                    error=None,
+                    finished_at=now(),
+                )
+                return
             details = {
                 "operation": "scheduled_job",
                 "runId": run_id,
@@ -2458,6 +2528,7 @@ class JobScheduler:
             with self.active_lock:
                 self.active.discard(run_id)
                 self.cancel_events.pop(run_id, None)
+                self.worker_threads.pop(run_id, None)
                 row = self.store.db.execute(
                     "SELECT definition_id FROM job_runs WHERE id=?", (run_id,)
                 )
@@ -2466,15 +2537,20 @@ class JobScheduler:
 
     def _run_analysis(self, run_id, kind, worker, should_terminate):
         pressure_logged = False
-        while active_requests():
+        while True:
+            foreground_requests = active_requests()
+            library_work = self._library_work_active()
+            if not foreground_requests and not library_work:
+                break
             if should_terminate():
                 raise JobTerminated()
             if not pressure_logged:
                 logger.info(
-                    "analysis job yielding to foreground traffic run_id=%s kind=%s active_requests=%s",
+                    "analysis job yielding run_id=%s kind=%s active_requests=%s library_work=%s",
                     run_id,
                     kind,
-                    active_requests(),
+                    foreground_requests,
+                    library_work,
                 )
                 pressure_logged = True
             time.sleep(0.05)

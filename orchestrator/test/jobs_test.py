@@ -1021,6 +1021,8 @@ class AnalysisCapacityTest(unittest.TestCase):
     def test_intro_outro_and_trickplay_analysis_jobs_can_run_together(self):
         scheduler = JobScheduler.__new__(JobScheduler)
         scheduler.store = MagicMock()
+        scheduler.library_runtime = MagicMock()
+        scheduler.library_runtime.has_active_inventory_jobs.return_value = False
         barrier = threading.Barrier(2)
         errors = []
 
@@ -1044,6 +1046,63 @@ class AnalysisCapacityTest(unittest.TestCase):
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
         self.assertEqual(errors, [])
+
+    def test_analysis_waits_for_active_library_work(self):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = MagicMock()
+        scheduler.library_runtime = MagicMock()
+        scheduler.library_runtime.has_active_inventory_jobs.side_effect = [True, False]
+        started = threading.Event()
+
+        class Worker:
+            def run(self, run_id, store, should_terminate):
+                started.set()
+
+        with patch("app.jobs.active_requests", return_value=0):
+            scheduler._run_analysis(
+                "run-1", "trickplay_extract", Worker(), lambda: False
+            )
+
+        self.assertTrue(started.is_set())
+        self.assertEqual(
+            scheduler.library_runtime.has_active_inventory_jobs.call_count, 2
+        )
+
+
+class JobSchedulerShutdownTest(unittest.TestCase):
+    def test_stop_signals_and_joins_active_workers(self):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = MagicMock()
+        scheduler.stop_event = threading.Event()
+        scheduler.condition = threading.Condition()
+        scheduler.thread = None
+        scheduler.active_lock = threading.RLock()
+        cancel_event = threading.Event()
+        scheduler.cancel_events = {"run-1": cancel_event}
+        scheduler.worker_threads = {}
+
+        finished = threading.Event()
+
+        def worker():
+            cancel_event.wait(timeout=2)
+            finished.set()
+            with scheduler.active_lock:
+                scheduler.worker_threads.pop("run-1", None)
+
+        thread = threading.Thread(target=worker)
+        scheduler.worker_threads["run-1"] = thread
+        thread.start()
+
+        scheduler.stop(timeout=1)
+
+        self.assertTrue(finished.is_set())
+        self.assertFalse(thread.is_alive())
+        cancel_event.wait(timeout=0)
+        scheduler.store.update_run.assert_called_once_with(
+            "run-1",
+            state="terminating",
+            message="Termination requested during Orchestrator shutdown",
+        )
 
 
 if __name__ == "__main__":

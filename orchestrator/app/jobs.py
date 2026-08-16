@@ -89,6 +89,107 @@ def _ready_cache_path(value) -> bool:
         return False
 
 
+def _metadata_upgrade_needed(
+    before: dict, fresh: dict, locale: str, provider: str
+) -> bool:
+    """Return whether fresh non-empty provider data can improve existing data."""
+    if not isinstance(before, dict) or not isinstance(fresh, dict):
+        return False
+    for field in TEXT_FIELDS | FACT_FIELDS:
+        previous = before.get(field)
+        current = fresh.get(field)
+        if _usable_metadata_value(previous) and _usable_metadata_value(current):
+            if previous != current:
+                return True
+
+    prefer_no_language_for_backdrop = _prefer_no_language_for_backdrop()
+    for image_type in ARTWORK_TYPES:
+        previous = choose_artwork(
+            before.get("images", []),
+            locale,
+            image_type,
+            before.get("originalLanguage"),
+            [provider],
+            include_english=_english_configured(),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
+        )
+        current = choose_artwork(
+            fresh.get("images", []),
+            locale,
+            image_type,
+            fresh.get("originalLanguage"),
+            [provider],
+            include_english=_english_configured(),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
+        )
+        if (
+            previous
+            and current
+            and _usable_metadata_value(previous.get("url"))
+            and _usable_metadata_value(current.get("url"))
+            and previous.get("url") != current.get("url")
+        ):
+            return True
+
+    previous_credits = before.get("credits")
+    current_credits = fresh.get("credits")
+    if isinstance(previous_credits, dict) and isinstance(current_credits, dict):
+        for credit_type in ("cast", "crew"):
+            previous_values = previous_credits.get(credit_type)
+            current_values = current_credits.get(credit_type)
+            if (
+                isinstance(previous_values, list)
+                and previous_values
+                and isinstance(current_values, list)
+                and current_values
+                and previous_values != current_values
+            ):
+                return True
+    return False
+
+
+def _fetch_upgrade_documents(
+    ingest: MetadataIngestService,
+    provider: str,
+    entity_type: str,
+    provider_id: str,
+    locales: list[str],
+) -> dict[str, dict]:
+    """Fetch and cache fresh documents without projecting unchanged upgrades."""
+    service = ingest.metadata_service
+    fetch_locales = getattr(service, "fetch_locales", None)
+    if fetch_locales is not None:
+        try:
+            return fetch_locales(
+                provider,
+                entity_type,
+                provider_id,
+                locales,
+                force=True,
+                project=False,
+            )
+        except TypeError as error:
+            if "project" not in str(error):
+                raise
+            return fetch_locales(
+                provider,
+                entity_type,
+                provider_id,
+                locales,
+                force=True,
+            )
+    return {
+        locale: service.fetch(
+            provider,
+            entity_type,
+            provider_id,
+            locale,
+            force=True,
+        )
+        for locale in locales
+    }
+
+
 def _metadata_document_gaps(
     db,
     provider: str,
@@ -676,6 +777,19 @@ class JobStore:
             self.db.execute(
                 "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
                 (now(), now(), definition["id"]),
+            )
+        upgrade = self.ensure(
+            "metadata_upgrade",
+            "Find metadata upgrade",
+            "Refetch provider metadata and repair existing metadata that can be improved.",
+            "metadata_upgrade",
+            10080,
+            {"locales": ["en"], "batchSize": 50},
+        )
+        if upgrade["lastRunAt"] is None:
+            self.db.execute(
+                "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+                (now(), now(), upgrade["id"]),
             )
         cleanup = self.ensure(
             "metadata_cleanup",
@@ -1280,8 +1394,11 @@ class MetadataMissingJob:
         should_terminate=None,
         force: bool = False,
         force_assets: bool | None = None,
+        operation: str | None = None,
     ) -> None:
         should_terminate = should_terminate or (lambda: False)
+        operation = operation or ("metadata_refresh" if force else "metadata_missing")
+        is_upgrade = operation == "metadata_upgrade"
         ingest = MetadataIngestService(background_assets=False)
         locales = ingest.locales()
         _repair_missing_tv_child_identities(self.db, ingest.metadata_service)
@@ -1303,7 +1420,15 @@ class MetadataMissingJob:
         )
         for entity_id, tvdb_id in tv_series_rows:
             try:
-                if force:
+                if is_upgrade:
+                    documents = _fetch_upgrade_documents(
+                        ingest,
+                        "tvdb",
+                        "series",
+                        str(tvdb_id),
+                        locales,
+                    )
+                elif force:
                     documents = ingest.ingest_locales(
                         "tvdb",
                         "series",
@@ -1367,12 +1492,20 @@ class MetadataMissingJob:
             thread_name=threading.current_thread().name,
             progress_total=total + extractor_total,
             progress_phase="discovery",
-            progress_label="Discovering metadata work",
+            progress_label=(
+                "Discovering metadata upgrades"
+                if is_upgrade
+                else "Discovering metadata work"
+            ),
             progress_stage_current=0,
             progress_stage_total=total + extractor_total,
             progress_stage_unit="documents",
             message=format_progress_message(
-                "Discovering metadata work",
+                (
+                    "Discovering metadata upgrades"
+                    if is_upgrade
+                    else "Discovering metadata work"
+                ),
                 current=0,
                 total=total + extractor_total,
                 unit="documents",
@@ -1440,6 +1573,7 @@ class MetadataMissingJob:
             fetch_locales = []
             documents: dict[str, dict] = {}
             worked_locales: set[str] = set()
+            upgrade_locales: set[str] = set()
             for locale in locales:
                 cached = ingest.metadata_service.cache.get(
                     provider, entity_type, provider_id, locale
@@ -1479,16 +1613,41 @@ class MetadataMissingJob:
                         worked_locales.add(locale)
             if fetch_locales:
                 try:
-                    fetched = ingest.ingest_locales(
-                        provider,
-                        entity_type,
-                        provider_id,
-                        fetch_locales,
-                        force=force,
-                        force_assets=force_assets,
-                    )
-                    documents.update(fetched)
-                    worked_locales.update(fetch_locales)
+                    if is_upgrade:
+                        fetched = _fetch_upgrade_documents(
+                            ingest,
+                            provider,
+                            entity_type,
+                            provider_id,
+                            fetch_locales,
+                        )
+                        for locale, fresh in fetched.items():
+                            previous = documents.get(locale)
+                            documents[locale] = fresh
+                            if _metadata_upgrade_needed(
+                                previous, fresh, locale, provider
+                            ):
+                                ingest.ingest_document(
+                                    provider,
+                                    entity_type,
+                                    provider_id,
+                                    locale,
+                                    fresh,
+                                    force_assets=False,
+                                )
+                                worked_locales.add(locale)
+                                upgrade_locales.add(locale)
+                    else:
+                        fetched = ingest.ingest_locales(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            fetch_locales,
+                            force=force,
+                            force_assets=force_assets,
+                        )
+                        documents.update(fetched)
+                        worked_locales.update(fetch_locales)
                 except (ProviderError, ValueError, OSError) as error:
                     item_failures.extend(
                         {
@@ -1528,6 +1687,8 @@ class MetadataMissingJob:
                     continue
                 document = dict(document)
                 document.pop("_stale", None)
+                if is_upgrade and locale not in upgrade_locales:
+                    continue
                 gaps, linked = _metadata_document_gaps(
                     self.db,
                     provider,
@@ -1582,7 +1743,16 @@ class MetadataMissingJob:
                             break
                         current = parent
                 CatalogReadModel(self.db).refresh_roots(sorted(roots))
-            return len(locales), item_failures, len(worked_locales)
+            if is_upgrade:
+                incomplete_locales = {
+                    str(failure.get("locale"))
+                    for failure in item_failures
+                    if failure.get("kind") == "incomplete"
+                }
+                upgraded_documents = len(upgrade_locales - incomplete_locales)
+            else:
+                upgraded_documents = len(worked_locales)
+            return len(locales), item_failures, upgraded_documents
 
         completed = 0
         repaired = 0
@@ -1622,14 +1792,20 @@ class MetadataMissingJob:
                     run_id,
                     progress_current=completed,
                     progress_phase="metadata",
-                    progress_label="Refreshing metadata",
+                    progress_label=(
+                        "Upgrading metadata" if is_upgrade else "Refreshing metadata"
+                    ),
                     progress_stage_current=completed,
                     progress_stage_total=total + extractor_total,
                     progress_stage_unit="documents",
                     progress_current_item=item_label,
                     message=(
                         format_progress_message(
-                            "Refreshing metadata",
+                            (
+                                "Upgrading metadata"
+                                if is_upgrade
+                                else "Refreshing metadata"
+                            ),
                             item=item_label,
                             current=completed,
                             total=total + extractor_total,
@@ -1726,12 +1902,27 @@ class MetadataMissingJob:
         if should_terminate():
             raise JobTerminated()
         if failures:
-            summary = (
-                f"Checked {completed} metadata documents; repaired {repaired}; "
-                f"{len(failures)} repair errors"
-            )
+            if is_upgrade:
+                unchanged = max(
+                    0,
+                    completed
+                    - repaired
+                    - len(failures)
+                    - len(incomplete_repairs),
+                )
+                summary = (
+                    f"Checked {completed} metadata documents; upgraded {repaired}; "
+                    f"unchanged {unchanged}; {len(incomplete_repairs)} incomplete; "
+                    f"{len(failures)} failed"
+                )
+            else:
+                summary = (
+                    f"Checked {completed} metadata documents; repaired {repaired}; "
+                    f"{len(failures)} repair errors"
+                )
             if incomplete_repairs:
-                summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
+                if not is_upgrade:
+                    summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
             self.store.update_run(
                 run_id,
                 state="failed",
@@ -1742,21 +1933,43 @@ class MetadataMissingJob:
                 error=summary,
                 error_details=json.dumps(
                     {
-                        "operation": "metadata_refresh"
-                        if force
-                        else "metadata_missing",
+                        "operation": operation,
+                        "checked": completed,
+                        "upgraded": repaired if is_upgrade else 0,
+                        "unchanged": (
+                            max(
+                                0,
+                                completed
+                                - repaired
+                                - len(failures)
+                                - len(incomplete_repairs),
+                            )
+                            if is_upgrade
+                            else 0
+                        ),
+                        "incomplete": len(incomplete_repairs),
+                        "failed": len(failures),
                         "failures": failures,
                         "incompleteRepairs": incomplete_repairs,
                     }
                 ),
             )
         else:
-            summary = (
-                f"Checked {completed} metadata documents; repaired {repaired} "
-                "missing or partial documents"
-            )
+            if is_upgrade:
+                unchanged = max(0, completed - repaired - len(incomplete_repairs))
+                summary = (
+                    f"Checked {completed} metadata documents; upgraded {repaired}; "
+                    f"unchanged {unchanged}; {len(incomplete_repairs)} incomplete; "
+                    "0 failed"
+                )
+            else:
+                summary = (
+                    f"Checked {completed} metadata documents; repaired {repaired} "
+                    "missing or partial documents"
+                )
             if incomplete_repairs:
-                summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
+                if not is_upgrade:
+                    summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
             self.store.update_run(
                 run_id,
                 state="completed",
@@ -1764,7 +1977,42 @@ class MetadataMissingJob:
                 progress_total=total + extractor_total,
                 finished_at=now(),
                 message=summary,
+                error_details=(
+                    json.dumps(
+                        {
+                            "operation": operation,
+                            "checked": completed,
+                            "upgraded": repaired,
+                            "unchanged": max(
+                                0, completed - repaired - len(incomplete_repairs)
+                            ),
+                            "incomplete": len(incomplete_repairs),
+                            "failed": 0,
+                        }
+                    )
+                    if is_upgrade
+                    else None
+                ),
             )
+
+
+class MetadataUpgradeJob(MetadataMissingJob):
+    """Refetch existing provider metadata and apply only real improvements."""
+
+    def run(
+        self,
+        run_id: str,
+        definition: dict,
+        should_terminate=None,
+    ) -> None:
+        return super().run(
+            run_id,
+            definition,
+            should_terminate,
+            force=True,
+            force_assets=False,
+            operation="metadata_upgrade",
+        )
 
 
 class MetadataCleanupJob:
@@ -1942,6 +2190,16 @@ class JobScheduler:
         if not definition:
             self.store.ensure_defaults()
             definition = self.store.by_key("metadata_missing")
+        run, _ = self.store.create_or_get_active_run(definition)
+        with self.condition:
+            self.condition.notify_all()
+        return run
+
+    def enqueue_metadata_upgrade(self) -> dict:
+        definition = self.store.by_key("metadata_upgrade")
+        if not definition:
+            self.store.ensure_defaults()
+            definition = self.store.by_key("metadata_upgrade")
         run, _ = self.store.create_or_get_active_run(definition)
         with self.condition:
             self.condition.notify_all()
@@ -2133,6 +2391,10 @@ class JobScheduler:
             self.store.begin_progress(run_id, kind)
             if kind == "metadata_missing":
                 MetadataMissingJob(self.store).run(
+                    run_id, definition, self.cancel_events[run_id].is_set
+                )
+            elif kind == "metadata_upgrade":
+                MetadataUpgradeJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
             elif kind == "metadata_refresh":

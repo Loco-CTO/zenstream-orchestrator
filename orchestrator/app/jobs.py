@@ -2151,7 +2151,9 @@ class JobScheduler:
         while True:
             with self.active_lock:
                 workers = list(self.worker_threads.values())
-            workers = [worker for worker in workers if worker is not threading.current_thread()]
+            workers = [
+                worker for worker in workers if worker is not threading.current_thread()
+            ]
             if not workers:
                 return
             remaining = deadline - time.monotonic()
@@ -2174,7 +2176,9 @@ class JobScheduler:
         except Exception:
             # Do not start destructive/background analysis while the inventory
             # state is unavailable during a concurrent lifecycle transition.
-            logger.warning("could not inspect library work before analysis", exc_info=True)
+            logger.warning(
+                "could not inspect library work before analysis", exc_info=True
+            )
             return True
 
     def refresh_library_definition(self, library: dict) -> dict:
@@ -2494,8 +2498,10 @@ class JobScheduler:
                 finished_at=now(),
             )
         except Exception as error:
-            if self.stop_event.is_set() and isinstance(error, RuntimeError) and (
-                "cannot schedule new futures after" in str(error).lower()
+            if (
+                self.stop_event.is_set()
+                and isinstance(error, RuntimeError)
+                and ("cannot schedule new futures after" in str(error).lower())
             ):
                 logger.warning(
                     "scheduled job stopped while executors were shutting down run_id=%s",

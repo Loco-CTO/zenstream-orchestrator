@@ -48,9 +48,7 @@ def _json_request(
 
 class CatalogSocketEventTest(unittest.TestCase):
     def test_scan_events_are_coalesced_but_idle_transition_is_sent(self):
-        previous = {
-            "library-1": ("library-1", "ready", "before", 1, "root-1")
-        }
+        previous = {"library-1": ("library-1", "ready", "before", 1, "root-1")}
         last_scan_sent = {}
         scanning = {
             "id": "library-1",

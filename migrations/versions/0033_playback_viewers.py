@@ -3,8 +3,8 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0033_playback_viewers"
 down_revision = "0032_playback_language_preferences"
@@ -159,7 +159,9 @@ def upgrade():
 
 
 def downgrade():
-    op.drop_index("idx_playback_viewer_command_delivery", table_name="playback_viewer_commands")
+    op.drop_index(
+        "idx_playback_viewer_command_delivery", table_name="playback_viewer_commands"
+    )
     op.drop_index("idx_playback_viewer_worker", table_name="playback_viewer_sessions")
     op.drop_index("idx_playback_viewer_device", table_name="playback_viewer_sessions")
     op.drop_index("idx_playback_viewer_user", table_name="playback_viewer_sessions")

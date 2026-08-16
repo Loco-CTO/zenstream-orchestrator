@@ -20,11 +20,28 @@ class PlaybackViewerStoreTest(unittest.TestCase):
         ):
             self.db.execute(statement)
         self.db.execute("INSERT INTO users VALUES('user-1','viewer')")
-        self.db.execute("INSERT INTO user_sessions VALUES('auth-1','user-1','hash','2099','now','now',NULL)")
-        self.db.execute("INSERT INTO library_entities VALUES('entity-1','episode','Show/episode.mkv',2,4)")
+        self.db.execute(
+            "INSERT INTO user_sessions VALUES('auth-1','user-1','hash','2099','now','now',NULL)"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('entity-1','episode','Show/episode.mkv',2,4)"
+        )
         self.db.execute(
             "INSERT INTO media_sources VALUES('source-1','mkv',1000000,1920,1080,'hevc','aac',?)",
-            (json.dumps({"streams": [{"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2}]}),),
+            (
+                json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "index": 1,
+                                "codec_type": "audio",
+                                "codec_name": "aac",
+                                "channels": 2,
+                            }
+                        ]
+                    }
+                ),
+            ),
         )
         self.store = PlaybackViewerStore(self.db)
 
@@ -70,7 +87,11 @@ class PlaybackViewerStoreTest(unittest.TestCase):
             "user-1",
             "auth-1",
             viewer_id,
-            {"positionSeconds": 44, "paused": True, "commandAcks": [{"id": command["id"], "success": True}]},
+            {
+                "positionSeconds": 44,
+                "paused": True,
+                "commandAcks": [{"id": command["id"], "success": True}],
+            },
         )
         detail = self.store.get_session(viewer_id)
         self.assertEqual(detail["diagnostics"]["container"], "mkv")

@@ -46,6 +46,8 @@ from version import __version__
 from api.zenstream.client_routes import (
     _bounded_json_object,
     _enforce_rate_limit,
+)
+from api.zenstream.client_routes import (
     media as client_playback_media,
 )
 from api.zenstream.version import _main_version

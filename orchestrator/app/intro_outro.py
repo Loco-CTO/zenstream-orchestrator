@@ -142,10 +142,7 @@ def comparison_key(settings: dict, rows) -> str:
     """Return the stable input key for one season's marker comparison."""
     normalized = normalize_settings(settings)
     payload = {
-        "settings": {
-            key: normalized[key]
-            for key in COMPARISON_SETTING_KEYS
-        },
+        "settings": {key: normalized[key] for key in COMPARISON_SETTING_KEYS},
         "episodes": [
             {
                 "mediaFileId": row[0],
@@ -580,8 +577,7 @@ class IntroOutroStore:
             (season_id,),
         )
         existing = {
-            (row[0], row[1]): (float(row[2]), float(row[3]))
-            for row in existing_rows
+            (row[0], row[1]): (float(row[2]), float(row[3])) for row in existing_rows
         }
         deleted = sorted(set(existing) - set(selected))
         changed = sorted(

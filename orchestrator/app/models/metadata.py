@@ -81,9 +81,7 @@ class MetadataLanguageSettings:
     ) -> dict:
         locales = self.normalize(values)
         if prefer_no_language_for_backdrop is _UNSET:
-            prefer_no_language_for_backdrop = (
-                self.prefer_no_language_for_backdrop()
-            )
+            prefer_no_language_for_backdrop = self.prefer_no_language_for_backdrop()
         elif type(prefer_no_language_for_backdrop) is not bool:
             raise ValueError("preferNoLanguageForBackdrop must be a boolean.")
 

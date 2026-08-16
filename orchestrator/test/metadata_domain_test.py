@@ -39,9 +39,7 @@ class BackdropLanguageRankingTest(unittest.TestCase):
         ]
 
     def test_default_order_is_preserved(self):
-        ranked = rank_artwork_candidates(
-            self.images, "fr", "Backdrop", "ja", ["tmdb"]
-        )
+        ranked = rank_artwork_candidates(self.images, "fr", "Backdrop", "ja", ["tmdb"])
         self.assertEqual(
             [image["url"] for image in ranked],
             ["requested", "neutral-none", "neutral-empty", "english", "original"],

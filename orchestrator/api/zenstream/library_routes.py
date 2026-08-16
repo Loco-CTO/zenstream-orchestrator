@@ -703,9 +703,7 @@ async def metadata_languages(
 ):
     require_admin(Username, TOKEN)
     return {
-        **(
-            await run_control(MetadataLanguageSettings().get_settings)
-        ),
+        **(await run_control(MetadataLanguageSettings().get_settings)),
         "options": await run_foreground(MetadataService().language_options),
     }
 

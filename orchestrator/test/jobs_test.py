@@ -604,7 +604,9 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             (
                 "movie-1",
                 "en",
-                json.dumps({"title": "Example", "overview": "Old overview", "images": {}}),
+                json.dumps(
+                    {"title": "Example", "overview": "Old overview", "images": {}}
+                ),
             ),
         )
         previous = {"title": "Example", "overview": "Old overview", "images": []}
@@ -631,11 +633,23 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             def locales(self):
                 return ["en"]
 
-            def ingest_document(self, provider, entity_type, provider_id, locale, document, **kwargs):
-                self.materialized.append((provider, entity_type, provider_id, locale, kwargs))
+            def ingest_document(
+                self, provider, entity_type, provider_id, locale, document, **kwargs
+            ):
+                self.materialized.append(
+                    (provider, entity_type, provider_id, locale, kwargs)
+                )
                 self_db.execute(
                     "UPDATE catalog_item_projection SET payload=? WHERE entity_id='movie-1' AND locale='en'",
-                    (json.dumps({"title": "Example", "overview": document["overview"], "images": {}}),),
+                    (
+                        json.dumps(
+                            {
+                                "title": "Example",
+                                "overview": document["overview"],
+                                "images": {},
+                            }
+                        ),
+                    ),
                 )
 
         self_db = self.db
@@ -659,7 +673,9 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         ):
             MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
 
-        self.assertEqual(ingest.metadata_service.fetches[0][1], {"force": True, "project": False})
+        self.assertEqual(
+            ingest.metadata_service.fetches[0][1], {"force": True, "project": False}
+        )
         self.assertEqual(ingest.materialized[0][-1], {"force_assets": False})
         self.assertIn("upgraded 1", store.updates[-1]["message"])
         self.assertEqual(json.loads(store.updates[-1]["error_details"])["upgraded"], 1)

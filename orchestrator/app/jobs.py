@@ -1905,10 +1905,7 @@ class MetadataMissingJob:
             if is_upgrade:
                 unchanged = max(
                     0,
-                    completed
-                    - repaired
-                    - len(failures)
-                    - len(incomplete_repairs),
+                    completed - repaired - len(failures) - len(incomplete_repairs),
                 )
                 summary = (
                     f"Checked {completed} metadata documents; upgraded {repaired}; "

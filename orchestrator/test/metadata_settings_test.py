@@ -10,9 +10,7 @@ class MetadataLanguageSettingsTest(unittest.TestCase):
         self.db.execute(
             "CREATE TABLE metadata_settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT)"
         )
-        self.db.execute(
-            "CREATE TABLE account_preferences(metadata_language TEXT)"
-        )
+        self.db.execute("CREATE TABLE account_preferences(metadata_language TEXT)")
         self.settings = MetadataLanguageSettings.__new__(MetadataLanguageSettings)
         self.settings.db = self.db
 

@@ -32,6 +32,7 @@ from app.logging_config import get_logger
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
+from app.models.playback_viewer import PlaybackViewerStore, normalize_device_metadata
 from app.playback import PlaybackManager, ffmpeg_path
 from app.trickplay import TrickplayExtractor
 from fastapi import (
@@ -77,12 +78,71 @@ async def _require_access(request: Request, kind: str = "resource", **claims):
     return await run_auth(account_from_access, request, kind, **claims)
 
 
-def _authenticate_and_create_session(username: str, password: str):
+def _request_device_metadata(data: dict) -> dict | None:
+    value = data.get("device")
+    if not isinstance(value, dict):
+        value = {
+            key: data.get(key)
+            for key in (
+                "deviceId",
+                "deviceType",
+                "browser",
+                "operatingSystem",
+                "deviceName",
+                "clientName",
+                "clientVersion",
+            )
+            if data.get(key) is not None
+        }
+    normalized = normalize_device_metadata(value)
+    if not any(
+        normalized.get(key)
+        for key in (
+            "deviceId",
+            "browser",
+            "operatingSystem",
+            "deviceName",
+            "clientName",
+            "clientVersion",
+        )
+    ):
+        return None
+    return normalized
+
+
+def _authenticate_and_create_session(
+    username: str,
+    password: str,
+    device_metadata: dict | None = None,
+    ip_address: str | None = None,
+):
     account_model = Account()
     account = account_model.authenticate_password(username, password)
     if not account:
         return None
-    return account, account_model.create_session(account["id"])
+    if device_metadata is None:
+        session = account_model.create_session(account["id"])
+    else:
+        session = account_model.create_session(
+            account["id"], device_metadata=device_metadata, ip_address=ip_address
+        )
+    return account, session
+
+
+def _heartbeat_playback_viewer(
+    user_id: str,
+    auth_session_id: str,
+    viewer_id: str,
+    payload: dict,
+    ip_address: str | None,
+):
+    return PlaybackViewerStore().heartbeat(
+        user_id, auth_session_id, viewer_id, payload, ip_address
+    )
+
+
+def _end_playback_viewer_sync(user_id: str, auth_session_id: str, viewer_id: str):
+    return PlaybackViewerStore().end_viewer(user_id, auth_session_id, viewer_id)
 
 
 def _direct_path_and_size(user_id: str, entity_id: str, source_id: str | None):
@@ -275,7 +335,13 @@ async def login(request: Request):
     data = await _bounded_json_object(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
-    authenticated = await run_auth(_authenticate_and_create_session, username, password)
+    authenticated = await run_auth(
+        _authenticate_and_create_session,
+        username,
+        password,
+        _request_device_metadata(data),
+        _client_address(request),
+    )
     if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
     account, session = authenticated
@@ -330,7 +396,13 @@ async def browser_login(request: Request):
     data = await _bounded_json_object(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
-    authenticated = await run_auth(_authenticate_and_create_session, username, password)
+    authenticated = await run_auth(
+        _authenticate_and_create_session,
+        username,
+        password,
+        _request_device_metadata(data),
+        _client_address(request),
+    )
     if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
     account, session = authenticated
@@ -928,7 +1000,49 @@ async def negotiate_playback(entity_id: str, request: Request):
         entity_id,
         await request.json(),
         session_id,
+        _client_address(request),
     )
+
+
+@router.post("/api/playback/viewers/{viewer_id}/heartbeat")
+async def playback_viewer_heartbeat(viewer_id: str, request: Request):
+    account, token = await _require_account(request)
+    auth_session_id = await run_auth(session_id_for_token, token)
+    if not auth_session_id:
+        raise HTTPException(401, "Authentication required.")
+    try:
+        return await run_foreground(
+            _heartbeat_playback_viewer,
+            account["id"],
+            auth_session_id,
+            viewer_id,
+            await _bounded_json_object(request),
+            _client_address(request),
+        )
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@router.delete("/api/playback/viewers/{viewer_id}")
+async def end_playback_viewer(viewer_id: str, request: Request):
+    account, token = await _require_account(request)
+    auth_session_id = await run_auth(session_id_for_token, token)
+    if not auth_session_id:
+        raise HTTPException(401, "Authentication required.")
+    try:
+        result = await run_foreground(
+            _end_playback_viewer_sync,
+            account["id"],
+            auth_session_id,
+            viewer_id,
+        )
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+    if result.get("stopWorker") and result.get("workerSessionId"):
+        await run_control(
+            media.cancel_session, account["id"], result["workerSessionId"]
+        )
+    return result
 
 
 @router.get("/api/playback/items/{entity_id}/source")

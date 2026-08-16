@@ -21,6 +21,7 @@ from app.models import Invite
 from app.models.account import Account
 from app.models.admin import ADMIN_SESSION_COOKIE, Admin
 from app.models.playback_settings import PlaybackSettings
+from app.models.playback_viewer import PlaybackViewerStore
 from app.models.syncplay import (
     StaleSyncplayState,
     SyncplayGroup,
@@ -42,8 +43,32 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from version import __version__
 
-from api.zenstream.client_routes import _bounded_json_object, _enforce_rate_limit
+from api.zenstream.client_routes import (
+    _bounded_json_object,
+    _enforce_rate_limit,
+    media as client_playback_media,
+)
 from api.zenstream.version import _main_version
+
+
+def _list_admin_playback_sessions(user_id: str | None):
+    return PlaybackViewerStore().list_sessions(user_id)
+
+
+def _get_admin_playback_session(viewer_id: str):
+    return PlaybackViewerStore().get_session(viewer_id)
+
+
+def _issue_admin_playback_command(viewer_id: str, action: str):
+    return PlaybackViewerStore().issue_command(viewer_id, action)
+
+
+def _list_admin_devices(user_id: str | None):
+    return PlaybackViewerStore().list_devices(user_id)
+
+
+def _remove_admin_device(device_id: str):
+    return PlaybackViewerStore().remove_device(device_id)
 
 
 def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
@@ -553,6 +578,86 @@ async def admin_overview(
         }
 
     return await run_control(overview)
+
+
+@router.get("/api/admin/sessions")
+async def admin_playback_sessions(
+    request: Request,
+    userId: str | None = Query(None),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    return await run_control(_list_admin_playback_sessions, userId)
+
+
+@router.get("/api/admin/sessions/{viewer_id}")
+async def admin_playback_session_detail(
+    viewer_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    value = await run_control(_get_admin_playback_session, viewer_id)
+    if not value:
+        raise HTTPException(404, "Playback session not found.")
+    return value
+
+
+@router.post("/api/admin/sessions/{viewer_id}/command")
+async def admin_playback_session_command(
+    viewer_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    data = await _bounded_json_object(request)
+    try:
+        value = await run_control(
+            _issue_admin_playback_command,
+            viewer_id,
+            str(data.get("action") or "").strip().lower(),
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    if not value:
+        raise HTTPException(404, "Playback session is no longer active.")
+    return value
+
+
+@router.get("/api/admin/devices")
+async def admin_devices(
+    request: Request,
+    userId: str | None = Query(None),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    return await run_control(_list_admin_devices, userId)
+
+
+@router.delete("/api/admin/devices/{device_id}")
+async def admin_remove_device(
+    device_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    try:
+        result = await run_control(_remove_admin_device, device_id)
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+    for user_id, worker_id in result.get("workers", []):
+        try:
+            await run_control(client_playback_media.cancel_session, user_id, worker_id)
+        except Exception:
+            # Device removal remains successful even if a worker has already
+            # expired; the playback cleanup loop will reap that state.
+            pass
+    return {"deviceId": device_id, "removed": True}
 
 
 @router.get("/api/admin/playback/settings")

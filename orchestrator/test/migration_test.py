@@ -163,6 +163,48 @@ class PersistenceMigrationTest(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_existing_sessions_receive_legacy_devices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "0032_playback_language_preferences")
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "INSERT INTO users(id,username,password) VALUES(?,?,?)",
+                    ("user-1", "legacy", "hash"),
+                )
+                connection.execute(
+                    "INSERT INTO user_sessions(id,user_id,token_hash,expires_at,created_at,last_seen_at) VALUES(?,?,?,?,?,?)",
+                    (
+                        "session-1",
+                        "user-1",
+                        "token-hash",
+                        "2099-01-01T00:00:00+00:00",
+                        "2026-01-01T00:00:00+00:00",
+                        "2026-01-02T00:00:00+00:00",
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        """
+                        SELECT s.device_id,d.device_key,d.device_type
+                          FROM user_sessions s JOIN user_devices d ON d.id=s.device_id
+                         WHERE s.id='session-1'
+                        """
+                    ).fetchone()[1:],
+                    ("legacy", "unknown"),
+                )
+            finally:
+                connection.close()
+
     def test_catalog_performance_migration_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "orchestrator.db"

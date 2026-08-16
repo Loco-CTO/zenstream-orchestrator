@@ -22,6 +22,7 @@ from app.language_registry import normalize_track_language
 from app.library import language_name, sidecar_display_title
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
+from app.models.playback_viewer import PlaybackViewerStore
 from fastapi import HTTPException
 
 logger = get_logger("playback")
@@ -645,12 +646,48 @@ class PlaybackManager:
         mode = cls._playback_mode(source, profile)
         return "video-transcode" if mode == "direct" else mode
 
+    def _register_viewer(
+        self,
+        user_id: str,
+        entity_id: str,
+        source: dict,
+        mode: str,
+        profile: dict,
+        auth_session_id: str | None,
+        worker_session_id: str | None,
+        start_time: float,
+        duration_seconds: float,
+        ip_address: str | None,
+    ) -> str | None:
+        database = getattr(self, "db", None)
+        if database is None:
+            return None
+        store = PlaybackViewerStore(database)
+        if not store.available():
+            return None
+        viewer_profile = {
+            **profile,
+            "startPositionSeconds": start_time,
+            "durationSeconds": duration_seconds,
+        }
+        return store.create_viewer(
+            user_id,
+            auth_session_id,
+            entity_id,
+            source["id"],
+            mode,
+            viewer_profile,
+            worker_session_id,
+            ip_address,
+        )
+
     def negotiate(
         self,
         user_id: str,
         entity_id: str,
         profile: dict,
         auth_session_id: str | None = None,
+        ip_address: str | None = None,
     ) -> dict:
         forbidden = {
             "EnableTranscoding",
@@ -730,7 +767,19 @@ class PlaybackManager:
         if duration_seconds > 0:
             start_time = min(start_time, duration_seconds)
         if selected_mode == "direct":
-            return {
+            viewer_id = self._register_viewer(
+                user_id,
+                entity_id,
+                source,
+                selected_mode,
+                profile,
+                auth_session_id,
+                None,
+                start_time,
+                duration_seconds,
+                ip_address,
+            )
+            result = {
                 "mode": "direct",
                 "sessionState": "ready",
                 "source": source,
@@ -741,6 +790,9 @@ class PlaybackManager:
                 "startPositionSeconds": start_time,
                 "durationSeconds": source.get("durationSeconds"),
             }
+            if viewer_id:
+                result["viewerSessionId"] = viewer_id
+            return result
         if direct_only:
             raise HTTPException(
                 409,
@@ -758,6 +810,20 @@ class PlaybackManager:
         result["audioStreamId"] = profile.get("audioStreamId")
         result["startPositionSeconds"] = start_time
         result["durationSeconds"] = source.get("durationSeconds")
+        viewer_id = self._register_viewer(
+            user_id,
+            entity_id,
+            source,
+            selected_mode,
+            profile,
+            auth_session_id,
+            result.get("sessionId"),
+            start_time,
+            duration_seconds,
+            ip_address,
+        )
+        if viewer_id:
+            result["viewerSessionId"] = viewer_id
         return result
 
     @staticmethod

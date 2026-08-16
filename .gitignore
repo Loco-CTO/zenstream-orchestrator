@@ -317,4 +317,4 @@ tsconfig.*.json
 *.swp
 *.tmp
 frontend/.next-dev/*
-frontend/dashboard-design/*
+frontend/design/*

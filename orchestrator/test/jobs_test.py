@@ -127,6 +127,28 @@ class WholeJobProgressTest(unittest.TestCase):
         self.assertLess(failed["progress_current"], PROGRESS_TOTAL)
         self.assertEqual(failed["progress_total"], PROGRESS_TOTAL)
 
+    def test_completed_with_warnings_reaches_fixed_progress_total(self):
+        progress = WholeJobProgress("intro_outro_detect")
+        progress.apply(
+            {
+                "state": "running",
+                "progress_current": 5,
+                "progress_total": 10,
+                "message": "Fingerprinting 5/10 episodes",
+            }
+        )
+        completed = progress.apply(
+            {
+                "state": "completed_with_warnings",
+                "progress_current": 9,
+                "progress_total": 10,
+                "message": "Detected 3 intro/outro markers; 1 failed",
+            }
+        )
+
+        self.assertEqual(completed["progress_current"], PROGRESS_TOTAL)
+        self.assertEqual(completed["progress_total"], PROGRESS_TOTAL)
+
 
 class MetadataMissingInspectionTest(unittest.TestCase):
     def setUp(self):

@@ -412,7 +412,7 @@ class WholeJobProgress:
         elif message is not None:
             self._select_phase(str(message))
 
-        if result.get("state") == "completed":
+        if result.get("state") in {"completed", "completed_with_warnings"}:
             self.current = PROGRESS_TOTAL
             result["progress_current"] = PROGRESS_TOTAL
             result["progress_total"] = PROGRESS_TOTAL

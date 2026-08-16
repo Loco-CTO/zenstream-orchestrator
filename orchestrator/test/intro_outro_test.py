@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from app.intro_outro import (
     DEFAULTS,
+    EmptyFingerprint,
     SAMPLE_SECONDS,
     IntroOutroDetector,
     IntroOutroStore,
@@ -92,6 +93,7 @@ class IntroOutroTest(unittest.TestCase):
                 ("queued", "season-a", "ep-queued", "fp-queued", "queued"),
                 ("missing", "season-b", "ep-missing", "fp-missing", None),
                 ("stale", "season-a", "ep-stale", "fp-new", "scanned"),
+                ("partial", "season-a", "ep-partial", "fp-partial", "scanned"),
             )
             for label, season_id, entity_id, fingerprint, state in episodes:
                 library_id = "lib-a" if season_id == "season-a" else "lib-b"
@@ -109,8 +111,8 @@ class IntroOutroTest(unittest.TestCase):
                 if state:
                     stored_fingerprint = "fp-old" if label == "stale" else fingerprint
                     db.connection.execute(
-                        "INSERT INTO intro_outro_assets(media_file_id,entity_id,season_id,source_fingerprint,analysis_key,state,created_at,updated_at) "
-                        "VALUES(?,?,?,?,?,?,?,?)",
+                        "INSERT INTO intro_outro_assets(media_file_id,entity_id,season_id,source_fingerprint,analysis_key,state,error,created_at,updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
                         (
                             label,
                             entity_id,
@@ -118,6 +120,7 @@ class IntroOutroTest(unittest.TestCase):
                             stored_fingerprint,
                             current_key,
                             state,
+                            "outro: no audio" if label == "partial" else None,
                             "created",
                             "updated",
                         ),
@@ -126,7 +129,7 @@ class IntroOutroTest(unittest.TestCase):
 
             queued = IntroOutroStore(db).queue_pending(settings=settings)
 
-            self.assertEqual(queued, 4)
+            self.assertEqual(queued, 5)
             states = dict(
                 db.execute("SELECT media_file_id,state FROM intro_outro_assets")
             )
@@ -135,7 +138,82 @@ class IntroOutroTest(unittest.TestCase):
             self.assertEqual(states["queued"], "queued")
             self.assertEqual(states["missing"], "queued")
             self.assertEqual(states["stale"], "queued")
+            self.assertEqual(states["partial"], "queued")
             db.connection.close()
+
+    def test_failed_asset_drops_stale_detected_segments(self):
+        class Database:
+            def __init__(self):
+                self.connection = sqlite3.connect(":memory:")
+
+            def execute(self, query, params=None):
+                cursor = self.connection.execute(query, params or ())
+                rows = cursor.fetchall()
+                self.connection.commit()
+                return rows
+
+        db = Database()
+        db.connection.executescript(
+            """
+            CREATE TABLE intro_outro_assets (
+                media_file_id TEXT PRIMARY KEY, source_fingerprint TEXT,
+                state TEXT, error TEXT, updated_at TEXT
+            );
+            CREATE TABLE intro_outro_segments (
+                media_file_id TEXT, segment_type TEXT,
+                start_seconds REAL, end_seconds REAL
+            );
+            INSERT INTO intro_outro_assets VALUES
+                ('episode-1', 'source-1', 'generating', NULL, 'created');
+            INSERT INTO intro_outro_segments VALUES
+                ('episode-1', 'intro', 0, 30);
+            """
+        )
+
+        IntroOutroStore(db).mark_failed(
+            {"mediaFileId": "episode-1", "sourceFingerprint": "source-1"},
+            "no audio window",
+        )
+
+        self.assertEqual(
+            db.execute("SELECT state FROM intro_outro_assets"), [("failed",)]
+        )
+        self.assertEqual(db.execute("SELECT * FROM intro_outro_segments"), [])
+        db.connection.close()
+
+    def test_recompute_clears_segments_when_a_season_has_no_comparison_peer(self):
+        class Database:
+            def __init__(self):
+                self.connection = sqlite3.connect(":memory:")
+
+            def execute(self, query, params=None):
+                cursor = self.connection.execute(query, params or ())
+                rows = cursor.fetchall()
+                self.connection.commit()
+                return rows
+
+        db = Database()
+        db.connection.executescript(
+            """
+            CREATE TABLE intro_outro_assets (
+                media_file_id TEXT PRIMARY KEY, season_id TEXT,
+                intro_fingerprint BLOB, outro_fingerprint BLOB, state TEXT
+            );
+            CREATE TABLE intro_outro_segments (
+                media_file_id TEXT, segment_type TEXT,
+                start_seconds REAL, end_seconds REAL
+            );
+            INSERT INTO intro_outro_assets VALUES
+                ('episode-1', 'season-1', X'01000000', X'02000000', 'scanned');
+            INSERT INTO intro_outro_segments VALUES
+                ('episode-1', 'intro', 0, 30);
+            """
+        )
+
+        result = IntroOutroStore(db).recompute_season("season-1", DEFAULTS)
+        self.assertEqual(result, 0)
+        self.assertEqual(db.execute("SELECT * FROM intro_outro_segments"), [])
+        db.connection.close()
 
     @patch("app.intro_outro.ffmpeg_path", return_value="ffmpeg")
     def test_fingerprint_command_uses_raw_chromaprint(self, _ffmpeg):
@@ -154,6 +232,17 @@ class IntroOutroTest(unittest.TestCase):
     def test_decodes_little_endian_fingerprint_points(self):
         self.assertEqual(decode_fingerprint(struct.pack("<3I", 1, 2, 3)), (1, 2, 3))
         self.assertEqual(decode_fingerprint(b"bad"), ())
+
+    @patch("app.intro_outro.run_ffmpeg", return_value=b"")
+    @patch("app.intro_outro.ffmpeg_path", return_value="ffmpeg")
+    def test_empty_ffmpeg_output_is_a_window_level_fingerprint_warning(
+        self, _ffmpeg, _run_ffmpeg
+    ):
+        with tempfile.NamedTemporaryFile() as temporary:
+            with self.assertRaises(EmptyFingerprint):
+                IntroOutroDetector()._fingerprint(
+                    Path(temporary.name), 0, 30, lambda: False
+                )
 
     def test_downsamples_fingerprint_bit_density_for_dashboard_preview(self):
         preview = fingerprint_preview(
@@ -255,14 +344,14 @@ class IntroOutroTest(unittest.TestCase):
                 with self.lock:
                     return self.assets.pop(0) if self.assets else None
 
-            def mark_fingerprinted(self, asset, intro, outro):
+            def mark_fingerprinted(self, asset, intro, outro, warning=None):
                 with self.lock:
                     self.processed.append(asset["mediaFileId"])
 
             def mark_failed(self, asset, error):
                 raise AssertionError(error)
 
-            def recompute_all(self, settings):
+            def recompute_all(self, settings, progress=None):
                 return 0
 
         class JobStore:
@@ -305,3 +394,124 @@ class IntroOutroTest(unittest.TestCase):
         self.assertIn(
             "completed", {values.get("state") for _, values in job_store.updates}
         )
+
+    def test_partial_window_fingerprints_are_kept_and_comparison_continues(self):
+        class Store:
+            def __init__(self):
+                self.asset = {
+                    "mediaFileId": "episode-1",
+                    "entityId": "entity-1",
+                    "durationSeconds": 600,
+                    "path": Path("episode-1.mkv"),
+                }
+                self.processed = []
+                self.comparisons = 0
+
+            def settings(self):
+                return {**DEFAULTS, "introOutroWorkers": 1}
+
+            def queue_pending(self, settings=None):
+                return 1
+
+            def claim_next(self):
+                asset, self.asset = self.asset, None
+                return asset
+
+            def mark_fingerprinted(self, asset, intro, outro, warning=None):
+                self.processed.append((intro, outro, warning))
+
+            def mark_failed(self, asset, error):
+                raise AssertionError(error)
+
+            def recompute_all(self, settings, progress=None):
+                self.comparisons += 1
+                return 2
+
+        class JobStore:
+            def __init__(self):
+                self.updates = []
+
+            def update_run(self, run_id, **values):
+                self.updates.append((run_id, values))
+
+        store = Store()
+        detector = IntroOutroDetector(store)
+
+        def fingerprint(path, start, duration, should_terminate):
+            if start > 0:
+                raise EmptyFingerprint(
+                    "FFmpeg did not return a raw Chromaprint fingerprint."
+                )
+            return b"intro"
+
+        detector._fingerprint = fingerprint
+        job_store = JobStore()
+        detector.run("run", job_store)
+
+        intro, outro, warning = store.processed[0]
+        self.assertEqual(intro, b"intro")
+        self.assertIsNone(outro)
+        self.assertIn("outro:", warning)
+        self.assertEqual(store.comparisons, 1)
+        terminal = [
+            values for _, values in job_store.updates if values.get("finished_at")
+        ]
+        self.assertEqual(terminal[-1]["state"], "completed_with_warnings")
+        self.assertIn("1 partial", terminal[-1]["message"])
+
+    def test_fingerprint_failures_do_not_skip_existing_fingerprint_comparison(self):
+        class Store:
+            def __init__(self):
+                self.asset = {
+                    "mediaFileId": "episode-1",
+                    "entityId": "entity-1",
+                    "durationSeconds": 600,
+                    "path": Path("episode-1.mkv"),
+                }
+                self.failures = []
+                self.comparisons = 0
+
+            def settings(self):
+                return {**DEFAULTS, "introOutroWorkers": 1}
+
+            def queue_pending(self, settings=None):
+                return 1
+
+            def claim_next(self):
+                asset, self.asset = self.asset, None
+                return asset
+
+            def mark_fingerprinted(self, asset, intro, outro, warning=None):
+                raise AssertionError("a fully failed episode must not be scanned")
+
+            def mark_failed(self, asset, error):
+                self.failures.append((asset["mediaFileId"], error))
+
+            def recompute_all(self, settings, progress=None):
+                self.comparisons += 1
+                return 3
+
+        class JobStore:
+            def __init__(self):
+                self.updates = []
+
+            def update_run(self, run_id, **values):
+                self.updates.append((run_id, values))
+
+        store = Store()
+        job_store = JobStore()
+        detector = IntroOutroDetector(store)
+        detector._fingerprint = lambda *args: (_ for _ in ()).throw(
+            EmptyFingerprint("no audio window")
+        )
+
+        detector.run("run", job_store)
+
+        self.assertEqual(len(store.failures), 1)
+        self.assertEqual(store.comparisons, 1)
+        terminal = [
+            values for _, values in job_store.updates if values.get("finished_at")
+        ]
+        self.assertEqual(terminal[-1]["state"], "completed_with_warnings")
+        self.assertIn("3 intro/outro markers", terminal[-1]["message"])
+        self.assertIn("1 failed", terminal[-1]["message"])

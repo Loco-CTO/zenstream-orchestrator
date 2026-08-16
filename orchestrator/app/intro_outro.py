@@ -25,6 +25,12 @@ logger = get_logger("intro_outro")
 DEFAULT_INTRO_OUTRO_FFMPEG_THREADS = 4
 SAMPLE_SECONDS = 4096.0 / 11025.0 / 3.0
 MIN_MATCH_DENSITY = 0.55
+
+
+class EmptyFingerprint(RuntimeError):
+    """FFmpeg produced no Chromaprint points for the requested audio window."""
+
+
 DEFAULTS = {
     "scanOnAdded": True,
     "analysisPercent": 25,
@@ -250,7 +256,7 @@ class IntroOutroStore:
         ) in rows:
             source_fingerprint = self.source_key(quick_fingerprint, size, modified_ns)
             existing = self.db.execute(
-                "SELECT source_fingerprint,analysis_key,state FROM intro_outro_assets WHERE media_file_id=?",
+                "SELECT source_fingerprint,analysis_key,state,error FROM intro_outro_assets WHERE media_file_id=?",
                 (media_file_id,),
             )
             if (
@@ -259,19 +265,24 @@ class IntroOutroStore:
                 and existing[0][1] == fingerprint_settings_key
             ):
                 state = existing[0][2]
-                if state in {"scanned", "fingerprinted", "generating"}:
+                warning_retry = state == "scanned" and bool(existing[0][3])
+                if (
+                    state in {"scanned", "fingerprinted", "generating"}
+                    and not warning_retry
+                ):
                     continue
-                if state in {"queued", "failed"}:
+                if state in {"queued", "failed"} or warning_retry:
                     timestamp = now()
                     self.db.execute(
                         "UPDATE intro_outro_assets SET entity_id=?,season_id=?,state='queued',"
                         "error=NULL,updated_at=? WHERE media_file_id=?",
                         (entity_id, season_id, timestamp, media_file_id),
                     )
-                    self.db.execute(
-                        "DELETE FROM intro_outro_segments WHERE media_file_id=?",
-                        (media_file_id,),
-                    )
+                    if not warning_retry:
+                        self.db.execute(
+                            "DELETE FROM intro_outro_segments WHERE media_file_id=?",
+                            (media_file_id,),
+                        )
                     queued += 1
                     continue
             timestamp = now()
@@ -348,18 +359,48 @@ class IntroOutroStore:
             return cursor.rowcount == 1
 
     def mark_fingerprinted(
-        self, asset: dict, intro: bytes | None, outro: bytes | None
+        self,
+        asset: dict,
+        intro: bytes | None,
+        outro: bytes | None,
+        warning: str | None = None,
     ) -> None:
+        timestamp = now()
+        if warning:
+            self.db.execute(
+                "UPDATE intro_outro_assets SET intro_fingerprint=COALESCE(?,intro_fingerprint),"
+                "outro_fingerprint=COALESCE(?,outro_fingerprint),state='scanned',error=?,updated_at=? "
+                "WHERE media_file_id=? AND source_fingerprint=? AND state='generating'",
+                (
+                    intro,
+                    outro,
+                    warning[:1000],
+                    timestamp,
+                    asset["mediaFileId"],
+                    asset["sourceFingerprint"],
+                ),
+            )
+            return
         self.db.execute(
             "UPDATE intro_outro_assets SET intro_fingerprint=?,outro_fingerprint=?,state='scanned',error=NULL,updated_at=? "
             "WHERE media_file_id=? AND source_fingerprint=? AND state='generating'",
-            (intro, outro, now(), asset["mediaFileId"], asset["sourceFingerprint"]),
+            (intro, outro, timestamp, asset["mediaFileId"], asset["sourceFingerprint"]),
         )
 
     def mark_failed(self, asset: dict, error: str) -> None:
         self.db.execute(
             "UPDATE intro_outro_assets SET state='failed',error=?,updated_at=? WHERE media_file_id=? AND source_fingerprint=? AND state='generating'",
             (error[:1000], now(), asset["mediaFileId"], asset["sourceFingerprint"]),
+        )
+        self.db.execute(
+            "DELETE FROM intro_outro_segments WHERE media_file_id=? AND EXISTS ("
+            "SELECT 1 FROM intro_outro_assets WHERE media_file_id=? "
+            "AND source_fingerprint=? AND state='failed')",
+            (
+                asset["mediaFileId"],
+                asset["mediaFileId"],
+                asset["sourceFingerprint"],
+            ),
         )
 
     def recompute_all(self, settings: dict, progress=None) -> int:
@@ -382,14 +423,15 @@ class IntroOutroStore:
             "WHERE season_id=? AND state='scanned'",
             (season_id,),
         )
+        ids = [row[0] for row in rows]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            self.db.execute(
+                f"DELETE FROM intro_outro_segments WHERE media_file_id IN ({placeholders})",
+                ids,
+            )
         if len(rows) < 2:
             return 0
-        ids = [row[0] for row in rows]
-        placeholders = ",".join("?" for _ in ids)
-        self.db.execute(
-            f"DELETE FROM intro_outro_segments WHERE media_file_id IN ({placeholders})",
-            ids,
-        )
         selected: dict[tuple[str, str], tuple[float, float]] = {}
         for index, left in enumerate(rows):
             for right in rows[index + 1 :]:
@@ -795,7 +837,13 @@ class IntroOutroDetector:
             should_terminate=should_terminate,
         )
         if not output or len(output) % 4:
-            raise RuntimeError("FFmpeg did not return a raw Chromaprint fingerprint.")
+            if not output:
+                raise EmptyFingerprint(
+                    "FFmpeg did not return a raw Chromaprint fingerprint."
+                )
+            raise RuntimeError(
+                "FFmpeg returned an invalid raw Chromaprint fingerprint."
+            )
         return output
 
     def run(self, run_id: str, job_store, should_terminate=None) -> None:
@@ -820,7 +868,7 @@ class IntroOutroDetector:
             progress_stage_total=queued,
             progress_stage_unit="episodes",
         )
-        completed = failures = markers = 0
+        completed = partial_count = failures = markers = 0
         progress_lock = Lock()
         reporter = ProgressReporter(
             partial(job_store.update_run, run_id), unit="episodes"
@@ -828,7 +876,7 @@ class IntroOutroDetector:
         reporter.stage("fingerprinting", "Fingerprinting intros/outros", total=queued)
 
         def process_assets():
-            nonlocal completed, failures
+            nonlocal completed, partial_count, failures
             while not should_terminate():
                 asset = self.store.claim_next()
                 if not asset:
@@ -849,23 +897,40 @@ class IntroOutroDetector:
                         duration, float(settings["maximumCreditsAnalysisSeconds"])
                     )
                     outro_start = max(0.0, duration - outro_duration)
+                    window_errors: list[str] = []
+
+                    def fingerprint_window(
+                        kind: str, start: float, window_duration: float
+                    ) -> bytes | None:
+                        try:
+                            return self._fingerprint(
+                                asset["path"], start, window_duration, should_terminate
+                            )
+                        except Exception as error:
+                            if should_terminate():
+                                raise
+                            window_errors.append(f"{kind}: {error}")
+                            return None
+
                     intro = (
-                        self._fingerprint(
-                            asset["path"], 0.0, intro_duration, should_terminate
-                        )
+                        fingerprint_window("intro", 0.0, intro_duration)
                         if settings["scanIntroduction"]
                         else None
                     )
                     outro = (
-                        self._fingerprint(
-                            asset["path"], outro_start, outro_duration, should_terminate
-                        )
+                        fingerprint_window("outro", outro_start, outro_duration)
                         if settings["scanCredits"]
                         else None
                     )
-                    self.store.mark_fingerprinted(asset, intro, outro)
+                    if window_errors and intro is None and outro is None:
+                        raise RuntimeError("; ".join(window_errors))
+                    warning = "; ".join(window_errors) if window_errors else None
+                    self.store.mark_fingerprinted(asset, intro, outro, warning)
                     with progress_lock:
-                        completed += 1
+                        if warning:
+                            partial_count += 1
+                        else:
+                            completed += 1
                     reporter.settle(item_label)
                 except Exception as error:
                     if should_terminate():
@@ -902,18 +967,6 @@ class IntroOutroDetector:
                 finished_at=now(),
                 message="Terminated by administrator",
             )
-        elif failures:
-            reporter.finish(failed=True)
-            message = f"Fingerprinted {completed} episodes; {failures} failed"
-            job_store.update_run(
-                run_id,
-                state="failed",
-                progress_current=completed,
-                progress_total=max(completed + failures, queued),
-                finished_at=now(),
-                message=message,
-                error=message,
-            )
         else:
             reporter.stage("comparison", "Comparing fingerprints", total=None)
             comparison_progress = lambda current, total, season: job_store.update_run(
@@ -947,13 +1000,28 @@ class IntroOutroDetector:
                     raise
                 markers = self.store.recompute_all(settings)
             reporter.finish()
+            processed = completed + partial_count
+            warning_count = partial_count + failures
+            if warning_count:
+                state = "completed_with_warnings"
+                message = (
+                    f"Detected {markers} intro/outro markers; "
+                    f"fingerprinted {completed} episodes; {partial_count} partial; "
+                    f"{failures} failed"
+                )
+            else:
+                state = "completed"
+                message = (
+                    f"Detected {markers} intro/outro markers"
+                    if markers
+                    else "Intro and outro detection is current"
+                )
             job_store.update_run(
                 run_id,
-                state="completed",
-                progress_current=completed,
-                progress_total=max(completed, queued),
+                state=state,
+                progress_current=processed,
+                progress_total=max(processed + failures, queued),
                 finished_at=now(),
-                message=f"Detected {markers} intro/outro markers"
-                if markers
-                else "Intro and outro detection is current",
+                message=message,
+                error=None,
             )

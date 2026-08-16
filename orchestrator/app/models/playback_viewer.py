@@ -108,9 +108,7 @@ class PlaybackViewerStore:
             )
         except Exception:
             return False
-        return isinstance(rows, list) and {
-            row[0] for row in rows if row
-        } == {
+        return isinstance(rows, list) and {row[0] for row in rows if row} == {
             "user_devices",
             "playback_viewer_sessions",
             "playback_viewer_commands",
@@ -347,7 +345,9 @@ class PlaybackViewerStore:
         episode_label = None
         if season_number is not None or episode_number is not None:
             season = f"S{int(season_number):02d}" if season_number is not None else "S?"
-            episode = f"E{int(episode_number):02d}" if episode_number is not None else "E?"
+            episode = (
+                f"E{int(episode_number):02d}" if episode_number is not None else "E?"
+            )
             episode_label = f"{season} · {episode}"
         value = {
             "id": viewer_id,
@@ -441,9 +441,7 @@ class PlaybackViewerStore:
 
     def get_session(self, viewer_id: str) -> dict | None:
         self._expire_stale()
-        rows = self.db.read_execute(
-            self._select_sql() + " WHERE v.id=?", (viewer_id,)
-        )
+        rows = self.db.read_execute(self._select_sql() + " WHERE v.id=?", (viewer_id,))
         return self._payload(rows[0], detail=True) if rows else None
 
     def heartbeat(
@@ -483,13 +481,19 @@ class PlaybackViewerStore:
                 command_id = ack.get("id") if isinstance(ack, dict) else ack
                 if not command_id:
                     continue
-                success = True if not isinstance(ack, dict) else bool(ack.get("success", True))
+                success = (
+                    True
+                    if not isinstance(ack, dict)
+                    else bool(ack.get("success", True))
+                )
                 cursor.execute(
                     "UPDATE playback_viewer_commands SET state=?,acknowledged_at=?,error=? WHERE id=? AND viewer_session_id=? AND state IN ('pending','delivered')",
                     (
                         "acknowledged" if success else "failed",
                         now,
-                        _clean(ack.get("error"), 200) if isinstance(ack, dict) else None,
+                        _clean(ack.get("error"), 200)
+                        if isinstance(ack, dict)
+                        else None,
                         str(command_id),
                         viewer_id,
                     ),
@@ -574,14 +578,22 @@ class PlaybackViewerStore:
         expires = now + timedelta(seconds=self.COMMAND_TTL_SECONDS)
         command_id = str(uuid.uuid4())
         result = self.db.execute(
-            "INSERT INTO playback_viewer_commands(id,viewer_session_id,action,state,issued_at,expires_at) SELECT ?,?,'" + action + "','pending',?,? WHERE EXISTS (SELECT 1 FROM playback_viewer_sessions WHERE id=? AND state='active')",
+            "INSERT INTO playback_viewer_commands(id,viewer_session_id,action,state,issued_at,expires_at) SELECT ?,?,'"
+            + action
+            + "','pending',?,? WHERE EXISTS (SELECT 1 FROM playback_viewer_sessions WHERE id=? AND state='active')",
             (command_id, viewer_id, _iso(now), _iso(expires), viewer_id),
         )
         if not result and not self.db.read_execute(
             "SELECT 1 FROM playback_viewer_commands WHERE id=?", (command_id,)
         ):
             return None
-        return {"id": command_id, "viewerSessionId": viewer_id, "action": action, "state": "pending", "expiresAt": _iso(expires)}
+        return {
+            "id": command_id,
+            "viewerSessionId": viewer_id,
+            "action": action,
+            "state": "pending",
+            "expiresAt": _iso(expires),
+        }
 
     def list_devices(self, user_id: str | None = None) -> dict:
         self._expire_stale()
@@ -667,7 +679,9 @@ class PlaybackViewerStore:
                 (device_id,),
             )
             cursor.execute("DELETE FROM user_sessions WHERE device_id=?", (device_id,))
-            deleted = cursor.execute("DELETE FROM user_devices WHERE id=?", (device_id,)).rowcount
+            deleted = cursor.execute(
+                "DELETE FROM user_devices WHERE id=?", (device_id,)
+            ).rowcount
         if not deleted:
             raise LookupError("Device not found.")
         return {"deviceId": device_id, "workers": workers}

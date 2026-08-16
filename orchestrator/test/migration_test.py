@@ -90,6 +90,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "catalog_root_search_grams",
                         "catalog_artwork_selection",
                         "catalog_collection_member_projection",
+                        "intro_outro_comparison_state",
                     }
                     <= tables
                 )

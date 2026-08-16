@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,85 @@ from app.intro_outro import (
 
 
 class IntroOutroTest(unittest.TestCase):
+    @staticmethod
+    def _comparison_database():
+        class Database:
+            def __init__(self):
+                self.connection = sqlite3.connect(":memory:")
+
+            def execute(self, query, params=None):
+                cursor = self.connection.execute(query, params or ())
+                rows = cursor.fetchall()
+                self.connection.commit()
+                return rows
+
+            @contextmanager
+            def transaction(self):
+                cursor = self.connection.cursor()
+                try:
+                    cursor.execute("BEGIN IMMEDIATE")
+                    yield cursor
+                    self.connection.commit()
+                except Exception:
+                    self.connection.rollback()
+                    raise
+                finally:
+                    cursor.close()
+
+        db = Database()
+        db.connection.executescript(
+            """
+            CREATE TABLE media_sources (
+                media_file_id TEXT PRIMARY KEY, duration_seconds REAL
+            );
+            CREATE TABLE intro_outro_assets (
+                media_file_id TEXT PRIMARY KEY, season_id TEXT,
+                source_fingerprint TEXT, intro_fingerprint BLOB,
+                outro_fingerprint BLOB, state TEXT, error TEXT
+            );
+            CREATE TABLE intro_outro_segments (
+                media_file_id TEXT, segment_type TEXT,
+                start_seconds REAL, end_seconds REAL,
+                PRIMARY KEY(media_file_id, segment_type)
+            );
+            CREATE TABLE intro_outro_comparison_state (
+                season_id TEXT PRIMARY KEY, comparison_key TEXT, updated_at TEXT
+            );
+            """
+        )
+        return db
+
+    @staticmethod
+    def _add_comparison_asset(
+        db,
+        media_file_id,
+        season_id,
+        source_fingerprint=None,
+        duration=600,
+        intro=b"\0\0\0\0",
+        outro=b"\0\0\0\0",
+        state="scanned",
+        error=None,
+    ):
+        db.connection.execute(
+            "INSERT INTO media_sources(media_file_id,duration_seconds) VALUES(?,?)",
+            (media_file_id, duration),
+        )
+        db.connection.execute(
+            "INSERT INTO intro_outro_assets(media_file_id,season_id,source_fingerprint,"
+            "intro_fingerprint,outro_fingerprint,state,error) VALUES(?,?,?,?,?,?,?)",
+            (
+                media_file_id,
+                season_id,
+                source_fingerprint or f"source-{media_file_id}",
+                intro,
+                outro,
+                state,
+                error,
+            ),
+        )
+        db.connection.commit()
+
     def test_queue_pending_repairs_global_incomplete_backlog(self):
         class Database:
             def __init__(self, root):
@@ -192,19 +272,43 @@ class IntroOutroTest(unittest.TestCase):
                 self.connection.commit()
                 return rows
 
+            @contextmanager
+            def transaction(self):
+                cursor = self.connection.cursor()
+                try:
+                    cursor.execute("BEGIN IMMEDIATE")
+                    yield cursor
+                    self.connection.commit()
+                except Exception:
+                    self.connection.rollback()
+                    raise
+                finally:
+                    cursor.close()
+
         db = Database()
         db.connection.executescript(
             """
             CREATE TABLE intro_outro_assets (
                 media_file_id TEXT PRIMARY KEY, season_id TEXT,
-                intro_fingerprint BLOB, outro_fingerprint BLOB, state TEXT
+                source_fingerprint TEXT, intro_fingerprint BLOB,
+                outro_fingerprint BLOB, state TEXT, error TEXT
+            );
+            CREATE TABLE media_sources (
+                media_file_id TEXT PRIMARY KEY, duration_seconds REAL
+            );
+            CREATE TABLE intro_outro_comparison_state (
+                season_id TEXT PRIMARY KEY, comparison_key TEXT, updated_at TEXT
             );
             CREATE TABLE intro_outro_segments (
                 media_file_id TEXT, segment_type TEXT,
                 start_seconds REAL, end_seconds REAL
             );
-            INSERT INTO intro_outro_assets VALUES
-                ('episode-1', 'season-1', X'01000000', X'02000000', 'scanned');
+            INSERT INTO media_sources VALUES ('episode-1', 600);
+            INSERT INTO intro_outro_assets(
+                media_file_id,season_id,source_fingerprint,intro_fingerprint,
+                outro_fingerprint,state,error
+            ) VALUES
+                ('episode-1', 'season-1', 'source-1', X'01000000', X'02000000', 'scanned', NULL);
             INSERT INTO intro_outro_segments VALUES
                 ('episode-1', 'intro', 0, 30);
             """
@@ -214,6 +318,191 @@ class IntroOutroTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(db.execute("SELECT * FROM intro_outro_segments"), [])
         db.connection.close()
+
+    def test_bootstrap_comparison_skips_pairwise_matching_and_segment_writes_when_unchanged(
+        self,
+    ):
+        db = self._comparison_database()
+        self._add_comparison_asset(db, "episode-1", "season-1")
+        self._add_comparison_asset(db, "episode-2", "season-1")
+        store = IntroOutroStore(db)
+
+        with patch(
+            "app.intro_outro.shared_region",
+            return_value=(0.0, 30.0, 0.0, 30.0),
+        ):
+            self.assertEqual(store.recompute_season("season-1", DEFAULTS), 4)
+
+        before_segments = db.execute(
+            "SELECT media_file_id,segment_type,start_seconds,end_seconds "
+            "FROM intro_outro_segments ORDER BY media_file_id,segment_type"
+        )
+        before_state = db.execute(
+            "SELECT comparison_key,updated_at FROM intro_outro_comparison_state "
+            "WHERE season_id='season-1'"
+        )
+        statements = []
+        db.connection.set_trace_callback(statements.append)
+        with patch(
+            "app.intro_outro.shared_region",
+            side_effect=AssertionError("unchanged seasons must not compare pairs"),
+        ):
+            self.assertEqual(store.recompute_season("season-1", DEFAULTS), 4)
+        db.connection.set_trace_callback(None)
+
+        self.assertEqual(
+            db.execute(
+                "SELECT media_file_id,segment_type,start_seconds,end_seconds "
+                "FROM intro_outro_segments ORDER BY media_file_id,segment_type"
+            ),
+            before_segments,
+        )
+        self.assertEqual(
+            db.execute(
+                "SELECT comparison_key,updated_at FROM intro_outro_comparison_state "
+                "WHERE season_id='season-1'"
+            ),
+            before_state,
+        )
+        self.assertFalse(
+            any(
+                statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+                and "INTRO_OUTRO_SEGMENTS" in statement.upper()
+                for statement in statements
+            )
+        )
+
+    def test_new_episode_recomputes_only_its_season(self):
+        db = self._comparison_database()
+        for season_id in ("season-a", "season-b"):
+            self._add_comparison_asset(db, f"{season_id}-episode-1", season_id)
+            self._add_comparison_asset(db, f"{season_id}-episode-2", season_id)
+        store = IntroOutroStore(db)
+        with patch(
+            "app.intro_outro.shared_region",
+            return_value=(0.0, 30.0, 0.0, 30.0),
+        ):
+            store.recompute_all(DEFAULTS)
+
+        self._add_comparison_asset(db, "season-a-episode-3", "season-a")
+        with patch(
+            "app.intro_outro.shared_region",
+            return_value=(0.0, 30.0, 0.0, 30.0),
+        ) as matcher:
+            store.recompute_all(DEFAULTS)
+
+        self.assertEqual(matcher.call_count, 6)
+        self.assertEqual(
+            db.execute(
+                "SELECT COUNT(*) FROM intro_outro_segments WHERE media_file_id LIKE 'season-b-%'"
+            )[0][0],
+            4,
+        )
+
+    def test_adding_a_peer_backfills_a_changed_episode(self):
+        db = self._comparison_database()
+        self._add_comparison_asset(
+            db, "episode-13", "season-1", source_fingerprint="source-13-old"
+        )
+        store = IntroOutroStore(db)
+        self.assertEqual(store.recompute_season("season-1", DEFAULTS), 0)
+
+        db.connection.execute(
+            "UPDATE intro_outro_assets SET source_fingerprint=?,intro_fingerprint=?,"
+            "outro_fingerprint=? WHERE media_file_id='episode-13'",
+            ("source-13-new", b"new-intro", b"new-outro"),
+        )
+        db.connection.commit()
+        with patch(
+            "app.intro_outro.shared_region",
+            return_value=None,
+        ):
+            self.assertEqual(store.recompute_season("season-1", DEFAULTS), 0)
+        self.assertEqual(db.execute("SELECT * FROM intro_outro_segments"), [])
+
+        self._add_comparison_asset(
+            db,
+            "episode-14",
+            "season-1",
+            source_fingerprint="source-14",
+            intro=b"new-intro",
+            outro=b"new-outro",
+        )
+        with patch(
+            "app.intro_outro.shared_region",
+            return_value=(0.0, 30.0, 0.0, 30.0),
+        ):
+            self.assertEqual(store.recompute_season("season-1", DEFAULTS), 4)
+        self.assertEqual(
+            {
+                row[0]
+                for row in db.execute(
+                    "SELECT DISTINCT media_file_id FROM intro_outro_segments"
+                )
+            },
+            {"episode-13", "episode-14"},
+        )
+
+    def test_comparison_key_changes_for_duration_fingerprint_warning_and_removal(self):
+        db = self._comparison_database()
+        self._add_comparison_asset(db, "episode-1", "season-1")
+        self._add_comparison_asset(db, "episode-2", "season-1")
+        store = IntroOutroStore(db)
+        with patch(
+            "app.intro_outro.shared_region",
+            return_value=(0.0, 30.0, 0.0, 30.0),
+        ):
+            store.recompute_season("season-1", DEFAULTS)
+
+        keys = []
+        keys.append(
+            db.execute(
+                "SELECT comparison_key FROM intro_outro_comparison_state WHERE season_id='season-1'"
+            )[0][0]
+        )
+        db.connection.execute(
+            "UPDATE media_sources SET duration_seconds=601 WHERE media_file_id='episode-1'"
+        )
+        db.connection.commit()
+        with patch(
+            "app.intro_outro.shared_region",
+            return_value=(0.0, 30.0, 0.0, 30.0),
+        ):
+            store.recompute_season("season-1", DEFAULTS)
+        keys.append(
+            db.execute(
+                "SELECT comparison_key FROM intro_outro_comparison_state WHERE season_id='season-1'"
+            )[0][0]
+        )
+
+        db.connection.execute(
+            "UPDATE intro_outro_assets SET intro_fingerprint=?,error=? "
+            "WHERE media_file_id='episode-1'",
+            (b"changed", "intro: temporary failure"),
+        )
+        db.connection.commit()
+        with patch(
+            "app.intro_outro.shared_region",
+            return_value=(0.0, 30.0, 0.0, 30.0),
+        ):
+            store.recompute_season("season-1", DEFAULTS)
+        keys.append(
+            db.execute(
+                "SELECT comparison_key FROM intro_outro_comparison_state WHERE season_id='season-1'"
+            )[0][0]
+        )
+
+        db.connection.execute(
+            "UPDATE intro_outro_assets SET state='failed' WHERE media_file_id='episode-2'"
+        )
+        db.connection.commit()
+        store.recompute_season("season-1", DEFAULTS)
+        keys.append(
+            db.execute(
+                "SELECT comparison_key FROM intro_outro_comparison_state WHERE season_id='season-1'"
+            )[0][0]
+        )
+        self.assertEqual(len(set(keys)), len(keys))
 
     @patch("app.intro_outro.ffmpeg_path", return_value="ffmpeg")
     def test_fingerprint_command_uses_raw_chromaprint(self, _ffmpeg):

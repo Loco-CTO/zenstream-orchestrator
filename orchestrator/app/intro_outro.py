@@ -48,6 +48,20 @@ DEFAULTS = {
     "introOutroFfmpegThreads": 4,
 }
 
+COMPARISON_SETTING_KEYS = (
+    "analysisPercent",
+    "analysisLengthLimitMinutes",
+    "scanIntroduction",
+    "scanCredits",
+    "minimumIntroDuration",
+    "maximumIntroDuration",
+    "minimumCreditsDuration",
+    "maximumCreditsAnalysisSeconds",
+    "maximumFingerprintPointDifferences",
+    "maximumTimeSkipSeconds",
+    "invertedIndexShift",
+)
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -114,6 +128,41 @@ def analysis_key(settings: dict) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
+def _fingerprint_digest(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    elif not isinstance(value, (bytes, bytearray)):
+        value = str(value).encode()
+    return hashlib.sha256(bytes(value)).hexdigest()
+
+
+def comparison_key(settings: dict, rows) -> str:
+    """Return the stable input key for one season's marker comparison."""
+    normalized = normalize_settings(settings)
+    payload = {
+        "settings": {
+            key: normalized[key]
+            for key in COMPARISON_SETTING_KEYS
+        },
+        "episodes": [
+            {
+                "mediaFileId": row[0],
+                "sourceFingerprint": row[1],
+                "durationSeconds": float(row[2] or 0),
+                "introFingerprint": _fingerprint_digest(row[3]),
+                "outroFingerprint": _fingerprint_digest(row[4]),
+                "warning": row[5],
+            }
+            for row in rows
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 class IntroOutroStore:
     def __init__(self, db=None):
         self.db = db or Config().database
@@ -123,17 +172,23 @@ class IntroOutroStore:
         return str(quick_fingerprint or f"{int(size or 0)}:{int(modified_ns or 0)}")
 
     def available(self) -> bool:
-        tables = {
-            row[0]
-            for row in self.db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
+        tables = self._tables()
         return {
             "intro_outro_settings",
             "intro_outro_assets",
             "intro_outro_segments",
         }.issubset(tables)
+
+    def _tables(self) -> set[str]:
+        return {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+
+    def _comparison_state_available(self) -> bool:
+        return "intro_outro_comparison_state" in self._tables()
 
     def settings(self) -> dict:
         if not self.available():
@@ -404,9 +459,16 @@ class IntroOutroStore:
         )
 
     def recompute_all(self, settings: dict, progress=None) -> int:
-        rows = self.db.execute(
-            "SELECT DISTINCT season_id FROM intro_outro_assets WHERE state='scanned'"
-        )
+        if self._comparison_state_available():
+            rows = self.db.execute(
+                "SELECT season_id FROM intro_outro_assets "
+                "UNION SELECT season_id FROM intro_outro_comparison_state "
+                "ORDER BY season_id"
+            )
+        else:
+            rows = self.db.execute(
+                "SELECT DISTINCT season_id FROM intro_outro_assets WHERE state='scanned'"
+            )
         total = len(rows)
         completed = 0
         markers = 0
@@ -418,95 +480,156 @@ class IntroOutroStore:
         return markers
 
     def recompute_season(self, season_id: str, settings: dict) -> int:
+        settings = normalize_settings(settings)
         rows = self.db.execute(
-            "SELECT media_file_id,intro_fingerprint,outro_fingerprint FROM intro_outro_assets "
-            "WHERE season_id=? AND state='scanned'",
+            "SELECT a.media_file_id,a.source_fingerprint,"
+            "COALESCE(source.duration_seconds,0),a.intro_fingerprint,"
+            "a.outro_fingerprint,a.error FROM intro_outro_assets a "
+            "LEFT JOIN media_sources source ON source.media_file_id=a.media_file_id "
+            "WHERE a.season_id=? AND a.state='scanned' "
+            "ORDER BY a.media_file_id",
             (season_id,),
         )
-        ids = [row[0] for row in rows]
-        if ids:
-            placeholders = ",".join("?" for _ in ids)
-            self.db.execute(
-                f"DELETE FROM intro_outro_segments WHERE media_file_id IN ({placeholders})",
-                ids,
+        current_key = comparison_key(settings, rows)
+        state_available = self._comparison_state_available()
+        stored_key = None
+        if state_available:
+            state_rows = self.db.execute(
+                "SELECT comparison_key FROM intro_outro_comparison_state WHERE season_id=?",
+                (season_id,),
             )
-        if len(rows) < 2:
-            return 0
+            stored_key = state_rows[0][0] if state_rows else None
+            if stored_key == current_key:
+                return self._segment_count(season_id)
+
         selected: dict[tuple[str, str], tuple[float, float]] = {}
-        for index, left in enumerate(rows):
-            for right in rows[index + 1 :]:
-                kinds = []
-                if settings["scanIntroduction"]:
-                    kinds.append(
-                        (
-                            "intro",
-                            1,
-                            settings["minimumIntroDuration"],
-                            settings["maximumIntroDuration"],
-                            0.0,
-                        )
+        if len(rows) >= 2:
+            kinds = []
+            if settings["scanIntroduction"]:
+                kinds.append(
+                    (
+                        "intro",
+                        3,
+                        settings["minimumIntroDuration"],
+                        settings["maximumIntroDuration"],
+                        0.0,
                     )
-                if settings["scanCredits"]:
-                    kinds.append(
-                        (
-                            "outro",
-                            2,
-                            settings["minimumCreditsDuration"],
-                            settings["maximumCreditsAnalysisSeconds"],
-                            None,
-                        )
-                    )
-                for kind, column, minimum, maximum, offset in kinds:
-                    left_points = decode_fingerprint(left[column])
-                    right_points = decode_fingerprint(right[column])
-                    result = shared_region(
-                        left_points, right_points, settings, minimum, maximum
-                    )
-                    if not result:
-                        continue
-                    left_start, left_end, right_start, right_end = result
-                    left_duration = self._duration(left[0])
-                    right_duration = self._duration(right[0])
-                    left_offset = (
-                        offset
-                        if offset is not None
-                        else max(
-                            0.0,
-                            left_duration - settings["maximumCreditsAnalysisSeconds"],
-                        )
-                    )
-                    right_offset = (
-                        offset
-                        if offset is not None
-                        else max(
-                            0.0,
-                            right_duration - settings["maximumCreditsAnalysisSeconds"],
-                        )
-                    )
-                    self._choose(
-                        selected,
-                        left[0],
-                        kind,
-                        left_start + left_offset,
-                        min(left_duration, left_end + left_offset),
-                    )
-                    self._choose(
-                        selected,
-                        right[0],
-                        kind,
-                        right_start + right_offset,
-                        min(right_duration, right_end + right_offset),
-                    )
-        if selected:
-            with self.db.transaction() as cursor:
-                cursor.executemany(
-                    "INSERT INTO intro_outro_segments(media_file_id,segment_type,start_seconds,end_seconds) VALUES(?,?,?,?)",
-                    [
-                        (media_file_id, kind, start, end)
-                        for (media_file_id, kind), (start, end) in selected.items()
-                    ],
                 )
+            if settings["scanCredits"]:
+                kinds.append(
+                    (
+                        "outro",
+                        4,
+                        settings["minimumCreditsDuration"],
+                        settings["maximumCreditsAnalysisSeconds"],
+                        None,
+                    )
+                )
+            for index, left in enumerate(rows):
+                for right in rows[index + 1 :]:
+                    for kind, column, minimum, maximum, offset in kinds:
+                        left_points = decode_fingerprint(left[column])
+                        right_points = decode_fingerprint(right[column])
+                        result = shared_region(
+                            left_points, right_points, settings, minimum, maximum
+                        )
+                        if not result:
+                            continue
+                        left_start, left_end, right_start, right_end = result
+                        left_duration = float(left[2] or 0)
+                        right_duration = float(right[2] or 0)
+                        left_offset = (
+                            offset
+                            if offset is not None
+                            else max(
+                                0.0,
+                                left_duration
+                                - settings["maximumCreditsAnalysisSeconds"],
+                            )
+                        )
+                        right_offset = (
+                            offset
+                            if offset is not None
+                            else max(
+                                0.0,
+                                right_duration
+                                - settings["maximumCreditsAnalysisSeconds"],
+                            )
+                        )
+                        self._choose(
+                            selected,
+                            left[0],
+                            kind,
+                            left_start + left_offset,
+                            min(left_duration, left_end + left_offset),
+                        )
+                        self._choose(
+                            selected,
+                            right[0],
+                            kind,
+                            right_start + right_offset,
+                            min(right_duration, right_end + right_offset),
+                        )
+
+        existing_rows = self.db.execute(
+            "SELECT segment.media_file_id,segment.segment_type,"
+            "segment.start_seconds,segment.end_seconds "
+            "FROM intro_outro_segments segment "
+            "JOIN intro_outro_assets asset ON asset.media_file_id=segment.media_file_id "
+            "WHERE asset.season_id=?",
+            (season_id,),
+        )
+        existing = {
+            (row[0], row[1]): (float(row[2]), float(row[3]))
+            for row in existing_rows
+        }
+        deleted = sorted(set(existing) - set(selected))
+        changed = sorted(
+            key for key, value in selected.items() if existing.get(key) != value
+        )
+        state_changed = state_available and stored_key != current_key
+        if deleted or changed or state_changed:
+            with self.db.transaction() as cursor:
+                for media_file_id, kind in deleted:
+                    cursor.execute(
+                        "DELETE FROM intro_outro_segments "
+                        "WHERE media_file_id=? AND segment_type=?",
+                        (media_file_id, kind),
+                    )
+                for media_file_id, kind in changed:
+                    start, end = selected[(media_file_id, kind)]
+                    if (media_file_id, kind) in existing:
+                        cursor.execute(
+                            "UPDATE intro_outro_segments SET start_seconds=?,end_seconds=? "
+                            "WHERE media_file_id=? AND segment_type=?",
+                            (start, end, media_file_id, kind),
+                        )
+                    else:
+                        cursor.execute(
+                            "INSERT INTO intro_outro_segments "
+                            "(media_file_id,segment_type,start_seconds,end_seconds) "
+                            "VALUES(?,?,?,?)",
+                            (media_file_id, kind, start, end),
+                        )
+                if state_available:
+                    cursor.execute(
+                        "INSERT INTO intro_outro_comparison_state "
+                        "(season_id,comparison_key,updated_at) VALUES(?,?,?) "
+                        "ON CONFLICT(season_id) DO UPDATE SET "
+                        "comparison_key=excluded.comparison_key,"
+                        "updated_at=excluded.updated_at",
+                        (season_id, current_key, now()),
+                    )
         return len(selected)
+
+    def _segment_count(self, season_id: str) -> int:
+        rows = self.db.execute(
+            "SELECT COUNT(*) FROM intro_outro_segments segment "
+            "JOIN intro_outro_assets asset ON asset.media_file_id=segment.media_file_id "
+            "WHERE asset.season_id=?",
+            (season_id,),
+        )
+        return int(rows[0][0] or 0) if rows else 0
 
     def _duration(self, media_file_id: str) -> float:
         rows = self.db.execute(

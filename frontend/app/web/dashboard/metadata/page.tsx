@@ -68,14 +68,12 @@ export default function MetadataPage() {
 		const data = await response.json().catch(() => null);
 		setMessage(
 			response.ok
-				? "Metadata languages saved; existing metadata backfill queued."
+				? "Metadata settings saved; existing metadata backfill queued."
 				: data?.detail || "Could not save metadata languages.",
 		);
 		if (response.ok) {
 			setLocales(data.locales || locales);
-			setPreferNoLanguageForBackdrop(
-				data.preferNoLanguageForBackdrop === true,
-			);
+			setPreferNoLanguageForBackdrop(data.preferNoLanguageForBackdrop === true);
 		}
 	}
 
@@ -249,7 +247,7 @@ export default function MetadataPage() {
 								aria-describedby="backdrop-language-help"
 							/>
 							<span>
-								<span className="font-semibold">Prefer language-neutral backdrops</span>
+								<span className="font-semibold">Prefer no language for backdrops</span>
 								<span
 									id="backdrop-language-help"
 									className="mt-1 block leading-5 console-muted"

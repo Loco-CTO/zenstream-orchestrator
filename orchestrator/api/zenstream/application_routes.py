@@ -18,7 +18,6 @@ from app.foreground import run_auth, run_control
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite
-from app.models.account import Account
 from app.models.admin import ADMIN_SESSION_COOKIE, Admin
 from app.models.playback_settings import PlaybackSettings
 from app.models.playback_viewer import PlaybackViewerStore

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import httpx
-from app.providers import ProviderClient, TVDBClient
+from app.providers import ProviderClient, ProviderNotFoundError, TVDBClient
 
 
 class TVDBTLSCompatibilityTest(unittest.TestCase):
@@ -57,6 +57,19 @@ class TVDBTLSCompatibilityTest(unittest.TestCase):
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(transport.get.call_count, 2)
         sleep.assert_called_once_with(0.25)
+
+    def test_not_found_response_has_a_distinct_provider_error(self):
+        url = "https://provider.example/item"
+        response = httpx.Response(404, request=httpx.Request("GET", url))
+        client = ProviderClient()
+        transport = MagicMock()
+        transport.get.return_value = response
+
+        with (
+            patch.object(client, "_http_client", return_value=transport),
+            self.assertRaises(ProviderNotFoundError),
+        ):
+            client._get(url)
 
 
 if __name__ == "__main__":

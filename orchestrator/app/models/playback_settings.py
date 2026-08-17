@@ -10,6 +10,7 @@ DEFAULT_TRICKPLAY_FRAME_WIDTH = 320
 DEFAULT_TRICKPLAY_FRAME_HEIGHT = 180
 DEFAULT_TRICKPLAY_INTERVAL_SECONDS = 10
 DEFAULT_TRICKPLAY_WORKERS = 1
+DEFAULT_TRICKPLAY_FFMPEG_THREADS = 4
 MIN_TRICKPLAY_FRAME_WIDTH = 160
 MAX_TRICKPLAY_FRAME_WIDTH = 640
 MIN_TRICKPLAY_INTERVAL_SECONDS = 1
@@ -36,6 +37,7 @@ class PlaybackSettings:
         trickplay_frame_height=DEFAULT_TRICKPLAY_FRAME_HEIGHT,
         trickplay_interval_seconds=DEFAULT_TRICKPLAY_INTERVAL_SECONDS,
         trickplay_workers=DEFAULT_TRICKPLAY_WORKERS,
+        trickplay_ffmpeg_threads=DEFAULT_TRICKPLAY_FFMPEG_THREADS,
     ) -> dict[str, int]:
         values = {
             "maxTranscodes": max_transcodes,
@@ -44,6 +46,7 @@ class PlaybackSettings:
             "trickplayFrameHeight": trickplay_frame_height,
             "trickplayIntervalSeconds": trickplay_interval_seconds,
             "trickplayWorkers": trickplay_workers,
+            "trickplayFfmpegThreads": trickplay_ffmpeg_threads,
         }
         normalized = {}
         for name, value in values.items():
@@ -63,6 +66,13 @@ class PlaybackSettings:
             ):
                 raise ValueError(
                     f"{name} must be between 1 and {MAX_ALLOWED_TRANSCODES}."
+                )
+            if (
+                name == "trickplayFfmpegThreads"
+                and not 0 <= integer <= MAX_ALLOWED_TRANSCODES
+            ):
+                raise ValueError(
+                    f"{name} must be between 0 and {MAX_ALLOWED_TRANSCODES}."
                 )
             normalized[name] = integer
         if (
@@ -100,6 +110,7 @@ class PlaybackSettings:
             "trickplayFrameHeight": DEFAULT_TRICKPLAY_FRAME_HEIGHT,
             "trickplayIntervalSeconds": DEFAULT_TRICKPLAY_INTERVAL_SECONDS,
             "trickplayWorkers": DEFAULT_TRICKPLAY_WORKERS,
+            "trickplayFfmpegThreads": DEFAULT_TRICKPLAY_FFMPEG_THREADS,
         }
         if (
             defaults["maxTranscodes"] > 0
@@ -108,13 +119,19 @@ class PlaybackSettings:
         ):
             defaults["maxTranscodesPerUser"] = defaults["maxTranscodes"]
         rows = self.db.execute(
-            "SELECT max_transcodes,max_transcodes_per_user,trickplay_frame_width,trickplay_frame_height,trickplay_interval_seconds,trickplay_workers FROM playback_settings WHERE id=1"
+            "SELECT max_transcodes,max_transcodes_per_user,trickplay_frame_width,trickplay_frame_height,trickplay_interval_seconds,trickplay_workers,trickplay_ffmpeg_threads FROM playback_settings WHERE id=1"
         )
         if not isinstance(rows, list) or not rows:
             return defaults
         try:
             return self.normalize(
-                rows[0][0], rows[0][1], rows[0][2], rows[0][3], rows[0][4], rows[0][5]
+                rows[0][0],
+                rows[0][1],
+                rows[0][2],
+                rows[0][3],
+                rows[0][4],
+                rows[0][5],
+                rows[0][6],
             )
         except (IndexError, TypeError, ValueError):
             return defaults
@@ -127,6 +144,7 @@ class PlaybackSettings:
         trickplay_frame_height=DEFAULT_TRICKPLAY_FRAME_HEIGHT,
         trickplay_interval_seconds=DEFAULT_TRICKPLAY_INTERVAL_SECONDS,
         trickplay_workers=DEFAULT_TRICKPLAY_WORKERS,
+        trickplay_ffmpeg_threads=DEFAULT_TRICKPLAY_FFMPEG_THREADS,
     ) -> dict[str, int]:
         values = self.normalize(
             max_transcodes,
@@ -135,16 +153,18 @@ class PlaybackSettings:
             trickplay_frame_height,
             trickplay_interval_seconds,
             trickplay_workers,
+            trickplay_ffmpeg_threads,
         )
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
-            "INSERT INTO playback_settings(id,max_transcodes,max_transcodes_per_user,trickplay_frame_width,trickplay_frame_height,trickplay_interval_seconds,trickplay_workers,updated_at) VALUES(1,?,?,?,?,?,?,?) "
+            "INSERT INTO playback_settings(id,max_transcodes,max_transcodes_per_user,trickplay_frame_width,trickplay_frame_height,trickplay_interval_seconds,trickplay_workers,trickplay_ffmpeg_threads,updated_at) VALUES(1,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET max_transcodes=excluded.max_transcodes, "
             "max_transcodes_per_user=excluded.max_transcodes_per_user,"
             "trickplay_frame_width=excluded.trickplay_frame_width,"
             "trickplay_frame_height=excluded.trickplay_frame_height,"
             "trickplay_interval_seconds=excluded.trickplay_interval_seconds,"
-            "trickplay_workers=excluded.trickplay_workers,updated_at=excluded.updated_at",
+            "trickplay_workers=excluded.trickplay_workers,"
+            "trickplay_ffmpeg_threads=excluded.trickplay_ffmpeg_threads,updated_at=excluded.updated_at",
             (
                 values["maxTranscodes"],
                 values["maxTranscodesPerUser"],
@@ -152,6 +172,7 @@ class PlaybackSettings:
                 values["trickplayFrameHeight"],
                 values["trickplayIntervalSeconds"],
                 values["trickplayWorkers"],
+                values["trickplayFfmpegThreads"],
                 now,
             ),
         )

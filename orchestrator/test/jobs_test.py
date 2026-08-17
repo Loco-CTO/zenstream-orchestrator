@@ -10,9 +10,11 @@ from app.jobs import (
     JobScheduler,
     JobStore,
     MetadataMissingJob,
+    MetadataUpgradeJob,
     _metadata_document_gaps,
     _repair_missing_tv_child_identities,
 )
+from app.progress import PROGRESS_TOTAL, WholeJobProgress
 
 
 class DatabaseRollbackTest(unittest.TestCase):
@@ -57,6 +59,95 @@ class DatabaseRollbackTest(unittest.TestCase):
                 self.assertEqual(errors, [])
             finally:
                 db.close()
+
+
+class WholeJobProgressTest(unittest.TestCase):
+    def test_scan_progress_retains_denominator_for_current_only_updates(self):
+        progress = WholeJobProgress("reconcile")
+        announced = progress.apply(
+            {
+                "state": "running",
+                "progress_total": 618,
+                "message": "Reconciling changed series roots (618 roots)",
+            }
+        )
+        indexed = progress.apply(
+            {"progress_current": 544, "message": "Indexing series 544/618"}
+        )
+
+        self.assertEqual(announced["progress_total"], PROGRESS_TOTAL)
+        self.assertGreater(indexed["progress_current"], announced["progress_current"])
+        self.assertEqual(indexed["progress_total"], PROGRESS_TOTAL)
+
+    def test_progress_is_fixed_and_monotonic_across_stage_counter_resets(self):
+        progress = WholeJobProgress("scan")
+        first = progress.apply(
+            {
+                "state": "running",
+                "progress_current": 1,
+                "progress_total": 10,
+                "message": "Indexed One",
+            }
+        )
+        second = progress.apply(
+            {
+                "progress_current": 0,
+                "progress_total": 50,
+                "message": "Resolving new metadata",
+            }
+        )
+        completed = progress.apply(
+            {"state": "completed", "message": "Indexed 1 entries"}
+        )
+
+        self.assertEqual(first["progress_total"], PROGRESS_TOTAL)
+        self.assertGreaterEqual(second["progress_current"], first["progress_current"])
+        self.assertEqual(completed["progress_current"], PROGRESS_TOTAL)
+        self.assertEqual(completed["progress_total"], PROGRESS_TOTAL)
+
+    def test_terminal_failure_keeps_progress_partial(self):
+        progress = WholeJobProgress("metadata_refresh")
+        progress.apply(
+            {
+                "state": "running",
+                "progress_current": 5,
+                "progress_total": 10,
+                "message": "Processing 5/10",
+            }
+        )
+        failed = progress.apply(
+            {
+                "state": "failed",
+                "progress_current": 5,
+                "progress_total": 10,
+                "message": "5 repair errors",
+            }
+        )
+
+        self.assertLess(failed["progress_current"], PROGRESS_TOTAL)
+        self.assertEqual(failed["progress_total"], PROGRESS_TOTAL)
+
+    def test_completed_with_warnings_reaches_fixed_progress_total(self):
+        progress = WholeJobProgress("intro_outro_detect")
+        progress.apply(
+            {
+                "state": "running",
+                "progress_current": 5,
+                "progress_total": 10,
+                "message": "Fingerprinting 5/10 episodes",
+            }
+        )
+        completed = progress.apply(
+            {
+                "state": "completed_with_warnings",
+                "progress_current": 9,
+                "progress_total": 10,
+                "message": "Detected 3 intro/outro markers; 1 failed",
+            }
+        )
+
+        self.assertEqual(completed["progress_current"], PROGRESS_TOTAL)
+        self.assertEqual(completed["progress_total"], PROGRESS_TOTAL)
 
 
 class MetadataMissingInspectionTest(unittest.TestCase):
@@ -529,6 +620,89 @@ class MetadataMissingInspectionTest(unittest.TestCase):
 
         self.assertEqual(ingest.kwargs, {"force": True, "force_assets": False})
 
+    def test_upgrade_refetches_without_projecting_unchanged_documents(self):
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie-1",
+                "en",
+                json.dumps(
+                    {"title": "Example", "overview": "Old overview", "images": {}}
+                ),
+            ),
+        )
+        previous = {"title": "Example", "overview": "Old overview", "images": []}
+        fresh = {"title": "Example", "overview": "New overview", "images": []}
+
+        class Cache:
+            def get(self, *_args):
+                return dict(previous)
+
+        class Service:
+            def __init__(self):
+                self.cache = Cache()
+                self.fetches = []
+
+            def fetch_locales(self, *args, **kwargs):
+                self.fetches.append((args, kwargs))
+                return {"en": dict(fresh)}
+
+        class Ingest:
+            def __init__(self):
+                self.metadata_service = Service()
+                self.materialized = []
+
+            def locales(self):
+                return ["en"]
+
+            def ingest_document(
+                self, provider, entity_type, provider_id, locale, document, **kwargs
+            ):
+                self.materialized.append(
+                    (provider, entity_type, provider_id, locale, kwargs)
+                )
+                self_db.execute(
+                    "UPDATE catalog_item_projection SET payload=? WHERE entity_id='movie-1' AND locale='en'",
+                    (
+                        json.dumps(
+                            {
+                                "title": "Example",
+                                "overview": document["overview"],
+                                "images": {},
+                            }
+                        ),
+                    ),
+                )
+
+        self_db = self.db
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+        read_model = MagicMock()
+
+        with (
+            patch("app.jobs.MetadataIngestService", return_value=ingest),
+            patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
+        ):
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        self.assertEqual(
+            ingest.metadata_service.fetches[0][1], {"force": True, "project": False}
+        )
+        self.assertEqual(ingest.materialized[0][-1], {"force_assets": False})
+        self.assertIn("upgraded 1", store.updates[-1]["message"])
+        self.assertEqual(json.loads(store.updates[-1]["error_details"])["upgraded"], 1)
+        read_model.refresh_roots.assert_called_once_with(["movie-1"])
+
 
 class MissingTvChildIdentityRepairTest(unittest.TestCase):
     def setUp(self):
@@ -614,6 +788,21 @@ class MissingTvChildIdentityRepairTest(unittest.TestCase):
 
 
 class JobMappingTest(unittest.TestCase):
+    def _scheduler_store(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        db.execute(
+            "CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE TABLE job_runs (id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, library_id TEXT, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', progress_current INTEGER NOT NULL DEFAULT 0, progress_total INTEGER NOT NULL DEFAULT 0, message TEXT, error TEXT, error_details TEXT, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, thread_name TEXT)"
+        )
+        db.execute(
+            "CREATE TABLE job_schedule_triggers (id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, trigger_type TEXT NOT NULL, interval_seconds INTEGER, time_of_day TEXT, weekday INTEGER, next_run_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        store = JobStore.__new__(JobStore)
+        store.db = db
+        return db, store
+
     def test_definition_mapping_uses_all_persisted_columns(self):
         row = (
             "id",
@@ -664,21 +853,133 @@ class JobMappingTest(unittest.TestCase):
         self.assertEqual(value["progressCurrent"], 4)
         self.assertEqual(value["threadName"], "worker")
 
-    def test_default_tasks_include_orphan_cleanup(self):
-        db = DatabaseHandler("sqlite", {}, ":memory:")
-        try:
-            db.execute(
-                "CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
-            )
-            store = JobStore.__new__(JobStore)
-            store.db = db
+    def test_run_mapping_accepts_structured_progress_detail(self):
+        row = (
+            "run",
+            "definition",
+            None,
+            "trickplay_extract",
+            "running",
+            1200,
+            10000,
+            "Extracting trickplay",
+            None,
+            None,
+            "created",
+            "started",
+            None,
+            "worker",
+            "extraction",
+            "Extracting trickplay",
+            12,
+            87,
+            "videos",
+            "Dune.mkv",
+            None,
+            "{}",
+        )
+        value = JobStore._run(row)
+        self.assertEqual(
+            value["progressDetail"],
+            {
+                "phase": "extraction",
+                "label": "Extracting trickplay",
+                "current": 12,
+                "total": 87,
+                "unit": "videos",
+                "item": "Dune.mkv",
+            },
+        )
 
+    def test_default_tasks_include_orphan_cleanup(self):
+        db, store = self._scheduler_store()
+        try:
             store.ensure_defaults()
 
             cleanup = store.by_key("metadata_cleanup")
             self.assertIsNotNone(cleanup)
             self.assertEqual(cleanup["kind"], "metadata_cleanup")
             self.assertEqual(cleanup["intervalMinutes"], 10080)
+        finally:
+            db.close()
+
+    def test_removes_legacy_library_definition_by_configured_owner(self):
+        db, store = self._scheduler_store()
+        try:
+            db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,kind,config,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    "definition-1",
+                    "library_delta_verify:library-1",
+                    "Scan Library",
+                    "library_scan",
+                    '{"libraryId":"library-1"}',
+                    "created",
+                    "updated",
+                ),
+            )
+            db.execute(
+                "INSERT INTO job_runs(id,definition_id,kind,created_at) VALUES('run-1','definition-1','library_scan','created')"
+            )
+            db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,created_at,updated_at) VALUES('trigger-1','definition-1','interval','created','updated')"
+            )
+
+            store.remove_library_definitions("library-1")
+
+            self.assertEqual(db.execute("SELECT id FROM job_definitions"), [])
+            self.assertEqual(db.execute("SELECT id FROM job_runs"), [])
+            self.assertEqual(db.execute("SELECT id FROM job_schedule_triggers"), [])
+        finally:
+            db.close()
+
+    def test_reconciles_legacy_and_orphaned_library_definitions(self):
+        db, store = self._scheduler_store()
+        try:
+            for values in (
+                (
+                    "legacy",
+                    "library_delta_verify:library-1",
+                    "Scan Existing",
+                    '{"libraryId":"library-1"}',
+                ),
+                (
+                    "orphan",
+                    "library_scan:deleted-library",
+                    "Scan Deleted",
+                    '{"libraryId":"deleted-library"}',
+                ),
+            ):
+                db.execute(
+                    "INSERT INTO job_definitions(id,job_key,name,kind,config,created_at,updated_at) VALUES(?,?,?,'library_scan',?,'created','updated')",
+                    values,
+                )
+            db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,created_at,updated_at) VALUES('orphan-trigger','orphan','interval','created','updated')"
+            )
+
+            store.reconcile_library_definitions(
+                [
+                    {
+                        "id": "library-1",
+                        "name": "Existing",
+                        "scanIntervalMinutes": 60,
+                        "watchEnabled": True,
+                    }
+                ]
+            )
+
+            self.assertEqual(
+                db.execute("SELECT id,job_key,config FROM job_definitions ORDER BY id"),
+                [
+                    (
+                        "legacy",
+                        "library_scan:library-1",
+                        '{"libraryId": "library-1"}',
+                    )
+                ],
+            )
+            self.assertEqual(db.execute("SELECT id FROM job_schedule_triggers"), [])
         finally:
             db.close()
 
@@ -720,6 +1021,8 @@ class AnalysisCapacityTest(unittest.TestCase):
     def test_intro_outro_and_trickplay_analysis_jobs_can_run_together(self):
         scheduler = JobScheduler.__new__(JobScheduler)
         scheduler.store = MagicMock()
+        scheduler.library_runtime = MagicMock()
+        scheduler.library_runtime.has_active_inventory_jobs.return_value = False
         barrier = threading.Barrier(2)
         errors = []
 
@@ -743,6 +1046,63 @@ class AnalysisCapacityTest(unittest.TestCase):
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
         self.assertEqual(errors, [])
+
+    def test_analysis_waits_for_active_library_work(self):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = MagicMock()
+        scheduler.library_runtime = MagicMock()
+        scheduler.library_runtime.has_active_inventory_jobs.side_effect = [True, False]
+        started = threading.Event()
+
+        class Worker:
+            def run(self, run_id, store, should_terminate):
+                started.set()
+
+        with patch("app.jobs.active_requests", return_value=0):
+            scheduler._run_analysis(
+                "run-1", "trickplay_extract", Worker(), lambda: False
+            )
+
+        self.assertTrue(started.is_set())
+        self.assertEqual(
+            scheduler.library_runtime.has_active_inventory_jobs.call_count, 2
+        )
+
+
+class JobSchedulerShutdownTest(unittest.TestCase):
+    def test_stop_signals_and_joins_active_workers(self):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = MagicMock()
+        scheduler.stop_event = threading.Event()
+        scheduler.condition = threading.Condition()
+        scheduler.thread = None
+        scheduler.active_lock = threading.RLock()
+        cancel_event = threading.Event()
+        scheduler.cancel_events = {"run-1": cancel_event}
+        scheduler.worker_threads = {}
+
+        finished = threading.Event()
+
+        def worker():
+            cancel_event.wait(timeout=2)
+            finished.set()
+            with scheduler.active_lock:
+                scheduler.worker_threads.pop("run-1", None)
+
+        thread = threading.Thread(target=worker)
+        scheduler.worker_threads["run-1"] = thread
+        thread.start()
+
+        scheduler.stop(timeout=1)
+
+        self.assertTrue(finished.is_set())
+        self.assertFalse(thread.is_alive())
+        cancel_event.wait(timeout=0)
+        scheduler.store.update_run.assert_called_once_with(
+            "run-1",
+            state="terminating",
+            message="Termination requested during Orchestrator shutdown",
+        )
 
 
 if __name__ == "__main__":

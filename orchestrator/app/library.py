@@ -19,7 +19,9 @@ from queue import Empty
 
 from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
+from app.language_registry import language_options, normalize_track_language
 from app.logging_config import get_logger
+from app.progress import WholeJobProgress
 from app.worker_config import configured_worker_limit
 
 try:
@@ -103,42 +105,8 @@ LYRIC_EXTENSIONS = {
     ".irc",
     ".yrc",
 }
-LANGUAGE_ALIASES = {
-    "eng": "en",
-    "jpn": "ja",
-    "jap": "ja",
-    "deu": "de",
-    "ger": "de",
-    "fra": "fr",
-    "fre": "fr",
-    "spa": "es",
-    "ita": "it",
-    "kor": "ko",
-    "por": "pt",
-    "rus": "ru",
-    "zho": "zh",
-    "chi": "zh",
-    "tha": "th",
-    "vie": "vi",
-    "ara": "ar",
-    "und": None,
-}
 LANGUAGE_NAMES = {
-    "en": "English",
-    "ja": "Japanese",
-    "de": "German",
-    "fr": "French",
-    "es": "Spanish",
-    "it": "Italian",
-    "ko": "Korean",
-    "pt": "Portuguese",
-    "ru": "Russian",
-    "zh": "Chinese",
-    "zh-CN": "Chinese (Simplified)",
-    "zh-TW": "Chinese (Traditional)",
-    "th": "Thai",
-    "vi": "Vietnamese",
-    "ar": "Arabic",
+    str(option["value"]): str(option["label"]) for option in language_options()
 }
 LANGUAGE_MARKERS = {
     "default",
@@ -160,7 +128,20 @@ EPISODE_RE = re.compile(
 )
 SEASON_RE = re.compile(r"(?i)^(?:season\s*|s)(\d+)$")
 ACTIVE_JOB_STATES = ("queued", "running", "terminating")
+WATCHER_RECONCILE_DEBOUNCE_SECONDS = 5.0
+WATCHER_RECONCILE_FLUSH_INTERVAL_SECONDS = 1.0
 logger = get_logger("library")
+
+
+def _path_key(value: str | os.PathLike[str]) -> str:
+    """Return a platform-aware stable key for relative filesystem paths."""
+
+    normalized = os.path.normcase(str(value).replace("\\", "/"))
+    return normalized.replace("\\", "/").strip("/")
+
+
+def _top_level_key(value: str | os.PathLike[str]) -> str:
+    return _path_key(value).split("/", 1)[0]
 
 
 class FairMetadataExecutor:
@@ -474,17 +455,17 @@ def sidecar_language(path: Path) -> str | None:
         lowered = candidate.lower()
         if lowered in LANGUAGE_MARKERS:
             continue
-        if lowered in LANGUAGE_ALIASES:
-            return LANGUAGE_ALIASES[lowered]
-        if re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?", candidate):
-            base, _, region = candidate.partition("-")
-            if len(base) in {2, 3}:
-                return f"{base.lower()}-{region.upper()}" if region else base.lower()
+        normalized = normalize_track_language(candidate)
+        if normalized:
+            return normalized
     return None
 
 
 def _sidecar_suffix_tokens(value: str) -> list[str]:
-    return [token.strip() for token in re.split(r"[._-]+", value) if token.strip()]
+    # Periods delimit descriptor, marker, and language components. Keep
+    # hyphens intact because they are part of BCP-47 language tags such as
+    # ``zh-TW`` and may also be part of a descriptor.
+    return [token.strip() for token in value.split(".") if token.strip()]
 
 
 def sidecar_descriptor(
@@ -516,9 +497,7 @@ def sidecar_descriptor(
     if tokens:
         candidate = tokens[-1]
         lowered = candidate.casefold()
-        if lowered in LANGUAGE_ALIASES or re.fullmatch(
-            r"[a-zA-Z]{2,3}(?:-[a-zA-Z]{2,4})?", candidate
-        ):
+        if normalize_track_language(candidate):
             tokens.pop()
     while tokens and tokens[-1].casefold() in LANGUAGE_MARKERS:
         tokens.pop()
@@ -546,6 +525,15 @@ def language_name(language: str | None, role: str) -> str:
 class LibraryStore:
     def __init__(self):
         self.db = Config().database
+        self._progress: dict[str, WholeJobProgress] = {}
+
+    def begin_progress(self, job_id: str, kind: str) -> None:
+        if not hasattr(self, "_progress"):
+            self._progress = {}
+        self._progress[job_id] = WholeJobProgress(kind)
+
+    def end_progress(self, job_id: str) -> None:
+        getattr(self, "_progress", {}).pop(job_id, None)
 
     def list(self) -> list[dict]:
         rows = self.db.execute(
@@ -722,8 +710,27 @@ class LibraryStore:
         return self.job(job_id)  # type: ignore[return-value]
 
     def job(self, job_id: str) -> dict | None:
+        try:
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")
+            }
+        except Exception:
+            columns = set()
+        detail_columns = [
+            name if name in columns else f"NULL AS {name}"
+            for name in (
+                "progress_phase",
+                "progress_label",
+                "progress_stage_current",
+                "progress_stage_total",
+                "progress_stage_unit",
+                "progress_current_item",
+            )
+        ]
         rows = self.db.execute(
-            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at FROM library_jobs WHERE id=?",
+            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,"
+            + ",".join(detail_columns)
+            + " FROM library_jobs WHERE id=?",
             (job_id,),
         )
         if not rows:
@@ -750,6 +757,7 @@ class LibraryStore:
             if has_queue
             else []
         )
+        detail_values = row[12:18]
         return {
             "id": row[0],
             "libraryId": row[1],
@@ -765,6 +773,18 @@ class LibraryStore:
             "finishedAt": row[11],
             "warningCount": int(failed_repairs[0][0]) if failed_repairs else 0,
             "repairPending": bool(pending_repairs and pending_repairs[0][0]),
+            "progressDetail": (
+                {
+                    "phase": detail_values[0] or "processing",
+                    "label": detail_values[1] or "Working",
+                    "current": detail_values[2],
+                    "total": detail_values[3],
+                    "unit": detail_values[4],
+                    "item": detail_values[5],
+                }
+                if any(value is not None for value in detail_values)
+                else None
+            ),
         }
 
     def jobs(self, library_id: str) -> list[dict]:
@@ -778,6 +798,9 @@ class LibraryStore:
         ]  # type: ignore[list-item]
 
     def update_job(self, job_id: str, **values) -> None:
+        tracker = getattr(self, "_progress", {}).get(job_id)
+        if tracker is not None:
+            values = tracker.apply(values)
         allowed = {
             "state",
             "progress_current",
@@ -787,7 +810,20 @@ class LibraryStore:
             "error_details",
             "started_at",
             "finished_at",
+            "progress_phase",
+            "progress_label",
+            "progress_stage_current",
+            "progress_stage_total",
+            "progress_stage_unit",
+            "progress_current_item",
         }
+        try:
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")
+            }
+            allowed = {key for key in allowed if key in columns}
+        except Exception:
+            pass
         updates = [(key, value) for key, value in values.items() if key in allowed]
         if not updates:
             return
@@ -814,6 +850,8 @@ class LibraryScanner:
         self._scan_provider_identity_changed: set[str] = set()
         self._scan_rejected_ids: set[str] = set()
         self._scan_reconciled_ids: set[str] = set()
+        self._scan_deferred_roots: set[str] = set()
+        self._scan_access_errors: set[Path] = set()
         self._scan_refresh_root_ids: set[str] = set()
         self._scan_complete = False
         self._stage_lock = threading.RLock()
@@ -841,7 +879,25 @@ class LibraryScanner:
             context,
         )
         if persist:
-            self.store.update_job(job_id, message=stage)
+            current = context.get("current")
+            total = context.get("total")
+            self.store.update_job(
+                job_id,
+                message=stage
+                if current is None or total is None
+                else f"{stage} · {current}/{total}",
+                progress_phase="finalization"
+                if any(
+                    token in stage.casefold()
+                    for token in ("prun", "refresh", "queue", "reconcil")
+                )
+                else "processing",
+                progress_label=stage,
+                progress_stage_current=current,
+                progress_stage_total=total,
+                progress_stage_unit=context.get("unit"),
+                progress_current_item=context.get("item"),
+            )
             self._last_stage_persisted_at = time.monotonic()
 
     def _start_heartbeat(self, library_id: str, job_id: str) -> None:
@@ -869,7 +925,16 @@ class LibraryScanner:
                     stage,
                     elapsed,
                 )
-                self.store.update_job(job_id, message=message)
+                self.store.update_job(
+                    job_id,
+                    message=message,
+                    progress_phase="processing",
+                    progress_label=stage,
+                    progress_stage_current=context.get("current"),
+                    progress_stage_total=context.get("total"),
+                    progress_stage_unit=context.get("unit"),
+                    progress_current_item=context.get("item"),
+                )
 
         self._heartbeat_thread = threading.Thread(
             target=heartbeat,
@@ -903,10 +968,26 @@ class LibraryScanner:
         root = Path(library["directory"])
         if not root.is_dir():
             raise ValueError("Library directory is no longer available")
+        progress_kind = (
+            "reconcile" if targets is not None else f"scan:{library['type']}"
+        )
+        self.store.begin_progress(job_id, progress_kind)
         started = now()
+        reconcile_root_label = {
+            "tv_series": "series",
+            "movies": "movie",
+            "music": "music",
+        }.get(library["type"], library["type"])
         self.store.set_scan_state(library_id, "scanning", started=started, error=None)
         self.store.update_job(
-            job_id, state="running", started_at=started, message="Discovering media"
+            job_id,
+            state="running",
+            started_at=started,
+            message=(
+                f"Reconciling changed {reconcile_root_label} roots ({len(targets)} roots)"
+                if targets is not None
+                else "Discovering media"
+            ),
         )
         self._start_heartbeat(library_id, job_id)
         self._scan_seen_ids = set()
@@ -921,6 +1002,8 @@ class LibraryScanner:
         self._scan_provider_identity_changed = set()
         self._scan_rejected_ids = set()
         self._scan_reconciled_ids = set()
+        self._scan_deferred_roots = set()
+        self._scan_access_errors = set()
         self._scan_refresh_root_ids = set()
         self._last_stage_persisted_at = 0.0
         self._scan_complete = False
@@ -958,11 +1041,30 @@ class LibraryScanner:
                 self._set_stage(job_id, "Populating changed metadata locales")
                 self._fetch_seen_locales(should_terminate)
             self._set_stage(job_id, "Reconciling moved entities")
-            self._reconcile_moved_entities(library_id, root)
+            self._reconcile_moved_entities(library_id, root, targets=targets)
             self._set_stage(job_id, "Pruning entities without playable media")
-            rejected = self._prune_rejected_entities()
+            concurrent_reconcile = targets is None and bool(
+                self.db.execute(
+                    "SELECT 1 FROM library_jobs WHERE library_id=? AND kind='reconcile' AND state IN ('queued','running','terminating') LIMIT 1",
+                    (library_id,),
+                )
+            )
+            # A full traversal cannot safely treat its own snapshot as
+            # authoritative while a targeted reconcile is mutating the same
+            # inventory. Leave cleanup to the root-scoped reconcile instead of
+            # deleting newer rows, then let the next complete scan repair any
+            # roots that were not part of that target.
+            rejected = (
+                set()
+                if concurrent_reconcile
+                else self._prune_rejected_entities(targets=targets)
+            )
             self._set_stage(job_id, "Pruning missing entities")
-            missing = self._prune_missing_entities(library_id, root, targets=targets)
+            missing = (
+                set()
+                if concurrent_reconcile
+                else self._prune_missing_entities(library_id, root, targets=targets)
+            )
             self._set_stage(job_id, "Refreshing catalog read model")
             removed = rejected | missing
             self._flush_publications()
@@ -997,7 +1099,11 @@ class LibraryScanner:
                 progress_current=count,
                 progress_total=count,
                 finished_at=finished,
-                message=f"Indexed {count} entries",
+                message=(
+                    f"Indexed {count} entries; reconciled {len(targets)} changed roots"
+                    if targets is not None
+                    else f"Indexed {count} entries"
+                ),
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
             if removed:
@@ -1042,6 +1148,7 @@ class LibraryScanner:
             )
             raise
         finally:
+            self.store.end_progress(job_id)
             self._stop_heartbeat()
 
     @staticmethod
@@ -1152,23 +1259,20 @@ class LibraryScanner:
             (library_id,),
         )
         missing = []
-        normalized_targets = {
-            str(target).replace("\\", "/").strip("/").casefold()
-            for target in (targets or set())
-        }
+        normalized_targets = {_top_level_key(target) for target in (targets or set())}
         for entity_id, relative_path in rows:
             if entity_id in self._scan_seen_ids:
                 continue
             if normalized_targets:
-                normalized_path = (
-                    str(relative_path or "").replace("\\", "/").strip("/").casefold()
-                )
+                normalized_path = _path_key(relative_path or "")
                 if not any(
                     normalized_path == target
                     or normalized_path.startswith(target + "/")
                     for target in normalized_targets
                 ):
                     continue
+            if _top_level_key(relative_path or "") in self._scan_deferred_roots:
+                continue
             # A complete traversal is required before pruning. Existing paths
             # that were not classifiable are deliberately retained.
             if legacy_without_library_root:
@@ -1202,6 +1306,28 @@ class LibraryScanner:
         )
         if rows:
             self._scan_rejected_ids.add(rows[0][0])
+
+    def _defer_root(self, relative_path: str, reason: str) -> None:
+        root = _top_level_key(relative_path)
+        if not root:
+            return
+        self._scan_deferred_roots.add(root)
+        logger.warning(
+            "library scan deferred inaccessible root root=%s reason=%s",
+            relative_path,
+            reason,
+        )
+
+    def _record_access_error(self, path: Path) -> None:
+        self._scan_access_errors.add(path)
+
+    def _root_has_access_error(self, root: Path) -> bool:
+        root_key = _path_key(root.resolve(strict=False))
+        return any(
+            (candidate_key := _path_key(path.resolve(strict=False))) == root_key
+            or candidate_key.startswith(root_key + "/")
+            for path in self._scan_access_errors
+        )
 
     def _entity_closure(self, entity_ids: Iterable[str]) -> list[str]:
         roots = list(dict.fromkeys(entity_ids))
@@ -1246,8 +1372,34 @@ class LibraryScanner:
                         f"DELETE FROM {table} WHERE {column} IN ({placeholders})", batch
                     )
 
-    def _prune_rejected_entities(self) -> set[str]:
+    def _prune_rejected_entities(self, targets: set[str] | None = None) -> set[str]:
         rejected = self._scan_rejected_ids - self._scan_reconciled_ids
+        if targets is not None and rejected:
+            rows = self.db.execute(
+                "SELECT id,relative_path FROM library_entities WHERE id IN (%s)"
+                % ",".join("?" for _ in rejected),
+                list(rejected),
+            )
+            rejected = {
+                entity_id
+                for entity_id, relative_path in rows
+                if relative_path
+                and Path(relative_path).parts
+                and _top_level_key(relative_path)
+                in {_top_level_key(target) for target in targets}
+                and _top_level_key(relative_path) not in self._scan_deferred_roots
+            }
+        elif rejected:
+            rows = self.db.execute(
+                "SELECT id,relative_path FROM library_entities WHERE id IN (%s)"
+                % ",".join("?" for _ in rejected),
+                list(rejected),
+            )
+            rejected = {
+                entity_id
+                for entity_id, relative_path in rows
+                if _top_level_key(relative_path or "") not in self._scan_deferred_roots
+            }
         closure = self._entity_closure(rejected)
         if not closure:
             return set()
@@ -1387,7 +1539,12 @@ class LibraryScanner:
             return None
         return "|".join(f"{role}:{fingerprint}" for role, fingerprint in rows)
 
-    def _reconcile_moved_entities(self, library_id: str, root: Path) -> None:
+    def _reconcile_moved_entities(
+        self,
+        library_id: str,
+        root: Path,
+        targets: set[str] | None = None,
+    ) -> None:
         """Match newly discovered leaf entities to vanished paths by unique hash."""
         if "quick_fingerprint" not in {
             row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
@@ -1403,10 +1560,19 @@ class LibraryScanner:
             "SELECT id,entity_type,relative_path FROM library_entities WHERE library_id=?",
             (library_id,),
         )
+        normalized_targets = {_top_level_key(target) for target in (targets or set())}
         old_ids = [
             row[0]
             for row in old_rows
-            if row[0] not in self._scan_seen_ids and row[1] in leaf_types
+            if row[0] not in self._scan_seen_ids
+            and row[1] in leaf_types
+            and _top_level_key(row[2] or "") not in self._scan_deferred_roots
+            and (
+                targets is None
+                or bool(row[2])
+                and Path(row[2]).parts
+                and _top_level_key(row[2]) in normalized_targets
+            )
         ]
         old_by_key: dict[tuple[str, str], list[str]] = {}
         new_by_key: dict[tuple[str, str], list[str]] = {}
@@ -1702,6 +1868,18 @@ class LibraryScanner:
                 (entity_id,),
             )
         ]
+        # A TVDB refresh is authoritative for the primary series identity, but
+        # its remote-ID list is optional.  Do not erase a previously discovered
+        # TMDB series link merely because a later filename/NFO pass only found
+        # the TVDB ID.
+        if entity_type == "series":
+            normalized_keys = set(normalized)
+            normalized.extend(
+                value
+                for value in current
+                if value[0] == "tmdb" and value not in normalized_keys
+            )
+            normalized = list(dict.fromkeys(normalized))
         if set(normalized) != set(current):
             self.db.execute(
                 "DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,)
@@ -1926,7 +2104,35 @@ class LibraryScanner:
         total: int,
     ) -> None:
         self._resolve_movie_row(library_id, row, job_id, should_terminate, index, total)
+        self._extract_and_reproject(row[0], "movie", should_terminate)
         self._publish_root(row[0])
+
+    def _extract_and_reproject(
+        self,
+        entity_id: str,
+        entity_type: str,
+        should_terminate: Callable[[], bool],
+    ) -> None:
+        if entity_type not in {"movie", "episode"}:
+            return
+        try:
+            from app.metadata_services import reproject_entity_artwork
+            from app.screen_extractor import extract_entity
+
+            extract_entity(
+                self.db,
+                entity_id,
+                entity_type,
+                should_terminate=should_terminate,
+            )
+            reproject_entity_artwork(self.db, entity_id)
+        except Exception as error:
+            logger.warning(
+                "screen extractor fallback failed entity_id=%s type=%s error=%s",
+                entity_id,
+                entity_type,
+                error,
+            )
 
     def _queue_metadata_repair(
         self,
@@ -2091,7 +2297,15 @@ class LibraryScanner:
             relative_path,
         )
         result = None
-        if self._needs_metadata(series_id):
+        # Revisit matched TVDB roots during an affected scan so the TVDB
+        # remote-ID list can add the optional TMDB secondary identity.
+        has_tmdb_identity = bool(
+            self.db.execute(
+                "SELECT 1 FROM entity_provider_ids WHERE entity_id=? AND provider='tmdb' AND identifier_type='series' LIMIT 1",
+                (series_id,),
+            )
+        )
+        if self._needs_metadata(series_id) or not has_tmdb_identity:
             query, year = _inventory_query(relative_path or "")
             explicit = [
                 {"provider": row[0], "id": row[2]}
@@ -2140,7 +2354,7 @@ class LibraryScanner:
                     value["provider"],
                     "series",
                     str(value["id"]),
-                    required=True,
+                    required=value["provider"] == "tvdb",
                     progress=lambda message: self.store.update_job(
                         job_id, message=message
                     ),
@@ -2447,11 +2661,29 @@ class LibraryScanner:
                     return True
             return False
 
-        rows = [
-            row
-            for row in rows
-            if row[0] in self._scan_seen_ids and needs_localized_metadata(row)
-        ]
+        def needs_artwork_reconciliation(row: tuple) -> bool:
+            if row[1] not in {"movie", "episode"} or row[0] not in self._scan_seen_ids:
+                return False
+            if needs_localized_metadata(row):
+                return True
+            # A ready Screen Extractor asset can exist without a selected
+            # catalog row (the historical publication bug). Revisit entities
+            # missing a Primary selection so incremental scans repair them.
+            locales = ingest.locales()
+            if not self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_artwork_selection'"
+            ):
+                return False
+            return bool(
+                self.db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection "
+                    "WHERE entity_id=? AND image_type='Primary' "
+                    "GROUP BY entity_id HAVING COUNT(DISTINCT locale)<?",
+                    (row[0], len(locales)),
+                )
+            )
+
+        rows = [row for row in rows if needs_artwork_reconciliation(row)]
         self.store.update_job(
             job_id,
             progress_total=len(rows),
@@ -2492,6 +2724,9 @@ class LibraryScanner:
                         progress_current=index,
                         message=f"Skipped unresolved {entity_type} {relative_path}",
                     )
+                    self._extract_and_reproject(
+                        entity_id, entity_type, should_terminate
+                    )
                     continue
                 query, year = _inventory_query(relative_path or "")
                 try:
@@ -2530,6 +2765,9 @@ class LibraryScanner:
                         job_id,
                         progress_current=index,
                         message=f"Metadata failed for {entity_type} {relative_path}; continuing",
+                    )
+                    self._extract_and_reproject(
+                        entity_id, entity_type, should_terminate
                     )
                     continue
             priorities = {
@@ -2621,11 +2859,13 @@ class LibraryScanner:
                     progress_current=index,
                     message=f"Metadata failed for {entity_type} {relative_path}; continuing",
                 )
+                self._extract_and_reproject(entity_id, entity_type, should_terminate)
                 continue
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_child_resolution',updated_at=? WHERE id=?",
                 (now(), entity_id),
             )
+            self._extract_and_reproject(entity_id, entity_type, should_terminate)
             self.store.update_job(
                 job_id,
                 progress_current=index,
@@ -3217,9 +3457,27 @@ class LibraryScanner:
                 )
 
     @staticmethod
-    def _walk_file_entries(directory: Path):
+    def _video_state(path: Path, file_stat: os.stat_result | None = None) -> str:
+        """Classify a video candidate without mistaking access failure for absence."""
+
+        if path.suffix.lower() not in VIDEO_EXTENSIONS:
+            return "unsupported"
+        try:
+            if path.is_symlink():
+                return "unsupported"
+        except OSError:
+            return "inaccessible"
+        try:
+            value = file_stat if file_stat is not None else path.stat()
+        except OSError:
+            return "inaccessible"
+        return "supported" if stat.S_ISREG(value.st_mode) else "unsupported"
+
+    def _walk_file_entries(self, directory: Path):
         def traversal_error(error):
-            raise error
+            self._record_access_error(
+                Path(getattr(error, "filename", None) or directory)
+            )
 
         for current, _directories, filenames in os.walk(
             directory, onerror=traversal_error
@@ -3230,13 +3488,21 @@ class LibraryScanner:
                 # Do not index symlinks or reparse points.  A path that
                 # resolves outside the library root is treated as inaccessible
                 # and retained in the existing inventory for a later scan.
-                if path.is_symlink():
+                try:
+                    if path.is_symlink():
+                        yield path, None
+                        continue
+                except OSError:
+                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                        self._record_access_error(path)
                     yield path, None
                     continue
                 stat_started = time.monotonic()
                 try:
                     file_stat = path.stat()
                 except OSError:
+                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                        self._record_access_error(path)
                     yield path, None
                     continue
                 stat_seconds = time.monotonic() - stat_started
@@ -3259,17 +3525,11 @@ class LibraryScanner:
                 entries.append(candidate)
         return entries
 
-    @staticmethod
+    @classmethod
     def _is_supported_video(
-        path: Path, file_stat: os.stat_result | None = None
+        cls, path: Path, file_stat: os.stat_result | None = None
     ) -> bool:
-        if path.suffix.lower() not in VIDEO_EXTENSIONS:
-            return False
-        try:
-            value = file_stat if file_stat is not None else path.stat()
-            return stat.S_ISREG(value.st_mode)
-        except OSError:
-            return False
+        return cls._video_state(path, file_stat) == "supported"
 
     def _series_episode_plan(
         self,
@@ -3300,7 +3560,10 @@ class LibraryScanner:
             if path.is_dir()
             and (SEASON_RE.match(path.name) or path.name.lower() == "specials")
         ]
-        if any(self._is_supported_video(path) for path in children):
+        child_video_states = [self._video_state(path) for path in children]
+        if any(state == "inaccessible" for state in child_video_states):
+            self._record_access_error(series_dir)
+        if any(state == "supported" for state in child_video_states):
             season_dirs.append(series_dir)
         season_dirs.sort(
             key=lambda path: (
@@ -3328,15 +3591,20 @@ class LibraryScanner:
                     try:
                         value = path.stat()
                     except OSError:
+                        if path.suffix.lower() in VIDEO_EXTENSIONS:
+                            self._record_access_error(path)
                         episode_entries.append((path, None))
                         continue
                     if stat.S_ISREG(value.st_mode):
                         episode_entries.append((path, value))
             else:
                 episode_entries = []
-                for candidate in self._walk_file_entries(season_dir):
-                    self._check_termination(should_terminate)
-                    episode_entries.append(candidate)
+                try:
+                    for candidate in self._walk_file_entries(season_dir):
+                        self._check_termination(should_terminate)
+                        episode_entries.append(candidate)
+                except OSError:
+                    self._record_access_error(season_dir)
             files_by_parent: dict[Path, list[tuple[Path, os.stat_result | None]]] = {}
             for entry in episode_entries:
                 files_by_parent.setdefault(entry[0].parent, []).append(entry)
@@ -3405,7 +3673,11 @@ class LibraryScanner:
     ) -> int:
         self._set_stage(
             job_id,
-            "Enumerating movie roots",
+            (
+                f"Reconciling changed movie roots ({len(targets)} roots)"
+                if targets is not None
+                else "Enumerating movie roots"
+            ),
             root=str(root),
             targets=sorted(targets) if targets else None,
         )
@@ -3429,15 +3701,27 @@ class LibraryScanner:
             self._check_termination(should_terminate)
             if entry.is_dir():
                 files = []
-                for candidate in self._walk_file_entries(entry):
-                    self._check_termination(should_terminate)
-                    files.append(candidate)
+                try:
+                    for candidate in self._walk_file_entries(entry):
+                        self._check_termination(should_terminate)
+                        files.append(candidate)
+                except OSError:
+                    self._record_access_error(entry)
             else:
                 try:
                     files = [(entry, entry.stat())]
                 except OSError:
+                    self._record_access_error(entry)
                     files = []
             relative_path = relative(str(root), str(entry))
+            if self._root_has_access_error(entry):
+                self._defer_root(relative_path, "media path could not be inspected")
+                self.store.update_job(
+                    job_id,
+                    progress_current=count,
+                    message=f"Deferred {entry.name}: media path inaccessible",
+                )
+                continue
             if not any(
                 self._is_supported_video(path, file_stat) for path, file_stat in files
             ):
@@ -3514,7 +3798,11 @@ class LibraryScanner:
 
         self._set_stage(
             job_id,
-            "Enumerating TV series roots",
+            (
+                f"Reconciling changed series roots ({len(targets)} roots)"
+                if targets is not None
+                else "Enumerating TV series roots"
+            ),
             root=str(root),
             targets=sorted(targets) if targets else None,
         )
@@ -3557,13 +3845,36 @@ class LibraryScanner:
                 series_dir,
             )
             series_children = []
-            for child in series_dir.iterdir():
-                self._check_termination(should_terminate)
-                series_children.append(child)
+            try:
+                for child in series_dir.iterdir():
+                    self._check_termination(should_terminate)
+                    series_children.append(child)
+            except OSError as error:
+                self._record_access_error(series_dir)
+                self._defer_root(
+                    relative(str(root), str(series_dir)),
+                    f"series directory could not be enumerated: {error}",
+                )
+                self.store.update_job(
+                    job_id,
+                    progress_current=series_index,
+                    message=f"Deferred {series_dir.name}: directory inaccessible",
+                )
+                continue
             episode_plan = self._series_episode_plan(
                 root, series_dir, should_terminate, series_children
             )
             series_relative_path = relative(str(root), str(series_dir))
+            if self._root_has_access_error(series_dir):
+                self._defer_root(
+                    series_relative_path, "episode path could not be inspected"
+                )
+                self.store.update_job(
+                    job_id,
+                    progress_current=series_index,
+                    message=f"Deferred {series_dir.name}: media path inaccessible",
+                )
+                continue
             if not episode_plan:
                 self._reject_existing_entity(library_id, "series", series_relative_path)
                 self.store.update_job(
@@ -3912,6 +4223,7 @@ class LibraryScanner:
         library = self.store.get(library_id)
         if not library:
             raise ValueError("Library not found")
+        self.store.begin_progress(job_id, "collection_rebuild")
         sources = self.store.sources(library_id)
         self.store.set_scan_state(library_id, "scanning", started=now(), error=None)
         self.store.update_job(
@@ -4105,6 +4417,8 @@ class LibraryScanner:
                 library_id, "error", error=summary, finished=now()
             )
             raise
+        finally:
+            self.store.end_progress(job_id)
 
 
 def _inventory_query(relative_path: str) -> tuple[str, str | None]:
@@ -4154,12 +4468,15 @@ class _LibraryChangeHandler(FileSystemEventHandler):
     def on_any_event(
         self, event
     ):  # watchdog emits separate create/modify/delete/move events
-        if not getattr(event, "is_directory", False):
-            self.runtime.request_reconcile(
-                self.library_id,
-                getattr(event, "src_path", None),
-                getattr(event, "dest_path", None),
-            )
+        # Directory events are important: a newly-created movie/series root
+        # has no file event until its children arrive, and deleting a root
+        # must remove the previously indexed inventory.  The scanner still
+        # applies supported-media/admission filtering at reconciliation time.
+        self.runtime.request_reconcile(
+            self.library_id,
+            getattr(event, "src_path", None),
+            getattr(event, "dest_path", None),
+        )
 
 
 class LibraryRuntime:
@@ -4173,12 +4490,24 @@ class LibraryRuntime:
         self.thread: threading.Thread | None = None
         self.observer = None
         self._watch_paths: set[str] = set()
+        # Compatibility buffers are only used when an older test/database has
+        # not yet run migration 0024. Normal installations always use the
+        # durable table below.
         self._reconcile_due: dict[str, float] = {}
         self._reconcile_targets: dict[str, set[str]] = {}
         self._job_targets: dict[str, set[str]] = {}
+        self._job_target_revisions: dict[str, dict[str, int]] = {}
         self._active_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_lock = threading.RLock()
+        self._root_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._root_locks_guard = threading.RLock()
+        self._reconcile_state_lock = threading.RLock()
+        self._reconcile_target_cache: dict[str, dict[str, dict[str, object]]] = {}
+        self._reconcile_cache_loaded: set[str] = set()
+        self._reconcile_pending: dict[str, set[str]] = {}
+        self._reconcile_table_available: bool | None = None
+        self._reconcile_last_flush = 0.0
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -4195,12 +4524,13 @@ class LibraryRuntime:
         self.stop_event.set()
         with self.condition:
             self.condition.notify_all()
-        if self.thread:
-            self.thread.join(timeout=5)
         if self.observer:
             self.observer.stop()
             self.observer.join(timeout=5)
             self.observer = None
+        if self.thread:
+            self.thread.join(timeout=5)
+        self._flush_reconcile_updates(force=True)
         self._watch_paths.clear()
 
     def refresh_watchers(self) -> None:
@@ -4219,8 +4549,17 @@ class LibraryRuntime:
         kind: str = "scan",
         targets: set[str] | None = None,
     ) -> dict | None:
-        # Scan, reconcile, and collection rebuild all mutate the same inventory.
-        # Claim the task atomically so different triggers cannot overlap.
+        # Full inventory work and watcher reconciliation are independent lanes.
+        # There is at most one active job in each lane for a library, while a
+        # full scan and a targeted reconcile may run together on disjoint roots.
+        lane_kinds = (
+            ("reconcile",)
+            if kind == "reconcile"
+            else (
+                "scan",
+                "collection_rebuild",
+            )
+        )
         with self.store.db.transaction() as cursor:
             # Filesystem events and the repair timer can race library deletion.
             # Check the parent row in the same transaction as the job insert so
@@ -4229,8 +4568,8 @@ class LibraryRuntime:
             if not cursor.fetchone():
                 return None
             cursor.execute(
-                "SELECT id FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1",
-                (library_id,),
+                "SELECT id FROM library_jobs WHERE library_id=? AND kind IN (?,?) AND state IN ('queued','running','terminating') ORDER BY created_at DESC LIMIT 1",
+                (library_id, lane_kinds[0], lane_kinds[-1]),
             )
             existing = cursor.fetchone()
             if existing:
@@ -4241,14 +4580,11 @@ class LibraryRuntime:
                     "INSERT INTO library_jobs(id,library_id,kind,created_at) VALUES(?,?,?,?)",
                     (job_id, library_id, kind, now()),
                 )
-        if targets:
-            pending = getattr(self, "_reconcile_targets", {}).setdefault(
-                library_id, set()
-            )
-            pending.update(targets)
-            if not existing:
-                getattr(self, "_job_targets", {}).update({job_id: pending.copy()})
-                pending.clear()
+        if targets and kind == "reconcile":
+            # Legacy callers may still pass an explicit target set.  Durable
+            # watcher events use the table directly; this path keeps the
+            # public enqueue API compatible for manual targeted scans/tests.
+            self._job_targets[job_id] = set(targets)
         job = self.store.job(job_id)
         with self.condition:
             self.condition.notify_all()
@@ -4309,17 +4645,34 @@ class LibraryRuntime:
             with self.condition:
                 self.condition.wait(timeout=min(0.25, remaining))
 
+    def has_active_inventory_jobs(self) -> bool:
+        """Return whether inventory work is queued or running."""
+
+        rows = self.store.db.execute(
+            "SELECT 1 FROM library_jobs "
+            "WHERE kind IN ('scan','reconcile','collection_rebuild') "
+            "AND state IN ('queued','running','terminating') LIMIT 1"
+        )
+        return bool(rows)
+
     def _recover_active_jobs(self) -> None:
         """Re-queue interrupted inventory jobs after an Orchestrator restart."""
         rows = self.store.db.execute(
             "SELECT id,library_id,state FROM library_jobs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC"
         )
-        by_library: dict[str, list[tuple[str, str]]] = {}
+        by_lane: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for job_id, library_id, state in rows:
-            by_library.setdefault(library_id, []).append((job_id, state))
+            kind_row = self.store.db.execute(
+                "SELECT kind FROM library_jobs WHERE id=?", (job_id,)
+            )
+            kind = kind_row[0][0] if kind_row else "scan"
+            lane = "reconcile" if kind == "reconcile" else "full"
+            by_lane.setdefault((library_id, lane), []).append((job_id, state))
         timestamp = now()
         with self.store.db.transaction() as cursor:
-            for library_id, jobs in by_library.items():
+            touched_libraries: set[str] = set()
+            for (library_id, _lane), jobs in by_lane.items():
+                touched_libraries.add(library_id)
                 keep_id = next(
                     (job_id for job_id, state in jobs if state != "terminating"),
                     None,
@@ -4340,18 +4693,20 @@ class LibraryRuntime:
                             "UPDATE library_jobs SET state='terminated',message=?,error=NULL,finished_at=? WHERE id=?",
                             (message, timestamp, job_id),
                         )
+            for library_id in touched_libraries:
                 cursor.execute(
                     "UPDATE libraries SET scan_state='idle',scan_error=NULL,updated_at=? WHERE id=?",
                     (timestamp, library_id),
                 )
 
     def request_reconcile(self, library_id: str, *paths: str | None) -> None:
-        """Debounce watcher changes into top-level, path-scoped reconciles."""
+        """Persist and debounce watcher changes into top-level reconciles."""
+        self._ensure_reconcile_state()
         library = self.store.get(library_id)
         if not library:
             return
         root = Path(library["directory"])
-        targets = self._reconcile_targets.setdefault(library_id, set())
+        targets: set[str] = set()
         for value in paths:
             if not value:
                 continue
@@ -4361,11 +4716,273 @@ class LibraryRuntime:
                 continue
             if relative_path.parts:
                 targets.add(relative_path.parts[0])
+            else:
+                # An event on the library directory itself has no target root
+                # to scope. Queue a full traversal as the safe fallback.
+                self.enqueue(library_id, "scan")
         if not targets:
             return
-        self._reconcile_due[library_id] = time.monotonic() + 5
+        deadline = time.time() + WATCHER_RECONCILE_DEBOUNCE_SECONDS
+        timestamp = now()
+        has_queue = self._durable_reconcile_targets_available()
+        if not has_queue:
+            queued = self._reconcile_targets.setdefault(library_id, set())
+            for target in targets:
+                queued.difference_update(
+                    {
+                        existing
+                        for existing in queued
+                        if _top_level_key(existing) == _top_level_key(target)
+                    }
+                )
+                queued.add(target)
+            self._reconcile_due[library_id] = (
+                time.monotonic() + WATCHER_RECONCILE_DEBOUNCE_SECONDS
+            )
+            with self.condition:
+                self.condition.notify_all()
+            return
+        with self._reconcile_state_lock:
+            cache = self._load_reconcile_target_cache(library_id)
+            pending = self._reconcile_pending.setdefault(library_id, set())
+            new_records: list[dict[str, object]] = []
+            for target in targets:
+                key = _top_level_key(target)
+                record = cache.get(key)
+                if record is None:
+                    record = {
+                        "top_level_root": target,
+                        "stored_root": target,
+                        "debounce_until": deadline,
+                        "event_count": 1,
+                        "revision": 1,
+                        "first_seen_at": timestamp,
+                        "last_seen_at": timestamp,
+                    }
+                    cache[key] = record
+                    new_records.append(dict(record))
+                    continue
+                record["top_level_root"] = target
+                record["debounce_until"] = deadline
+                record["event_count"] = int(record["event_count"]) + 1
+                record["revision"] = int(record["revision"]) + 1
+                record["last_seen_at"] = timestamp
+                pending.add(key)
+            if new_records:
+                self._persist_new_reconcile_targets(library_id, new_records)
         with self.condition:
             self.condition.notify_all()
+
+    def _ensure_reconcile_state(self) -> None:
+        if not hasattr(self, "_reconcile_state_lock"):
+            self._reconcile_state_lock = threading.RLock()
+        if not hasattr(self, "_reconcile_target_cache"):
+            self._reconcile_target_cache = {}
+        if not hasattr(self, "_reconcile_cache_loaded"):
+            self._reconcile_cache_loaded = set()
+        if not hasattr(self, "_reconcile_pending"):
+            self._reconcile_pending = {}
+        if not hasattr(self, "_reconcile_table_available"):
+            self._reconcile_table_available = None
+        if not hasattr(self, "_reconcile_last_flush"):
+            self._reconcile_last_flush = 0.0
+
+    def _durable_reconcile_targets_available(self) -> bool:
+        self._ensure_reconcile_state()
+        available = getattr(self, "_reconcile_table_available", None)
+        if available is None:
+            available = bool(
+                self.store.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='library_reconcile_targets'"
+                )
+            )
+            self._reconcile_table_available = available
+        return available
+
+    def _load_reconcile_target_cache(
+        self, library_id: str
+    ) -> dict[str, dict[str, object]]:
+        self._ensure_reconcile_state()
+        cache = self._reconcile_target_cache.setdefault(library_id, {})
+        if library_id in self._reconcile_cache_loaded:
+            return cache
+        rows = self.store.db.execute(
+            "SELECT top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at "
+            "FROM library_reconcile_targets WHERE library_id=?",
+            (library_id,),
+        )
+        for root, deadline, event_count, revision, first_seen, last_seen in rows:
+            cache[_top_level_key(root)] = {
+                "top_level_root": root,
+                "stored_root": root,
+                "debounce_until": float(deadline),
+                "event_count": int(event_count),
+                "revision": int(revision),
+                "first_seen_at": first_seen,
+                "last_seen_at": last_seen,
+            }
+        self._reconcile_cache_loaded.add(library_id)
+        return cache
+
+    def _persist_new_reconcile_targets(
+        self, library_id: str, records: list[dict[str, object]]
+    ) -> None:
+        if not records:
+            return
+        with self.store.db.transaction() as cursor:
+            cursor.execute("SELECT 1 FROM libraries WHERE id=?", (library_id,))
+            if not cursor.fetchone():
+                self._reconcile_target_cache.pop(library_id, None)
+                self._reconcile_pending.pop(library_id, None)
+                return
+            for record in records:
+                cursor.execute(
+                    """
+                    INSERT INTO library_reconcile_targets
+                        (library_id,top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at)
+                    VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(library_id,top_level_root) DO UPDATE SET
+                        debounce_until=excluded.debounce_until,
+                        event_count=excluded.event_count,
+                        revision=excluded.revision,
+                        first_seen_at=excluded.first_seen_at,
+                        last_seen_at=excluded.last_seen_at
+                    """,
+                    (
+                        library_id,
+                        record["top_level_root"],
+                        record["debounce_until"],
+                        record["event_count"],
+                        record["revision"],
+                        record["first_seen_at"],
+                        record["last_seen_at"],
+                    ),
+                )
+
+    def _flush_reconcile_updates(self, *, force: bool = False) -> None:
+        if not self._durable_reconcile_targets_available():
+            return
+        self._ensure_reconcile_state()
+        current = time.monotonic()
+        with self._reconcile_state_lock:
+            if not force and (
+                current - self._reconcile_last_flush
+                < WATCHER_RECONCILE_FLUSH_INTERVAL_SECONDS
+            ):
+                return
+            snapshots: list[tuple[str, str, dict[str, object]]] = []
+            for library_id, keys in self._reconcile_pending.items():
+                cache = self._reconcile_target_cache.get(library_id, {})
+                for key in keys:
+                    record = cache.get(key)
+                    if record is not None:
+                        snapshots.append((library_id, key, dict(record)))
+            if not snapshots:
+                self._reconcile_last_flush = current
+                return
+            for library_id, key, _record in snapshots:
+                self._reconcile_pending.setdefault(library_id, set()).discard(key)
+
+        try:
+            with self.store.db.transaction() as cursor:
+                existing_libraries: dict[str, bool] = {}
+                for library_id, _key, record in snapshots:
+                    if library_id not in existing_libraries:
+                        cursor.execute(
+                            "SELECT 1 FROM libraries WHERE id=?", (library_id,)
+                        )
+                        existing_libraries[library_id] = bool(cursor.fetchone())
+                    if not existing_libraries[library_id]:
+                        continue
+                    cursor.execute(
+                        """
+                        UPDATE library_reconcile_targets
+                        SET top_level_root=?, debounce_until=?, event_count=?,
+                            revision=?, first_seen_at=?, last_seen_at=?
+                        WHERE library_id=? AND top_level_root=?
+                        """,
+                        (
+                            record["top_level_root"],
+                            record["debounce_until"],
+                            record["event_count"],
+                            record["revision"],
+                            record["first_seen_at"],
+                            record["last_seen_at"],
+                            library_id,
+                            record["stored_root"],
+                        ),
+                    )
+                    if cursor.rowcount == 0:
+                        cursor.execute(
+                            """
+                            INSERT INTO library_reconcile_targets
+                                (library_id,top_level_root,debounce_until,event_count,revision,first_seen_at,last_seen_at)
+                            VALUES(?,?,?,?,?,?,?)
+                            """,
+                            (
+                                library_id,
+                                record["top_level_root"],
+                                record["debounce_until"],
+                                record["event_count"],
+                                record["revision"],
+                                record["first_seen_at"],
+                                record["last_seen_at"],
+                            ),
+                        )
+        except Exception:
+            with self._reconcile_state_lock:
+                for library_id, key, _record in snapshots:
+                    self._reconcile_pending.setdefault(library_id, set()).add(key)
+            logger.exception("durable watcher target flush failed")
+            return
+
+        with self._reconcile_state_lock:
+            for library_id, key, record in snapshots:
+                current_record = self._reconcile_target_cache.get(library_id, {}).get(
+                    key
+                )
+                if current_record is not None:
+                    current_record["stored_root"] = record["top_level_root"]
+            self._reconcile_last_flush = current
+
+    def _forget_reconcile_targets(
+        self, library_id: str, revisions: dict[str, int]
+    ) -> None:
+        if not revisions:
+            return
+        self._ensure_reconcile_state()
+        with self._reconcile_state_lock:
+            cache = self._reconcile_target_cache.get(library_id, {})
+            pending = self._reconcile_pending.get(library_id, set())
+            for target, revision in revisions.items():
+                key = _top_level_key(target)
+                record = cache.get(key)
+                if record is None or int(record["revision"]) != revision:
+                    continue
+                cache.pop(key, None)
+                pending.discard(key)
+
+    def _root_lock(self, library_id: str, root: str) -> threading.Lock:
+        key = (library_id, _top_level_key(root))
+        with self._root_locks_guard:
+            return self._root_locks.setdefault(key, threading.Lock())
+
+    def _acquire_roots(self, library_id: str, roots: set[str]):
+        locks = [
+            self._root_lock(library_id, root)
+            for root in sorted(roots, key=_top_level_key)
+        ]
+        for lock in locks:
+            lock.acquire()
+        return locks
+
+    def _aggregate_scan_state(self, library_id: str) -> None:
+        active = self.store.db.execute(
+            "SELECT 1 FROM library_jobs WHERE library_id=? AND state IN ('queued','running','terminating') LIMIT 1",
+            (library_id,),
+        )
+        if active:
+            self.store.set_scan_state(library_id, "scanning", error=None)
 
     def _configure_watchers(self) -> None:
         if Observer is None:
@@ -4419,18 +5036,30 @@ class LibraryRuntime:
 
     def _run(self):
         while not self.stop_event.is_set():
-            due = [
-                library_id
-                for library_id, deadline in self._reconcile_due.items()
-                if time.monotonic() >= deadline
-            ]
-            for library_id in due:
-                self.enqueue(
-                    library_id,
-                    "reconcile",
-                    self._reconcile_targets.get(library_id, set()).copy(),
+            # Keep the durable first-seen target cheap, then batch the noisy
+            # follow-up event counters/revisions before the due-target query.
+            self._flush_reconcile_updates()
+            has_queue = self._durable_reconcile_targets_available()
+            if has_queue:
+                due_rows = self.store.db.execute(
+                    "SELECT DISTINCT library_id FROM library_reconcile_targets WHERE debounce_until<=?",
+                    (time.time(),),
                 )
-                self._reconcile_due.pop(library_id, None)
+                for (library_id,) in due_rows:
+                    self.enqueue(library_id, "reconcile")
+            else:
+                due = [
+                    library_id
+                    for library_id, deadline in self._reconcile_due.items()
+                    if time.monotonic() >= deadline
+                ]
+                for library_id in due:
+                    self.enqueue(
+                        library_id,
+                        "reconcile",
+                        self._reconcile_targets.get(library_id, set()).copy(),
+                    )
+                    self._reconcile_due.pop(library_id, None)
             rows = self.store.db.execute(
                 "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
             )
@@ -4464,9 +5093,45 @@ class LibraryRuntime:
             ).start()
 
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
+        locks: list[threading.Lock] = []
         try:
             if kind in {"scan", "reconcile", "collection_rebuild"}:
                 targets = self._job_targets.pop(job_id, None)
+                target_revisions: dict[str, int] = {}
+                if kind == "reconcile" and targets is None:
+                    # Watcher callbacks can continue while this worker is
+                    # being claimed.  Make the latest batched revision
+                    # visible before taking the due-target snapshot.
+                    self._flush_reconcile_updates(force=True)
+                    has_queue = self._durable_reconcile_targets_available()
+                    if has_queue:
+                        rows = self.store.db.execute(
+                            "SELECT top_level_root,revision FROM library_reconcile_targets WHERE library_id=? AND debounce_until<=? ORDER BY top_level_root",
+                            (library_id, time.time()),
+                        )
+                        targets_by_key: dict[str, str] = {}
+                        for row in rows:
+                            targets_by_key[_top_level_key(row[0])] = row[0]
+                        targets = set(targets_by_key.values())
+                        target_revisions = {row[0]: int(row[1]) for row in rows}
+                    else:
+                        targets = self._reconcile_targets.pop(library_id, set())
+                    self._job_target_revisions[job_id] = target_revisions
+                if kind == "reconcile" and not targets:
+                    # A newer watcher event may have postponed every target
+                    # after the job was queued. Complete this stale job without
+                    # invoking a scanner or unscoped cleanup.
+                    self.store.update_job(
+                        job_id,
+                        state="completed",
+                        progress_current=0,
+                        progress_total=0,
+                        finished_at=now(),
+                        message="No due watcher targets",
+                    )
+                    return
+                if kind == "reconcile" and targets:
+                    locks = self._acquire_roots(library_id, targets)
                 # A scan owns mutable traversal state and diagnostics.  Do not
                 # share one scanner between concurrent library workers: a movie
                 # scan could otherwise overwrite a TV scan's stage, delta, and
@@ -4494,11 +5159,21 @@ class LibraryRuntime:
                 kind,
             )
         finally:
+            for lock in reversed(locks):
+                lock.release()
+            revisions = getattr(self, "_job_target_revisions", {}).pop(job_id, {})
+            if revisions:
+                with self.store.db.transaction() as cursor:
+                    for target, revision in revisions.items():
+                        cursor.execute(
+                            "DELETE FROM library_reconcile_targets WHERE library_id=? AND top_level_root=? AND revision=?",
+                            (library_id, target, revision),
+                        )
+                self._forget_reconcile_targets(library_id, revisions)
             with self._active_lock:
                 self._active_jobs.discard(job_id)
                 self._cancel_events.pop(job_id, None)
-            if self._reconcile_targets.get(library_id):
-                self._reconcile_due[library_id] = time.monotonic()
+            self._aggregate_scan_state(library_id)
             with self.condition:
                 self.condition.notify_all()
 

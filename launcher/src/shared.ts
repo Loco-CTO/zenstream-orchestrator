@@ -4,10 +4,34 @@ export type LifecycleStatus =
 export type LogSource = "stdout" | "stderr" | "launcher";
 
 export interface LogEntry {
-  id: number;
+  id: string;
   timestamp: string;
   source: LogSource;
   message: string;
+}
+
+export interface PagedLogEntry extends LogEntry {
+  beforeCursor: LogCursor;
+  afterCursor: LogCursor;
+}
+
+export type LogCursor = string;
+
+export interface ReadLogsRequest {
+  direction: "older" | "newer";
+  cursor?: LogCursor;
+  limit?: number;
+  source?: LogSource | "all";
+  query?: string;
+}
+
+export interface LogPage {
+  entries: PagedLogEntry[];
+  olderCursor: LogCursor | null;
+  newerCursor: LogCursor | null;
+  hasOlder: boolean;
+  hasNewer: boolean;
+  cursorExpired: boolean;
 }
 
 export interface BootstrapCredentials {
@@ -28,6 +52,7 @@ export interface LauncherState {
 export const ENVIRONMENT_KEYS = [
   "ORCHESTRATOR_HOST",
   "ORCHESTRATOR_PORT",
+  "ZENSTREAM_PUBLIC_WEB_URL",
   "METADATA_PATH",
   "CORS_ORIGINS",
   "TRUSTED_PROXY_IPS",
@@ -38,6 +63,10 @@ export const ENVIRONMENT_KEYS = [
   "MAX_TRANSCODES_PER_USER",
   "PLAYBACK_SESSION_IDLE_TIMEOUT_SECONDS",
   "FOREGROUND_WORKERS",
+  "CONTROL_WORKERS",
+  "AUTH_WORKERS",
+  "CONTROL_QUEUE",
+  "AUTH_QUEUE",
   "METADATA_ROOT_WORKERS",
   "METADATA_FETCH_WORKERS",
   "METADATA_ASSET_WORKERS",
@@ -74,7 +103,6 @@ export interface LauncherBridge {
   initialize(): Promise<{
     config: EditableConfig;
     state: LauncherState;
-    logs: LogEntry[];
     credentials: BootstrapCredentials | null;
   }>;
   saveConfig(request: SaveConfigRequest): Promise<SaveConfigResult>;
@@ -83,16 +111,20 @@ export interface LauncherBridge {
   stop(): Promise<LauncherState>;
   restart(): Promise<LauncherState>;
   quit(): Promise<void>;
+  hideWindow(): Promise<void>;
   openDashboard(): Promise<void>;
   chooseDirectory(key: EnvironmentKey): Promise<string | null>;
   chooseExecutable(key: EnvironmentKey): Promise<string | null>;
   openDataFolder(): Promise<void>;
   openLogsFolder(): Promise<void>;
+  readLogs(request: ReadLogsRequest): Promise<LogPage>;
+  copyLogText(text: string): Promise<void>;
   clearLogs(): Promise<void>;
   exportLogs(): Promise<boolean>;
-  acknowledgeCredentials(): Promise<void>;
+  copyAndAcknowledgeCredentials(): Promise<void>;
   onState(callback: (state: LauncherState) => void): () => void;
-  onLog(callback: (entry: LogEntry) => void): () => void;
+  onPersistedLog(callback: (entry: PagedLogEntry) => void): () => void;
+  onLogsReset(callback: () => void): () => void;
   onCredentials(
     callback: (credentials: BootstrapCredentials) => void,
   ): () => void;

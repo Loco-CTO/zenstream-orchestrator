@@ -124,6 +124,7 @@ TABLES = [
     """CREATE TABLE user_sessions (
         id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
         expires_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+        device_id TEXT,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )""",
     """CREATE TABLE user_library_access (
@@ -167,6 +168,34 @@ TABLES = [
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
         FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE,
         FOREIGN KEY(source_id) REFERENCES media_sources(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE user_devices (
+        id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, device_key TEXT NOT NULL,
+        device_type TEXT NOT NULL DEFAULT 'unknown', browser TEXT, operating_system TEXT,
+        device_name TEXT, client_name TEXT, client_version TEXT, ip_address TEXT,
+        first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+        UNIQUE(user_id, device_key),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE playback_viewer_sessions (
+        id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, auth_session_id TEXT,
+        device_id TEXT, entity_id TEXT NOT NULL, source_id TEXT NOT NULL,
+        worker_session_id TEXT, mode TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active',
+        engine TEXT, position_seconds REAL NOT NULL DEFAULT 0, duration_seconds REAL,
+        paused INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+        last_heartbeat_at TEXT NOT NULL, ended_at TEXT, requested_bitrate INTEGER,
+        audio_stream_id TEXT, requested_mode TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(device_id) REFERENCES user_devices(id) ON DELETE SET NULL,
+        FOREIGN KEY(entity_id) REFERENCES library_entities(id) ON DELETE CASCADE,
+        FOREIGN KEY(source_id) REFERENCES media_sources(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE playback_viewer_commands (
+        id TEXT PRIMARY KEY NOT NULL, viewer_session_id TEXT NOT NULL, action TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending', issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+        delivered_at TEXT, acknowledged_at TEXT, error TEXT,
+        FOREIGN KEY(viewer_session_id) REFERENCES playback_viewer_sessions(id) ON DELETE CASCADE,
+        CHECK(action IN ('pause','resume','stop'))
     )""",
     """CREATE TABLE playback_settings (
         id INTEGER PRIMARY KEY, max_transcodes INTEGER NOT NULL, max_transcodes_per_user INTEGER NOT NULL,
@@ -293,6 +322,14 @@ INDEXES = [
     "CREATE INDEX idx_job_runs_queue ON job_runs(state, created_at)",
     "CREATE INDEX idx_job_runs_definition ON job_runs(definition_id, created_at)",
     "CREATE INDEX idx_user_sessions_user ON user_sessions(user_id, expires_at)",
+    "CREATE INDEX idx_user_sessions_device ON user_sessions(device_id)",
+    "CREATE UNIQUE INDEX idx_user_devices_user_key ON user_devices(user_id, device_key)",
+    "CREATE INDEX idx_user_devices_user_active ON user_devices(user_id, last_seen_at)",
+    "CREATE INDEX idx_playback_viewer_active ON playback_viewer_sessions(state, last_heartbeat_at)",
+    "CREATE INDEX idx_playback_viewer_user ON playback_viewer_sessions(user_id, state)",
+    "CREATE INDEX idx_playback_viewer_device ON playback_viewer_sessions(device_id, state)",
+    "CREATE INDEX idx_playback_viewer_worker ON playback_viewer_sessions(worker_session_id, state)",
+    "CREATE INDEX idx_playback_viewer_command_delivery ON playback_viewer_commands(viewer_session_id, state, expires_at)",
     "CREATE INDEX idx_user_item_state_resume ON user_item_state(user_id, last_played_at)",
     "CREATE INDEX idx_media_sources_entity ON media_sources(entity_id)",
     "CREATE INDEX idx_trickplay_assets_state ON trickplay_assets(state, updated_at)",

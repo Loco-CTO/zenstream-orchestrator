@@ -3,19 +3,14 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import {
+	IconEye,
 	IconFolder,
 	IconPlus,
 	IconRefresh,
 	IconTrash,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import {
-	ConfirmDialog,
-	EmptyState,
-	PageHeader,
-	StatusMessage,
-	SurfaceCard,
-} from "../components/dashboard-surface";
+import { DashboardModal } from "../components/dashboard-surface";
 
 type Library = {
 	id: string;
@@ -34,6 +29,16 @@ const labels: Record<string, string> = {
 	music: "Music",
 	collection: "Collection",
 };
+const inputStyle: React.CSSProperties = {
+	width: "100%",
+	background: "#1a1a1a",
+	border: "1px solid var(--border-strong)",
+	borderRadius: 8,
+	padding: "10px 14px",
+	color: "var(--text)",
+	fontSize: 14,
+	fontFamily: "var(--font-sans)",
+};
 
 export default function LibrariesPage() {
 	const [session, setSession] = useState<Session | null>(null);
@@ -45,7 +50,8 @@ export default function LibrariesPage() {
 	const [watch, setWatch] = useState(true);
 	const [interval, setIntervalValue] = useState(1440);
 	const [message, setMessage] = useState("");
-	const [libraryToRemove, setLibraryToRemove] = useState<Library | null>(null);
+	const [addModal, setAddModal] = useState(false);
+	const [deleteModal, setDeleteModal] = useState<Library | null>(null);
 
 	async function load(current = session) {
 		if (!current) return;
@@ -55,9 +61,8 @@ export default function LibrariesPage() {
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
-		if (current) load(current);
+		if (current) void load(current);
 	}, []);
-
 	async function create(event: FormEvent) {
 		event.preventDefault();
 		if (!session) return;
@@ -83,27 +88,26 @@ export default function LibrariesPage() {
 			setName("");
 			setDirectory("");
 			setSources([]);
-			load();
+			setAddModal(false);
+			void load();
 		}
 	}
 	async function rescan(library: Library) {
 		if (!session) return;
 		const response = await adminFetch(
-			"/api/admin/libraries/" + library.id + "/scan",
+			`/api/admin/libraries/${library.id}/scan`,
 			session,
 			{ method: "POST" },
 		);
 		setMessage(
-			response.ok
-				? "Scan queued for " + library.name + "."
-				: "Could not queue scan.",
+			response.ok ? `Scan queued for ${library.name}.` : "Could not queue scan.",
 		);
-		load();
+		void load();
 	}
 	async function remove(library: Library) {
 		if (!session) return;
 		const response = await adminFetch(
-			"/api/admin/libraries/" + library.id,
+			`/api/admin/libraries/${library.id}`,
 			session,
 			{ method: "DELETE" },
 		);
@@ -112,62 +116,153 @@ export default function LibrariesPage() {
 				? "Library removed; files were left untouched."
 				: "Could not remove library.",
 		);
-		setLibraryToRemove(null);
-		load();
+		setDeleteModal(null);
+		void load();
 	}
 
 	return (
-		<div className="max-w-6xl">
-			<ConfirmDialog
-				open={Boolean(libraryToRemove)}
-				title="Remove library?"
-				description={`Remove ${libraryToRemove?.name || "this library"} from ZenStream. Its media files will remain untouched on disk.`}
-				confirmLabel="Remove library"
-				destructive
-				onClose={() => setLibraryToRemove(null)}
-				onConfirm={() => libraryToRemove && void remove(libraryToRemove)}
-			/>
-			<PageHeader
-				title="Media sources"
-				description="Connect media roots, monitor scans, and assemble collection libraries."
-				actions={
-					<button
-						onClick={() => load()}
-						aria-label="Refresh libraries"
-						className="material-icon-button"
-						title="Refresh libraries"
+		<div className="dashboard-page dashboard-design">
+			<div
+				style={{
+					display: "flex",
+					alignItems: "flex-start",
+					justifyContent: "space-between",
+					marginBottom: 36,
+					gap: 16,
+				}}
+			>
+				<div>
+					<h1
+						style={{
+							margin: 0,
+							fontSize: 22,
+							fontWeight: 600,
+							color: "#fff",
+							letterSpacing: "-.02em",
+						}}
 					>
-						<IconRefresh size={17} />
+						Media sources
+					</h1>
+					<p
+						style={{
+							margin: "5px 0 0",
+							fontSize: 13,
+							color: "#666",
+							lineHeight: 1.5,
+						}}
+					>
+						Connect media roots, monitor scans, and assemble collection libraries.
+					</p>
+				</div>
+				<div style={{ display: "flex", gap: 8 }}>
+					<button
+						type="button"
+						onClick={() => void load()}
+						aria-label="Refresh libraries"
+						style={{
+							width: 32,
+							height: 32,
+							border: 0,
+							borderRadius: 8,
+							background: "none",
+							color: "#777",
+							cursor: "pointer",
+						}}
+					>
+						<IconRefresh size={15} />
 					</button>
-				}
-			/>
-			{message && <StatusMessage>{message}</StatusMessage>}
-			<div className="mt-7 grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
-				<SurfaceCard className="overflow-hidden">
-					<div className="border-b console-divider px-5 py-4 text-xs uppercase tracking-[.16em] console-muted">
-						Configured libraries{" "}
-						<span className="ml-2 normal-case tracking-normal">
-							{libraries.length}
-						</span>
-					</div>
-					{libraries.map((library) => (
-						<article
-							key={library.id}
-							className="flex items-start justify-between gap-4 border-b console-divider px-5 py-5 last:border-0"
+					<button
+						type="button"
+						onClick={() => setAddModal(true)}
+						style={{
+							display: "inline-flex",
+							alignItems: "center",
+							gap: 7,
+							border: 0,
+							background: "var(--primary)",
+							color: "#000",
+							borderRadius: 7,
+							padding: "9px 14px",
+							fontSize: 12,
+							fontWeight: 600,
+							cursor: "pointer",
+						}}
+					>
+						<IconPlus size={14} />
+						Add library
+					</button>
+				</div>
+			</div>
+			{message && (
+				<div
+					role="status"
+					style={{ color: "var(--primary)", fontSize: 12, marginBottom: 12 }}
+				>
+					{message}
+				</div>
+			)}
+			<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
+				<div style={{ padding: "14px 22px" }}>
+					<span
+						style={{
+							fontSize: 10,
+							fontWeight: 600,
+							color: "var(--primary)",
+							letterSpacing: ".1em",
+							textTransform: "uppercase",
+						}}
+					>
+						Configured libraries {libraries.length}
+					</span>
+				</div>
+				<div style={{ height: 1, background: "#111" }} />
+				{libraries.map((library, index) => (
+					<div key={library.id}>
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								padding: "16px 22px",
+								gap: 14,
+							}}
 						>
-							<div className="flex min-w-0 items-start gap-3">
-								<span className="rounded-lg bg-[#aeb9ff]/10 p-2.5 text-[#aeb9ff]">
-									<IconFolder size={18} />
-								</span>
-								<div className="min-w-0">
-									<p className="font-medium">{library.name}</p>
-									<p className="mt-1 truncate text-xs console-muted">
-										{labels[library.type]}{" "}
-										{library.directory
-											? "· " + library.directory
-											: "· derived collection"}
-									</p>
-									<p className="mt-2 text-xs console-muted">
+							<div
+								style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}
+							>
+								<div
+									style={{
+										width: 36,
+										height: 36,
+										background: "var(--primary-dim)",
+										border: "1px solid rgba(94,227,216,.12)",
+										borderRadius: 9,
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+										color: "var(--primary)",
+										flexShrink: 0,
+									}}
+								>
+									<IconFolder size={15} />
+								</div>
+								<div style={{ minWidth: 0 }}>
+									<div style={{ fontSize: 14, fontWeight: 600, color: "#ddd" }}>
+										{library.name}
+									</div>
+									<div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+										{labels[library.type]} ·{" "}
+										<span style={{ fontFamily: "var(--font-mono)", color: "#444" }}>
+											{library.directory || "derived collection"}
+										</span>
+									</div>
+									<div
+										style={{
+											fontSize: 11,
+											color: library.scanState === "error" ? "var(--danger)" : "#555",
+											marginTop: 3,
+										}}
+									>
 										{library.scanState === "error"
 											? library.scanError
 											: library.scanState === "ready"
@@ -176,81 +271,156 @@ export default function LibrariesPage() {
 													? "Scanning…"
 													: "Waiting for first scan"}{" "}
 										· {library.watchEnabled ? "watching" : "watch disabled"}
-									</p>
+									</div>
 								</div>
 							</div>
-							<div className="flex shrink-0 gap-2">
+							<div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
 								<Link
-									href={
-										"/web/dashboard/libraries/view?libraryId=" +
-										encodeURIComponent(library.id)
-									}
-									className="rounded-lg border console-divider px-3 py-2 text-xs text-[#aeb9ff]"
+									href={`/web/dashboard/libraries/view/?libraryId=${encodeURIComponent(library.id)}`}
+									aria-label={`Browse ${library.name}`}
+									style={{
+										width: 32,
+										height: 32,
+										display: "inline-flex",
+										alignItems: "center",
+										justifyContent: "center",
+										color: "#777",
+										borderRadius: 8,
+									}}
 								>
-									View
+									<IconEye size={15} />
 								</Link>
 								<button
-									onClick={() => rescan(library)}
-									aria-label="Rescan"
-									className="rounded-lg border console-divider p-2 console-muted hover:bg-white/10"
+									type="button"
+									onClick={() => void rescan(library)}
+									aria-label={`Rescan ${library.name}`}
+									style={{
+										width: 32,
+										height: 32,
+										border: 0,
+										background: "none",
+										color: "#777",
+										cursor: "pointer",
+										borderRadius: 8,
+									}}
 								>
-									<IconRefresh size={16} />
+									<IconRefresh size={15} />
 								</button>
 								<button
-									onClick={() => setLibraryToRemove(library)}
-									aria-label="Remove"
-									className="rounded-lg border console-divider p-2 console-muted hover:bg-[#aeb9ff]/10 hover:text-[#aeb9ff]"
+									type="button"
+									onClick={() => setDeleteModal(library)}
+									aria-label={`Delete ${library.name}`}
+									style={{
+										width: 32,
+										height: 32,
+										border: 0,
+										background: "none",
+										color: "#777",
+										cursor: "pointer",
+										borderRadius: 8,
+									}}
 								>
-									<IconTrash size={16} />
+									<IconTrash size={15} />
 								</button>
 							</div>
-						</article>
-					))}
-					{!libraries.length && (
-						<EmptyState>No libraries yet. Add your first media root.</EmptyState>
-					)}
-				</SurfaceCard>
-				<form onSubmit={create} className="console-card rounded-xl p-5">
-					<p className="console-kicker">New library</p>
-					<h2 className="mt-2 text-lg font-semibold">Add source</h2>
-					<input
-						required
-						value={name}
-						onChange={(event) => setName(event.target.value)}
-						placeholder="Library name"
-						className="console-input mt-5 h-11 w-full rounded-lg px-3 text-sm outline-none"
-					/>
-					<select
-						value={type}
-						onChange={(event) => setType(event.target.value)}
-						className="console-input mt-3 h-11 w-full rounded-lg px-3 text-sm outline-none"
+						</div>
+						{index < libraries.length - 1 && (
+							<div style={{ height: 1, background: "#111" }} />
+						)}
+					</div>
+				))}
+				{!libraries.length && (
+					<div style={{ padding: "24px 22px", color: "#555", fontSize: 13 }}>
+						No libraries yet. Add your first media root.
+					</div>
+				)}
+			</div>
+			<DashboardModal
+				open={addModal}
+				onClose={() => setAddModal(false)}
+				title="Add library"
+			>
+				<form
+					onSubmit={create}
+					style={{ display: "flex", flexDirection: "column", gap: 14 }}
+				>
+					<label
+						style={{
+							fontSize: 10,
+							fontWeight: 600,
+							color: "var(--primary)",
+							letterSpacing: ".1em",
+							textTransform: "uppercase",
+						}}
 					>
-						<option value="tv_series">TV Series</option>
-						<option value="movies">Movies</option>
-						<option value="music">Music</option>
-						<option value="collection">Collection</option>
-					</select>
-					{type !== "collection" ? (
+						Name
 						<input
 							required
-							value={directory}
-							onChange={(event) => setDirectory(event.target.value)}
-							placeholder="X:\\Media Library\\Movies"
-							className="console-input mt-3 h-11 w-full rounded-lg px-3 text-sm outline-none"
+							value={name}
+							onChange={(event) => setName(event.target.value)}
+							placeholder="Library name"
+							style={{ ...inputStyle, marginTop: 8 }}
 						/>
+					</label>
+					<label
+						style={{
+							fontSize: 10,
+							fontWeight: 600,
+							color: "var(--primary)",
+							letterSpacing: ".1em",
+							textTransform: "uppercase",
+						}}
+					>
+						Type
+						<select
+							value={type}
+							onChange={(event) => setType(event.target.value)}
+							style={{ ...inputStyle, marginTop: 8 }}
+						>
+							<option value="tv_series">TV Series</option>
+							<option value="movies">Movies</option>
+							<option value="music">Music</option>
+							<option value="collection">Collection</option>
+						</select>
+					</label>
+					{type !== "collection" ? (
+						<label
+							style={{
+								fontSize: 10,
+								fontWeight: 600,
+								color: "var(--primary)",
+								letterSpacing: ".1em",
+								textTransform: "uppercase",
+							}}
+						>
+							Path
+							<input
+								required
+								value={directory}
+								onChange={(event) => setDirectory(event.target.value)}
+								placeholder="/media/path"
+								style={{ ...inputStyle, marginTop: 8 }}
+							/>
+						</label>
 					) : (
-						<div className="mt-3 rounded-lg border console-divider p-3 text-xs console-muted">
-							Select existing TV or Movie libraries as collection sources.
-						</div>
-					)}
-					{type === "collection" && (
-						<div className="mt-3 space-y-2">
+						<div
+							style={{
+								display: "flex",
+								flexDirection: "column",
+								gap: 8,
+								color: "#777",
+								fontSize: 12,
+							}}
+						>
 							{libraries
 								.filter(
 									(library) => library.type === "movies" || library.type === "tv_series",
 								)
 								.map((library) => (
-									<label key={library.id} className="flex items-center gap-2 text-sm">
+									<label
+										key={library.id}
+										style={{ display: "flex", alignItems: "center", gap: 8 }}
+									>
 										<input
 											type="checkbox"
 											checked={sources.includes(library.id)}
@@ -267,33 +437,128 @@ export default function LibrariesPage() {
 								))}
 						</div>
 					)}
-					<label className="mt-4 flex items-center justify-between text-sm">
-						<span className="console-muted">Watch file changes</span>
+					<label
+						style={{
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "space-between",
+							color: "#777",
+							fontSize: 12,
+						}}
+					>
+						Watch file changes
 						<input
 							type="checkbox"
 							checked={watch}
 							onChange={(event) => setWatch(event.target.checked)}
 						/>
 					</label>
-					{type !== "collection" && (
-						<label className="mt-4 block text-sm">
-							<span className="console-muted">Repair interval (minutes)</span>
-							<input
-								type="number"
-								min={15}
-								max={43200}
-								value={interval}
-								onChange={(event) => setIntervalValue(Number(event.target.value))}
-								className="console-input mt-2 h-11 w-full rounded-lg px-3 outline-none"
-							/>
-						</label>
-					)}
-					<button className="console-button mt-5 flex items-center gap-2 rounded-lg px-4 py-3 text-sm font-medium">
-						<IconPlus size={16} />
-						Create and scan
-					</button>
+					<label style={{ color: "#777", fontSize: 12 }}>
+						Repair interval (minutes)
+						<input
+							type="number"
+							min={15}
+							max={43200}
+							value={interval}
+							onChange={(event) => setIntervalValue(Number(event.target.value))}
+							style={{ ...inputStyle, marginTop: 8 }}
+						/>
+					</label>
+					<div
+						style={{
+							display: "flex",
+							justifyContent: "flex-end",
+							gap: 8,
+							paddingTop: 4,
+						}}
+					>
+						<button
+							type="button"
+							onClick={() => setAddModal(false)}
+							style={{
+								border: "1px solid var(--border-strong)",
+								background: "transparent",
+								color: "#aaa",
+								borderRadius: 7,
+								padding: "9px 14px",
+								fontSize: 12,
+								cursor: "pointer",
+							}}
+						>
+							Cancel
+						</button>
+						<button
+							type="submit"
+							style={{
+								display: "inline-flex",
+								alignItems: "center",
+								gap: 7,
+								border: 0,
+								background: "var(--primary)",
+								color: "#000",
+								borderRadius: 7,
+								padding: "9px 14px",
+								fontSize: 12,
+								fontWeight: 600,
+								cursor: "pointer",
+							}}
+						>
+							<IconPlus size={14} />
+							Create and scan
+						</button>
+					</div>
 				</form>
-			</div>
+			</DashboardModal>
+			<DashboardModal
+				open={Boolean(deleteModal)}
+				onClose={() => setDeleteModal(null)}
+				title="Delete library"
+			>
+				<p
+					style={{
+						color: "#777",
+						fontSize: 13,
+						lineHeight: 1.6,
+						margin: "0 0 24px",
+					}}
+				>
+					Remove <strong style={{ color: "#ccc" }}>{deleteModal?.name}</strong> and
+					all its indexed metadata?
+				</p>
+				<div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+					<button
+						type="button"
+						onClick={() => setDeleteModal(null)}
+						style={{
+							border: "1px solid var(--border-strong)",
+							background: "transparent",
+							color: "#aaa",
+							borderRadius: 7,
+							padding: "9px 14px",
+							fontSize: 12,
+							cursor: "pointer",
+						}}
+					>
+						Cancel
+					</button>
+					<button
+						type="button"
+						onClick={() => deleteModal && void remove(deleteModal)}
+						style={{
+							border: 0,
+							background: "var(--danger)",
+							color: "#000",
+							borderRadius: 7,
+							padding: "9px 14px",
+							fontSize: 12,
+							fontWeight: 600,
+							cursor: "pointer",
+						}}
+					>
+						<IconTrash size={14} /> Delete
+					</button>
+				</div>
+			</DashboardModal>
 		</div>
 	);
 }

@@ -14,8 +14,18 @@ from api.zenstream.application_routes import (
 from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
 from app.catalog_read_model import CatalogReadModel
-from app.config import load_config
-from app.foreground import active_requests, run_foreground
+from app.client_auth import browser_origins
+from app.config import Config, load_config
+from app.foreground import (
+    active_auth_work,
+    active_control_work,
+    active_requests,
+    run_auth,
+    run_control,
+)
+from app.foreground import (
+    metrics as foreground_metrics,
+)
 from app.foreground import shutdown as shutdown_foreground
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
@@ -29,6 +39,15 @@ from fastapi.staticfiles import StaticFiles
 from version import __version__
 
 request_logger = get_logger("http")
+
+
+def _authenticate_bearer(token: str):
+    return Account().authenticate_token(token)
+
+
+def _database_metrics():
+    instance = Config._instance
+    return instance.database.metrics() if instance is not None else {}
 
 
 @asynccontextmanager
@@ -45,14 +64,40 @@ async def lifespan(_app: FastAPI):
             await asyncio.sleep(60)
             await asyncio.to_thread(Account.flush_session_activity)
 
+    async def monitor_event_loop():
+        """Report event-loop stalls without adding work to request handlers."""
+        loop = asyncio.get_running_loop()
+        interval = 0.1
+        expected = loop.time() + interval
+        while True:
+            await asyncio.sleep(interval)
+            current = loop.time()
+            lag = current - expected
+            if lag >= 0.25:
+                socket_metrics = await hub.queue_metrics()
+                get_logger("event_loop").warning(
+                    "event loop lag lag_ms=%.1f foreground_active=%s control_active=%s auth_active=%s foreground_metrics=%s sqlite_metrics=%s websocket_metrics=%s",
+                    lag * 1000,
+                    active_requests(),
+                    active_control_work(),
+                    active_auth_work(),
+                    foreground_metrics(),
+                    _database_metrics(),
+                    socket_metrics,
+                )
+            expected = current + interval
+
     maintenance_task = asyncio.create_task(maintain_sessions())
+    event_loop_task = asyncio.create_task(monitor_event_loop())
     try:
         yield
     finally:
-        maintenance_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await maintenance_task
-        await asyncio.to_thread(Account.flush_session_activity)
+        for task in (maintenance_task, event_loop_task):
+            task.cancel()
+        for task in (maintenance_task, event_loop_task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await run_control(Account.flush_session_activity)
         PlaybackManager.stop_all()
         job_scheduler.stop()
         library_runtime.stop()
@@ -71,17 +116,9 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
 )
 
-origins = [
-    value.strip() for value in os.getenv("CORS_ORIGINS", "").split(",") if value.strip()
-]
-origins += [
-    value
-    for value in ("http://localhost:3000", "http://127.0.0.1:3000")
-    if value not in origins
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=browser_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -97,25 +134,26 @@ async def request_timing(request, call_next):
     auth_ms = 0.0
     if authorization:
         from app.client_auth import bearer_token
-        from app.models.account import Account
 
         token = bearer_token(authorization)
         if token:
-            request.state.authenticated = await run_foreground(
-                Account().authenticate_token, token
-            )
+            request.state.authenticated = await run_auth(_authenticate_bearer, token)
             auth_ms = (time.perf_counter() - auth_started) * 1000
     response = await call_next(request)
     duration_ms = (time.perf_counter() - started) * 1000
     log = request_logger.warning if duration_ms >= 500 else request_logger.debug
     log(
-        "request complete method=%s path=%s status=%s duration_ms=%.1f auth_ms=%.1f foreground_active=%s",
+        "request complete method=%s path=%s status=%s duration_ms=%.1f auth_ms=%.1f foreground_active=%s control_active=%s auth_active=%s foreground_metrics=%s sqlite_metrics=%s",
         request.method,
         request.url.path,
         response.status_code,
         duration_ms,
         auth_ms,
         active_requests(),
+        active_control_work(),
+        active_auth_work(),
+        foreground_metrics(),
+        _database_metrics(),
     )
     return response
 

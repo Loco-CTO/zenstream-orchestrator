@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { IconPlayerPlay, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { activeStates, stateLabel } from "../jobs/job-types";
 import {
 	ConfirmDialog,
 	PageHeader,
@@ -12,8 +13,7 @@ import {
 
 type Task = {
 	id: string;
-	enabled: boolean;
-	intervalMinutes: number;
+	triggers?: { type: string; intervalSeconds?: number; time?: string }[];
 	lastState?: string;
 	lastMessage?: string | null;
 	nextRunAt?: string | null;
@@ -32,6 +32,7 @@ type Settings = {
 	maximumTimeSkipSeconds: number;
 	invertedIndexShift: number;
 	introOutroWorkers: number;
+	introOutroFfmpegThreads: number;
 };
 
 const defaults: Settings = {
@@ -48,6 +49,7 @@ const defaults: Settings = {
 	maximumTimeSkipSeconds: 3.5,
 	invertedIndexShift: 2,
 	introOutroWorkers: 1,
+	introOutroFfmpegThreads: 4,
 };
 
 function NumberField({
@@ -95,19 +97,24 @@ export default function IntroOutroPage() {
 
 	const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
 		setSettings((current) => ({ ...current, [key]: value }));
-	async function load(current = session) {
+	const load = useCallback(async (current: Session | null) => {
 		if (!current) return;
 		const response = await adminFetch("/api/admin/intro-outro/settings", current);
 		if (!response.ok) return;
 		const value = await response.json();
 		setSettings({ ...defaults, ...value });
 		setTask(value.task || null);
-	}
+	}, []);
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
 		void load(current);
-	}, []);
+	}, [load]);
+	useEffect(() => {
+		if (!session || !task?.lastState || !activeStates.has(task.lastState)) return;
+		const timer = window.setInterval(() => void load(session), 2000);
+		return () => window.clearInterval(timer);
+	}, [load, session, task?.lastState]);
 	async function save() {
 		if (!session) return;
 		setSaving(true);
@@ -126,7 +133,7 @@ export default function IntroOutroPage() {
 				: "Could not save settings.",
 		);
 		setSaving(false);
-		if (response.ok) void load();
+		if (response.ok) void load(session);
 	}
 	async function runNow() {
 		if (!session || !task) return;
@@ -136,7 +143,7 @@ export default function IntroOutroPage() {
 		setMessage(
 			response.ok ? "Detection task queued." : "Could not queue detection.",
 		);
-		void load();
+		void load(session);
 	}
 	async function clearDetected() {
 		if (!session) return;
@@ -171,7 +178,7 @@ export default function IntroOutroPage() {
 				description="Compare raw Chromaprint audio points across episodes. Each episode keeps its own matching timestamps."
 				actions={
 					<button
-						onClick={() => void load()}
+						onClick={() => void load(session)}
 						className="material-icon-button"
 						aria-label="Refresh"
 					>
@@ -231,6 +238,14 @@ export default function IntroOutroPage() {
 						minimum={1}
 						maximum={64}
 						onChange={(value) => update("introOutroWorkers", value)}
+					/>
+					<NumberField
+						label="Intro/outro FFmpeg threads per process"
+						hint="Explicit per-process FFmpeg threads; 0 lets FFmpeg choose automatically. Total pressure is approximately workers × threads."
+						value={settings.introOutroFfmpegThreads}
+						minimum={0}
+						maximum={64}
+						onChange={(value) => update("introOutroFfmpegThreads", value)}
 					/>
 					<NumberField
 						label="Opening analysis (%)"
@@ -319,11 +334,19 @@ export default function IntroOutroPage() {
 					<div className="mt-3 space-y-2 text-sm">
 						<p>
 							<span className="console-muted">Status: </span>
-							{task.enabled ? task.lastState || "idle" : "paused"}
+							{task.triggers?.length ? stateLabel(task.lastState) : "paused"}
 						</p>
 						<p>
-							<span className="console-muted">Cadence: </span>every{" "}
-							{task.intervalMinutes} minutes
+							<span className="console-muted">Schedule: </span>
+							{task.triggers?.length
+								? task.triggers
+										.map((trigger) =>
+											trigger.type === "interval"
+												? `every ${Math.round((trigger.intervalSeconds || 0) / 60)} minutes`
+												: trigger.type,
+										)
+										.join(", ")
+								: "disabled (no triggers)"}
 						</p>
 						{task.lastMessage && <p className="console-muted">{task.lastMessage}</p>}
 						{task.nextRunAt && (

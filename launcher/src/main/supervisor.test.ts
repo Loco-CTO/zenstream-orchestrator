@@ -18,11 +18,30 @@ describe("backend supervisor helpers", () => {
 
   it("removes inherited managed values before applying saved configuration", () => {
     const environment = buildBackendEnvironment(
-      { SECRET_KEY: "old", FFMPEG_PATH: "old.exe", PATH: "system" },
-      { SECRET_KEY: "new", FFMPEG_PATH: "" },
+      {
+        SECRET_KEY: "old",
+        FFMPEG_PATH: "old.exe",
+        CONTROL_WORKERS: "old",
+        AUTH_WORKERS: "old",
+        CONTROL_QUEUE: "old",
+        AUTH_QUEUE: "old",
+        PATH: "system",
+      },
+      {
+        SECRET_KEY: "new",
+        FFMPEG_PATH: "",
+        CONTROL_WORKERS: "",
+        AUTH_WORKERS: "",
+        CONTROL_QUEUE: "",
+        AUTH_QUEUE: "",
+      },
     );
     expect(environment.SECRET_KEY).toBe("new");
     expect(environment.FFMPEG_PATH).toBeUndefined();
+    expect(environment.CONTROL_WORKERS).toBeUndefined();
+    expect(environment.AUTH_WORKERS).toBeUndefined();
+    expect(environment.CONTROL_QUEUE).toBeUndefined();
+    expect(environment.AUTH_QUEUE).toBeUndefined();
     expect(environment.PATH).toBe("system");
     expect(environment.PYTHONUNBUFFERED).toBe("1");
   });

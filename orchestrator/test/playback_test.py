@@ -366,7 +366,7 @@ class PlaybackTest(unittest.TestCase):
 
         self.assertEqual(
             [stream["tags"]["title"] for stream in streams],
-            ["AI 音声認識 - Japanese", "Japanese"],
+            ["AI 音声認識 - Japanese (日本語)", "Japanese (日本語)"],
         )
 
     @patch("app.playback.issue_ticket", return_value="ticket")

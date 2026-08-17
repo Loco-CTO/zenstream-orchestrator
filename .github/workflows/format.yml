@@ -66,10 +66,7 @@ jobs:
       - name: Install dashboard dependencies
         working-directory: frontend
         run: npm install --no-package-lock --no-audit --no-fund
-      - name: Apply dashboard ESLint fixes
-        working-directory: frontend
-        run: npm run lint:fix
-      - name: Format dashboard files
+      - name: Format dashboard files with Prettier
         working-directory: frontend
         run: npm run format
       - name: Install launcher dependencies

@@ -101,7 +101,12 @@ class Account:
             row = self._row(user_id=row[0], read_only=True)
         return self._public(row)
 
-    def create_session(self, user_id: str) -> dict:
+    def create_session(
+        self,
+        user_id: str,
+        device_metadata: dict | None = None,
+        ip_address: str | None = None,
+    ) -> dict:
         token = secrets.token_urlsafe(48)
         session_id = str(uuid.uuid4())
         now = _now()
@@ -116,6 +121,17 @@ class Account:
                 _iso(now),
                 _iso(now),
             ),
+        )
+        # Device rows are additive to the bearer-session contract.  The
+        # lightweight account fixtures used by older tests may not have the
+        # viewer tables yet, so the store safely reports unavailable there.
+        from app.models.playback_viewer import PlaybackViewerStore
+
+        PlaybackViewerStore(self.db).ensure_device(
+            user_id,
+            device_metadata,
+            ip_address,
+            session_id,
         )
         # Return the opaque session identifier alongside the bearer so
         # short-lived resource/socket tickets can be bound to this login.

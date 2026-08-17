@@ -84,23 +84,11 @@ class SyncplayGroup:
             )
         return group
 
-    def _state(self, cursor, include_ended=False):
-        ended = "" if include_ended else " AND ended=0"
-        cursor.execute(
-            "SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,timeline_revision,media_generation,anchor_position,anchor_time,effective_at,playback_state,pause_reason,host_disconnected_at,updated,ended FROM syncplay_groups WHERE id=?"
-            + ended,
-            (self.id,),
-        )
-        r = cursor.fetchone()
-        if not r:
-            return None
-        cursor.execute(
-            "SELECT user_id,participant_id,username,watching_together,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?",
-            (self.id,),
-        )
-        members = cursor.fetchall()
+    @staticmethod
+    def _state_from_values(group_id, group_row, member_rows):
+        r = group_row
         return {
-            "id": self.id,
+            "id": group_id,
             "name": f"{r[1]}'s group",
             "hostUserId": r[0],
             "hostName": r[1],
@@ -132,21 +120,90 @@ class SyncplayGroup:
                     "readyGeneration": m[6],
                     "role": "host" if m[0] == r[0] else "viewer",
                 }
-                for m in members
+                for m in member_rows
             ],
         }
 
+    def _state(self, cursor, include_ended=False):
+        ended = "" if include_ended else " AND ended=0"
+        cursor.execute(
+            "SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,timeline_revision,media_generation,anchor_position,anchor_time,effective_at,playback_state,pause_reason,host_disconnected_at,updated,ended FROM syncplay_groups WHERE id=?"
+            + ended,
+            (self.id,),
+        )
+        r = cursor.fetchone()
+        if not r:
+            return None
+        cursor.execute(
+            "SELECT user_id,participant_id,username,watching_together,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?",
+            (self.id,),
+        )
+        members = cursor.fetchall()
+        return self._state_from_values(self.id, r, members)
+
+    def _read_state(self, include_ended=False):
+        """Read a group snapshot through the reader pool, never the writer gate."""
+        ended = "" if include_ended else " AND ended=0"
+        with self.db.read_session():
+            rows = self.db.read_execute(
+                "SELECT host_user_id,host_name,allow_controls,item_id,position,playing,resume,revision,timeline_revision,media_generation,anchor_position,anchor_time,effective_at,playback_state,pause_reason,host_disconnected_at,updated,ended FROM syncplay_groups WHERE id=?"
+                + ended,
+                (self.id,),
+            )
+            if not rows:
+                return None
+            members = self.db.read_execute(
+                "SELECT user_id,participant_id,username,watching_together,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=?",
+                (self.id,),
+            )
+        return self._state_from_values(self.id, rows[0], members)
+
     def state(self):
-        with self.db.transaction() as cursor:
-            return self._state(cursor)
+        return self._read_state()
 
     def member(self, user, participant_id):
-        with self.db.transaction() as cursor:
-            cursor.execute(
+        with self.db.read_session():
+            rows = self.db.read_execute(
                 "SELECT 1 FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
                 (self.id, user, participant_id),
             )
-            return bool(cursor.fetchone())
+        return bool(rows)
+
+    @classmethod
+    def states(cls, user=None, participant_id=None):
+        """Load ordered active group snapshots with one reader query."""
+        group = cls("_")
+        query = (
+            "SELECT g.id,g.host_user_id,g.host_name,g.allow_controls,g.item_id,g.position,g.playing,g.resume,g.revision,g.timeline_revision,g.media_generation,g.anchor_position,g.anchor_time,g.effective_at,g.playback_state,g.pause_reason,g.host_disconnected_at,g.updated,g.ended,"
+            "m.user_id,m.participant_id,m.username,m.watching_together,m.viewing,m.loading,m.ready_generation "
+            "FROM syncplay_groups g LEFT JOIN syncplay_members m ON m.group_id=g.id "
+            "WHERE g.ended=0"
+        )
+        args = []
+        if user is not None:
+            query += " AND EXISTS (SELECT 1 FROM syncplay_members mine WHERE mine.group_id=g.id AND mine.user_id=?"
+            args.append(user)
+            if participant_id is not None:
+                query += " AND mine.participant_id=?"
+                args.append(participant_id)
+            query += ")"
+        query += " ORDER BY g.updated DESC, g.id, m.participant_id"
+        with group.db.read_session():
+            rows = group.db.read_execute(query, tuple(args))
+        snapshots = {}
+        members = {}
+        for row in rows:
+            group_id = row[0]
+            snapshots.setdefault(group_id, row[1:19])
+            member = row[19:]
+            if member[0] is not None:
+                members.setdefault(group_id, []).append(member)
+        return [
+            cls._state_from_values(
+                group_id, snapshots[group_id], members.get(group_id, [])
+            )
+            for group_id in snapshots
+        ]
 
     @classmethod
     def active_groups_for_user(cls, user, participant_id=None):
@@ -156,7 +213,8 @@ class SyncplayGroup:
         if participant_id is not None:
             query += " AND m.participant_id=?"
             args.append(participant_id)
-        rows = group.db.execute(query, tuple(args))
+        with group.db.read_session():
+            rows = group.db.read_execute(query, tuple(args))
         return [cls(row[0]) for row in rows]
 
     def _remembered(self, cursor, operation_id, user):
@@ -357,10 +415,12 @@ class SyncplayGroup:
     @classmethod
     def expire_due_host_disconnects(cls, now=None):
         now = time.time() if now is None else now
-        rows = cls("_").db.execute(
-            "SELECT id FROM syncplay_groups WHERE ended=0 AND host_disconnected_at IS NOT NULL AND host_disconnected_at<=?",
-            (now - 300,),
-        )
+        group = cls("_")
+        with group.db.read_session():
+            rows = group.db.read_execute(
+                "SELECT id FROM syncplay_groups WHERE ended=0 AND host_disconnected_at IS NOT NULL AND host_disconnected_at<=?",
+                (now - 300,),
+            )
         states = []
         for row in rows:
             state = cls(row[0]).expire_host_disconnect(now)

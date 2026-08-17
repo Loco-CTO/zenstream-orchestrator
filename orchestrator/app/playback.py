@@ -18,9 +18,11 @@ from pathlib import Path
 from app.catalog import Catalog
 from app.client_auth import issue_ticket
 from app.config import Config
-from app.library import LANGUAGE_ALIASES, language_name, sidecar_display_title
+from app.language_registry import normalize_track_language
+from app.library import language_name, sidecar_display_title
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
+from app.models.playback_viewer import PlaybackViewerStore
 from fastapi import HTTPException
 
 logger = get_logger("playback")
@@ -286,6 +288,12 @@ class PlaybackManager:
             (entity_id, PLAYABLE_ROLE),
         )
         values = []
+        track_index_statements = []
+        has_track_index = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_track_languages'"
+            )
+        )
         for media_file_id, directory, relative_path in rows:
             root = Path(directory).resolve()
             path = root / relative_path
@@ -366,7 +374,40 @@ class PlaybackManager:
                     _iso(),
                 ),
             )
+            if has_track_index:
+                track_index_statements.append(
+                    (
+                        "DELETE FROM media_track_languages WHERE media_file_id=?",
+                        (media_file_id,),
+                    )
+                )
+                indexed_languages = set()
+                for stream in streams:
+                    if not isinstance(stream, dict):
+                        continue
+                    track_type = {
+                        "audio": "audio",
+                        "subtitle": "subtitle",
+                    }.get(str(stream.get("codec_type") or "").lower())
+                    if track_type is None:
+                        continue
+                    tags = stream.get("tags")
+                    tags = tags if isinstance(tags, dict) else {}
+                    language = normalize_track_language(
+                        tags.get("language") or tags.get("LANGUAGE")
+                    )
+                    if language:
+                        indexed_languages.add((track_type, language))
+                track_index_statements.extend(
+                    (
+                        "INSERT OR IGNORE INTO media_track_languages(media_file_id,track_type,language) VALUES(?,?,?)",
+                        (media_file_id, track_type, language),
+                    )
+                    for track_type, language in sorted(indexed_languages)
+                )
             values.append(value)
+        if track_index_statements:
+            self.db.write_many(track_index_statements)
         return values
 
     def sources(self, user_id: str, entity_id: str) -> list[dict]:
@@ -388,9 +429,7 @@ class PlaybackManager:
             raw_language = str(
                 tags.get("language") or tags.get("LANGUAGE") or ""
             ).strip()
-            language = LANGUAGE_ALIASES.get(
-                raw_language.lower(), raw_language.lower() or None
-            )
+            language = normalize_track_language(raw_language)
             if language:
                 tags["language"] = language
             if str(value.get("codec_type") or "").lower() == "subtitle":
@@ -607,12 +646,48 @@ class PlaybackManager:
         mode = cls._playback_mode(source, profile)
         return "video-transcode" if mode == "direct" else mode
 
+    def _register_viewer(
+        self,
+        user_id: str,
+        entity_id: str,
+        source: dict,
+        mode: str,
+        profile: dict,
+        auth_session_id: str | None,
+        worker_session_id: str | None,
+        start_time: float,
+        duration_seconds: float,
+        ip_address: str | None,
+    ) -> str | None:
+        database = getattr(self, "db", None)
+        if database is None:
+            return None
+        store = PlaybackViewerStore(database)
+        if not store.available():
+            return None
+        viewer_profile = {
+            **profile,
+            "startPositionSeconds": start_time,
+            "durationSeconds": duration_seconds,
+        }
+        return store.create_viewer(
+            user_id,
+            auth_session_id,
+            entity_id,
+            source["id"],
+            mode,
+            viewer_profile,
+            worker_session_id,
+            ip_address,
+        )
+
     def negotiate(
         self,
         user_id: str,
         entity_id: str,
         profile: dict,
         auth_session_id: str | None = None,
+        ip_address: str | None = None,
     ) -> dict:
         forbidden = {
             "EnableTranscoding",
@@ -692,7 +767,19 @@ class PlaybackManager:
         if duration_seconds > 0:
             start_time = min(start_time, duration_seconds)
         if selected_mode == "direct":
-            return {
+            viewer_id = self._register_viewer(
+                user_id,
+                entity_id,
+                source,
+                selected_mode,
+                profile,
+                auth_session_id,
+                None,
+                start_time,
+                duration_seconds,
+                ip_address,
+            )
+            result = {
                 "mode": "direct",
                 "sessionState": "ready",
                 "source": source,
@@ -703,6 +790,9 @@ class PlaybackManager:
                 "startPositionSeconds": start_time,
                 "durationSeconds": source.get("durationSeconds"),
             }
+            if viewer_id:
+                result["viewerSessionId"] = viewer_id
+            return result
         if direct_only:
             raise HTTPException(
                 409,
@@ -720,6 +810,20 @@ class PlaybackManager:
         result["audioStreamId"] = profile.get("audioStreamId")
         result["startPositionSeconds"] = start_time
         result["durationSeconds"] = source.get("durationSeconds")
+        viewer_id = self._register_viewer(
+            user_id,
+            entity_id,
+            source,
+            selected_mode,
+            profile,
+            auth_session_id,
+            result.get("sessionId"),
+            start_time,
+            duration_seconds,
+            ip_address,
+        )
+        if viewer_id:
+            result["viewerSessionId"] = viewer_id
         return result
 
     @staticmethod

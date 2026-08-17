@@ -1,9 +1,10 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from app.catalog import Catalog
+from app.catalog import Catalog, _CatalogReadContext
 from app.catalog_read_model import CatalogReadModel
 from app.database import DatabaseHandler
+from fastapi import HTTPException
 
 
 class CatalogReadModelTest(unittest.TestCase):
@@ -110,11 +111,13 @@ class CatalogReadModelTest(unittest.TestCase):
             "INSERT INTO metadata_images VALUES('tvdb','series','1','en','Primary','url','cached.webp','2026','blur')"
         )
         CatalogReadModel(self.db).rebuild(["en"])
+        # A metadata row is not publishable unless its cache file exists and
+        # is non-empty.
         self.assertEqual(
             self.db.read_execute(
                 "SELECT provider,local_path,blur_hash FROM catalog_artwork_selection WHERE entity_id='series' AND locale='en' AND image_type='Primary'"
             ),
-            [("tvdb", "cached.webp", "blur")],
+            [],
         )
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
@@ -326,6 +329,54 @@ class CatalogReadModelTest(unittest.TestCase):
         )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_projection_preload_deduplicates_and_caches_missing_rows(self, _languages):
+        CatalogReadModel(self.db).rebuild(["en"])
+        self.db.execute(
+            "DELETE FROM catalog_item_projection WHERE entity_id='episode-2' AND locale='en'"
+        )
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        context = _CatalogReadContext(catalog, "user")
+        token = Catalog._read_context.set(context)
+        projection_preloads = 0
+        single_projection_reads = 0
+        original_read = self.db.read_execute
+
+        def counted_read(query, params=None):
+            nonlocal projection_preloads, single_projection_reads
+            if query.startswith(
+                "SELECT entity_id,payload FROM catalog_item_projection"
+            ):
+                projection_preloads += 1
+            if query.startswith(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id="
+            ):
+                single_projection_reads += 1
+            return original_read(query, params)
+
+        self.db.read_execute = counted_read
+        try:
+            catalog._preload_projected_metadata(
+                "user", ["series", "series", "episode-2"], "en"
+            )
+            catalog._preload_projected_metadata("user", ["episode-2", "series"], "en")
+            service = Mock()
+            service.resolve_public.return_value = {"metadata": {"images": {}}}
+            with (
+                patch.object(catalog, "_read_service", return_value=service),
+                patch.object(catalog, "_provider_ids", return_value=[]),
+            ):
+                resolved = catalog.metadata("user", "episode-2", "en")
+        finally:
+            self.db.read_execute = original_read
+            Catalog._read_context.reset(token)
+
+        self.assertEqual(projection_preloads, 1)
+        self.assertEqual(single_projection_reads, 0)
+        self.assertEqual(resolved, {"metadata": {"images": {}}})
+        self.assertIn(("episode-2", "en"), context.projected_metadata_loaded)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_projection_first_title_plan_avoids_temp_ordering_tree(self, _languages):
         CatalogReadModel(self.db).rebuild(["en"])
         for direction in ("ASC", "DESC"):
@@ -370,6 +421,74 @@ class CatalogReadModelTest(unittest.TestCase):
             detail = catalog.detail("user", "series", "en")
         self.assertEqual(detail["selectedSeasonId"], "season")
         self.assertLessEqual(query_count, 12)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_detail_sections_are_bounded_and_preserve_legacy_default(self, _languages):
+        CatalogReadModel(self.db).rebuild(["en"])
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+
+        legacy = catalog.detail("user", "series", "en")
+        self.assertEqual(
+            set(legacy),
+            {
+                "item",
+                "backgroundItem",
+                "seasons",
+                "selectedSeasonId",
+                "episodes",
+                "similar",
+                "collectionItems",
+                "rootEntityId",
+                "catalogGeneration",
+            },
+        )
+        self.assertEqual(
+            [episode["id"] for episode in legacy["episodes"]],
+            ["episode-1", "episode-2"],
+        )
+        self.assertIn("credits", legacy["item"]["metadata"])
+
+        header = catalog.detail("user", "series", "en", section="header")
+        self.assertEqual(
+            set(header),
+            {
+                "item",
+                "backgroundItem",
+                "seasons",
+                "selectedSeasonId",
+                "rootEntityId",
+                "catalogGeneration",
+            },
+        )
+        self.assertNotIn("credits", header["item"]["metadata"])
+
+        episodes = catalog.detail(
+            "user", "series", "en", section="episodes", page=2, page_size=1
+        )
+        self.assertEqual(episodes["total"], 2)
+        self.assertEqual(episodes["page"], 2)
+        self.assertEqual(episodes["pageSize"], 1)
+        self.assertEqual(
+            [episode["id"] for episode in episodes["episodes"]], ["episode-2"]
+        )
+
+        self.assertEqual(
+            catalog.detail("user", "episode-1", "en", section="similar"),
+            {"similar": []},
+        )
+        self.assertEqual(
+            catalog.detail("user", "series", "en", section="credits"),
+            {"credits": {"cast": [], "crew": []}},
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_detail_rejects_unknown_section(self, _languages):
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        with self.assertRaises(HTTPException) as raised:
+            catalog.detail("user", "series", "en", section="all")
+        self.assertEqual(raised.exception.status_code, 400)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_short_search_uses_read_model_grams_before_hydration(self, _languages):

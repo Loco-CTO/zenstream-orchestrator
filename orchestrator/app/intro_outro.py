@@ -6,17 +6,31 @@ import struct
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from threading import Lock
 
 from app.config import Config
+from app.ffmpeg_supervisor import run_ffmpeg
 from app.logging_config import get_logger
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
+from app.progress import (
+    ProgressReporter,
+    format_progress_message,
+    resolve_progress_item,
+)
 from fastapi import HTTPException
 
 logger = get_logger("intro_outro")
+DEFAULT_INTRO_OUTRO_FFMPEG_THREADS = 4
 SAMPLE_SECONDS = 4096.0 / 11025.0 / 3.0
 MIN_MATCH_DENSITY = 0.55
+
+
+class EmptyFingerprint(RuntimeError):
+    """FFmpeg produced no Chromaprint points for the requested audio window."""
+
+
 DEFAULTS = {
     "scanOnAdded": True,
     "analysisPercent": 25,
@@ -31,7 +45,22 @@ DEFAULTS = {
     "maximumTimeSkipSeconds": 3.5,
     "invertedIndexShift": 2,
     "introOutroWorkers": 1,
+    "introOutroFfmpegThreads": 4,
 }
+
+COMPARISON_SETTING_KEYS = (
+    "analysisPercent",
+    "analysisLengthLimitMinutes",
+    "scanIntroduction",
+    "scanCredits",
+    "minimumIntroDuration",
+    "maximumIntroDuration",
+    "minimumCreditsDuration",
+    "maximumCreditsAnalysisSeconds",
+    "maximumFingerprintPointDifferences",
+    "maximumTimeSkipSeconds",
+    "invertedIndexShift",
+)
 
 
 def now() -> str:
@@ -43,9 +72,12 @@ def normalize_settings(values: dict | None = None) -> dict:
 
     def integer(key: str, minimum: int, maximum: int):
         try:
-            return max(minimum, min(maximum, int(values[key])))
+            integer_value = int(values[key])
         except (TypeError, ValueError):
             return DEFAULTS[key]
+        if key == "introOutroFfmpegThreads" and not minimum <= integer_value <= maximum:
+            raise ValueError(f"{key} must be between {minimum} and {maximum}.")
+        return max(minimum, min(maximum, integer_value))
 
     def decimal(key: str, minimum: float, maximum: float):
         try:
@@ -71,6 +103,7 @@ def normalize_settings(values: dict | None = None) -> dict:
         "maximumTimeSkipSeconds": decimal("maximumTimeSkipSeconds", 0.1, 10),
         "invertedIndexShift": integer("invertedIndexShift", 0, 8),
         "introOutroWorkers": integer("introOutroWorkers", 1, 64),
+        "introOutroFfmpegThreads": integer("introOutroFfmpegThreads", 0, 64),
     }
     result["maximumIntroDuration"] = max(
         result["minimumIntroDuration"], result["maximumIntroDuration"]
@@ -95,6 +128,38 @@ def analysis_key(settings: dict) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
+def _fingerprint_digest(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    elif not isinstance(value, (bytes, bytearray)):
+        value = str(value).encode()
+    return hashlib.sha256(bytes(value)).hexdigest()
+
+
+def comparison_key(settings: dict, rows) -> str:
+    """Return the stable input key for one season's marker comparison."""
+    normalized = normalize_settings(settings)
+    payload = {
+        "settings": {key: normalized[key] for key in COMPARISON_SETTING_KEYS},
+        "episodes": [
+            {
+                "mediaFileId": row[0],
+                "sourceFingerprint": row[1],
+                "durationSeconds": float(row[2] or 0),
+                "introFingerprint": _fingerprint_digest(row[3]),
+                "outroFingerprint": _fingerprint_digest(row[4]),
+                "warning": row[5],
+            }
+            for row in rows
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 class IntroOutroStore:
     def __init__(self, db=None):
         self.db = db or Config().database
@@ -104,17 +169,23 @@ class IntroOutroStore:
         return str(quick_fingerprint or f"{int(size or 0)}:{int(modified_ns or 0)}")
 
     def available(self) -> bool:
-        tables = {
-            row[0]
-            for row in self.db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
+        tables = self._tables()
         return {
             "intro_outro_settings",
             "intro_outro_assets",
             "intro_outro_segments",
         }.issubset(tables)
+
+    def _tables(self) -> set[str]:
+        return {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+
+    def _comparison_state_available(self) -> bool:
+        return "intro_outro_comparison_state" in self._tables()
 
     def settings(self) -> dict:
         if not self.available():
@@ -139,6 +210,7 @@ class IntroOutroStore:
             ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"),
             ("invertedIndexShift", "inverted_index_shift"),
             ("introOutroWorkers", "intro_outro_workers"),
+            ("introOutroFfmpegThreads", "intro_outro_ffmpeg_threads"),
         ]
         selected = [(key, column) for key, column in names if column in columns]
         rows = self.db.execute(
@@ -173,6 +245,7 @@ class IntroOutroStore:
             ("maximumTimeSkipSeconds", "maximum_time_skip_seconds"),
             ("invertedIndexShift", "inverted_index_shift"),
             ("introOutroWorkers", "intro_outro_workers"),
+            ("introOutroFfmpegThreads", "intro_outro_ffmpeg_threads"),
         ]
         selected = [(key, column) for key, column in mappings if column in columns]
         self.db.execute(
@@ -235,7 +308,7 @@ class IntroOutroStore:
         ) in rows:
             source_fingerprint = self.source_key(quick_fingerprint, size, modified_ns)
             existing = self.db.execute(
-                "SELECT source_fingerprint,analysis_key FROM intro_outro_assets WHERE media_file_id=?",
+                "SELECT source_fingerprint,analysis_key,state,error FROM intro_outro_assets WHERE media_file_id=?",
                 (media_file_id,),
             )
             if (
@@ -243,7 +316,27 @@ class IntroOutroStore:
                 and existing[0][0] == source_fingerprint
                 and existing[0][1] == fingerprint_settings_key
             ):
-                continue
+                state = existing[0][2]
+                warning_retry = state == "scanned" and bool(existing[0][3])
+                if (
+                    state in {"scanned", "fingerprinted", "generating"}
+                    and not warning_retry
+                ):
+                    continue
+                if state in {"queued", "failed"} or warning_retry:
+                    timestamp = now()
+                    self.db.execute(
+                        "UPDATE intro_outro_assets SET entity_id=?,season_id=?,state='queued',"
+                        "error=NULL,updated_at=? WHERE media_file_id=?",
+                        (entity_id, season_id, timestamp, media_file_id),
+                    )
+                    if not warning_retry:
+                        self.db.execute(
+                            "DELETE FROM intro_outro_segments WHERE media_file_id=?",
+                            (media_file_id,),
+                        )
+                    queued += 1
+                    continue
             timestamp = now()
             self.db.execute(
                 "INSERT INTO intro_outro_assets(media_file_id,entity_id,season_id,source_fingerprint,analysis_key,state,created_at,updated_at) "
@@ -318,12 +411,32 @@ class IntroOutroStore:
             return cursor.rowcount == 1
 
     def mark_fingerprinted(
-        self, asset: dict, intro: bytes | None, outro: bytes | None
+        self,
+        asset: dict,
+        intro: bytes | None,
+        outro: bytes | None,
+        warning: str | None = None,
     ) -> None:
+        timestamp = now()
+        if warning:
+            self.db.execute(
+                "UPDATE intro_outro_assets SET intro_fingerprint=COALESCE(?,intro_fingerprint),"
+                "outro_fingerprint=COALESCE(?,outro_fingerprint),state='scanned',error=?,updated_at=? "
+                "WHERE media_file_id=? AND source_fingerprint=? AND state='generating'",
+                (
+                    intro,
+                    outro,
+                    warning[:1000],
+                    timestamp,
+                    asset["mediaFileId"],
+                    asset["sourceFingerprint"],
+                ),
+            )
+            return
         self.db.execute(
             "UPDATE intro_outro_assets SET intro_fingerprint=?,outro_fingerprint=?,state='scanned',error=NULL,updated_at=? "
             "WHERE media_file_id=? AND source_fingerprint=? AND state='generating'",
-            (intro, outro, now(), asset["mediaFileId"], asset["sourceFingerprint"]),
+            (intro, outro, timestamp, asset["mediaFileId"], asset["sourceFingerprint"]),
         )
 
     def mark_failed(self, asset: dict, error: str) -> None:
@@ -331,102 +444,188 @@ class IntroOutroStore:
             "UPDATE intro_outro_assets SET state='failed',error=?,updated_at=? WHERE media_file_id=? AND source_fingerprint=? AND state='generating'",
             (error[:1000], now(), asset["mediaFileId"], asset["sourceFingerprint"]),
         )
-
-    def recompute_all(self, settings: dict) -> int:
-        rows = self.db.execute(
-            "SELECT DISTINCT season_id FROM intro_outro_assets WHERE state='scanned'"
+        self.db.execute(
+            "DELETE FROM intro_outro_segments WHERE media_file_id=? AND EXISTS ("
+            "SELECT 1 FROM intro_outro_assets WHERE media_file_id=? "
+            "AND source_fingerprint=? AND state='failed')",
+            (
+                asset["mediaFileId"],
+                asset["mediaFileId"],
+                asset["sourceFingerprint"],
+            ),
         )
-        return sum(self.recompute_season(row[0], settings) for row in rows)
+
+    def recompute_all(self, settings: dict, progress=None) -> int:
+        if self._comparison_state_available():
+            rows = self.db.execute(
+                "SELECT season_id FROM intro_outro_assets "
+                "UNION SELECT season_id FROM intro_outro_comparison_state "
+                "ORDER BY season_id"
+            )
+        else:
+            rows = self.db.execute(
+                "SELECT DISTINCT season_id FROM intro_outro_assets WHERE state='scanned'"
+            )
+        total = len(rows)
+        completed = 0
+        markers = 0
+        for row in rows:
+            markers += self.recompute_season(row[0], settings)
+            completed += 1
+            if progress:
+                progress(completed, total, row[0])
+        return markers
 
     def recompute_season(self, season_id: str, settings: dict) -> int:
+        settings = normalize_settings(settings)
         rows = self.db.execute(
-            "SELECT media_file_id,intro_fingerprint,outro_fingerprint FROM intro_outro_assets "
-            "WHERE season_id=? AND state='scanned'",
+            "SELECT a.media_file_id,a.source_fingerprint,"
+            "COALESCE(source.duration_seconds,0),a.intro_fingerprint,"
+            "a.outro_fingerprint,a.error FROM intro_outro_assets a "
+            "LEFT JOIN media_sources source ON source.media_file_id=a.media_file_id "
+            "WHERE a.season_id=? AND a.state='scanned' "
+            "ORDER BY a.media_file_id",
             (season_id,),
         )
-        if len(rows) < 2:
-            return 0
-        ids = [row[0] for row in rows]
-        placeholders = ",".join("?" for _ in ids)
-        self.db.execute(
-            f"DELETE FROM intro_outro_segments WHERE media_file_id IN ({placeholders})",
-            ids,
-        )
+        current_key = comparison_key(settings, rows)
+        state_available = self._comparison_state_available()
+        stored_key = None
+        if state_available:
+            state_rows = self.db.execute(
+                "SELECT comparison_key FROM intro_outro_comparison_state WHERE season_id=?",
+                (season_id,),
+            )
+            stored_key = state_rows[0][0] if state_rows else None
+            if stored_key == current_key:
+                return self._segment_count(season_id)
+
         selected: dict[tuple[str, str], tuple[float, float]] = {}
-        for index, left in enumerate(rows):
-            for right in rows[index + 1 :]:
-                kinds = []
-                if settings["scanIntroduction"]:
-                    kinds.append(
-                        (
-                            "intro",
-                            1,
-                            settings["minimumIntroDuration"],
-                            settings["maximumIntroDuration"],
-                            0.0,
-                        )
+        if len(rows) >= 2:
+            kinds = []
+            if settings["scanIntroduction"]:
+                kinds.append(
+                    (
+                        "intro",
+                        3,
+                        settings["minimumIntroDuration"],
+                        settings["maximumIntroDuration"],
+                        0.0,
                     )
-                if settings["scanCredits"]:
-                    kinds.append(
-                        (
-                            "outro",
-                            2,
-                            settings["minimumCreditsDuration"],
-                            settings["maximumCreditsAnalysisSeconds"],
-                            None,
-                        )
-                    )
-                for kind, column, minimum, maximum, offset in kinds:
-                    left_points = decode_fingerprint(left[column])
-                    right_points = decode_fingerprint(right[column])
-                    result = shared_region(
-                        left_points, right_points, settings, minimum, maximum
-                    )
-                    if not result:
-                        continue
-                    left_start, left_end, right_start, right_end = result
-                    left_duration = self._duration(left[0])
-                    right_duration = self._duration(right[0])
-                    left_offset = (
-                        offset
-                        if offset is not None
-                        else max(
-                            0.0,
-                            left_duration - settings["maximumCreditsAnalysisSeconds"],
-                        )
-                    )
-                    right_offset = (
-                        offset
-                        if offset is not None
-                        else max(
-                            0.0,
-                            right_duration - settings["maximumCreditsAnalysisSeconds"],
-                        )
-                    )
-                    self._choose(
-                        selected,
-                        left[0],
-                        kind,
-                        left_start + left_offset,
-                        min(left_duration, left_end + left_offset),
-                    )
-                    self._choose(
-                        selected,
-                        right[0],
-                        kind,
-                        right_start + right_offset,
-                        min(right_duration, right_end + right_offset),
-                    )
-        if selected:
-            with self.db.transaction() as cursor:
-                cursor.executemany(
-                    "INSERT INTO intro_outro_segments(media_file_id,segment_type,start_seconds,end_seconds) VALUES(?,?,?,?)",
-                    [
-                        (media_file_id, kind, start, end)
-                        for (media_file_id, kind), (start, end) in selected.items()
-                    ],
                 )
+            if settings["scanCredits"]:
+                kinds.append(
+                    (
+                        "outro",
+                        4,
+                        settings["minimumCreditsDuration"],
+                        settings["maximumCreditsAnalysisSeconds"],
+                        None,
+                    )
+                )
+            for index, left in enumerate(rows):
+                for right in rows[index + 1 :]:
+                    for kind, column, minimum, maximum, offset in kinds:
+                        left_points = decode_fingerprint(left[column])
+                        right_points = decode_fingerprint(right[column])
+                        result = shared_region(
+                            left_points, right_points, settings, minimum, maximum
+                        )
+                        if not result:
+                            continue
+                        left_start, left_end, right_start, right_end = result
+                        left_duration = float(left[2] or 0)
+                        right_duration = float(right[2] or 0)
+                        left_offset = (
+                            offset
+                            if offset is not None
+                            else max(
+                                0.0,
+                                left_duration
+                                - settings["maximumCreditsAnalysisSeconds"],
+                            )
+                        )
+                        right_offset = (
+                            offset
+                            if offset is not None
+                            else max(
+                                0.0,
+                                right_duration
+                                - settings["maximumCreditsAnalysisSeconds"],
+                            )
+                        )
+                        self._choose(
+                            selected,
+                            left[0],
+                            kind,
+                            left_start + left_offset,
+                            min(left_duration, left_end + left_offset),
+                        )
+                        self._choose(
+                            selected,
+                            right[0],
+                            kind,
+                            right_start + right_offset,
+                            min(right_duration, right_end + right_offset),
+                        )
+
+        existing_rows = self.db.execute(
+            "SELECT segment.media_file_id,segment.segment_type,"
+            "segment.start_seconds,segment.end_seconds "
+            "FROM intro_outro_segments segment "
+            "JOIN intro_outro_assets asset ON asset.media_file_id=segment.media_file_id "
+            "WHERE asset.season_id=?",
+            (season_id,),
+        )
+        existing = {
+            (row[0], row[1]): (float(row[2]), float(row[3])) for row in existing_rows
+        }
+        deleted = sorted(set(existing) - set(selected))
+        changed = sorted(
+            key for key, value in selected.items() if existing.get(key) != value
+        )
+        state_changed = state_available and stored_key != current_key
+        if deleted or changed or state_changed:
+            with self.db.transaction() as cursor:
+                for media_file_id, kind in deleted:
+                    cursor.execute(
+                        "DELETE FROM intro_outro_segments "
+                        "WHERE media_file_id=? AND segment_type=?",
+                        (media_file_id, kind),
+                    )
+                for media_file_id, kind in changed:
+                    start, end = selected[(media_file_id, kind)]
+                    if (media_file_id, kind) in existing:
+                        cursor.execute(
+                            "UPDATE intro_outro_segments SET start_seconds=?,end_seconds=? "
+                            "WHERE media_file_id=? AND segment_type=?",
+                            (start, end, media_file_id, kind),
+                        )
+                    else:
+                        cursor.execute(
+                            "INSERT INTO intro_outro_segments "
+                            "(media_file_id,segment_type,start_seconds,end_seconds) "
+                            "VALUES(?,?,?,?)",
+                            (media_file_id, kind, start, end),
+                        )
+                if state_available:
+                    cursor.execute(
+                        "INSERT INTO intro_outro_comparison_state "
+                        "(season_id,comparison_key,updated_at) VALUES(?,?,?) "
+                        "ON CONFLICT(season_id) DO UPDATE SET "
+                        "comparison_key=excluded.comparison_key,"
+                        "updated_at=excluded.updated_at",
+                        (season_id, current_key, now()),
+                    )
         return len(selected)
+
+    def _segment_count(self, season_id: str) -> int:
+        rows = self.db.execute(
+            "SELECT COUNT(*) FROM intro_outro_segments segment "
+            "JOIN intro_outro_assets asset ON asset.media_file_id=segment.media_file_id "
+            "WHERE asset.season_id=?",
+            (season_id,),
+        )
+        return int(rows[0][0] or 0) if rows else 0
 
     def _duration(self, media_file_id: str) -> float:
         rows = self.db.execute(
@@ -705,9 +904,15 @@ def _select_region(
 class IntroOutroDetector:
     def __init__(self, store=None):
         self.store = store or IntroOutroStore()
+        self.ffmpeg_threads = DEFAULT_INTRO_OUTRO_FFMPEG_THREADS
 
     @staticmethod
-    def fingerprint_command(path: Path, start: float, duration: float) -> list[str]:
+    def fingerprint_command(
+        path: Path,
+        start: float,
+        duration: float,
+        ffmpeg_threads: int = DEFAULT_INTRO_OUTRO_FFMPEG_THREADS,
+    ) -> list[str]:
         executable = ffmpeg_path()
         if not executable:
             raise RuntimeError("FFmpeg is not available.")
@@ -716,8 +921,9 @@ class IntroOutroDetector:
             "-hide_banner",
             "-loglevel",
             "error",
+            "-nostdin",
             "-threads",
-            "1",
+            str(ffmpeg_threads),
             "-ss",
             str(start),
             "-i",
@@ -740,27 +946,22 @@ class IntroOutroDetector:
     ) -> bytes:
         if not path.is_file():
             raise RuntimeError("Media source is unavailable.")
-        process = subprocess.Popen(
-            self.fingerprint_command(path, start, duration),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        output = run_ffmpeg(
+            self.fingerprint_command(
+                path,
+                start,
+                duration,
+                getattr(self, "ffmpeg_threads", DEFAULT_INTRO_OUTRO_FFMPEG_THREADS),
+            ),
+            should_terminate=should_terminate,
         )
-        while True:
-            try:
-                output, error = process.communicate(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-            if should_terminate():
-                process.terminate()
-                process.communicate(timeout=10)
-                raise RuntimeError("Terminated by administrator")
-        if process.returncode or not output or len(output) % 4:
+        if not output or len(output) % 4:
+            if not output:
+                raise EmptyFingerprint(
+                    "FFmpeg did not return a raw Chromaprint fingerprint."
+                )
             raise RuntimeError(
-                (
-                    error.decode("utf-8", "replace")
-                    or "FFmpeg did not return a raw Chromaprint fingerprint."
-                ).strip()[-1000:]
+                "FFmpeg returned an invalid raw Chromaprint fingerprint."
             )
         return output
 
@@ -770,24 +971,42 @@ class IntroOutroDetector:
         if recover is not None:
             recover()
         settings = self.store.settings()
+        self.ffmpeg_threads = settings["introOutroFfmpegThreads"]
         queued = self.store.queue_pending(settings=settings)
         workers = settings["introOutroWorkers"]
         job_store.update_run(
             run_id,
             state="running",
             started_at=now(),
-            message="Detecting intro and outro segments",
+            message=format_progress_message(
+                "Preparing intro/outro analysis", detail=f"{queued} episodes queued"
+            ),
+            progress_phase="preparation",
+            progress_label="Preparing intro/outro analysis",
+            progress_stage_current=0,
+            progress_stage_total=queued,
+            progress_stage_unit="episodes",
         )
-        completed = failures = markers = 0
+        completed = partial_count = failures = markers = 0
         progress_lock = Lock()
+        reporter = ProgressReporter(
+            partial(job_store.update_run, run_id), unit="episodes"
+        )
+        reporter.stage("fingerprinting", "Fingerprinting intros/outros", total=queued)
 
         def process_assets():
-            nonlocal completed, failures
+            nonlocal completed, partial_count, failures
             while not should_terminate():
                 asset = self.store.claim_next()
                 if not asset:
                     return
                 try:
+                    item_label = resolve_progress_item(
+                        getattr(self.store, "db", None),
+                        asset.get("entityId"),
+                        asset.get("path"),
+                    )
+                    reporter.start(item_label)
                     duration = asset["durationSeconds"]
                     intro_duration = min(
                         duration * settings["analysisPercent"] / 100.0,
@@ -797,30 +1016,41 @@ class IntroOutroDetector:
                         duration, float(settings["maximumCreditsAnalysisSeconds"])
                     )
                     outro_start = max(0.0, duration - outro_duration)
+                    window_errors: list[str] = []
+
+                    def fingerprint_window(
+                        kind: str, start: float, window_duration: float
+                    ) -> bytes | None:
+                        try:
+                            return self._fingerprint(
+                                asset["path"], start, window_duration, should_terminate
+                            )
+                        except Exception as error:
+                            if should_terminate():
+                                raise
+                            window_errors.append(f"{kind}: {error}")
+                            return None
+
                     intro = (
-                        self._fingerprint(
-                            asset["path"], 0.0, intro_duration, should_terminate
-                        )
+                        fingerprint_window("intro", 0.0, intro_duration)
                         if settings["scanIntroduction"]
                         else None
                     )
                     outro = (
-                        self._fingerprint(
-                            asset["path"], outro_start, outro_duration, should_terminate
-                        )
+                        fingerprint_window("outro", outro_start, outro_duration)
                         if settings["scanCredits"]
                         else None
                     )
-                    self.store.mark_fingerprinted(asset, intro, outro)
+                    if window_errors and intro is None and outro is None:
+                        raise RuntimeError("; ".join(window_errors))
+                    warning = "; ".join(window_errors) if window_errors else None
+                    self.store.mark_fingerprinted(asset, intro, outro, warning)
                     with progress_lock:
-                        completed += 1
-                        current = completed
-                        job_store.update_run(
-                            run_id,
-                            progress_current=current,
-                            progress_total=max(current, queued),
-                            message=f"Fingerprinting episode {current}",
-                        )
+                        if warning:
+                            partial_count += 1
+                        else:
+                            completed += 1
+                    reporter.settle(item_label)
                 except Exception as error:
                     if should_terminate():
                         self.store.requeue(asset)
@@ -828,6 +1058,14 @@ class IntroOutroDetector:
                     self.store.mark_failed(asset, str(error))
                     with progress_lock:
                         failures += 1
+                    reporter.settle(
+                        resolve_progress_item(
+                            getattr(self.store, "db", None),
+                            asset.get("entityId"),
+                            asset.get("path"),
+                        ),
+                        failed=True,
+                    )
                     logger.warning(
                         "intro/outro detection failed entity_id=%s media_file_id=%s error=%s",
                         asset["entityId"],
@@ -848,26 +1086,61 @@ class IntroOutroDetector:
                 finished_at=now(),
                 message="Terminated by administrator",
             )
-        elif failures:
-            message = f"Fingerprinted {completed} episodes; {failures} failed"
+        else:
+            reporter.stage("comparison", "Comparing fingerprints", total=None)
+            comparison_progress = lambda current, total, season: job_store.update_run(
+                run_id,
+                progress_current=current,
+                progress_total=total,
+                progress_phase="comparison",
+                progress_label="Comparing fingerprints",
+                progress_stage_current=current,
+                progress_stage_total=total,
+                progress_stage_unit="seasons",
+                progress_current_item=resolve_progress_item(
+                    getattr(self.store, "db", None), season, season
+                ),
+                message=format_progress_message(
+                    "Comparing fingerprints",
+                    item=resolve_progress_item(
+                        getattr(self.store, "db", None), season, season
+                    ),
+                    current=current,
+                    total=total,
+                    unit="seasons",
+                ),
+            )
+            try:
+                markers = self.store.recompute_all(
+                    settings, progress=comparison_progress
+                )
+            except TypeError as error:
+                if "progress" not in str(error):
+                    raise
+                markers = self.store.recompute_all(settings)
+            reporter.finish()
+            processed = completed + partial_count
+            warning_count = partial_count + failures
+            if warning_count:
+                state = "completed_with_warnings"
+                message = (
+                    f"Detected {markers} intro/outro markers; "
+                    f"fingerprinted {completed} episodes; {partial_count} partial; "
+                    f"{failures} failed"
+                )
+            else:
+                state = "completed"
+                message = (
+                    f"Detected {markers} intro/outro markers"
+                    if markers
+                    else "Intro and outro detection is current"
+                )
             job_store.update_run(
                 run_id,
-                state="failed",
-                progress_current=completed,
-                progress_total=max(completed + failures, queued),
+                state=state,
+                progress_current=processed,
+                progress_total=max(processed + failures, queued),
                 finished_at=now(),
                 message=message,
-                error=message,
-            )
-        else:
-            markers = self.store.recompute_all(settings)
-            job_store.update_run(
-                run_id,
-                state="completed",
-                progress_current=completed,
-                progress_total=max(completed, queued),
-                finished_at=now(),
-                message=f"Detected {markers} intro/outro markers"
-                if markers
-                else "Intro and outro detection is current",
+                error=None,
             )

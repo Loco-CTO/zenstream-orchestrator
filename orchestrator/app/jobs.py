@@ -15,12 +15,18 @@ from app.library import JobTerminated
 from app.library import runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.logging_config import get_logger
-from app.metadata_domain import choose_artwork
+from app.metadata_domain import choose_artwork, language_family
 from app.metadata_services import (
     FACT_FIELDS,
     TEXT_FIELDS,
     MetadataIngestService,
     metadata_task_results,
+)
+from app.models.metadata import MetadataLanguageSettings
+from app.progress import (
+    WholeJobProgress,
+    format_progress_message,
+    resolve_progress_item,
 )
 from app.providers import ProviderError
 from app.trickplay import TrickplayExtractor
@@ -28,6 +34,17 @@ from app.trickplay import TrickplayExtractor
 logger = get_logger("jobs")
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
 ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
+ANALYSIS_KINDS = {"trickplay_extract", "intro_outro_detect"}
+
+
+def _english_configured() -> bool:
+    return any(
+        language_family(value) == "en" for value in MetadataLanguageSettings().get()
+    )
+
+
+def _prefer_no_language_for_backdrop() -> bool:
+    return MetadataLanguageSettings().prefer_no_language_for_backdrop()
 
 
 def now() -> str:
@@ -36,6 +53,27 @@ def now() -> str:
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _local_next(time_text: str, weekday: int | None = None) -> str:
+    """Return the next server-local calendar occurrence as a UTC ISO instant."""
+    try:
+        hour, minute = (int(part) for part in time_text.split(":", 1))
+    except (TypeError, ValueError):
+        raise ValueError("time must be HH:mm")
+    if hour not in range(24) or minute not in range(60):
+        raise ValueError("time must be HH:mm")
+    local_now = datetime.now().astimezone()
+    candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if weekday is not None:
+        if weekday not in range(7):
+            raise ValueError("weekday must be between 0 and 6")
+        candidate += timedelta(days=(weekday - candidate.weekday()) % 7)
+        if candidate <= local_now:
+            candidate += timedelta(days=7)
+    elif candidate <= local_now:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc).isoformat()
 
 
 def _usable_metadata_value(value) -> bool:
@@ -50,6 +88,107 @@ def _ready_cache_path(value) -> bool:
         return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def _metadata_upgrade_needed(
+    before: dict, fresh: dict, locale: str, provider: str
+) -> bool:
+    """Return whether fresh non-empty provider data can improve existing data."""
+    if not isinstance(before, dict) or not isinstance(fresh, dict):
+        return False
+    for field in TEXT_FIELDS | FACT_FIELDS:
+        previous = before.get(field)
+        current = fresh.get(field)
+        if _usable_metadata_value(previous) and _usable_metadata_value(current):
+            if previous != current:
+                return True
+
+    prefer_no_language_for_backdrop = _prefer_no_language_for_backdrop()
+    for image_type in ARTWORK_TYPES:
+        previous = choose_artwork(
+            before.get("images", []),
+            locale,
+            image_type,
+            before.get("originalLanguage"),
+            [provider],
+            include_english=_english_configured(),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
+        )
+        current = choose_artwork(
+            fresh.get("images", []),
+            locale,
+            image_type,
+            fresh.get("originalLanguage"),
+            [provider],
+            include_english=_english_configured(),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
+        )
+        if (
+            previous
+            and current
+            and _usable_metadata_value(previous.get("url"))
+            and _usable_metadata_value(current.get("url"))
+            and previous.get("url") != current.get("url")
+        ):
+            return True
+
+    previous_credits = before.get("credits")
+    current_credits = fresh.get("credits")
+    if isinstance(previous_credits, dict) and isinstance(current_credits, dict):
+        for credit_type in ("cast", "crew"):
+            previous_values = previous_credits.get(credit_type)
+            current_values = current_credits.get(credit_type)
+            if (
+                isinstance(previous_values, list)
+                and previous_values
+                and isinstance(current_values, list)
+                and current_values
+                and previous_values != current_values
+            ):
+                return True
+    return False
+
+
+def _fetch_upgrade_documents(
+    ingest: MetadataIngestService,
+    provider: str,
+    entity_type: str,
+    provider_id: str,
+    locales: list[str],
+) -> dict[str, dict]:
+    """Fetch and cache fresh documents without projecting unchanged upgrades."""
+    service = ingest.metadata_service
+    fetch_locales = getattr(service, "fetch_locales", None)
+    if fetch_locales is not None:
+        try:
+            return fetch_locales(
+                provider,
+                entity_type,
+                provider_id,
+                locales,
+                force=True,
+                project=False,
+            )
+        except TypeError as error:
+            if "project" not in str(error):
+                raise
+            return fetch_locales(
+                provider,
+                entity_type,
+                provider_id,
+                locales,
+                force=True,
+            )
+    return {
+        locale: service.fetch(
+            provider,
+            entity_type,
+            provider_id,
+            locale,
+            force=True,
+        )
+        for locale in locales
+    }
 
 
 def _metadata_document_gaps(
@@ -72,14 +211,20 @@ def _metadata_document_gaps(
         return {"identity:orphaned"}, []
 
     projected_fields = TEXT_FIELDS | FACT_FIELDS
-    source_images = {
-        (str(image.get("type")), str(image.get("url")))
-        for image in document.get("images", [])
-        if isinstance(image, dict)
-        and image.get("type") in ARTWORK_TYPES
-        and isinstance(image.get("url"), str)
-        and image.get("url")
-    }
+    prefer_no_language_for_backdrop = _prefer_no_language_for_backdrop()
+    source_images = set()
+    for image_type in ARTWORK_TYPES:
+        expected = choose_artwork(
+            document.get("images", []),
+            locale,
+            image_type,
+            document.get("originalLanguage"),
+            [provider],
+            include_english=_english_configured(),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
+        )
+        if expected and expected.get("url"):
+            source_images.add((image_type, str(expected["url"])))
     image_columns = {row[1] for row in db.execute("PRAGMA table_info(metadata_images)")}
     blur_hash_column = ",blur_hash" if "blur_hash" in image_columns else ""
     image_rows = db.execute(
@@ -156,6 +301,8 @@ def _metadata_document_gaps(
                 image_type,
                 document.get("originalLanguage"),
                 [provider],
+                include_english=_english_configured(),
+                prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
             )
             if expected and image_type not in projected_images:
                 gaps.add(f"projection-artwork:{image_type}")
@@ -360,11 +507,61 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
 class JobStore:
     def __init__(self):
         self.db = Config().database
+        self._progress: dict[str, WholeJobProgress] = {}
+
+    def begin_progress(self, run_id: str, kind: str) -> None:
+        if not hasattr(self, "_progress"):
+            self._progress = {}
+        self._progress[run_id] = WholeJobProgress(kind)
+
+    def end_progress(self, run_id: str) -> None:
+        getattr(self, "_progress", {}).pop(run_id, None)
+
+    def _progress_columns(self, table: str) -> list[str]:
+        try:
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+        except Exception:
+            columns = set()
+        return [
+            f"{name}" if name in columns else f"NULL AS {name}"
+            for name in (
+                "progress_phase",
+                "progress_label",
+                "progress_stage_current",
+                "progress_stage_total",
+                "progress_stage_unit",
+                "progress_current_item",
+            )
+        ]
+
+    @staticmethod
+    def _progress_detail(row: tuple, offset: int) -> dict | None:
+        values = row[offset : offset + 6]
+        if not any(value is not None for value in values):
+            return None
+        value = {
+            "phase": values[0] or "processing",
+            "label": values[1] or "Working",
+            "current": values[2],
+            "total": values[3],
+            "unit": values[4],
+            "item": values[5],
+        }
+        return value
 
     @staticmethod
     def _definition(row) -> dict:
+        # Keep the mapper tolerant of pre-trigger test databases while the
+        # production schema is migrated to trigger-owned scheduling.
+        if len(row) >= 15:
+            interval_minutes, enabled, config, next_run, last_run = row[5:10]
+            offset = 0
+        else:
+            interval_minutes, enabled = None, None
+            config, next_run, last_run = row[5:8]
+            offset = -2
         try:
-            config = json.loads(row[7] or "{}")
+            config = json.loads(config or "{}")
         except json.JSONDecodeError:
             config = {}
         return {
@@ -373,21 +570,94 @@ class JobStore:
             "name": row[2],
             "description": row[3],
             "kind": row[4],
-            "intervalMinutes": row[5],
-            "enabled": bool(row[6]),
             "config": config,
-            "nextRunAt": row[8],
-            "lastRunAt": row[9],
-            "lastRunId": row[10],
-            "lastState": row[11],
-            "lastMessage": row[12],
-            "createdAt": row[13],
-            "updatedAt": row[14],
+            "nextRunAt": next_run,
+            "lastRunAt": last_run,
+            "lastRunId": row[10 + offset],
+            "lastState": row[11 + offset],
+            "lastMessage": row[12 + offset],
+            "createdAt": row[13 + offset],
+            "updatedAt": row[14 + offset],
         }
+
+    def _definition_select(self) -> str:
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")
+        }
+        legacy = {"interval_minutes", "enabled"}.issubset(columns)
+        if legacy:
+            return "id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at"
+        return "id,job_key,name,description,kind,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at"
+
+    def _with_triggers(self, definition: dict) -> dict:
+        try:
+            rows = self.db.execute(
+                "SELECT id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,options "
+                "FROM job_schedule_triggers WHERE definition_id=? ORDER BY created_at",
+                (definition["id"],),
+            )
+        except Exception:
+            try:
+                rows = self.db.execute(
+                    "SELECT id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,NULL FROM job_schedule_triggers WHERE definition_id=? ORDER BY created_at",
+                    (definition["id"],),
+                )
+            except Exception:
+                rows = []
+        triggers = []
+        for row in rows:
+            item = {"id": row[0], "type": row[1]}
+            if row[1] == "interval":
+                item["intervalSeconds"] = row[2]
+            elif row[1] == "daily":
+                item["time"] = row[3]
+            elif row[1] == "weekly":
+                item["weekday"] = row[4]
+                item["time"] = row[3]
+            item["nextRunAt"] = row[5]
+            try:
+                item["options"] = json.loads(row[6] or "{}")
+            except (IndexError, TypeError, json.JSONDecodeError):
+                item["options"] = {}
+            triggers.append(item)
+        definition["triggers"] = triggers
+        definition["optionDefinitions"] = self.option_definitions(definition["kind"])
+        return definition
+
+    @staticmethod
+    def option_definitions(kind: str) -> list[dict]:
+        if kind == "metadata_refresh":
+            return [
+                {
+                    "key": "preserveCachedAssets",
+                    "label": "Preserve cached assets",
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Reuse valid cached artwork and portraits instead of forcing a refresh.",
+                }
+            ]
+        return []
+
+    @classmethod
+    def validate_options(cls, kind: str, options: dict | None) -> dict:
+        values = options or {}
+        if not isinstance(values, dict):
+            raise ValueError("options must be an object")
+        definitions = {item["key"]: item for item in cls.option_definitions(kind)}
+        unknown = set(values) - set(definitions)
+        if unknown:
+            raise ValueError(f"Unsupported task option: {sorted(unknown)[0]}")
+        result = {}
+        for key, definition in definitions.items():
+            value = values.get(key, definition.get("default"))
+            if definition["type"] == "boolean" and not isinstance(value, bool):
+                raise ValueError(f"{key} must be a boolean")
+            result[key] = value
+        return result
 
     @staticmethod
     def _run(row) -> dict:
-        return {
+        value = {
             "id": row[0],
             "definitionId": row[1],
             "libraryId": row[2],
@@ -403,26 +673,35 @@ class JobStore:
             "finishedAt": row[12],
             "threadName": row[13],
         }
+        value["progressDetail"] = JobStore._progress_detail(row, 14)
+        option_offset = 20
+        if len(row) > option_offset:
+            value["sourceTriggerId"] = row[option_offset]
+            try:
+                value["options"] = json.loads(row[option_offset + 1] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                value["options"] = {}
+        return value
 
     def definitions(self) -> list[dict]:
         rows = self.db.execute(
-            "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions ORDER BY name COLLATE NOCASE"
+            f"SELECT {self._definition_select()} FROM job_definitions ORDER BY name COLLATE NOCASE"
         )
-        return [self._definition(row) for row in rows]
+        return [self._with_triggers(self._definition(row)) for row in rows]
 
     def definition(self, definition_id: str) -> dict | None:
         rows = self.db.execute(
-            "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE id=?",
+            f"SELECT {self._definition_select()} FROM job_definitions WHERE id=?",
             (definition_id,),
         )
-        return self._definition(rows[0]) if rows else None
+        return self._with_triggers(self._definition(rows[0])) if rows else None
 
     def by_key(self, key: str) -> dict | None:
         rows = self.db.execute(
-            "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE job_key=?",
+            f"SELECT {self._definition_select()} FROM job_definitions WHERE job_key=?",
             (key,),
         )
-        return self._definition(rows[0]) if rows else None
+        return self._with_triggers(self._definition(rows[0])) if rows else None
 
     def ensure(
         self,
@@ -438,27 +717,52 @@ class JobStore:
         if existing:
             return existing
         timestamp = now()
-        next_run = (
-            datetime.now(timezone.utc)
-            + timedelta(minutes=max(5, min(43200, int(interval or 1440))))
-        ).isoformat()
         definition_id = new_id()
-        self.db.execute(
-            "INSERT INTO job_definitions(id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (
+        columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(job_definitions)")
+        }
+        if {"interval_minutes", "enabled"}.issubset(columns):
+            self.db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    definition_id,
+                    key,
+                    name,
+                    description,
+                    kind,
+                    max(5, min(43200, int(interval or 1440))),
+                    int(enabled),
+                    json.dumps(config or {}, ensure_ascii=False),
+                    None,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        else:
+            self.db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,description,kind,config,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    definition_id,
+                    key,
+                    name,
+                    description,
+                    kind,
+                    json.dumps(config or {}, ensure_ascii=False),
+                    None,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        if enabled:
+            self._replace_triggers(
                 definition_id,
-                key,
-                name,
-                description,
-                kind,
-                max(5, min(43200, int(interval or 1440))),
-                int(enabled),
-                json.dumps(config or {}, ensure_ascii=False),
-                next_run,
-                timestamp,
-                timestamp,
-            ),
-        )
+                [
+                    {
+                        "type": "interval",
+                        "intervalSeconds": max(1, int(interval or 1440) * 60),
+                    }
+                ],
+            )
         return self.definition(definition_id)  # type: ignore[return-value]
 
     def ensure_defaults(self) -> None:
@@ -474,6 +778,19 @@ class JobStore:
             self.db.execute(
                 "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
                 (now(), now(), definition["id"]),
+            )
+        upgrade = self.ensure(
+            "metadata_upgrade",
+            "Find metadata upgrade",
+            "Refetch provider metadata and repair existing metadata that can be improved.",
+            "metadata_upgrade",
+            10080,
+            {"locales": ["en"], "batchSize": 50},
+        )
+        if upgrade["lastRunAt"] is None:
+            self.db.execute(
+                "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+                (now(), now(), upgrade["id"]),
             )
         cleanup = self.ensure(
             "metadata_cleanup",
@@ -540,32 +857,287 @@ class JobStore:
         )
         return self.definition(definition["id"])  # type: ignore[return-value]
 
+    @staticmethod
+    def _library_definition_key_owner(job_key: str) -> str | None:
+        for prefix in ("library_scan:", "library_delta_verify:"):
+            if job_key.startswith(prefix):
+                return job_key.removeprefix(prefix) or None
+        return None
+
+    @classmethod
+    def _library_definition_owner(cls, job_key: str, config: str | None) -> str | None:
+        try:
+            library_id = json.loads(config or "{}").get("libraryId")
+        except (AttributeError, json.JSONDecodeError):
+            library_id = None
+        if library_id:
+            return str(library_id)
+        return cls._library_definition_key_owner(job_key)
+
+    def _delete_definitions(self, definition_ids: list[str]) -> None:
+        definition_ids = list(dict.fromkeys(definition_ids))
+        if not definition_ids:
+            return
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        with self.db.transaction() as cursor:
+            for definition_id in definition_ids:
+                if "job_schedule_triggers" in tables:
+                    cursor.execute(
+                        "DELETE FROM job_schedule_triggers WHERE definition_id=?",
+                        (definition_id,),
+                    )
+                if "job_runs" in tables:
+                    cursor.execute(
+                        "DELETE FROM job_runs WHERE definition_id=?", (definition_id,)
+                    )
+                cursor.execute(
+                    "DELETE FROM job_definitions WHERE id=?", (definition_id,)
+                )
+
+    def remove_library_definitions(self, library_id: str) -> None:
+        rows = self.db.execute(
+            "SELECT id,job_key,config FROM job_definitions WHERE kind='library_scan'"
+        )
+        self._delete_definitions(
+            [
+                row[0]
+                for row in rows
+                if library_id
+                in {
+                    self._library_definition_owner(row[1], row[2]),
+                    self._library_definition_key_owner(row[1]),
+                }
+            ]
+        )
+
+    def reconcile_library_definitions(self, libraries: list[dict]) -> None:
+        libraries_by_id = {str(library["id"]): library for library in libraries}
+        definitions_by_library: dict[str, list[tuple[str, str]]] = {}
+        orphan_ids = []
+        for definition_id, job_key, config in self.db.execute(
+            "SELECT id,job_key,config FROM job_definitions WHERE kind='library_scan'"
+        ):
+            library_id = self._library_definition_owner(job_key, config)
+            key_library_id = self._library_definition_key_owner(job_key)
+            if library_id not in libraries_by_id and key_library_id in libraries_by_id:
+                library_id = key_library_id
+            if library_id not in libraries_by_id:
+                orphan_ids.append(definition_id)
+                continue
+            definitions_by_library.setdefault(library_id, []).append(
+                (definition_id, job_key)
+            )
+        self._delete_definitions(orphan_ids)
+
+        for library_id, definitions in definitions_by_library.items():
+            canonical_key = f"library_scan:{library_id}"
+            keeper = next(
+                (
+                    definition
+                    for definition in definitions
+                    if definition[1] == canonical_key
+                ),
+                definitions[0],
+            )
+            self._delete_definitions(
+                [
+                    definition_id
+                    for definition_id, _key in definitions
+                    if definition_id != keeper[0]
+                ]
+            )
+            if keeper[1] != canonical_key:
+                self.db.execute(
+                    "UPDATE job_definitions SET job_key=?,updated_at=? WHERE id=?",
+                    (canonical_key, now(), keeper[0]),
+                )
+
+        for library in libraries_by_id.values():
+            self.ensure_library(library)
+
+    @staticmethod
+    def _validate_trigger(trigger: dict) -> dict:
+        trigger_type = str(trigger.get("type", "")).strip().lower()
+        if trigger_type == "interval":
+            seconds = int(trigger.get("intervalSeconds", 0))
+            if not 1 <= seconds <= 2_592_000:
+                raise ValueError("intervalSeconds must be between 1 and 2592000")
+            return {"type": "interval", "intervalSeconds": seconds}
+        if trigger_type == "daily":
+            value = str(trigger.get("time", ""))
+            _local_next(value)
+            return {"type": "daily", "time": value}
+        if trigger_type == "weekly":
+            value = str(trigger.get("time", ""))
+            weekday = int(trigger.get("weekday", -1))
+            _local_next(value, weekday)
+            return {"type": "weekly", "weekday": weekday, "time": value}
+        if trigger_type == "startup":
+            return {"type": "startup"}
+        raise ValueError("Unsupported schedule trigger")
+
+    def _next_for_trigger(
+        self, trigger: dict, base: datetime | None = None
+    ) -> str | None:
+        if trigger["type"] == "startup":
+            return None
+        if trigger["type"] == "interval":
+            return (
+                (base or datetime.now(timezone.utc))
+                + timedelta(seconds=trigger["intervalSeconds"])
+            ).isoformat()
+        if trigger["type"] == "daily":
+            return _local_next(trigger["time"])
+        return _local_next(trigger["time"], trigger["weekday"])
+
+    def _replace_triggers(self, definition_id: str, triggers: list[dict]) -> None:
+        definition = self.definition(definition_id)
+        if not definition:
+            raise KeyError("Job definition not found")
+        validated = [
+            {
+                **self._validate_trigger(trigger),
+                "id": str(trigger.get("id") or new_id()),
+                "options": self.validate_options(
+                    definition["kind"], trigger.get("options")
+                ),
+            }
+            for trigger in triggers
+        ]
+        timestamp = now()
+        self.db.execute(
+            "DELETE FROM job_schedule_triggers WHERE definition_id=?", (definition_id,)
+        )
+        for trigger in validated:
+            try:
+                self.db.execute(
+                    "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,options,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        trigger["id"],
+                        definition_id,
+                        trigger["type"],
+                        trigger.get("intervalSeconds"),
+                        trigger.get("time"),
+                        trigger.get("weekday"),
+                        self._next_for_trigger(trigger),
+                        json.dumps(trigger["options"], ensure_ascii=False),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            except Exception:
+                self.db.execute(
+                    "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        trigger["id"],
+                        definition_id,
+                        trigger["type"],
+                        trigger.get("intervalSeconds"),
+                        trigger.get("time"),
+                        trigger.get("weekday"),
+                        self._next_for_trigger(trigger),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+
+    def add_trigger(self, definition_id: str, trigger: dict) -> dict:
+        definition = self.definition(definition_id)
+        if not definition:
+            raise KeyError("Job definition not found")
+        validated = self._validate_trigger(trigger)
+        validated["options"] = self.validate_options(
+            definition["kind"], trigger.get("options")
+        )
+        trigger_id = str(trigger.get("id") or new_id())
+        timestamp = now()
+        try:
+            self.db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,options,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    trigger_id,
+                    definition_id,
+                    validated["type"],
+                    validated.get("intervalSeconds"),
+                    validated.get("time"),
+                    validated.get("weekday"),
+                    self._next_for_trigger(validated),
+                    json.dumps(validated["options"], ensure_ascii=False),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        except Exception:
+            self.db.execute(
+                "INSERT INTO job_schedule_triggers(id,definition_id,trigger_type,interval_seconds,time_of_day,weekday,next_run_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    trigger_id,
+                    definition_id,
+                    validated["type"],
+                    validated.get("intervalSeconds"),
+                    validated.get("time"),
+                    validated.get("weekday"),
+                    self._next_for_trigger(validated),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        self.db.execute(
+            "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+            (self._earliest_next(definition_id), timestamp, definition_id),
+        )
+        return self.definition(definition_id)  # type: ignore[return-value]
+
+    def remove_trigger(self, definition_id: str, trigger_id: str) -> dict:
+        definition = self.definition(definition_id)
+        if not definition:
+            raise KeyError("Job definition not found")
+        exists = self.db.execute(
+            "SELECT 1 FROM job_schedule_triggers WHERE id=? AND definition_id=?",
+            (trigger_id, definition_id),
+        )
+        if not exists:
+            raise KeyError("Trigger not found")
+        self.db.execute(
+            "DELETE FROM job_schedule_triggers WHERE id=? AND definition_id=?",
+            (trigger_id, definition_id),
+        )
+        self.db.execute(
+            "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+            (self._earliest_next(definition_id), now(), definition_id),
+        )
+        return self.definition(definition_id)  # type: ignore[return-value]
+
+    def _earliest_next(self, definition_id: str) -> str | None:
+        try:
+            rows = self.db.execute(
+                "SELECT next_run_at FROM job_schedule_triggers WHERE definition_id=? "
+                "AND next_run_at IS NOT NULL ORDER BY next_run_at LIMIT 1",
+                (definition_id,),
+            )
+        except Exception:
+            return None
+        return rows[0][0] if rows else None
+
     def update_definition(self, definition_id: str, values: dict) -> dict:
         definition = self.definition(definition_id)
         if not definition:
             raise KeyError("Job definition not found")
-        interval = max(
-            5,
-            min(
-                43200,
-                int(
-                    values.get("intervalMinutes", definition["intervalMinutes"]) or 1440
-                ),
-            ),
-        )
-        enabled = int(bool(values.get("enabled", definition["enabled"])))
+        if "intervalMinutes" in values or "enabled" in values:
+            raise ValueError("intervalMinutes and enabled are trigger properties")
         name = str(values.get("name", definition["name"])).strip() or definition["name"]
         config = values.get("config", definition["config"])
         self.db.execute(
-            "UPDATE job_definitions SET name=?,interval_minutes=?,enabled=?,config=?,next_run_at=?,updated_at=? WHERE id=?",
+            "UPDATE job_definitions SET name=?,config=?,next_run_at=?,updated_at=? WHERE id=?",
             (
                 name,
-                interval,
-                enabled,
                 json.dumps(config or {}, ensure_ascii=False),
-                (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
-                if enabled
-                else None,
+                self._earliest_next(definition_id),
                 now(),
                 definition_id,
             ),
@@ -573,23 +1145,45 @@ class JobStore:
         return self.definition(definition_id)  # type: ignore[return-value]
 
     def runs(self, definition_id: str | None = None, limit: int = 100) -> list[dict]:
+        detail = ",".join(self._progress_columns("job_runs"))
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}
+        snapshot = (
+            ",source_trigger_id,options"
+            if {"source_trigger_id", "options"}.issubset(columns)
+            else ",NULL,NULL"
+        )
         if definition_id:
             rows = self.db.execute(
-                "SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
+                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail}{snapshot} FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
                 (definition_id, limit),
             )
         else:
             rows = self.db.execute(
-                "SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name FROM job_runs ORDER BY created_at DESC LIMIT ?",
+                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail}{snapshot} FROM job_runs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
         return [self._run(row) for row in rows]
 
-    def library_runs(self, library_id: str, limit: int = 10) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at FROM library_jobs WHERE library_id=? ORDER BY created_at DESC LIMIT ?",
-            (library_id, limit),
+    def library_runs(
+        self,
+        library_id: str,
+        limit: int = 10,
+        kinds: set[str] | None = None,
+    ) -> list[dict]:
+        query = (
+            "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,"
+            + ",".join(self._progress_columns("library_jobs"))
+            + ",NULL,NULL "
+            "FROM library_jobs WHERE library_id=?"
         )
+        params: list[object] = [library_id]
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            query += f" AND kind IN ({placeholders})"
+            params.extend(sorted(kinds))
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.db.execute(query, params)
         return [
             {
                 "id": row[0],
@@ -606,6 +1200,7 @@ class JobStore:
                 "startedAt": row[10],
                 "finishedAt": row[11],
                 "threadName": None,
+                "progressDetail": self._progress_detail(row, 12),
             }
             for row in rows
         ]
@@ -624,7 +1219,12 @@ class JobStore:
         )
         return self.runs(definition["id"], 1)[0]
 
-    def create_or_get_active_run(self, definition: dict) -> tuple[dict, bool]:
+    def create_or_get_active_run(
+        self,
+        definition: dict,
+        options: dict | None = None,
+        source_trigger_id: str | None = None,
+    ) -> tuple[dict, bool]:
         """Atomically keep at most one queued/running run for a task definition."""
         timestamp = now()
         with self.db.transaction() as cursor:
@@ -639,16 +1239,34 @@ class JobStore:
             else:
                 run_id = new_id()
                 library_id = (definition.get("config") or {}).get("libraryId")
-                cursor.execute(
-                    "INSERT INTO job_runs(id,definition_id,library_id,kind,created_at) VALUES(?,?,?,?,?)",
-                    (
-                        run_id,
-                        definition["id"],
-                        library_id,
-                        definition["kind"],
-                        timestamp,
-                    ),
-                )
+                values = self.validate_options(definition["kind"], options)
+                columns = {
+                    row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")
+                }
+                if {"source_trigger_id", "options"}.issubset(columns):
+                    cursor.execute(
+                        "INSERT INTO job_runs(id,definition_id,library_id,kind,source_trigger_id,options,created_at) VALUES(?,?,?,?,?,?,?)",
+                        (
+                            run_id,
+                            definition["id"],
+                            library_id,
+                            definition["kind"],
+                            source_trigger_id,
+                            json.dumps(values, ensure_ascii=False),
+                            timestamp,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO job_runs(id,definition_id,library_id,kind,created_at) VALUES(?,?,?,?,?)",
+                        (
+                            run_id,
+                            definition["id"],
+                            library_id,
+                            definition["kind"],
+                            timestamp,
+                        ),
+                    )
                 cursor.execute(
                     "UPDATE job_definitions SET last_state='queued',last_message=?,updated_at=? WHERE id=?",
                     ("Queued", timestamp, definition["id"]),
@@ -665,29 +1283,66 @@ class JobStore:
             )
         )
 
-    def due(self) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at FROM job_definitions WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=? ORDER BY next_run_at",
-            (now(),),
-        )
-        return [self._definition(row) for row in rows]
+    def due_triggers(self) -> list[dict]:
+        current = now()
+        try:
+            rows = self.db.execute(
+                "SELECT t.id,t.definition_id,t.trigger_type,t.interval_seconds,t.time_of_day,t.weekday,t.next_run_at,t.options FROM job_schedule_triggers t WHERE t.next_run_at IS NOT NULL AND t.next_run_at<=? ORDER BY t.next_run_at,t.created_at",
+                (current,),
+            )
+        except Exception:
+            rows = self.db.execute(
+                "SELECT t.id,t.definition_id,t.trigger_type,t.interval_seconds,t.time_of_day,t.weekday,t.next_run_at,NULL FROM job_schedule_triggers t WHERE t.next_run_at IS NOT NULL AND t.next_run_at<=? ORDER BY t.next_run_at,t.created_at",
+                (current,),
+            )
+        values = []
+        for row in rows:
+            definition = self.definition(row[1])
+            if not definition:
+                continue
+            trigger = {"id": row[0], "type": row[2], "nextRunAt": row[6]}
+            if row[2] == "interval":
+                trigger["intervalSeconds"] = row[3]
+            elif row[2] == "daily":
+                trigger["time"] = row[4]
+            elif row[2] == "weekly":
+                trigger["weekday"], trigger["time"] = row[5], row[4]
+            try:
+                trigger["options"] = json.loads(row[7] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                trigger["options"] = {}
+            values.append({"definition": definition, "trigger": trigger})
+        return values
 
-    def mark_scheduled(
-        self, definition_id: str, run_id: str | None, message: str = "Queued"
+    def mark_trigger_scheduled(
+        self,
+        definition_id: str,
+        trigger: dict,
+        run_id: str | None,
+        message: str = "Queued",
     ) -> None:
-        definition = self.definition(definition_id)
-        if not definition:
-            return
-        next_run = (
-            datetime.now(timezone.utc)
-            + timedelta(minutes=definition["intervalMinutes"])
-        ).isoformat()
+        current = now()
+        next_trigger = self._next_for_trigger(trigger, datetime.now(timezone.utc))
+        self.db.execute(
+            "UPDATE job_schedule_triggers SET next_run_at=?,updated_at=? WHERE id=? AND definition_id=?",
+            (next_trigger, current, trigger["id"], definition_id),
+        )
         self.db.execute(
             "UPDATE job_definitions SET next_run_at=?,last_run_at=?,last_run_id=?,last_state='queued',last_message=?,updated_at=? WHERE id=?",
-            (next_run, now(), run_id, message, now(), definition_id),
+            (
+                self._earliest_next(definition_id),
+                current,
+                run_id,
+                message,
+                current,
+                definition_id,
+            ),
         )
 
     def update_run(self, run_id: str, **values) -> None:
+        tracker = getattr(self, "_progress", {}).get(run_id)
+        if tracker is not None:
+            values = tracker.apply(values)
         allowed = {
             "state",
             "progress_current",
@@ -698,7 +1353,18 @@ class JobStore:
             "started_at",
             "finished_at",
             "thread_name",
+            "progress_phase",
+            "progress_label",
+            "progress_stage_current",
+            "progress_stage_total",
+            "progress_stage_unit",
+            "progress_current_item",
         }
+        try:
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}
+            allowed = {key for key in allowed if key in columns}
+        except Exception:
+            pass
         updates = [(key, value) for key, value in values.items() if key in allowed]
         if updates:
             fields = ",".join(f"{key}=?" for key, _ in updates)
@@ -729,8 +1395,11 @@ class MetadataMissingJob:
         should_terminate=None,
         force: bool = False,
         force_assets: bool | None = None,
+        operation: str | None = None,
     ) -> None:
         should_terminate = should_terminate or (lambda: False)
+        operation = operation or ("metadata_refresh" if force else "metadata_missing")
+        is_upgrade = operation == "metadata_upgrade"
         ingest = MetadataIngestService(background_assets=False)
         locales = ingest.locales()
         _repair_missing_tv_child_identities(self.db, ingest.metadata_service)
@@ -741,6 +1410,61 @@ class MetadataMissingJob:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrichment_queue'"
             )
         )
+        # Discover optional TMDB series identities from the authoritative TVDB
+        # documents before taking the work-list snapshot.  This lets one global
+        # refresh ingest the newly discovered TMDB documents in the same run.
+        tv_series_rows = self.db.execute(
+            "SELECT e.id,p.provider_id FROM library_entities e "
+            "JOIN entity_provider_ids p ON p.entity_id=e.id "
+            "WHERE e.entity_type='series' AND p.provider='tvdb' "
+            "AND p.identifier_type='series' ORDER BY e.id"
+        )
+        for entity_id, tvdb_id in tv_series_rows:
+            try:
+                if is_upgrade:
+                    documents = _fetch_upgrade_documents(
+                        ingest,
+                        "tvdb",
+                        "series",
+                        str(tvdb_id),
+                        locales,
+                    )
+                elif force:
+                    documents = ingest.ingest_locales(
+                        "tvdb",
+                        "series",
+                        str(tvdb_id),
+                        locales,
+                        force=True,
+                        force_assets=force_assets,
+                    )
+                else:
+                    documents = {
+                        locale: ingest.metadata_service.cache.get(
+                            "tvdb", "series", str(tvdb_id), locale
+                        )
+                        for locale in locales
+                    }
+            except (ProviderError, ValueError, OSError) as error:
+                logger.warning(
+                    "TVDB series secondary-ID discovery failed entity_id=%s provider_id=%s: %s",
+                    entity_id,
+                    tvdb_id,
+                    error,
+                )
+                continue
+            linked_ids = {
+                str(value.get("id"))
+                for document in documents.values()
+                if isinstance(document, dict)
+                for value in document.get("ids", []) or []
+                if value.get("provider") == "tmdb" and value.get("id")
+            }
+            for tmdb_id in sorted(linked_ids):
+                self.db.execute(
+                    "INSERT OR IGNORE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
+                    (entity_id, "tmdb", "series", tmdb_id),
+                )
         rows = self.db.execute(
             "SELECT DISTINCT p.provider,p.identifier_type,p.provider_id "
             "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
@@ -748,13 +1472,45 @@ class MetadataMissingJob:
         )
         items = list(rows)
         total = len(items) * len(locales)
+        has_screen_assets = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='screen_extractor_assets'"
+            )
+        )
+        extractor_rows = (
+            self.db.execute(
+                "SELECT id,entity_type FROM library_entities "
+                "WHERE entity_type IN ('movie','episode') ORDER BY id"
+            )
+            if has_screen_assets
+            else []
+        )
+        extractor_total = len(extractor_rows)
         self.store.update_run(
             run_id,
             state="running",
             started_at=now(),
             thread_name=threading.current_thread().name,
-            progress_total=total,
-            message=f"Processing 0/{total} metadata documents",
+            progress_total=total + extractor_total,
+            progress_phase="discovery",
+            progress_label=(
+                "Discovering metadata upgrades"
+                if is_upgrade
+                else "Discovering metadata work"
+            ),
+            progress_stage_current=0,
+            progress_stage_total=total + extractor_total,
+            progress_stage_unit="documents",
+            message=format_progress_message(
+                (
+                    "Discovering metadata upgrades"
+                    if is_upgrade
+                    else "Discovering metadata work"
+                ),
+                current=0,
+                total=total + extractor_total,
+                unit="documents",
+            ),
         )
 
         def queue_failures(
@@ -818,6 +1574,7 @@ class MetadataMissingJob:
             fetch_locales = []
             documents: dict[str, dict] = {}
             worked_locales: set[str] = set()
+            upgrade_locales: set[str] = set()
             for locale in locales:
                 cached = ingest.metadata_service.cache.get(
                     provider, entity_type, provider_id, locale
@@ -857,16 +1614,41 @@ class MetadataMissingJob:
                         worked_locales.add(locale)
             if fetch_locales:
                 try:
-                    fetched = ingest.ingest_locales(
-                        provider,
-                        entity_type,
-                        provider_id,
-                        fetch_locales,
-                        force=force,
-                        force_assets=force_assets,
-                    )
-                    documents.update(fetched)
-                    worked_locales.update(fetch_locales)
+                    if is_upgrade:
+                        fetched = _fetch_upgrade_documents(
+                            ingest,
+                            provider,
+                            entity_type,
+                            provider_id,
+                            fetch_locales,
+                        )
+                        for locale, fresh in fetched.items():
+                            previous = documents.get(locale)
+                            documents[locale] = fresh
+                            if _metadata_upgrade_needed(
+                                previous, fresh, locale, provider
+                            ):
+                                ingest.ingest_document(
+                                    provider,
+                                    entity_type,
+                                    provider_id,
+                                    locale,
+                                    fresh,
+                                    force_assets=False,
+                                )
+                                worked_locales.add(locale)
+                                upgrade_locales.add(locale)
+                    else:
+                        fetched = ingest.ingest_locales(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            fetch_locales,
+                            force=force,
+                            force_assets=force_assets,
+                        )
+                        documents.update(fetched)
+                        worked_locales.update(fetch_locales)
                 except (ProviderError, ValueError, OSError) as error:
                     item_failures.extend(
                         {
@@ -906,6 +1688,8 @@ class MetadataMissingJob:
                     continue
                 document = dict(document)
                 document.pop("_stale", None)
+                if is_upgrade and locale not in upgrade_locales:
+                    continue
                 gaps, linked = _metadata_document_gaps(
                     self.db,
                     provider,
@@ -960,7 +1744,16 @@ class MetadataMissingJob:
                             break
                         current = parent
                 CatalogReadModel(self.db).refresh_roots(sorted(roots))
-            return len(locales), item_failures, len(worked_locales)
+            if is_upgrade:
+                incomplete_locales = {
+                    str(failure.get("locale"))
+                    for failure in item_failures
+                    if failure.get("kind") == "incomplete"
+                }
+                upgraded_documents = len(upgrade_locales - incomplete_locales)
+            else:
+                upgraded_documents = len(worked_locales)
+            return len(locales), item_failures, upgraded_documents
 
         completed = 0
         repaired = 0
@@ -987,56 +1780,237 @@ class MetadataMissingJob:
                 completed += processed
                 repaired += repaired_documents
                 provider, entity_type, provider_id = item
+                entity_rows = self.db.execute(
+                    "SELECT entity_id FROM entity_provider_ids WHERE provider=? AND identifier_type=? AND provider_id=? ORDER BY entity_id LIMIT 1",
+                    (provider, entity_type, provider_id),
+                )
+                item_label = resolve_progress_item(
+                    self.db,
+                    entity_rows[0][0] if entity_rows else None,
+                    f"{entity_type} {provider}:{provider_id}",
+                )
                 self.store.update_run(
                     run_id,
                     progress_current=completed,
+                    progress_phase="metadata",
+                    progress_label=(
+                        "Upgrading metadata" if is_upgrade else "Refreshing metadata"
+                    ),
+                    progress_stage_current=completed,
+                    progress_stage_total=total + extractor_total,
+                    progress_stage_unit="documents",
+                    progress_current_item=item_label,
                     message=(
-                        f"Processing {completed}/{total}: "
-                        f"{entity_type} {provider}:{provider_id}"
+                        format_progress_message(
+                            (
+                                "Upgrading metadata"
+                                if is_upgrade
+                                else "Refreshing metadata"
+                            ),
+                            item=item_label,
+                            current=completed,
+                            total=total + extractor_total,
+                            unit="documents",
+                        )
                     ),
                 )
+        # Screen Extractor is a final, language-neutral fallback. Run it only
+        # after every real provider identity has been processed so a secondary
+        # TMDB/TVDB Primary can displace a generated frame in the same pass.
+        extractor_failures = []
+        artwork_entity_ids: set[str] = set()
+        try:
+            from app.metadata_services import reproject_entity_artwork
+            from app.screen_extractor import extract_entity
+
+            for extractor_index, (entity_id, entity_type) in enumerate(
+                extractor_rows, start=1
+            ):
+                if should_terminate():
+                    raise JobTerminated()
+                try:
+                    extract_entity(
+                        self.db,
+                        entity_id,
+                        entity_type,
+                        force=False,
+                        should_terminate=should_terminate,
+                    )
+                    reproject_entity_artwork(self.db, entity_id, locales)
+                    artwork_entity_ids.add(entity_id)
+                    self.store.update_run(
+                        run_id,
+                        progress_current=total + extractor_index,
+                        progress_total=total + extractor_total,
+                        progress_phase="artwork",
+                        progress_label="Extracting fallback artwork",
+                        progress_stage_current=total + extractor_index,
+                        progress_stage_total=total + extractor_total,
+                        progress_stage_unit="documents",
+                        progress_current_item=resolve_progress_item(
+                            self.db, entity_id, entity_id
+                        ),
+                        message=(
+                            format_progress_message(
+                                "Extracting fallback artwork",
+                                item=resolve_progress_item(
+                                    self.db, entity_id, entity_id
+                                ),
+                                current=total + extractor_index,
+                                total=total + extractor_total,
+                                unit="documents",
+                            )
+                        ),
+                    )
+                except Exception as error:
+                    extractor_failures.append(
+                        {
+                            "entityId": entity_id,
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    )
+        except JobTerminated:
+            raise
+        except Exception as error:
+            extractor_failures.append({"error": f"{type(error).__name__}: {error}"})
+        if extractor_failures:
+            incomplete_repairs.extend(
+                {"kind": "screen_extractor", **failure}
+                for failure in extractor_failures
+            )
+        try:
+            from app.catalog_read_model import CatalogReadModel
+
+            roots = set()
+            for entity_id in artwork_entity_ids:
+                current = entity_id
+                seen = set()
+                while current and current not in seen:
+                    seen.add(current)
+                    rows = self.db.execute(
+                        "SELECT parent_id FROM library_entities WHERE id=?",
+                        (current,),
+                    )
+                    parent = rows[0][0] if rows else None
+                    if not parent:
+                        roots.add(current)
+                        break
+                    current = parent
+            if roots:
+                CatalogReadModel(self.db).refresh_roots(sorted(roots))
+        except Exception:
+            logger.exception("screen extractor catalog refresh failed")
         if should_terminate():
             raise JobTerminated()
         if failures:
-            summary = (
-                f"Checked {completed} metadata documents; repaired {repaired}; "
-                f"{len(failures)} repair errors"
-            )
+            if is_upgrade:
+                unchanged = max(
+                    0,
+                    completed - repaired - len(failures) - len(incomplete_repairs),
+                )
+                summary = (
+                    f"Checked {completed} metadata documents; upgraded {repaired}; "
+                    f"unchanged {unchanged}; {len(incomplete_repairs)} incomplete; "
+                    f"{len(failures)} failed"
+                )
+            else:
+                summary = (
+                    f"Checked {completed} metadata documents; repaired {repaired}; "
+                    f"{len(failures)} repair errors"
+                )
             if incomplete_repairs:
-                summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
+                if not is_upgrade:
+                    summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
             self.store.update_run(
                 run_id,
                 state="failed",
                 progress_current=completed,
-                progress_total=total,
+                progress_total=total + extractor_total,
                 finished_at=now(),
                 message=summary,
                 error=summary,
                 error_details=json.dumps(
                     {
-                        "operation": "metadata_refresh"
-                        if force
-                        else "metadata_missing",
+                        "operation": operation,
+                        "checked": completed,
+                        "upgraded": repaired if is_upgrade else 0,
+                        "unchanged": (
+                            max(
+                                0,
+                                completed
+                                - repaired
+                                - len(failures)
+                                - len(incomplete_repairs),
+                            )
+                            if is_upgrade
+                            else 0
+                        ),
+                        "incomplete": len(incomplete_repairs),
+                        "failed": len(failures),
                         "failures": failures,
                         "incompleteRepairs": incomplete_repairs,
                     }
                 ),
             )
         else:
-            summary = (
-                f"Checked {completed} metadata documents; repaired {repaired} "
-                "missing or partial documents"
-            )
+            if is_upgrade:
+                unchanged = max(0, completed - repaired - len(incomplete_repairs))
+                summary = (
+                    f"Checked {completed} metadata documents; upgraded {repaired}; "
+                    f"unchanged {unchanged}; {len(incomplete_repairs)} incomplete; "
+                    "0 failed"
+                )
+            else:
+                summary = (
+                    f"Checked {completed} metadata documents; repaired {repaired} "
+                    "missing or partial documents"
+                )
             if incomplete_repairs:
-                summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
+                if not is_upgrade:
+                    summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
             self.store.update_run(
                 run_id,
                 state="completed",
                 progress_current=completed,
-                progress_total=total,
+                progress_total=total + extractor_total,
                 finished_at=now(),
                 message=summary,
+                error_details=(
+                    json.dumps(
+                        {
+                            "operation": operation,
+                            "checked": completed,
+                            "upgraded": repaired,
+                            "unchanged": max(
+                                0, completed - repaired - len(incomplete_repairs)
+                            ),
+                            "incomplete": len(incomplete_repairs),
+                            "failed": 0,
+                        }
+                    )
+                    if is_upgrade
+                    else None
+                ),
             )
+
+
+class MetadataUpgradeJob(MetadataMissingJob):
+    """Refetch existing provider metadata and apply only real improvements."""
+
+    def run(
+        self,
+        run_id: str,
+        definition: dict,
+        should_terminate=None,
+    ) -> None:
+        return super().run(
+            run_id,
+            definition,
+            should_terminate,
+            force=True,
+            force_assets=False,
+            operation="metadata_upgrade",
+        )
 
 
 class MetadataCleanupJob:
@@ -1053,10 +2027,32 @@ class MetadataCleanupJob:
             state="running",
             started_at=now(),
             progress_total=1,
-            message="Cleaning orphaned library data",
+            progress_phase="preparation",
+            progress_label="Cleaning orphaned data",
+            progress_stage_current=0,
+            progress_stage_total=7,
+            progress_stage_unit="stages",
+            message="Cleaning orphaned data · 0/7 stages",
             thread_name=threading.current_thread().name,
         )
-        cleanup_orphans(self.db)
+        completed = 0
+
+        def progress(_phase, label):
+            nonlocal completed
+            completed += 1
+            self.store.update_run(
+                run_id,
+                progress_current=completed,
+                progress_total=7,
+                progress_phase="cleanup",
+                progress_label=label,
+                progress_stage_current=completed,
+                progress_stage_total=7,
+                progress_stage_unit="stages",
+                message=f"{label} · {completed}/7 stages",
+            )
+
+        cleanup_orphans(self.db, progress=progress)
         self.store.update_run(
             run_id,
             state="completed",
@@ -1079,6 +2075,7 @@ class JobScheduler:
         self.active: set[str] = set()
         self.active_definitions: set[str] = set()
         self.cancel_events: dict[str, threading.Event] = {}
+        self.worker_threads: dict[str, threading.Thread] = {}
         self.active_lock = threading.RLock()
 
     def start(self):
@@ -1103,8 +2100,24 @@ class JobScheduler:
             self.store.db.execute(
                 "DELETE FROM job_definitions WHERE id=?", (definition_id,)
             )
-        for library in self.library_runtime.store.list():
-            self.store.ensure_library(library)
+        self.store.reconcile_library_definitions(self.library_runtime.store.list())
+        # Startup triggers are intentionally armed on every process start and
+        # remain manual-only afterward until their next explicit update.
+        try:
+            startup_rows = self.store.db.execute(
+                "SELECT id,definition_id FROM job_schedule_triggers WHERE trigger_type='startup'"
+            )
+            for trigger_id, definition_id in startup_rows:
+                self.store.db.execute(
+                    "UPDATE job_schedule_triggers SET next_run_at=?,updated_at=? WHERE id=?",
+                    (now(), now(), trigger_id),
+                )
+                self.store.db.execute(
+                    "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+                    (now(), now(), definition_id),
+                )
+        except Exception:
+            pass
         self._recover_active_runs()
         self.stop_event.clear()
         self.thread = threading.Thread(
@@ -1112,31 +2125,92 @@ class JobScheduler:
         )
         self.thread.start()
 
-    def stop(self):
+    def stop(self, timeout: float = 30.0):
         self.stop_event.set()
+        with self.active_lock:
+            active = list(self.cancel_events.items())
+        for run_id, cancel_event in active:
+            cancel_event.set()
+            try:
+                self.store.update_run(
+                    run_id,
+                    state="terminating",
+                    message="Termination requested during Orchestrator shutdown",
+                )
+            except Exception:
+                logger.warning(
+                    "could not mark scheduled run terminating during shutdown run_id=%s",
+                    run_id,
+                    exc_info=True,
+                )
         with self.condition:
             self.condition.notify_all()
         if self.thread:
             self.thread.join(timeout=5)
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self.active_lock:
+                workers = list(self.worker_threads.values())
+            workers = [
+                worker for worker in workers if worker is not threading.current_thread()
+            ]
+            if not workers:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "scheduled jobs did not stop before shutdown timeout active=%s",
+                    len(workers),
+                )
+                return
+            for worker in workers:
+                worker.join(timeout=min(0.25, remaining))
+
+    def _library_work_active(self) -> bool:
+        runtime = getattr(self, "library_runtime", None)
+        checker = getattr(runtime, "has_active_inventory_jobs", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker())
+        except Exception:
+            # Do not start destructive/background analysis while the inventory
+            # state is unavailable during a concurrent lifecycle transition.
+            logger.warning(
+                "could not inspect library work before analysis", exc_info=True
+            )
+            return True
 
     def refresh_library_definition(self, library: dict) -> dict:
         definition = self.store.ensure_library(library)
-        values = {
-            "intervalMinutes": library.get("scanIntervalMinutes"),
-            "enabled": library.get("watchEnabled", True),
-            "config": {"libraryId": library["id"]},
-        }
-        return self.store.update_definition(definition["id"], values)
+        desired = max(1, int(library.get("scanIntervalMinutes") or 1440)) * 60
+        triggers = definition.get("triggers") or []
+        if library.get("watchEnabled", True):
+            interval = next(
+                (item for item in triggers if item["type"] == "interval"), None
+            )
+            if interval:
+                if interval.get("intervalSeconds") != desired:
+                    self.store._replace_triggers(
+                        definition["id"], [{**interval, "intervalSeconds": desired}]
+                    )
+            else:
+                self.store._replace_triggers(
+                    definition["id"], [{"type": "interval", "intervalSeconds": desired}]
+                )
+        else:
+            self.store._replace_triggers(
+                definition["id"],
+                [item for item in triggers if item["type"] != "interval"],
+            )
+        return self.store.update_definition(
+            definition["id"], {"config": {"libraryId": library["id"]}}
+        )
 
     def remove_library_definition(self, library_id: str):
-        for key in (f"library_scan:{library_id}",):
-            definition = self.store.by_key(key)
-            if definition:
-                self.store.db.execute(
-                    "DELETE FROM job_definitions WHERE id=?", (definition["id"],)
-                )
+        self.store.remove_library_definitions(library_id)
 
-    def run_now(self, definition_id: str) -> dict:
+    def run_now(self, definition_id: str, options: dict | None = None) -> dict:
         definition = self.store.definition(definition_id)
         if not definition:
             raise KeyError("Job definition not found")
@@ -1154,7 +2228,7 @@ class JobScheduler:
                 ),
             )
             return job
-        run, _ = self.store.create_or_get_active_run(definition)
+        run, _ = self.store.create_or_get_active_run(definition, options=options)
         with self.condition:
             self.condition.notify_all()
         return run
@@ -1169,7 +2243,17 @@ class JobScheduler:
             self.condition.notify_all()
         return run
 
-    def enqueue_metadata_refresh(self) -> dict:
+    def enqueue_metadata_upgrade(self) -> dict:
+        definition = self.store.by_key("metadata_upgrade")
+        if not definition:
+            self.store.ensure_defaults()
+            definition = self.store.by_key("metadata_upgrade")
+        run, _ = self.store.create_or_get_active_run(definition)
+        with self.condition:
+            self.condition.notify_all()
+        return run
+
+    def enqueue_metadata_refresh(self, options: dict | None = None) -> dict:
         definition = self.store.by_key("metadata_refresh")
         if not definition:
             definition = self.store.ensure(
@@ -1180,7 +2264,7 @@ class JobScheduler:
                 43200,
                 {},
             )
-        run, _ = self.store.create_or_get_active_run(definition)
+        run, _ = self.store.create_or_get_active_run(definition, options=options)
         with self.condition:
             self.condition.notify_all()
         return run
@@ -1266,19 +2350,27 @@ class JobScheduler:
                         )
 
     def _schedule_due(self):
-        for definition in self.store.due():
+        for due in self.store.due_triggers():
+            definition = due["definition"]
+            trigger = due["trigger"]
             if self.store.queued_or_running(definition["id"]):
                 continue
             if definition["kind"] == "library_scan":
                 library_id = (definition.get("config") or {}).get("libraryId")
                 if library_id:
                     self.library_runtime.enqueue(library_id, "scan")
-                self.store.mark_scheduled(definition["id"], None, "Library scan queued")
+                self.store.mark_trigger_scheduled(
+                    definition["id"], trigger, None, "Library scan queued"
+                )
             else:
-                run, created = self.store.create_or_get_active_run(definition)
+                run, created = self.store.create_or_get_active_run(
+                    definition,
+                    options=trigger.get("options"),
+                    source_trigger_id=trigger["id"],
+                )
                 if not created:
                     continue
-                self.store.mark_scheduled(definition["id"], run["id"])
+                self.store.mark_trigger_scheduled(definition["id"], trigger, run["id"])
 
     def _dispatch(self):
         while not self.stop_event.is_set():
@@ -1286,6 +2378,8 @@ class JobScheduler:
             queued = self.store.runs(limit=1000)
             for run in queued:
                 if run["state"] != "queued":
+                    continue
+                if run["kind"] in ANALYSIS_KINDS and self._library_work_active():
                     continue
                 with self.active_lock:
                     if (
@@ -1313,19 +2407,25 @@ class JobScheduler:
                     name=f"zenstream-job-{run['id'][:8]}",
                     daemon=True,
                 )
+                with self.active_lock:
+                    self.worker_threads[run["id"]] = thread
                 thread.start()
             with self.condition:
                 self.condition.wait(timeout=1)
 
     def _execute(self, run_id: str):
         try:
+            columns = {
+                row[1] for row in self.store.db.execute("PRAGMA table_info(job_runs)")
+            }
+            snapshot = ",r.options" if "options" in columns else ",NULL"
             rows = self.store.db.execute(
-                "SELECT r.id,r.definition_id,d.kind,d.config,d.name FROM job_runs r JOIN job_definitions d ON d.id=r.definition_id WHERE r.id=?",
+                f"SELECT r.id,r.definition_id,d.kind,d.config,d.name{snapshot} FROM job_runs r JOIN job_definitions d ON d.id=r.definition_id WHERE r.id=?",
                 (run_id,),
             )
             if not rows:
                 return
-            _, definition_id, kind, config_text, name = rows[0]
+            _, definition_id, kind, config_text, name, options_text = rows[0]
             try:
                 config = json.loads(config_text or "{}")
             except json.JSONDecodeError:
@@ -1336,18 +2436,28 @@ class JobScheduler:
                 "config": config,
                 "name": name,
             }
+            try:
+                run_options = json.loads(options_text or "{}")
+            except (TypeError, json.JSONDecodeError):
+                run_options = {}
+            self.store.begin_progress(run_id, kind)
             if kind == "metadata_missing":
                 MetadataMissingJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
+            elif kind == "metadata_upgrade":
+                MetadataUpgradeJob(self.store).run(
+                    run_id, definition, self.cancel_events[run_id].is_set
+                )
             elif kind == "metadata_refresh":
-                config = definition.get("config") or {}
                 MetadataMissingJob(self.store).run(
                     run_id,
                     definition,
                     self.cancel_events[run_id].is_set,
                     force=True,
-                    force_assets=not bool(config.get("preserveCachedAssets", False)),
+                    force_assets=not bool(
+                        run_options.get("preserveCachedAssets", False)
+                    ),
                 )
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(
@@ -1379,11 +2489,32 @@ class JobScheduler:
             self.store.update_run(
                 run_id,
                 state="terminated",
-                message="Terminated by administrator",
+                message=(
+                    "Terminated during Orchestrator shutdown"
+                    if self.stop_event.is_set()
+                    else "Terminated by administrator"
+                ),
                 error=None,
                 finished_at=now(),
             )
         except Exception as error:
+            if (
+                self.stop_event.is_set()
+                and isinstance(error, RuntimeError)
+                and ("cannot schedule new futures after" in str(error).lower())
+            ):
+                logger.warning(
+                    "scheduled job stopped while executors were shutting down run_id=%s",
+                    run_id,
+                )
+                self.store.update_run(
+                    run_id,
+                    state="terminated",
+                    message="Terminated during Orchestrator shutdown",
+                    error=None,
+                    finished_at=now(),
+                )
+                return
             details = {
                 "operation": "scheduled_job",
                 "runId": run_id,
@@ -1399,9 +2530,11 @@ class JobScheduler:
                 finished_at=now(),
             )
         finally:
+            self.store.end_progress(run_id)
             with self.active_lock:
                 self.active.discard(run_id)
                 self.cancel_events.pop(run_id, None)
+                self.worker_threads.pop(run_id, None)
                 row = self.store.db.execute(
                     "SELECT definition_id FROM job_runs WHERE id=?", (run_id,)
                 )
@@ -1410,15 +2543,20 @@ class JobScheduler:
 
     def _run_analysis(self, run_id, kind, worker, should_terminate):
         pressure_logged = False
-        while active_requests():
+        while True:
+            foreground_requests = active_requests()
+            library_work = self._library_work_active()
+            if not foreground_requests and not library_work:
+                break
             if should_terminate():
                 raise JobTerminated()
             if not pressure_logged:
                 logger.info(
-                    "analysis job yielding to foreground traffic run_id=%s kind=%s active_requests=%s",
+                    "analysis job yielding run_id=%s kind=%s active_requests=%s library_work=%s",
                     run_id,
                     kind,
-                    active_requests(),
+                    foreground_requests,
+                    library_work,
                 )
                 pressure_logged = True
             time.sleep(0.05)

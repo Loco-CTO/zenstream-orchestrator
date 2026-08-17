@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 
@@ -121,6 +122,11 @@ def _delete_entity_rows(cursor, tables: set[str], entity_ids: list[str]) -> None
             cursor.execute(
                 f"DELETE FROM media_files WHERE entity_id IN ({placeholders})", batch
             )
+        if "screen_extractor_assets" in tables:
+            cursor.execute(
+                f"DELETE FROM screen_extractor_assets WHERE entity_id IN ({placeholders})",
+                batch,
+            )
         cursor.execute(
             f"DELETE FROM entity_provider_ids WHERE entity_id IN ({placeholders})",
             batch,
@@ -206,12 +212,57 @@ def _remove_cached_files(db, tables: set[str], paths: set[str]) -> None:
             path = Path(raw_path)
             resolved = path.resolve()
             resolved.relative_to(cache_root)
-            if not db.execute(
+            referenced = db.execute(
                 "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1", (str(path),)
-            ):
+            )
+            if not referenced and "catalog_artwork_selection" in tables:
+                referenced = db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                    (str(path),),
+                )
+            if not referenced:
                 resolved.unlink(missing_ok=True)
         except (OSError, ValueError):
             continue
+
+
+def _sweep_metadata_cache_files(
+    db, tables: set[str], grace_seconds: int = 86400
+) -> None:
+    """Remove old crash leftovers and unregistered metadata image files."""
+    if "metadata_images" not in tables or not db.db_file:
+        return
+    root = (Path(db.db_file).parent / "metadata-cache" / "images").resolve()
+    if not root.is_dir():
+        return
+    from app.metadata_services import MetadataImageIngestService
+
+    cutoff = time.time() - grace_seconds
+    for path in root.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime > cutoff:
+                continue
+            path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        with MetadataImageIngestService._file_lock(path):
+            referenced = db.execute(
+                "SELECT 1 FROM metadata_images WHERE local_path=? LIMIT 1",
+                (str(path),),
+            )
+            if not referenced and "catalog_artwork_selection" in tables:
+                referenced = db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                    (str(path),),
+                )
+            if referenced:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
 
 
 def _remove_person_cached_files(db, tables: set[str], paths: set[str]) -> None:
@@ -262,7 +313,77 @@ def _remove_trickplay_files(db, media_file_ids: set[str]) -> None:
             continue
 
 
-def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
+def _screen_extractor_paths(db, tables: set[str], entity_ids: list[str]) -> set[str]:
+    if "screen_extractor_assets" not in tables or not entity_ids:
+        return set()
+    return {
+        row[0]
+        for batch in _chunks(entity_ids)
+        for row in db.execute(
+            f"SELECT local_path FROM screen_extractor_assets WHERE entity_id IN ({_placeholders(batch)}) AND local_path IS NOT NULL",
+            batch,
+        )
+        if row[0]
+    }
+
+
+def _remove_screen_extractor_files(db, tables: set[str], paths: set[str]) -> None:
+    if not paths or "screen_extractor_assets" not in tables or not db.db_file:
+        return
+    root = (Path(db.db_file).parent / "screen-extractor-cache").resolve()
+    for raw_path in paths:
+        try:
+            path = Path(raw_path)
+            resolved = path.resolve()
+            resolved.relative_to(root)
+            referenced = db.execute(
+                "SELECT 1 FROM screen_extractor_assets WHERE local_path=? LIMIT 1",
+                (str(path),),
+            )
+            if not referenced and "catalog_artwork_selection" in tables:
+                referenced = db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                    (str(path),),
+                )
+            if not referenced:
+                resolved.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            continue
+
+
+def _sweep_screen_extractor_cache(
+    db, tables: set[str], grace_seconds: int = 86400
+) -> None:
+    if "screen_extractor_assets" not in tables or not db.db_file:
+        return
+    root = (Path(db.db_file).parent / "screen-extractor-cache").resolve()
+    if not root.is_dir():
+        return
+    cutoff = time.time() - grace_seconds
+    for path in root.rglob("*.webp"):
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(root)
+            if path.stat().st_mtime > cutoff:
+                continue
+            referenced = db.execute(
+                "SELECT 1 FROM screen_extractor_assets WHERE local_path=? LIMIT 1",
+                (str(path),),
+            )
+            if not referenced and "catalog_artwork_selection" in tables:
+                referenced = db.execute(
+                    "SELECT 1 FROM catalog_artwork_selection WHERE local_path=? LIMIT 1",
+                    (str(path),),
+                )
+            if not referenced:
+                resolved.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            continue
+
+
+def _cleanup(
+    db, entity_ids: list[str], library_id: str | None = None, progress=None
+) -> bool:
     tables = _table_names(db)
     if "library_entities" not in tables or "entity_provider_ids" not in tables:
         raise RuntimeError("Library inventory schema is incomplete.")
@@ -274,6 +395,7 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
     image_paths = _image_paths(db, tables, provider_keys)
     person_image_paths = _person_image_paths(db, tables)
     trickplay_media_ids = _trickplay_media_ids(db, tables, entity_ids)
+    screen_paths = _screen_extractor_paths(db, tables, entity_ids)
 
     with db.transaction() as cursor:
         if entity_ids:
@@ -298,12 +420,30 @@ def _cleanup(db, entity_ids: list[str], library_id: str | None = None) -> bool:
         _purge_orphan_inventory(cursor, tables)
         _purge_orphan_metadata(cursor, tables)
 
+    if progress:
+        progress("database", "Cleaning database relationships")
+
     _remove_cached_files(db, tables, image_paths)
+    if progress:
+        progress("artwork", "Cleaning cached artwork")
     _remove_person_cached_files(db, tables, person_image_paths)
+    if progress:
+        progress("portraits", "Cleaning cached portraits")
     _remove_trickplay_files(db, trickplay_media_ids)
+    if progress:
+        progress("trickplay", "Cleaning trickplay cache")
+    _remove_screen_extractor_files(db, tables, screen_paths)
+    if progress:
+        progress("screen_extractor", "Cleaning screen-extractor cache")
+    _sweep_screen_extractor_cache(db, tables)
+    _sweep_metadata_cache_files(db, tables)
+    if progress:
+        progress("cache_sweep", "Sweeping metadata caches")
     from app.images import LocalArtworkCache
 
     LocalArtworkCache(db).prune()
+    if progress:
+        progress("local_artwork", "Pruning local artwork")
     return True
 
 
@@ -326,6 +466,6 @@ def cleanup_library(db, library_id: str) -> bool:
     return _cleanup(db, entity_ids, library_id)
 
 
-def cleanup_orphans(db) -> None:
+def cleanup_orphans(db, progress=None) -> None:
     """Purge leftovers from libraries/entities deleted before cascading cleanup existed."""
-    _cleanup(db, [])
+    _cleanup(db, [], progress=progress)

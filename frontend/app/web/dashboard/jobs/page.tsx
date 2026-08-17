@@ -1,387 +1,536 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
-	IconChevronRight,
 	IconClock,
 	IconPlayerPlay,
 	IconPlayerStop,
 	IconRefresh,
-	IconSettings,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
-import {
-	ConfirmDialog,
-	EmptyState,
-	PageHeader,
-	StatusMessage,
-	SurfaceCard,
-} from "../components/dashboard-surface";
+import { DashboardModal } from "../components/dashboard-surface";
+import { Job, activeStates, progressDetailText } from "./job-types";
 
-type Run = {
-	id: string;
-	state: string;
-	message?: string | null;
-	error?: string | null;
-	createdAt: string;
-	startedAt?: string | null;
-	finishedAt?: string | null;
-	progressCurrent: number;
-	progressTotal: number;
-};
-type Job = {
-	id: string;
-	key: string;
-	name: string;
-	description?: string | null;
-	kind: string;
-	intervalMinutes: number;
-	enabled: boolean;
-	nextRunAt?: string | null;
-	lastRunAt?: string | null;
-	lastState: string;
-	lastMessage?: string | null;
-	config?: Record<string, unknown>;
-	recentRuns: Run[];
+type TaskGroup = { group: string; tasks: Job[] };
+
+const GROUP_ORDER = ["Catalog", "Library", "Media Analysis", "Metadata"];
+
+function taskGroup(job: Job) {
+	if (job.kind.includes("metadata")) return "Metadata";
+	if (job.kind.includes("trickplay") || job.kind.includes("intro_outro"))
+		return "Media Analysis";
+	if (job.kind.includes("library")) return "Library";
+	return "Catalog";
+}
+
+function relativeTime(value?: string | null) {
+	if (!value) return "never";
+	const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000);
+	if (seconds < 60) return "just now";
+	if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+	if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`;
+	return `${Math.floor(seconds / 86400)} days ago`;
+}
+
+function runDuration(job: Job) {
+	const run = job.recentRuns?.[0];
+	if (!run?.startedAt) return "< 1 min";
+	const end = run.finishedAt ? new Date(run.finishedAt).getTime() : Date.now();
+	const seconds = Math.max(0, (end - new Date(run.startedAt).getTime()) / 1000);
+	return seconds < 60 ? "< 1 min" : `${Math.round(seconds / 60)} min`;
+}
+
+function progressFor(job: Job) {
+	const run = job.recentRuns?.find((entry) => activeStates.has(entry.state));
+	if (!run || !run.progressTotal) return undefined;
+	return Math.max(
+		0,
+		Math.min(100, (run.progressCurrent / run.progressTotal) * 100),
+	);
+}
+
+type TaskRowProps = {
+	task: Job;
+	isLast: boolean;
+	onOpen: (taskId: string) => void;
+	onToggleRun: (task: Job, event: React.MouseEvent<HTMLButtonElement>) => void;
 };
 
-const stateColor: Record<string, string> = {
-	completed: "text-[#aeb9ff]",
-	running: "text-[#aeb9ff]",
-	terminating: "text-[#aeb9ff]",
-	terminated: "text-[#aeb9ff]",
-	queued: "text-[#aeb9ff]",
-	failed: "text-[#aeb9ff]",
-	error: "text-[#aeb9ff]",
-	idle: "console-muted",
-};
-const activeStates = new Set(["queued", "running", "terminating"]);
+const TaskRow = memo(function TaskRow({
+	task,
+	isLast,
+	onOpen,
+	onToggleRun,
+}: TaskRowProps) {
+	const activeRun = task.recentRuns?.find((run) => activeStates.has(run.state));
+	const active = Boolean(activeRun);
+	const progress = progressFor(task);
+	const progressDetailValue = progressDetailText(activeRun?.progressDetail);
+	const progressDetail =
+		progressDetailValue !== activeRun?.message ? progressDetailValue : "";
+
+	return (
+		<div>
+			<div style={{ padding: "0 18px" }}>
+				<div
+					role="button"
+					tabIndex={0}
+					onClick={() => onOpen(task.id)}
+					onKeyDown={(event) => {
+						if (event.key === "Enter" || event.key === " ") {
+							event.preventDefault();
+							onOpen(task.id);
+						}
+					}}
+					style={{
+						display: "flex",
+						alignItems: "center",
+						gap: 14,
+						paddingTop: 13,
+						paddingBottom: active ? 8 : 13,
+						cursor: "pointer",
+					}}
+				>
+					<div
+						style={{
+							width: 32,
+							height: 32,
+							borderRadius: "50%",
+							background: "var(--primary-dim)",
+							border: "1px solid rgba(94,227,216,0.15)",
+							display: "flex",
+							alignItems: "center",
+							justifyContent: "center",
+							flexShrink: 0,
+							color: "var(--primary)",
+						}}
+					>
+						<IconClock size={14} />
+					</div>
+					<div style={{ flex: 1, minWidth: 0 }}>
+						<div style={{ fontSize: 14, fontWeight: 500, color: "#ddd" }}>
+							{task.name}
+						</div>
+						<div style={{ fontSize: 11, color: "#555", marginTop: 2 }}>
+							{activeRun
+								? activeRun.message || activeRun.state
+								: `Last run ${relativeTime(task.lastRunAt)} · ${runDuration(task)}`}
+						</div>
+					</div>
+					{!task.historyOnly && (
+						<button
+							type="button"
+							onClick={(event) => onToggleRun(task, event)}
+							aria-label={active ? `Stop ${task.name}` : `Run ${task.name}`}
+							style={{
+								width: 28,
+								height: 28,
+								borderRadius: 6,
+								background: "none",
+								border: "none",
+								color: active ? "#888" : "#444",
+								cursor: "pointer",
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "center",
+								flexShrink: 0,
+							}}
+						>
+							{active ? <IconPlayerStop size={12} /> : <IconPlayerPlay size={12} />}
+						</button>
+					)}
+				</div>
+				{active && (
+					<div style={{ paddingBottom: 12 }}>
+						{progress === undefined ? (
+							<progress
+								aria-label={`${task.name} preparation progress`}
+								style={{
+									width: "100%",
+									height: 3,
+									marginBottom: 5,
+									accentColor: "var(--primary)",
+								}}
+							/>
+						) : (
+							<div
+								style={{
+									height: 2,
+									background: "#111",
+									borderRadius: 2,
+									overflow: "hidden",
+									marginBottom: 5,
+								}}
+							>
+								<div
+									style={{
+										height: "100%",
+										width: `${progress}%`,
+										background: "var(--primary)",
+										borderRadius: 2,
+										transition: "width 0.4s ease",
+									}}
+								/>
+							</div>
+						)}
+						<div
+							style={{
+								display: "flex",
+								alignItems: "center",
+								justifyContent: "space-between",
+								gap: 12,
+								fontSize: 11,
+								color: "#555",
+								fontFamily: "var(--font-mono)",
+							}}
+						>
+							<span
+								style={{
+									minWidth: 0,
+									flex: 1,
+									overflow: "hidden",
+									textOverflow: "ellipsis",
+									whiteSpace: "nowrap",
+								}}
+							>
+								{progressDetail}
+							</span>
+							<span style={{ flexShrink: 0 }}>
+								{progress === undefined ? "Preparing…" : `${Math.round(progress)}%`}
+							</span>
+						</div>
+					</div>
+				)}
+			</div>
+			{!isLast && <div style={{ height: 1, background: "#111", margin: 0 }} />}
+		</div>
+	);
+});
 
 export default function JobsPage() {
+	const router = useRouter();
 	const params = useSearchParams();
 	const [session, setSession] = useState<Session | null>(null);
 	const [jobs, setJobs] = useState<Job[]>([]);
-	const [selectedId, setSelectedId] = useState(params.get("jobId") || "");
 	const [loading, setLoading] = useState(true);
-	const [saving, setSaving] = useState(false);
-	const [message, setMessage] = useState("");
-	const [confirmTerminate, setConfirmTerminate] = useState(false);
-	const selected = useMemo(
-		() => jobs.find((job) => job.id === selectedId) || jobs[0],
-		[jobs, selectedId],
-	);
-	const activeRun = selected?.recentRuns?.find((run) =>
-		activeStates.has(run.state),
-	);
+	const [error, setError] = useState("");
+	const [runTask, setRunTask] = useState<Job | null>(null);
+	const [runOptions, setRunOptions] = useState<Record<string, unknown>>({});
 
-	async function load(current = session, showLoading = true) {
+	const load = useCallback(async (current: Session | null) => {
 		if (!current) return;
-		if (showLoading) setLoading(true);
+		setLoading(true);
 		const response = await adminFetch("/api/admin/jobs", current);
 		if (response.ok) {
-			const value = await response.json();
-			const next = value.jobs || [];
-			setJobs(next);
-			if (!selectedId && next[0]) setSelectedId(next[0].id);
+			setJobs(((await response.json()) as { jobs?: Job[] }).jobs || []);
+			setError("");
+		} else {
+			setError("Scheduled tasks could not be loaded.");
 		}
-		if (showLoading) setLoading(false);
-	}
-
-	useEffect(() => {
-		const current = readSession();
-		setSession(current);
-		if (current) load(current);
+		setLoading(false);
 	}, []);
 
+	const refreshTask = useCallback(
+		async (current: Session | null, taskId: string) => {
+			if (!current) return null;
+			const response = await adminFetch(
+				`/api/admin/jobs/${encodeURIComponent(taskId)}`,
+				current,
+			);
+			if (!response.ok) return null;
+			return (await response.json()) as Job;
+		},
+		[],
+	);
+
+	const refreshActiveTasks = useCallback(
+		async (current: Session, taskIds: string[]) => {
+			const results = await Promise.allSettled(
+				taskIds.map((taskId) => refreshTask(current, taskId)),
+			);
+			const updates = results.flatMap((result) =>
+				result.status === "fulfilled" && result.value ? [result.value] : [],
+			);
+			if (!updates.length) return;
+			const byId = new Map(updates.map((task) => [task.id, task]));
+			setJobs((currentJobs) =>
+				currentJobs.map((task) => byId.get(task.id) || task),
+			);
+		},
+		[refreshTask],
+	);
+
 	useEffect(() => {
-		if (
-			!session ||
-			!jobs.some((job) =>
-				job.recentRuns?.some((run) => activeStates.has(run.state)),
-			)
-		)
+		const legacyId = params.get("jobId");
+		if (legacyId) {
+			router.replace(
+				`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(legacyId)}`,
+			);
 			return;
-		const timer = window.setInterval(() => load(session, false), 2000);
+		}
+		const current = readSession();
+		setSession(current);
+		void load(current);
+	}, [load, params, router]);
+
+	useEffect(() => {
+		if (!session) return;
+		const activeTaskIds = jobs
+			.filter((job) => job.recentRuns?.some((run) => activeStates.has(run.state)))
+			.map((job) => job.id);
+		if (!activeTaskIds.length) return;
+		let polling = false;
+		const poll = async () => {
+			if (polling) return;
+			polling = true;
+			try {
+				await refreshActiveTasks(session, activeTaskIds);
+			} finally {
+				polling = false;
+			}
+		};
+		const timer = window.setInterval(() => void poll(), 2000);
 		return () => window.clearInterval(timer);
-	}, [session, jobs]);
+	}, [jobs, refreshActiveTasks, session]);
 
-	async function save() {
-		if (!session || !selected) return;
-		setSaving(true);
-		const response = await adminFetch("/api/admin/jobs/" + selected.id, session, {
-			method: "PATCH",
+	const groups = useMemo<TaskGroup[]>(
+		() =>
+			GROUP_ORDER.map((group) => ({
+				group,
+				tasks: jobs.filter((job) => taskGroup(job) === group),
+			})).filter((group) => group.tasks.length),
+		[jobs],
+	);
+
+	const openTask = useCallback(
+		(taskId: string) => {
+			router.push(
+				`/web/dashboard/jobs/detail/?jobId=${encodeURIComponent(taskId)}`,
+			);
+		},
+		[router],
+	);
+
+	const toggleRun = useCallback(
+		async (task: Job, event: React.MouseEvent<HTMLButtonElement>) => {
+			event.stopPropagation();
+			if (task.historyOnly) return;
+			if (!session) return;
+			const activeRun = task.recentRuns?.find((run) =>
+				activeStates.has(run.state),
+			);
+			if (activeRun) {
+				await adminFetch(
+					`/api/admin/jobs/${task.id}/runs/${activeRun.id}/terminate`,
+					session,
+					{ method: "POST" },
+				);
+			} else {
+				if (task.optionDefinitions?.length) {
+					setRunOptions(
+						Object.fromEntries(
+							task.optionDefinitions.map((item) => [item.key, item.default ?? false]),
+						),
+					);
+					setRunTask(task);
+					return;
+				}
+				await adminFetch(`/api/admin/jobs/${task.id}/run`, session, {
+					method: "POST",
+				});
+			}
+			const updated = await refreshTask(session, task.id);
+			if (updated) {
+				setJobs((current) =>
+					current.map((item) => (item.id === updated.id ? updated : item)),
+				);
+			}
+		},
+		[refreshTask, session],
+	);
+
+	const confirmRun = useCallback(async () => {
+		if (!session || !runTask) return;
+		await adminFetch(`/api/admin/jobs/${runTask.id}/run`, session, {
+			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				intervalMinutes: selected.intervalMinutes,
-				enabled: selected.enabled,
-				config: selected.config || {},
-			}),
+			body: JSON.stringify({ options: runOptions }),
 		});
-		setMessage(
-			response.ok ? "Task settings saved." : "Could not save task settings.",
-		);
-		if (response.ok) load();
-		setSaving(false);
-	}
-
-	async function runNow() {
-		if (!session || !selected) return;
-		const response = await adminFetch(
-			"/api/admin/jobs/" + selected.id + "/run",
-			session,
-			{ method: "POST" },
-		);
-		setMessage(
-			response.ok ? "Task queued in the background." : "Could not queue task.",
-		);
-		load();
-	}
-
-	async function terminate() {
-		if (!session || !selected || !activeRun) return;
-		const response = await adminFetch(
-			"/api/admin/jobs/" + selected.id + "/runs/" + activeRun.id + "/terminate",
-			session,
-			{ method: "POST" },
-		);
-		setMessage(
-			response.ok ? "Termination requested." : "Could not terminate the task run.",
-		);
-		setConfirmTerminate(false);
-		load();
-	}
+		setRunTask(null);
+		const updated = await refreshTask(session, runTask.id);
+		if (updated) {
+			setJobs((current) =>
+				current.map((item) => (item.id === updated.id ? updated : item)),
+			);
+		}
+	}, [refreshTask, runTask, session]);
 
 	return (
-		<div className="max-w-6xl">
-			<ConfirmDialog
-				open={confirmTerminate}
-				title="Terminate active task run?"
-				description={`This stops the active run for ${selected?.name || "this task"}. Incomplete work may be resumed by its scheduler later.`}
-				confirmLabel="Terminate run"
-				destructive
-				onClose={() => setConfirmTerminate(false)}
-				onConfirm={() => void terminate()}
-			/>
-			<PageHeader
-				title="Tasks"
-				description="Review scheduled work, tune its cadence, and manage active runs."
-				actions={
-					<button
-						onClick={() => load()}
-						className="material-icon-button"
-						aria-label="Refresh tasks"
-						title="Refresh tasks"
-					>
-						<IconRefresh size={17} />
-					</button>
-				}
-			/>
-			{message && <StatusMessage>{message}</StatusMessage>}
-			<div className="mt-7 grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-				<SurfaceCard className="overflow-hidden">
-					<div className="border-b console-divider px-5 py-4 text-xs uppercase tracking-[.16em] console-muted">
-						All tasks{" "}
-						<span className="ml-2 normal-case tracking-normal">{jobs.length}</span>
-					</div>
-					{loading ? (
-						<div className="p-8 text-sm console-muted">Loading tasks…</div>
-					) : (
-						jobs.map((job) => (
-							<button
-								key={job.id}
-								onClick={() => setSelectedId(job.id)}
-								className={
-									"flex w-full items-center gap-4 border-b console-divider px-5 py-4 text-left transition last:border-0 hover:bg-white/[.035] " +
-									(selected?.id === job.id ? "bg-white/[.055]" : "")
-								}
-							>
-								<span
-									className={
-										"rounded-full border p-2 " +
-										(job.lastState === "failed"
-											? "border-[#aeb9ff]/30 text-[#aeb9ff]"
-											: "border-white/10 text-[#aeb9ff]")
-									}
-								>
-									<IconClock size={16} />
-								</span>
-								<span className="min-w-0 flex-1">
-									<span className="block truncate text-sm font-medium">{job.name}</span>
-									<span className="mt-1 block truncate text-xs console-muted">
-										{job.description || job.kind}
-									</span>
-								</span>
-								<span
-									className={
-										"text-xs capitalize " + (stateColor[job.lastState] || "console-muted")
-									}
-								>
-									{job.enabled ? job.lastState : "paused"}
-								</span>
-								<IconChevronRight size={16} className="console-muted" />
-							</button>
-						))
-					)}
-					{!loading && !jobs.length && (
-						<EmptyState>No scheduled tasks are configured.</EmptyState>
-					)}
-				</SurfaceCard>
-				{selected && (
-					<aside className="console-card rounded-2xl p-5">
-						<div className="flex items-start justify-between gap-3">
-							<div>
-								<p className="console-kicker">Task settings</p>
-								<h2 className="mt-2 text-xl font-semibold">{selected.name}</h2>
-							</div>
-							<IconSettings className="console-muted" size={19} />
-						</div>
-						<p className="mt-3 text-sm leading-6 console-muted">
-							{selected.description}
-						</p>
-						<label className="mt-7 block text-sm">
-							<span className="console-muted">Run every (minutes)</span>
-							<input
-								type="number"
-								min={5}
-								max={43200}
-								value={selected.intervalMinutes}
-								onChange={(event) =>
-									setJobs((current) =>
-										current.map((job) =>
-											job.id === selected.id
-												? {
-														...job,
-														intervalMinutes: Number(event.target.value),
-													}
-												: job,
-										),
-									)
-								}
-								className="console-input mt-2 h-11 w-full rounded-lg px-3 outline-none"
-							/>
-						</label>
-						<label className="mt-4 flex items-center justify-between text-sm">
-							<span className="console-muted">Enabled</span>
-							<input
-								type="checkbox"
-								checked={selected.enabled}
-								onChange={(event) =>
-									setJobs((current) =>
-										current.map((job) =>
-											job.id === selected.id
-												? { ...job, enabled: event.target.checked }
-												: job,
-										),
-									)
-								}
-							/>
-						</label>
-						{selected.kind === "metadata_refresh" && (
-							<div className="mt-5 rounded-xl border console-divider p-3">
-								<label className="flex items-start justify-between gap-4 text-sm">
-									<span>
-										<span className="block console-muted">
-											Preserve cached artwork and portraits
-										</span>
-										<span className="mt-1 block text-xs leading-5 console-muted">
-											Reuse valid files during metadata refreshes; missing or changed
-											assets are still downloaded.
-										</span>
-									</span>
-									<input
-										type="checkbox"
-										checked={Boolean(selected.config?.preserveCachedAssets)}
-										onChange={(event) =>
-											setJobs((current) =>
-												current.map((job) =>
-													job.id === selected.id
-														? {
-																...job,
-																config: {
-																	...(job.config || {}),
-																	preserveCachedAssets: event.target.checked,
-																},
-															}
-														: job,
-												),
-											)
-										}
-									/>
-								</label>
-							</div>
-						)}
-						<div className="mt-6 grid grid-cols-2 gap-2">
-							<button
-								onClick={save}
-								disabled={saving}
-								className="console-button rounded-lg px-3 py-2.5 text-sm font-medium disabled:opacity-50"
-							>
-								{saving ? "Saving…" : "Save"}
-							</button>
-							<button
-								onClick={runNow}
-								disabled={Boolean(activeRun)}
-								className="flex items-center justify-center gap-2 rounded-lg border console-divider px-3 py-2.5 text-sm console-muted hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
-							>
-								<IconPlayerPlay size={15} />
-								{activeRun ? "Task active" : "Run now"}
-							</button>
-							{activeRun && (
-								<button
-									onClick={() => setConfirmTerminate(true)}
-									disabled={activeRun.state === "terminating"}
-									className="col-span-2 flex items-center justify-center gap-2 rounded-lg border border-[#aeb9ff]/30 px-3 py-2.5 text-sm text-[#aeb9ff] hover:bg-[#aeb9ff]/10 disabled:opacity-50"
-								>
-									<IconPlayerStop size={15} />
-									{activeRun.state === "terminating"
-										? "Terminating…"
-										: "Terminate active run"}
-								</button>
-							)}
-						</div>
-						<div className="mt-8 border-t console-divider pt-5">
-							<p className="text-xs uppercase tracking-[.14em] console-muted">
-								Recent runs
-							</p>
-							<div className="mt-3 space-y-3">
-								{selected.recentRuns?.slice(0, 6).map((run) => (
-									<div
-										key={run.id}
-										className="flex items-start justify-between gap-3 text-xs"
-									>
-										<span>
-											<span
-												className={
-													"block capitalize " + (stateColor[run.state] || "console-muted")
-												}
-											>
-												{run.state}
-											</span>
-											<span className="mt-1 block console-muted">
-												{run.message || run.error || "No details"}
-											</span>
-										</span>
-										<time className="shrink-0 console-muted">
-											{new Date(run.createdAt).toLocaleString()}
-										</time>
-									</div>
-								))}
-								{!selected.recentRuns?.length && (
-									<p className="text-xs console-muted">No runs yet.</p>
-								)}
-							</div>
-						</div>
-					</aside>
-				)}
-			</div>
-			<Link
-				href="/web/dashboard"
-				className="mt-7 inline-block text-xs console-muted hover:text-white"
+		<div className="dashboard-page dashboard-design">
+			<DashboardModal
+				open={Boolean(runTask)}
+				onClose={() => setRunTask(null)}
+				title={runTask ? `Run ${runTask.name}` : "Run task"}
 			>
-				← Back to overview
-			</Link>
+				{runTask?.optionDefinitions?.map((option) => (
+					<label
+						key={option.key}
+						style={{
+							display: "flex",
+							gap: 8,
+							color: "#aaa",
+							fontSize: 12,
+							marginBottom: 14,
+						}}
+					>
+						<input
+							type="checkbox"
+							checked={Boolean(runOptions[option.key] ?? option.default)}
+							onChange={(event) =>
+								setRunOptions((current) => ({
+									...current,
+									[option.key]: event.target.checked,
+								}))
+							}
+						/>
+						{option.label}
+					</label>
+				))}
+				<div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+					<button
+						type="button"
+						onClick={() => setRunTask(null)}
+						className="rounded-lg border console-divider px-3 py-2 text-sm"
+					>
+						Cancel
+					</button>
+					<button
+						type="button"
+						onClick={() => void confirmRun()}
+						className="console-button rounded-lg px-3 py-2 text-sm"
+					>
+						Run now
+					</button>
+				</div>
+			</DashboardModal>
+			<div
+				style={{
+					display: "flex",
+					alignItems: "flex-start",
+					justifyContent: "space-between",
+					marginBottom: 36,
+					gap: 16,
+				}}
+			>
+				<div>
+					<h1
+						style={{
+							margin: 0,
+							fontSize: 22,
+							fontWeight: 600,
+							color: "#fff",
+							letterSpacing: "-0.02em",
+						}}
+					>
+						Tasks
+					</h1>
+					<p
+						style={{
+							margin: "5px 0 0",
+							fontSize: 13,
+							color: "#666",
+							lineHeight: 1.5,
+						}}
+					>
+						Review scheduled work, tune its cadence, and manage active runs.
+					</p>
+				</div>
+				<button
+					type="button"
+					onClick={() => void load(session)}
+					title="Refresh"
+					aria-label="Refresh tasks"
+					style={{
+						background: "none",
+						border: "none",
+						color: "#777",
+						cursor: "pointer",
+						width: 32,
+						height: 32,
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "center",
+						borderRadius: 8,
+					}}
+				>
+					<IconRefresh size={15} />
+				</button>
+			</div>
+
+			{error && (
+				<div
+					role="alert"
+					style={{ color: "var(--danger)", fontSize: 12, marginBottom: 16 }}
+				>
+					{error}
+				</div>
+			)}
+
+			{loading ? (
+				<div
+					style={{
+						background: "#080808",
+						borderRadius: 12,
+						padding: "20px 22px",
+						color: "#666",
+						fontSize: 13,
+					}}
+				>
+					Loading tasks…
+				</div>
+			) : (
+				<div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+					{groups.map((group) => (
+						<div key={group.group}>
+							<div
+								style={{
+									fontSize: 13,
+									fontWeight: 600,
+									color: "#fff",
+									marginBottom: 10,
+								}}
+							>
+								{group.group}
+							</div>
+							<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
+								{group.tasks.map((task, index) => (
+									<TaskRow
+										key={task.id}
+										task={task}
+										isLast={index === group.tasks.length - 1}
+										onOpen={openTask}
+										onToggleRun={toggleRun}
+									/>
+								))}
+							</div>
+						</div>
+					))}
+					{!groups.length && (
+						<div
+							style={{
+								background: "#080808",
+								borderRadius: 12,
+								padding: "20px 22px",
+								color: "#666",
+								fontSize: 13,
+							}}
+						>
+							No scheduled tasks.
+						</div>
+					)}
+				</div>
+			)}
 		</div>
 	);
 }

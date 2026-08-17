@@ -41,12 +41,15 @@ Python, Node.js, Docker, and host media tools are not required. The launcher:
 
 - starts the API and dashboard together at `http://127.0.0.1:9088`;
 - stores configuration at
-  `%APPDATA%\ZenStream Orchestrator\launcher-config.json`, protects
+  `%APPDATA%\zenstream-orchestrator-launcher\launcher-config.json`, protects
   `SECRET_KEY` with Windows secure storage, and prepares the versioned launcher
-  venv beneath `%APPDATA%\ZenStream Orchestrator\runtime`;
+  venv beneath `%APPDATA%\zenstream-orchestrator-launcher\runtime`;
 - stores SQLite and generated caches beneath
   `%LOCALAPPDATA%\ZenStream Orchestrator\metadata` by default;
 - shows live backend output and opens the persistent rotating log directory;
+- stores launcher stdout, stderr, and lifecycle output on demand as five
+  rotating 10 MiB `zenstream-launcher-*.ndjson` segments (50 MiB total),
+  without retaining the complete history in memory;
 - remains in the notification area when its window is closed; and
 - stops Orchestrator cleanly only when **Quit** is selected.
 
@@ -144,7 +147,8 @@ From a Windows x64 PowerShell prompt with Node.js and Python 3.14 available:
 
 The build verifies and stages the pinned FFmpeg binaries, exports the dashboard,
 stages the backend source with its isolated Python environment, runs launcher
-tests, and writes the
+tests, serializes packaging to prevent overlapping release writers, validates
+the packaged Electron archive, and writes the
 NSIS installer, portable executable, and `SHA256SUMS.txt` beneath
 `launcher/release/`. Generated FFmpeg binaries, Python build directories, and
 release outputs are intentionally untracked.
@@ -157,6 +161,13 @@ alembic -c alembic.ini upgrade head
 ```
 
 ## 🖥️ For Developers
+
+When the public `zenstream` web client is deployed separately from the
+administrator dashboard, set the launcher's **Public web URL** setting to the
+public web origin (for example `http://localhost:9086`). Invite links then
+target `/register` on that origin; they never target the dashboard's `/web`
+routes. Add the public web origin to `CORS_ORIGINS` so registration can submit
+credentials and receive its secure session cookie.
 
 Please see [`DEVELOPER`](/DEVELOPER.md) for more information.
 

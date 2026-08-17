@@ -8,6 +8,7 @@ import {
   type BootstrapCredentials,
   type LauncherState,
   type LogSource,
+  type PagedLogEntry,
 } from "../shared";
 
 export interface BackendCommand {
@@ -19,6 +20,11 @@ export interface BackendCommand {
 export interface SupervisorOptions {
   resolveCommand: () => BackendCommand;
   getEnvironment: () => NodeJS.ProcessEnv;
+  persistLog?: (entry: {
+    timestamp: string;
+    source: LogSource;
+    message: string;
+  }) => Promise<PagedLogEntry>;
 }
 
 export function dashboardUrlFor(environment: NodeJS.ProcessEnv): string {
@@ -192,13 +198,17 @@ export class BackendSupervisor extends EventEmitter {
     source: LogSource,
   ): void {
     const reader = readline.createInterface({ input: stream });
-    reader.on("line", (message) => {
-      if (this.child !== child) return;
-      this.captureCredentials(message);
-      const safeMessage = launcherLogLine(message);
-      this.recentOutput.push(safeMessage);
-      if (this.recentOutput.length > 80) this.recentOutput.shift();
-      this.log(source, safeMessage);
+    void (async () => {
+      for await (const message of reader) {
+        if (this.child !== child) break;
+        this.captureCredentials(message);
+        const safeMessage = launcherLogLine(message);
+        this.recentOutput.push(safeMessage);
+        if (this.recentOutput.length > 80) this.recentOutput.shift();
+        await this.log(source, safeMessage);
+      }
+    })().catch((error) => {
+      this.emit("log-error", error);
     });
   }
 
@@ -315,8 +325,25 @@ export class BackendSupervisor extends EventEmitter {
     this.emit("state", this.snapshot());
   }
 
-  private log(source: LogSource, message: string): void {
-    this.emit("log", { source, message });
+  private async log(source: LogSource, message: string): Promise<void> {
+    const timestamp = new Date().toISOString();
+    if (this.options.persistLog) {
+      const entry = await this.options.persistLog({
+        timestamp,
+        source,
+        message,
+      });
+      this.emit("log", entry);
+      return;
+    }
+    this.emit("log", {
+      id: `ephemeral-${timestamp}-${Math.random().toString(36).slice(2)}`,
+      timestamp,
+      source,
+      message,
+      beforeCursor: "",
+      afterCursor: "",
+    } satisfies PagedLogEntry);
   }
 
   private clearRetryTimer(): void {

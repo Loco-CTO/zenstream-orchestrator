@@ -1,6 +1,93 @@
 "use client";
 
 import { ReactNode, useEffect, useRef } from "react";
+import { IconX } from "@tabler/icons-react";
+
+export function DashboardModal({
+	open,
+	onClose,
+	title,
+	children,
+	closeDisabled = false,
+}: {
+	open: boolean;
+	onClose: () => void;
+	title: string;
+	children: ReactNode;
+	closeDisabled?: boolean;
+}) {
+	useEffect(() => {
+		if (!open || closeDisabled) return;
+		const closeOnEscape = (event: KeyboardEvent) => {
+			if (event.key === "Escape") onClose();
+		};
+		window.addEventListener("keydown", closeOnEscape);
+		return () => window.removeEventListener("keydown", closeOnEscape);
+	}, [closeDisabled, onClose, open]);
+
+	if (!open) return null;
+	return (
+		<div
+			role="presentation"
+			onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+			style={{
+				position: "fixed",
+				inset: 0,
+				zIndex: 50,
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				background: "rgba(0,0,0,.72)",
+				padding: 20,
+			}}
+		>
+			<div
+				role="dialog"
+				aria-modal="true"
+				aria-label={title}
+				style={{
+					width: "100%",
+					maxWidth: 440,
+					maxHeight: "calc(100vh - 40px)",
+					overflowY: "auto",
+					background: "#101010",
+					border: "1px solid var(--border-strong)",
+					borderRadius: 12,
+					padding: 22,
+					boxShadow: "0 24px 80px rgba(0,0,0,.5)",
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						marginBottom: 20,
+					}}
+				>
+					<h2 style={{ margin: 0, fontSize: 16, color: "#fff", fontWeight: 600 }}>
+						{title}
+					</h2>
+					<button
+						type="button"
+						disabled={closeDisabled}
+						onClick={onClose}
+						aria-label="Close"
+						style={{
+							background: "none",
+							border: 0,
+							color: "#666",
+							cursor: closeDisabled ? "default" : "pointer",
+						}}
+					>
+						<IconX size={18} />
+					</button>
+				</div>
+				{children}
+			</div>
+		</div>
+	);
+}
 
 export function PageHeader({
 	title,
@@ -12,15 +99,47 @@ export function PageHeader({
 	actions?: ReactNode;
 }) {
 	return (
-		<header className="flex flex-col gap-4 border-b console-divider pb-6 sm:flex-row sm:items-end sm:justify-between">
-			<div className="max-w-3xl">
-				<h1 className="text-3xl font-semibold tracking-tight">{title}</h1>
+		<header
+			style={{
+				display: "flex",
+				alignItems: "flex-start",
+				justifyContent: "space-between",
+				marginBottom: 36,
+				gap: 16,
+				flexWrap: "wrap",
+			}}
+		>
+			<div style={{ maxWidth: "70%" }}>
+				<h1
+					style={{
+						margin: 0,
+						fontSize: 22,
+						fontWeight: 600,
+						color: "#fff",
+						letterSpacing: "-0.02em",
+					}}
+				>
+					{title}
+				</h1>
 				{description && (
-					<p className="mt-2 text-sm leading-6 console-muted">{description}</p>
+					<p
+						style={{
+							margin: "5px 0 0",
+							fontSize: 13,
+							color: "#666",
+							lineHeight: 1.5,
+						}}
+					>
+						{description}
+					</p>
 				)}
 			</div>
 			{actions && (
-				<div className="flex flex-wrap items-center gap-3">{actions}</div>
+				<div
+					style={{ display: "flex", gap: 8, flexShrink: 0, alignItems: "center" }}
+				>
+					{actions}
+				</div>
 			)}
 		</header>
 	);
@@ -34,7 +153,10 @@ export function SurfaceCard({
 	className?: string;
 }) {
 	return (
-		<section className={`console-card rounded-2xl ${className}`}>
+		<section
+			className={`console-card ${className}`}
+			style={{ background: "#080808", borderRadius: 12, padding: "20px 22px" }}
+		>
 			{children}
 		</section>
 	);
@@ -50,11 +172,38 @@ export function SectionHeader({
 	action?: ReactNode;
 }) {
 	return (
-		<div className="flex items-start justify-between gap-4 border-b console-divider px-5 py-4">
+		<div
+			style={{
+				display: "flex",
+				alignItems: "flex-start",
+				justifyContent: "space-between",
+				gap: 16,
+				borderBottom: "1px solid #111",
+				padding: "16px 20px",
+			}}
+		>
 			<div>
-				{kicker && <p className="console-kicker">{kicker}</p>}
+				{kicker && (
+					<p
+						style={{
+							fontSize: 10,
+							fontWeight: 600,
+							letterSpacing: "0.1em",
+							textTransform: "uppercase",
+							color: "var(--primary)",
+							marginBottom: 8,
+						}}
+					>
+						{kicker}
+					</p>
+				)}
 				<h2
-					className={kicker ? "mt-1 text-lg font-semibold" : "text-sm font-semibold"}
+					style={{
+						margin: 0,
+						fontSize: kicker ? 16 : 13,
+						fontWeight: 600,
+						color: "#fff",
+					}}
 				>
 					{title}
 				</h2>
@@ -66,7 +215,17 @@ export function SectionHeader({
 
 export function StatusMessage({ children }: { children: ReactNode }) {
 	return (
-		<p className="mt-5 rounded-xl border border-[#aeb9ff]/20 bg-[#aeb9ff]/10 px-4 py-3 text-sm text-[#e8eaff]">
+		<p
+			style={{
+				marginTop: 20,
+				border: "1px solid rgba(94,227,216,.2)",
+				background: "rgba(94,227,216,.1)",
+				borderRadius: 8,
+				padding: "10px 14px",
+				fontSize: 13,
+				color: "#d8fffb",
+			}}
+		>
 			{children}
 		</p>
 	);
@@ -74,7 +233,16 @@ export function StatusMessage({ children }: { children: ReactNode }) {
 
 export function EmptyState({ children }: { children: ReactNode }) {
 	return (
-		<div className="px-5 py-12 text-center text-sm console-muted">{children}</div>
+		<div
+			style={{
+				padding: "42px 20px",
+				textAlign: "center",
+				fontSize: 13,
+				color: "#666",
+			}}
+		>
+			{children}
+		</div>
 	);
 }
 
@@ -102,40 +270,13 @@ export function ConfirmDialog({
 	useEffect(() => {
 		if (!open) return;
 		cancelRef.current?.focus();
-		const closeOnEscape = (event: KeyboardEvent) => {
-			if (event.key === "Escape" && !busy) onClose();
-		};
-		window.addEventListener("keydown", closeOnEscape);
-		return () => window.removeEventListener("keydown", closeOnEscape);
-	}, [busy, onClose, open]);
+	}, [open]);
 
 	if (!open) return null;
 	return (
-		<div className="dashboard-dialog-layer" role="presentation">
-			<button
-				type="button"
-				className="dashboard-dialog-backdrop"
-				aria-label="Close dialog"
-				disabled={busy}
-				onClick={onClose}
-			/>
-			<section
-				role="dialog"
-				aria-modal="true"
-				aria-labelledby="dashboard-dialog-title"
-				aria-describedby="dashboard-dialog-description"
-				className="dashboard-dialog"
-			>
-				<p className="console-kicker">Confirmation required</p>
-				<h2 id="dashboard-dialog-title" className="mt-2 text-xl font-semibold">
-					{title}
-				</h2>
-				<p
-					id="dashboard-dialog-description"
-					className="mt-3 text-sm leading-6 console-muted"
-				>
-					{description}
-				</p>
+		<DashboardModal open onClose={onClose} title={title} closeDisabled={busy}>
+			<div>
+				<p className="text-sm leading-6 console-muted">{description}</p>
 				<div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
 					<button
 						ref={cancelRef}
@@ -155,7 +296,7 @@ export function ConfirmDialog({
 						{busy ? "Working…" : confirmLabel}
 					</button>
 				</div>
-			</section>
-		</div>
+			</div>
+		</DashboardModal>
 	);
 }

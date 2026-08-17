@@ -119,6 +119,50 @@ class CatalogTest(unittest.TestCase):
 
         self.assertEqual(result["cast"][0]["name"], "Legacy Actor")
 
+    def test_hydrated_episode_rows_include_the_parent_series_name(self):
+        catalog = self.catalog()
+        account_id = "user-1"
+        episode_row = (
+            "episode-1",
+            "allowed",
+            "season-1",
+            "episode",
+            "Episode.mkv",
+            1,
+            1,
+            None,
+            "2026",
+            "2026",
+        )
+        with (
+            patch.object(
+                catalog,
+                "_entity_row",
+                return_value=(
+                    "season-1",
+                    "allowed",
+                    "series-1",
+                    "season",
+                    "Season",
+                    1,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            ),
+            patch.object(
+                catalog, "_series_metadata", return_value={"title": "Example Series"}
+            ),
+            patch.object(
+                catalog, "metadata", return_value={"metadata": {"title": "Pilot"}}
+            ),
+        ):
+            value = catalog._hydrate_rows(account_id, [episode_row], "en")[0]
+
+        self.assertEqual("Example Series", value["seriesName"])
+        self.assertEqual("series-1", value["seriesId"])
+
     def seed_series_hierarchy(self):
         account = self.account().create("series", "password-123")
         self.db.execute(
@@ -821,6 +865,53 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("USE TEMP B-TREE FOR ORDER BY", plan_text)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_continue_watching_plan_streams_from_partial_state_index(self, _languages):
+        user_id = self.account().create("continue-plan", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (user_id, "allowed", "now"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('continue-movie','allowed',NULL,'movie','Continue.mkv',NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "continue-movie", 0, 0, 0, 20, 100, None, "2026"),
+        )
+        self.db.execute(
+            "CREATE INDEX idx_user_item_state_continue "
+            "ON user_item_state(user_id,COALESCE(last_played_at,updated_at) DESC,entity_id) "
+            "WHERE played=0 AND duration_seconds>0 AND position_seconds>0"
+        )
+        catalog = self.catalog()
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {"title": entity_id}
+        }
+        selected_query = None
+        selected_params = None
+        execute = self.db.execute
+
+        def capture_query(query, params=None):
+            nonlocal selected_query, selected_params
+            if "ORDER BY COALESCE(s.last_played_at,s.updated_at)" in query:
+                selected_query = query
+                selected_params = params
+            return execute(query, params)
+
+        self.db.execute = capture_query
+        try:
+            response = catalog.home_continue_watching(user_id, "en")
+        finally:
+            self.db.execute = execute
+
+        self.assertEqual([item["id"] for item in response], ["continue-movie"])
+        self.assertIsNotNone(selected_query)
+        plan = execute("EXPLAIN QUERY PLAN " + selected_query, selected_params)
+        plan_text = " ".join(str(row[3]) for row in plan)
+        self.assertIn("idx_user_item_state_continue", plan_text)
+        self.assertNotIn("TEMP B-TREE", plan_text)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_large_list_preloads_graph_and_state_once(self, _languages):
         user_id = self.account().create("large", "password-123")["id"]
         self.db.execute(
@@ -1017,6 +1108,9 @@ class CatalogTest(unittest.TestCase):
         self.patch_catalog_metadata(catalog)
 
         home = catalog.home(user_id, "en")
+        self.assertTrue(
+            all(row["titleKey"] == "newlyAddedOn" for row in home["libraryRows"])
+        )
         rows = {
             row["libraryId"]: row
             for row in home["libraryRows"]
@@ -1034,6 +1128,13 @@ class CatalogTest(unittest.TestCase):
         )
         self.assertFalse(rows["movies"]["stackEpisodes"])
         self.assertNotIn("hidden", rows)
+
+        allowed_row = catalog.home_library(user_id, "en", "allowed")
+        self.assertEqual(
+            [item["id"] for item in allowed_row["items"]], ["episode-2", "episode-1"]
+        )
+        self.assertTrue(allowed_row["stackEpisodes"])
+        self.assertIsNone(catalog.home_library(user_id, "en", "hidden"))
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_featured_uses_series_added_date(self, _languages):
@@ -1209,11 +1310,60 @@ class CatalogTest(unittest.TestCase):
 
         catalog.metadata = metadata
         catalog._home_discovery_items = lambda *_args: []
+        catalog._home_top_rated_row = lambda *_args: None
 
         result = catalog.home(user_id, "en")
 
         self.assertEqual(len(result["libraryRows"][0]["items"]), 18)
         self.assertEqual(metadata_calls, 18)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_top_rated_rows_are_scoped_sorted_and_exclude_unrated(
+        self, _languages
+    ):
+        user_id = self.account().create("top-rated", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
+        )
+        for entity_id in ("movie-z", "movie-a", "movie-unrated"):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    "allowed",
+                    None,
+                    "movie",
+                    entity_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+        catalog = self.catalog()
+        ratings = {
+            "movie-z": (9.0, "Zulu"),
+            "movie-a": (9.0, "Alpha"),
+            "movie-unrated": (0, "Unrated"),
+        }
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {
+                "title": ratings[entity_id][1],
+                "communityRating": ratings[entity_id][0],
+            }
+        }
+
+        row = catalog._home_top_rated_row(
+            user_id,
+            "en",
+            {"id": "allowed", "name": "Allowed", "type": "movies"},
+        )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["titleKey"], "topRated")
+        self.assertEqual([item["id"] for item in row["items"]], ["movie-a", "movie-z"])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_derived_rows_use_existing_catalog_and_user_state(self, _languages):
@@ -1328,7 +1478,9 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(metadata["title"], "Japanese")
         self.assertEqual(metadata["overview"], "English overview")
         self.assertEqual(metadata["trailers"][0]["url"], "https://youtube.com/ja")
-        self.assertEqual(metadata["images"]["Primary"]["language"], None)
+        # Provider metadata alone is not publishable: image endpoints expose
+        # only artwork with a verified local cache file.
+        self.assertNotIn("Primary", metadata["images"])
         with self.assertRaises(HTTPException) as hidden:
             self.catalog().require_library(account["id"], "hidden")
         self.assertEqual(hidden.exception.status_code, 404)
@@ -1522,12 +1674,126 @@ class CatalogTest(unittest.TestCase):
         home = catalog.home(user_id, "en")
 
         self.assertEqual(home["continueWatching"][0]["seriesName"], "series 1")
-        self.assertEqual(home["nextUp"][0]["seriesName"], "series 1")
+        self.assertEqual(home["nextUp"], [])
         self.assertEqual(
             catalog.home_continue_watching(user_id, "en"),
             home["continueWatching"],
         )
         self.assertEqual(catalog.home_next_up(user_id, "en"), home["nextUp"])
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_rows_use_completion_frontier_and_exclude_partial_next(
+        self, _languages
+    ):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "episode-1", 0, 1, 1, 0, 100, "2026-01-01", "2026-01-01"),
+        )
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "episode-2", 0, 0, 0, 1, 100, "2026-01-02", "2026-01-02"),
+        )
+
+        self.assertEqual(
+            [item["id"] for item in catalog.home_continue_watching(user_id, "en")],
+            ["episode-2"],
+        )
+        self.assertEqual(catalog.home_next_up(user_id, "en"), [])
+
+        self.db.execute(
+            "UPDATE user_item_state SET played=1,position_seconds=0,last_played_at=?,updated_at=? WHERE user_id=? AND entity_id=?",
+            ("2026-01-03", "2026-01-03", user_id, "episode-2"),
+        )
+        next_up = catalog.home_next_up(user_id, "en")
+        self.assertEqual([item["id"] for item in next_up], ["episode-10"])
+
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "episode-11",
+                "allowed",
+                "season-1",
+                "episode",
+                "Example/Season 1/Episode 11",
+                1,
+                11,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "episode-10", 0, 1, 1, 0, 100, "2026-01-04", "2026-01-04"),
+        )
+        self.assertEqual(
+            [item["id"] for item in catalog.home_next_up(user_id, "en")],
+            ["episode-11"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_next_up_requires_published_candidate(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "episode-1", 0, 1, 1, 0, 100, "2026-01-01", "2026-01-01"),
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY)"
+        )
+        catalog._read_model_ready = lambda: True
+
+        self.assertEqual(catalog.home_next_up(user_id, "en"), [])
+        self.db.execute("INSERT INTO catalog_entity_summary VALUES(?)", ("episode-2",))
+        self.assertEqual(
+            [item["id"] for item in catalog.home_next_up(user_id, "en")],
+            ["episode-2"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_continue_includes_sub_two_percent_progress_and_orders_latest(
+        self, _languages
+    ):
+        user_id = self.account().create("home-progress", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
+        )
+        for entity_id, path in (("movie-old", "Old"), ("movie-new", "New")):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    "allowed",
+                    None,
+                    "movie",
+                    path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+        for state in (
+            (user_id, "movie-old", 0, 0, 0, 1, 100, "2026-01-01", "2026-01-01"),
+            (user_id, "movie-new", 0, 0, 0, 0.1, 100, "2026-01-02", "2026-01-02"),
+        ):
+            self.db.execute(
+                "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)", state
+            )
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+        self.assertEqual(
+            [item["id"] for item in catalog.home_continue_watching(user_id, "en")],
+            ["movie-new", "movie-old"],
+        )
 
 
 if __name__ == "__main__":

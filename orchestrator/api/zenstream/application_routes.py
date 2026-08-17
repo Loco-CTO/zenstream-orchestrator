@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import math
+import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from app.client_auth import cookie_secure, require_account, websocket_account
 from app.intro_outro import IntroOutroStore
@@ -11,6 +13,7 @@ from app.models import Invite
 from app.models.account import Account
 from app.models.admin import ADMIN_SESSION_COOKIE, Admin
 from app.models.playback_settings import PlaybackSettings
+from app.models.playback_viewer import PlaybackViewerStore
 from app.models.syncplay import (
     StaleSyncplayState,
     SyncplayGroup,
@@ -24,6 +27,7 @@ from fastapi import (
     APIRouter,
     Header,
     HTTPException,
+    Query,
     Request,
     WebSocket,
     WebSocketDisconnect,
@@ -31,14 +35,43 @@ from fastapi import (
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from version import __version__
 
-from api.zenstream.client_routes import _bounded_json_object, _enforce_rate_limit
+from api.zenstream.client_routes import (
+    _bounded_json_object,
+    _enforce_rate_limit,
+)
+from api.zenstream.client_routes import (
+    media as client_playback_media,
+)
 from api.zenstream.version import _main_version
+
+
+def _list_admin_playback_sessions(user_id: str | None):
+    return PlaybackViewerStore().list_sessions(user_id)
+
+
+def _get_admin_playback_session(viewer_id: str):
+    return PlaybackViewerStore().get_session(viewer_id)
+
+
+def _issue_admin_playback_command(viewer_id: str, action: str):
+    return PlaybackViewerStore().issue_command(viewer_id, action)
+
+
+def _list_admin_devices(user_id: str | None):
+    return PlaybackViewerStore().list_devices(user_id)
+
+
+def _remove_admin_device(device_id: str):
+    return PlaybackViewerStore().remove_device(device_id)
 
 
 def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
     """Return full state to members and a safe lobby projection to everyone else."""
-    group_id = state.get("id")
-    if group_id and SyncplayGroup(group_id).member(user_id, participant):
+    is_member = any(
+        member.get("userId") == user_id and member.get("participantId") == participant
+        for member in state.get("members", [])
+    )
+    if is_member:
         return state
     return {
         **state,
@@ -58,20 +91,91 @@ def _redact_syncplay_state(state: dict, user_id: str, participant: str) -> dict:
     }
 
 
+@dataclass
+class _SocketClient:
+    websocket: WebSocket
+    identity: tuple[str, str]
+    queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=128))
+    pending: list[dict] = field(default_factory=list)
+    initializing: bool = False
+    sender: asyncio.Task | None = None
+
+
 class WebSocketHub:
     def __init__(self):
         self.clients: set[WebSocket] = set()
         self.identities: dict[WebSocket, tuple[str, str]] = {}
+        self._connections: dict[WebSocket, _SocketClient] = {}
         self.disconnect_epochs: dict[tuple[str, str], int] = {}
+        self._queue_overflows = 0
         self.lock = asyncio.Lock()
 
-    async def connect(self, websocket: WebSocket, user: str, participant: str):
+    async def connect(
+        self,
+        websocket: WebSocket,
+        user: str,
+        participant: str,
+        *,
+        initialize: bool = False,
+    ):
         await websocket.accept()
+        connection = _SocketClient(
+            websocket=websocket,
+            identity=(user, participant),
+            initializing=initialize,
+        )
         async with self.lock:
             self.clients.add(websocket)
             self.identities[websocket] = (user, participant)
+            self._connections[websocket] = connection
             key = (user, participant)
             self.disconnect_epochs[key] = self.disconnect_epochs.get(key, 0) + 1
+            connection.sender = asyncio.create_task(self._sender(connection))
+
+    async def _sender(self, connection: _SocketClient):
+        websocket = connection.websocket
+        try:
+            while True:
+                payload = await connection.queue.get()
+                await websocket.send_json(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await self.remove(websocket)
+
+    def _enqueue_locked(self, connection: _SocketClient, payload: dict) -> bool:
+        try:
+            if connection.initializing:
+                if len(connection.pending) >= connection.queue.maxsize:
+                    raise asyncio.QueueFull
+                connection.pending.append(payload)
+            else:
+                connection.queue.put_nowait(payload)
+            return True
+        except asyncio.QueueFull:
+            self._queue_overflows += 1
+            return False
+
+    async def finish_initial(self, websocket: WebSocket, payload: dict) -> bool:
+        overflow = False
+        async with self.lock:
+            connection = self._connections.get(websocket)
+            if connection is None:
+                return False
+            try:
+                connection.queue.put_nowait(payload)
+                for pending in connection.pending:
+                    connection.queue.put_nowait(pending)
+            except asyncio.QueueFull:
+                overflow = True
+                self._queue_overflows += 1
+            else:
+                connection.pending.clear()
+                connection.initializing = False
+        if overflow:
+            asyncio.create_task(self.remove(websocket))
+            return False
+        return True
 
     async def epoch(self, user: str, participant: str):
         async with self.lock:
@@ -86,41 +190,82 @@ class WebSocketHub:
             )
 
     async def remove(self, websocket: WebSocket):
+        sender = None
         async with self.lock:
             self.clients.discard(websocket)
             identity = self.identities.pop(websocket, None)
+            connection = self._connections.pop(websocket, None)
+            if connection is not None:
+                sender = connection.sender
             if identity and not any(
                 value == identity for value in self.identities.values()
             ):
                 self.disconnect_epochs[identity] = (
                     self.disconnect_epochs.get(identity, 0) + 1
                 )
-            return identity, self.disconnect_epochs.get(
-                identity, 0
-            ) if identity else None
+            epoch = self.disconnect_epochs.get(identity, 0) if identity else None
+        current = asyncio.current_task()
+        if sender is not None and sender is not current:
+            sender.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sender
+        return identity, epoch
+
+    async def send(self, websocket: WebSocket, payload: dict) -> bool:
+        overflow = False
+        async with self.lock:
+            connection = self._connections.get(websocket)
+            if connection is None:
+                return False
+            if not self._enqueue_locked(connection, payload):
+                overflow = True
+        if overflow:
+            asyncio.create_task(self.remove(websocket))
+            return False
+        return True
+
+    async def send_to_identity(self, user: str, participant: str, payload: dict):
+        async with self.lock:
+            sockets = tuple(
+                socket
+                for socket, connection in self._connections.items()
+                if connection.identity == (user, participant)
+            )
+        for socket in sockets:
+            await self.send(socket, payload)
 
     async def broadcast(self, message: dict):
         async with self.lock:
-            clients = tuple(self.clients)
-        dead = []
-        for client in clients:
-            try:
+            connections = tuple(self._connections.values())
+            dead = []
+            for connection in connections:
                 payload = message
                 if message.get("type") == "group" and isinstance(
                     message.get("group"), dict
                 ):
-                    user_id, participant = self.identities.get(client, ("", ""))
                     payload = {
                         **message,
                         "group": _redact_syncplay_state(
-                            message["group"], user_id, participant
+                            message["group"], *connection.identity
                         ),
                     }
-                await client.send_json(payload)
-            except Exception:
-                dead.append(client)
+                if not self._enqueue_locked(connection, payload):
+                    dead.append(connection.websocket)
         for client in dead:
-            await self.remove(client)
+            asyncio.create_task(self.remove(client))
+
+    async def queue_metrics(self) -> dict[str, int]:
+        async with self.lock:
+            depths = [
+                connection.queue.qsize() + len(connection.pending)
+                for connection in self._connections.values()
+            ]
+            return {
+                "clients": len(self._connections),
+                "queued_messages": sum(depths),
+                "max_queue_depth": max(depths, default=0),
+                "queue_overflows": self._queue_overflows,
+            }
 
 
 hub = WebSocketHub()
@@ -137,25 +282,20 @@ async def _disconnect_cleanup(user, participant, epoch):
         user, participant
     ):
         return
-    for group in SyncplayGroup.active_groups_for_user(user, participant):
-        state = group.state()
-        if state and state["hostUserId"] == user:
-            await _broadcast_group(group.mark_host_disconnected())
-        else:
-            await _broadcast_group(group.deactivate_member(user, participant))
+    states = await run_control(_mark_disconnected_sync, user, participant)
+    for state in states:
+        await _broadcast_group(state)
 
     await asyncio.sleep(270)
     if await hub.epoch(user, participant) != epoch or await hub.sockets_for(
         user, participant
     ):
         return
-    for group in SyncplayGroup.active_groups_for_user(user, participant):
-        state = group.remove_disconnected_member(user, participant)
-        if state and state["hostUserId"] != user:
+    states = await run_control(_expire_disconnected_sync, user, participant)
+    for kind, state in states:
+        if kind == "group":
             await _broadcast_group(state)
-            continue
-        state = group.expire_host_disconnect()
-        if state:
+        else:
             await hub.broadcast(
                 {
                     "version": 1,
@@ -164,6 +304,32 @@ async def _disconnect_cleanup(user, participant, epoch):
                     "revision": state["revision"],
                 }
             )
+
+
+def _mark_disconnected_sync(user, participant):
+    states = []
+    for group in SyncplayGroup.active_groups_for_user(user, participant):
+        state = group.state()
+        if state and state["hostUserId"] == user:
+            state = group.mark_host_disconnected()
+        elif state:
+            state = group.deactivate_member(user, participant)
+        if state:
+            states.append(state)
+    return states
+
+
+def _expire_disconnected_sync(user, participant):
+    results = []
+    for group in SyncplayGroup.active_groups_for_user(user, participant):
+        state = group.remove_disconnected_member(user, participant)
+        if state and state["hostUserId"] != user:
+            results.append(("group", state))
+            continue
+        state = group.expire_host_disconnect()
+        if state:
+            results.append(("ended", state))
+    return results
 
 
 def _static_roots():
@@ -199,12 +365,7 @@ def _admin_request(
     request: Request, username: str | None = None, token: str | None = None
 ):
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-        origin = request.headers.get("origin")
-        expected = f"{request.headers.get('x-forwarded-proto', request.url.scheme)}://{request.headers.get('x-forwarded-host', request.headers.get('host', request.url.netloc))}"
-        if (
-            not origin
-            or f"{urlsplit(origin).scheme}://{urlsplit(origin).netloc}" != expected
-        ):
+        if not administrator_origin_allowed(request):
             raise HTTPException(403, "Cross-site administrator request rejected.")
     cookie_name = (
         ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session"
@@ -221,6 +382,18 @@ def _root_admin_request(
     if not profile or not profile["is_root"]:
         raise HTTPException(403, "Root administrator access is required.")
     return username, token
+
+
+async def _admin_request_async(
+    request: Request, username: str | None = None, token: str | None = None
+):
+    return await run_auth(_admin_request, request, username, token)
+
+
+async def _root_admin_request_async(
+    request: Request, username: str | None = None, token: str | None = None
+):
+    return await run_auth(_root_admin_request, request, username, token)
 
 
 def _contained_static_file(root: Path, *parts: str) -> Path | None:
@@ -242,6 +415,17 @@ def _static_path_is_contained(root: Path, path: str) -> bool:
         return False
 
 
+def _dashboard_files(path: str):
+    """Resolve dashboard paths in the control lane before FileResponse runs."""
+    if not _static_path_is_contained(web_root, path):
+        raise HTTPException(404)
+    requested = _contained_static_file(web_root, path)
+    route = path.strip("/") or "login"
+    page = _contained_static_file(web_root, "web", route, "index.html")
+    fallback = _contained_static_file(web_root, "web", "login", "index.html")
+    return requested, page, fallback
+
+
 router = APIRouter()
 web_root, _assets_root = _static_roots()
 
@@ -258,7 +442,7 @@ async def docs_alias():
 
 @router.get("/favicon.ico")
 async def favicon():
-    path = _contained_static_file(web_root, "favicon.ico")
+    path = await run_control(_contained_static_file, web_root, "favicon.ico")
     if path is None:
         raise HTTPException(404)
     return FileResponse(path)
@@ -266,16 +450,11 @@ async def favicon():
 
 @router.get("/web/{path:path}")
 async def dashboard(path: str = ""):
-    if not _static_path_is_contained(web_root, path):
-        raise HTTPException(404)
-    requested = _contained_static_file(web_root, path)
+    requested, page, fallback = await run_control(_dashboard_files, path)
     if requested is not None:
         return FileResponse(requested)
-    route = path.strip("/") or "login"
-    page = _contained_static_file(web_root, "web", route, "index.html")
     if page is not None:
         return FileResponse(page)
-    fallback = _contained_static_file(web_root, "web", "login", "index.html")
     if fallback is not None:
         return FileResponse(fallback)
     return JSONResponse(
@@ -290,7 +469,7 @@ async def admin_login(
     Password: str | None = Header(None),
 ):
     username, password = _user_headers(Username, Password)
-    token = Admin(username).login(password)
+    token = await run_auth(Admin(username).login, password)
     if not token:
         raise HTTPException(403, "Invalid administrator credentials.")
     response = JSONResponse({"username": username}, status_code=202)
@@ -312,8 +491,8 @@ async def admin_logout(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, token = _admin_request(request, Username, TOKEN)
-    Admin(username).logout(token)
+    username, token = await _admin_request_async(request, Username, TOKEN)
+    await run_control(Admin(username).logout, token)
     response = Response(status_code=204)
     response.delete_cookie(
         ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session",
@@ -334,11 +513,11 @@ async def admin_profile(
     TOKEN: str | None = Header(None),
 ):
     username, _ = (
-        _admin_request(request, Username, TOKEN)
+        await _admin_request_async(request, Username, TOKEN)
         if request is not None
-        else _admin_headers(Username, TOKEN)
+        else await run_auth(_admin_headers, Username, TOKEN)
     )
-    profile = Admin(username).profile()
+    profile = await run_control(Admin(username).profile)
     if not profile:
         raise HTTPException(404, "Administrator account not found.")
     return profile
@@ -353,12 +532,14 @@ async def admin_update_profile(
     TOKEN: str | None = Header(None),
 ):
     username, token = (
-        _admin_request(request, Username, TOKEN)
+        await _admin_request_async(request, Username, TOKEN)
         if request is not None
-        else _admin_headers(Username, TOKEN)
+        else await run_auth(_admin_headers, Username, TOKEN)
     )
     try:
-        result = Admin(username).update_profile(New_Username, New_Password, token)
+        result = await run_auth(
+            Admin(username).update_profile, New_Username, New_Password, token
+        )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     return {"username": result["username"]}
@@ -370,20 +551,107 @@ async def admin_overview(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _admin_request(request, Username, TOKEN)
-    db = Admin(username)._db
-    counts = db.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users"
-    )[0]
-    return {
-        "users": counts[0] or 0,
-        "active_users": counts[1] or 0,
-        "disabled_users": counts[2] or 0,
-        "administrators": db.execute("SELECT COUNT(*) FROM admins WHERE disabled = 0")[
-            0
-        ][0],
-        "pending_invites": db.execute("SELECT COUNT(*) FROM invites")[0][0],
-    }
+    username, _ = await _admin_request_async(request, Username, TOKEN)
+
+    def overview():
+        db = Admin(username)._db
+        counts = db.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN COALESCE(disabled, 0) = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN COALESCE(disabled, 0) = 1 THEN 1 ELSE 0 END) FROM users"
+        )[0]
+        active_invites = sum(
+            1 for invite in Invite().list() if invite["status"] == "active"
+        )
+        return {
+            "users": counts[0] or 0,
+            "active_users": counts[1] or 0,
+            "disabled_users": counts[2] or 0,
+            "administrators": db.execute(
+                "SELECT COUNT(*) FROM admins WHERE disabled = 0"
+            )[0][0],
+            "pending_invites": active_invites,
+        }
+
+    return await run_control(overview)
+
+
+@router.get("/api/admin/sessions")
+async def admin_playback_sessions(
+    request: Request,
+    userId: str | None = Query(None),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    return await run_control(_list_admin_playback_sessions, userId)
+
+
+@router.get("/api/admin/sessions/{viewer_id}")
+async def admin_playback_session_detail(
+    viewer_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    value = await run_control(_get_admin_playback_session, viewer_id)
+    if not value:
+        raise HTTPException(404, "Playback session not found.")
+    return value
+
+
+@router.post("/api/admin/sessions/{viewer_id}/command")
+async def admin_playback_session_command(
+    viewer_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    data = await _bounded_json_object(request)
+    try:
+        value = await run_control(
+            _issue_admin_playback_command,
+            viewer_id,
+            str(data.get("action") or "").strip().lower(),
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    if not value:
+        raise HTTPException(404, "Playback session is no longer active.")
+    return value
+
+
+@router.get("/api/admin/devices")
+async def admin_devices(
+    request: Request,
+    userId: str | None = Query(None),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    return await run_control(_list_admin_devices, userId)
+
+
+@router.delete("/api/admin/devices/{device_id}")
+async def admin_remove_device(
+    device_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    try:
+        result = await run_control(_remove_admin_device, device_id)
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+    for user_id, worker_id in result.get("workers", []):
+        try:
+            await run_control(client_playback_media.cancel_session, user_id, worker_id)
+        except Exception:
+            # Device removal remains successful even if a worker has already
+            # expired; the playback cleanup loop will reap that state.
+            pass
+    return {"deviceId": device_id, "removed": True}
 
 
 @router.get("/api/admin/playback/settings")
@@ -392,8 +660,8 @@ async def admin_playback_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    return PlaybackSettings().get()
+    await _admin_request_async(request, Username, TOKEN)
+    return await run_control(PlaybackSettings().get)
 
 
 @router.put("/api/admin/playback/settings")
@@ -402,9 +670,9 @@ async def update_admin_playback_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
+    await _admin_request_async(request, Username, TOKEN)
     data = await request.json()
-    current = PlaybackSettings().get()
+    current = await run_control(PlaybackSettings().get)
     width = data.get("trickplayFrameWidth", current["trickplayFrameWidth"])
     height = data.get("trickplayFrameHeight")
     if height is None:
@@ -413,13 +681,15 @@ async def update_admin_playback_settings(
         except (TypeError, ValueError):
             height = current["trickplayFrameHeight"]
     try:
-        values = PlaybackSettings().set(
+        values = await run_control(
+            PlaybackSettings().set,
             data.get("maxTranscodes", current["maxTranscodes"]),
             data.get("maxTranscodesPerUser", current["maxTranscodesPerUser"]),
             width,
             height,
             data.get("trickplayIntervalSeconds", current["trickplayIntervalSeconds"]),
             data.get("trickplayWorkers", current["trickplayWorkers"]),
+            data.get("trickplayFfmpegThreads", current["trickplayFfmpegThreads"]),
         )
         return values
     except ValueError as error:
@@ -432,10 +702,14 @@ async def admin_intro_outro_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    store = IntroOutroStore()
-    definition = scheduler.store.by_key("intro_outro_detect")
-    return {**store.settings(), "task": definition}
+    await _admin_request_async(request, Username, TOKEN)
+
+    def settings():
+        store = IntroOutroStore()
+        definition = scheduler.store.by_key("intro_outro_detect")
+        return {**store.settings(), "task": definition}
+
+    return await run_control(settings)
 
 
 @router.put("/api/admin/intro-outro/settings")
@@ -444,9 +718,18 @@ async def update_admin_intro_outro_settings(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    settings = IntroOutroStore().update_settings(await request.json())
-    scheduler.enqueue_intro_outro_detection()
+    await _admin_request_async(request, Username, TOKEN)
+    data = await request.json()
+    try:
+
+        def update():
+            settings = IntroOutroStore().update_settings(data)
+            scheduler.enqueue_intro_outro_detection()
+            return settings
+
+        settings = await run_control(update)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
     return settings
 
 
@@ -456,8 +739,8 @@ async def clear_admin_intro_outro_segments(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _admin_request(request, Username, TOKEN)
-    return {"removedSegments": IntroOutroStore().clear_segments()}
+    await _admin_request_async(request, Username, TOKEN)
+    return {"removedSegments": await run_control(IntroOutroStore().clear_segments)}
 
 
 @router.get("/api/admin/accounts")
@@ -466,8 +749,8 @@ async def admin_accounts(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _admin_request(request, Username, TOKEN)
-    return Admin(username).list_accounts()
+    username, _ = await _admin_request_async(request, Username, TOKEN)
+    return await run_control(Admin(username).list_accounts)
 
 
 @router.post("/api/admin/accounts", status_code=201)
@@ -478,12 +761,12 @@ async def admin_create_account(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _admin_request(request, Username, TOKEN)
+    username, _ = await _admin_request_async(request, Username, TOKEN)
     if (
         not Target_Username
         or not New_Password
         or len(New_Password) < 8
-        or not Admin(username).create(Target_Username, New_Password)
+        or not await run_auth(Admin(username).create, Target_Username, New_Password)
     ):
         raise HTTPException(400, "Invalid or duplicate administrator account.")
 
@@ -496,10 +779,14 @@ async def admin_set_account_disabled(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    username, _ = _root_admin_request(request, Username, TOKEN)
-    if not Admin(username).set_disabled(target_username.strip(), disabled):
-        raise HTTPException(404, "Administrator account not found.")
-    profile = Admin(target_username.strip()).profile()
+    username, _ = await _root_admin_request_async(request, Username, TOKEN)
+
+    def update_admin():
+        if not Admin(username).set_disabled(target_username.strip(), disabled):
+            return None
+        return Admin(target_username.strip()).profile()
+
+    profile = await run_control(update_admin)
     if not profile:
         raise HTTPException(404, "Administrator account not found.")
     return profile
@@ -511,32 +798,85 @@ async def admin_create_invite(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    _root_admin_request(request, Username, TOKEN)
-    return {"inviteid": Invite().generate()}
+    await _admin_request_async(request, Username, TOKEN)
+    data = await _bounded_json_object(request)
+    try:
+        max_uses = data.get("maxUses", 1)
+        expires_in_seconds = data.get("expiresInSeconds", 7 * 24 * 60 * 60)
+        if max_uses is not None:
+            max_uses = int(max_uses)
+        if expires_in_seconds is not None:
+            expires_in_seconds = int(expires_in_seconds)
+        return await run_control(
+            Invite().create,
+            library_ids=data.get("libraryIds") or [],
+            max_uses=max_uses,
+            expires_in_seconds=expires_in_seconds,
+        )
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@router.get("/api/admin/invites")
+async def admin_list_invites(
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    return {"invites": await run_control(Invite().list)}
+
+
+@router.delete("/api/admin/invites/{invite_id}", status_code=204)
+async def admin_delete_invite(
+    invite_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    if not await run_control(Invite().delete, invite_id):
+        raise HTTPException(404, "Invite not found.")
+    return Response(status_code=204)
 
 
 @router.get("/api/user/check_invite")
-async def check_invite(url: str | None = Header(None)):
-    if not isinstance(url, str) or not Invite().validate(url.strip()):
+async def check_invite(
+    invite: str | None = Query(None),
+    url: str | None = Header(None),
+):
+    token = invite if isinstance(invite, str) else url
+    if not isinstance(token, str) or not await run_control(
+        Invite().validate, token.strip()
+    ):
         raise HTTPException(403, "Invalid invite.")
-    return JSONResponse({}, status_code=202)
+    return JSONResponse({"valid": True}, status_code=200)
 
 
 @router.get("/api/version")
 async def version():
-    return {"version": __version__, "main": _main_version()}
+    return {"version": __version__, "main": await run_control(_main_version)}
+
+
+@router.get("/api/config/public-web-url")
+async def public_web_url():
+    return {
+        "publicWebUrl": os.environ.get("ZENSTREAM_PUBLIC_WEB_URL", "")
+        .strip()
+        .rstrip("/")
+    }
 
 
 @router.get("/api/config")
 async def mobile_config():
-    ffmpeg = ffmpeg_path()
-    ffprobe = ffprobe_path()
+    ffmpeg, ffprobe = await run_control(lambda: (ffmpeg_path(), ffprobe_path()))
+    main_version = await run_control(_main_version)
     return {
         "apiVersion": 2,
         "catalog": True,
         "playback": bool(ffmpeg and ffprobe),
         "version": __version__,
-        "main": _main_version(),
+        "main": main_version,
     }
 
 
@@ -549,14 +889,30 @@ async def register_client(request: Request):
         data.get("username") or request.headers.get("username") or ""
     ).strip()
     password = str(data.get("password") or request.headers.get("password") or "")
-    if not Invite().validate(invite_id):
-        raise HTTPException(403, "Invalid invite.")
     try:
-        account = Account().create(username, password)
+        result = await run_auth(Invite().register, invite_id, username, password)
+    except PermissionError as error:
+        raise HTTPException(403, str(error)) from error
     except ValueError as error:
         raise HTTPException(409, str(error)) from error
-    Invite().delete(invite_id)
-    return {"user": account}
+    response = JSONResponse({"user": result["user"]}, status_code=201)
+    response.set_cookie(
+        session_cookie_name(request),
+        result["sessionToken"],
+        max_age=7 * 24 * 60 * 60,
+        secure=cookie_secure(request),
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    response.delete_cookie(
+        DEV_CLIENT_SESSION_COOKIE,
+        secure=False,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
 
 
 def _sync_identity(request: Request):
@@ -567,30 +923,53 @@ def _sync_identity(request: Request):
     return account["id"], participant
 
 
+async def _sync_identity_async(request: Request):
+    return await run_auth(_sync_identity, request)
+
+
+def _syncplay_create_sync(user: str, participant: str):
+    account = Account()._row(user_id=user, read_only=True)
+    return SyncplayGroup.create(
+        user, participant, account[1] if account else "ZenStream"
+    ).state()
+
+
+def _syncplay_group_snapshot_sync(group_id: str, user: str, participant: str):
+    group = SyncplayGroup(group_id)
+    state = group.state()
+    return group, state, bool(state and group.member(user, participant))
+
+
+def _syncplay_socket_initial_sync(user: str, participant: str):
+    changed = []
+    for group in SyncplayGroup.active_groups_for_user(user, participant):
+        state = group.clear_host_disconnected()
+        if state:
+            changed.append(state)
+    states = SyncplayGroup.states()
+    return changed, [
+        _redact_syncplay_state(state, user, participant) for state in states
+    ]
+
+
 @router.get("/api/syncplay/groups")
 async def syncplay_groups(
     request: Request,
 ):
-    user_id, participant = _sync_identity(request)
-    rows = SyncplayGroup("_").db.execute(
-        "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
-    )
+    user_id, participant = await _sync_identity_async(request)
+    states = await run_control(SyncplayGroup.states)
     return {
         "groups": [
-            _redact_syncplay_state(SyncplayGroup(row[0]).state(), user_id, participant)
-            for row in rows
+            _redact_syncplay_state(state, user_id, participant) for state in states
         ]
     }
 
 
 @router.post("/api/syncplay/groups")
 async def syncplay_create(request: Request):
-    user, participant = _sync_identity(request)
+    user, participant = await _sync_identity_async(request)
     try:
-        account = Account()._row(user_id=user, read_only=True)
-        state = SyncplayGroup.create(
-            user, participant, account[1] if account else "ZenStream"
-        ).state()
+        state = await run_control(_syncplay_create_sync, user, participant)
     except SyncplayMembershipConflict:
         raise HTTPException(409, "You already belong to an active Syncplay group.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
@@ -599,22 +978,25 @@ async def syncplay_create(request: Request):
 
 @router.get("/api/syncplay/groups/{group_id}")
 async def syncplay_group(group_id: str, request: Request):
-    user, participant = _sync_identity(request)
-    group = SyncplayGroup(group_id)
-    state = group.state()
+    user, participant = await _sync_identity_async(request)
+    group, state, is_member = await run_control(
+        _syncplay_group_snapshot_sync, group_id, user, participant
+    )
     if not state:
         raise HTTPException(404, "Group not found.")
-    if not group.member(user, participant):
+    if not is_member:
         raise HTTPException(403, "Join this group first.")
     return state
 
 
 async def _sync_group_context(group_id: str, request: Request):
-    user, participant = _sync_identity(request)
-    group = SyncplayGroup(group_id)
-    if not group.state():
+    user, participant = await _sync_identity_async(request)
+    group, state, is_member = await run_control(
+        _syncplay_group_snapshot_sync, group_id, user, participant
+    )
+    if not state:
         raise HTTPException(404, "Group not found.")
-    if not group.member(user, participant):
+    if not is_member:
         raise HTTPException(403, "Join this group first.")
     return (
         user,
@@ -628,9 +1010,9 @@ async def _sync_group_context(group_id: str, request: Request):
 
 @router.post("/api/syncplay/groups/{group_id}/join")
 async def syncplay_join(group_id: str, request: Request):
-    user, participant = _sync_identity(request)
-    group = SyncplayGroup(group_id)
-    if not group.state():
+    user, participant = await _sync_identity_async(request)
+    group = await run_control(SyncplayGroup, group_id)
+    if not await run_control(group.state):
         raise HTTPException(404, "Group not found.")
     data = (
         await request.json()
@@ -638,6 +1020,7 @@ async def syncplay_join(group_id: str, request: Request):
         else {}
     )
     replaced = []
+    username = request.headers.get("x-zenstream-username", "ZenStream")
     try:
 
         def apply(cursor, state):
@@ -662,30 +1045,32 @@ async def syncplay_join(group_id: str, request: Request):
                     group_id,
                     user,
                     participant,
-                    request.headers.get("x-zenstream-username", "ZenStream"),
+                    username,
                 ),
             )
             group.transition(cursor, state)
 
-        state = group.mutate(
-            user, data.get("expectedRevision"), data.get("operationId"), apply
+        state = await run_control(
+            group.mutate,
+            user,
+            data.get("expectedRevision"),
+            data.get("operationId"),
+            apply,
         )
     except SyncplayMembershipConflict:
         raise HTTPException(409, "You must leave your current Syncplay group first.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     for old_participant in replaced:
-        for socket in await hub.sockets_for(user, old_participant):
-            try:
-                await socket.send_json(
-                    {
-                        "version": 1,
-                        "type": "participant-replaced",
-                        "id": group_id,
-                        "revision": state["revision"],
-                    }
-                )
-            except Exception:
-                pass
+        await hub.send_to_identity(
+            user,
+            old_participant,
+            {
+                "version": 1,
+                "type": "participant-replaced",
+                "id": group_id,
+                "revision": state["revision"],
+            },
+        )
     return state
 
 
@@ -713,8 +1098,12 @@ async def syncplay_leave(group_id: str, request: Request):
             )
             group.transition(cursor, state)
 
-    state = group.mutate(
-        user, data.get("expectedRevision"), data.get("operationId"), apply
+    state = await run_control(
+        group.mutate,
+        user,
+        data.get("expectedRevision"),
+        data.get("operationId"),
+        apply,
     )
     await hub.broadcast(
         {
@@ -741,8 +1130,12 @@ async def syncplay_settings(group_id: str, request: Request):
         group.transition(cursor, state, allow_controls=int(value))
 
     try:
-        state = group.mutate(
-            user, data.get("expectedRevision"), data.get("operationId"), apply
+        state = await run_control(
+            group.mutate,
+            user,
+            data.get("expectedRevision"),
+            data.get("operationId"),
+            apply,
         )
     except PermissionError:
         raise HTTPException(403, "Only the host can change settings.")
@@ -766,8 +1159,12 @@ async def syncplay_remove_member(group_id: str, member_id: str, request: Request
         group.reconcile_readiness(cursor, state)
 
     try:
-        state = group.mutate(
-            user, data.get("expectedRevision"), data.get("operationId"), apply
+        state = await run_control(
+            group.mutate,
+            user,
+            data.get("expectedRevision"),
+            data.get("operationId"),
+            apply,
         )
     except PermissionError:
         raise HTTPException(403, "Only the host can remove members.")
@@ -876,8 +1273,12 @@ async def syncplay_command(group_id: str, request: Request):
             pause(group, cursor, state, "command")
 
     try:
-        state = group.mutate(
-            user, data.get("expectedRevision"), data.get("operationId"), apply
+        state = await run_control(
+            group.mutate,
+            user,
+            data.get("expectedRevision"),
+            data.get("operationId"),
+            apply,
         )
     except PermissionError:
         raise HTTPException(403, "Only the host can control playback.")
@@ -925,7 +1326,7 @@ async def syncplay_presence(group_id: str, request: Request):
             bool(data.get("loading")),
         )
 
-    state = group.mutate(user, None, data.get("operationId"), apply)
+    state = await run_control(group.mutate, user, None, data.get("operationId"), apply)
     await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
 
@@ -937,8 +1338,12 @@ async def syncplay_participation(group_id: str, request: Request):
     if not isinstance(watching, bool):
         raise HTTPException(400, "watchingTogether must be boolean.")
     try:
-        state = group.set_participation(
-            user, participant, watching, data.get("operationId")
+        state = await run_control(
+            group.set_participation,
+            user,
+            participant,
+            watching,
+            data.get("operationId"),
         )
     except StaleSyncplayState as error:
         raise HTTPException(
@@ -954,44 +1359,36 @@ async def syncplay_socket(websocket: WebSocket):
     participant = websocket.headers.get(
         "x-zenstream-participant"
     ) or websocket.query_params.get("participantId")
-    account = websocket_account(websocket)
+    account = await run_auth(websocket_account, websocket)
     user_id = account["id"] if account else None
     if not user_id or not participant:
         await websocket.close(code=1008)
         return
-    await hub.connect(websocket, user_id, participant)
+    await hub.connect(websocket, user_id, participant, initialize=True)
     try:
-        for group in SyncplayGroup.active_groups_for_user(user_id, participant):
-            state = group.clear_host_disconnected()
-            if state:
-                await _broadcast_group(state)
-        rows = SyncplayGroup("_").db.execute(
-            "SELECT id FROM syncplay_groups WHERE ended=0 ORDER BY updated DESC", ()
+        changed, groups = await run_control(
+            _syncplay_socket_initial_sync, user_id, participant
         )
-        await websocket.send_json(
-            {
-                "version": 1,
-                "type": "groups",
-                "groups": [
-                    _redact_syncplay_state(
-                        SyncplayGroup(row[0]).state(), user_id, participant
-                    )
-                    for row in rows
-                ],
-            }
-        )
+        for state in changed:
+            await _broadcast_group(state)
+        if not await hub.finish_initial(
+            websocket,
+            {"version": 1, "type": "groups", "groups": groups},
+        ):
+            return
         while True:
             message = await websocket.receive_json()
             if message.get("type") == "clock":
                 received = time.time()
-                await websocket.send_json(
+                await hub.send(
+                    websocket,
                     {
                         "version": 1,
                         "type": "clock",
                         "clientSentAt": message.get("clientSentAt"),
                         "serverReceivedAt": received,
                         "serverSentAt": time.time(),
-                    }
+                    },
                 )
     except WebSocketDisconnect:
         pass

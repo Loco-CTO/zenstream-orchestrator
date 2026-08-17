@@ -4,9 +4,11 @@ import base64
 import binascii
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import time
+from urllib.parse import urlsplit
 
 from app.models.account import Account
 from fastapi import HTTPException, Request, WebSocket
@@ -15,26 +17,95 @@ _TICKET_TTL_LIMITS = {"resource": 15 * 60, "socket": 60}
 _RESERVED_TICKET_CLAIMS = {"uid", "kind", "iat", "exp"}
 CLIENT_SESSION_COOKIE = "__Host-zenstream-session"
 DEV_CLIENT_SESSION_COOKIE = "zenstream-session"
+DEV_CLIENT_SESSION_COOKIE_PREFIX = f"{DEV_CLIENT_SESSION_COOKIE}-"
+_DEFAULT_BROWSER_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+)
+
+
+def _normalized_origin(value: str | None) -> str | None:
+    parsed = urlsplit(value or "")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def browser_origins() -> list[str]:
+    values = [
+        value.strip()
+        for value in os.getenv("CORS_ORIGINS", "").split(",")
+        if value.strip()
+    ]
+    values.extend(_DEFAULT_BROWSER_ORIGINS)
+    return list(dict.fromkeys(filter(None, map(_normalized_origin, values))))
+
+
+def administrator_origin_allowed(request: Request) -> bool:
+    supplied = _normalized_origin(request.headers.get("origin"))
+    if supplied is None:
+        return False
+    direct = _normalized_origin(
+        f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+    )
+    forwarded = _normalized_origin(
+        f"{request.headers.get('x-forwarded-proto', request.url.scheme)}://"
+        f"{request.headers.get('x-forwarded-host', '')}"
+    )
+    return supplied in {direct, forwarded, *browser_origins()}
+
+
+def _request_hostname(request: Request) -> str:
+    try:
+        return (request.url.hostname or "").rstrip(".").lower()
+    except (UnicodeError, ValueError):
+        return ""
+
+
+def _request_port(request: Request) -> int:
+    try:
+        port = request.url.port
+    except ValueError:
+        port = None
+    if port is not None:
+        return port
+    return 443 if request.url.scheme == "https" else 80
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def cookie_secure(request: Request) -> bool:
     """Use secure cookies in production; permit explicit loopback HTTP development."""
-    host = (
-        (request.headers.get("host") or request.url.hostname or "")
-        .split(":", 1)[0]
-        .lower()
+    return request.url.scheme == "https" or not _is_loopback_host(
+        _request_hostname(request)
     )
-    return request.url.scheme == "https" or host not in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-    }
 
 
 def session_cookie_name(request: Request) -> str:
-    return (
-        CLIENT_SESSION_COOKIE if cookie_secure(request) else DEV_CLIENT_SESSION_COOKIE
-    )
+    if cookie_secure(request):
+        return CLIENT_SESSION_COOKIE
+    return f"{DEV_CLIENT_SESSION_COOKIE_PREFIX}{_request_port(request)}"
+
+
+def _session_cookie_token(request: Request) -> str | None:
+    primary = request.cookies.get(session_cookie_name(request))
+    if primary:
+        return primary
+    # Accept the unscoped loopback cookie during the migration window. Login and
+    # logout expire it so separate local Orchestrator ports stop overwriting one
+    # another as soon as the client next authenticates.
+    if not cookie_secure(request):
+        return request.cookies.get(DEV_CLIENT_SESSION_COOKIE)
+    return None
 
 
 def _token_hash(token: str) -> str:
@@ -49,8 +120,8 @@ def bearer_token(value: str | None) -> str | None:
 
 
 def require_account(request: Request) -> tuple[dict, str]:
-    token = bearer_token(request.headers.get("authorization")) or request.cookies.get(
-        session_cookie_name(request)
+    token = bearer_token(request.headers.get("authorization")) or _session_cookie_token(
+        request
     )
     account = getattr(request.state, "authenticated", None)
     if account is None:
@@ -78,8 +149,8 @@ def _iso_now() -> str:
 
 
 def optional_account(request: Request) -> tuple[dict, str] | None:
-    token = bearer_token(request.headers.get("authorization")) or request.cookies.get(
-        session_cookie_name(request)
+    token = bearer_token(request.headers.get("authorization")) or _session_cookie_token(
+        request
     )
     account = getattr(request.state, "authenticated", None)
     if account is None:

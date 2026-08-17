@@ -15,6 +15,7 @@ from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import (
     CLIENT_SESSION_COOKIE,
+    DEV_CLIENT_SESSION_COOKIE,
     account_from_access,
     cookie_secure,
     issue_ticket,
@@ -23,13 +24,15 @@ from app.client_auth import (
     session_id_for_token,
     websocket_account,
 )
-from app.foreground import run_foreground
+from app.foreground import run_auth, run_control, run_foreground
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore
+from app.language_registry import language_options
 from app.logging_config import get_logger
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
+from app.models.playback_viewer import PlaybackViewerStore, normalize_device_metadata
 from app.playback import PlaybackManager, ffmpeg_path
 from app.trickplay import TrickplayExtractor
 from fastapi import (
@@ -53,7 +56,163 @@ intro_outro = IntroOutroStore()
 logger = get_logger("playback_routes")
 AUTH_BODY_LIMIT_BYTES = 16 * 1024
 RESOURCE_TICKET_TTL_SECONDS = 15 * 60
+CATALOG_SCAN_EVENT_INTERVAL_SECONDS = 5.0
 _RATE_LIMIT_EVENTS: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+CARD_METADATA_FIELDS = {
+    "title",
+    "date",
+    "year",
+    "runtimeMinutes",
+    "communityRating",
+    "officialRating",
+    "tags",
+    "genres",
+    "images",
+}
+
+
+async def _require_account(request: Request) -> tuple[dict, str]:
+    return await run_auth(require_account, request)
+
+
+async def _require_access(request: Request, kind: str = "resource", **claims):
+    return await run_auth(account_from_access, request, kind, **claims)
+
+
+def _request_device_metadata(data: dict) -> dict | None:
+    value = data.get("device")
+    if not isinstance(value, dict):
+        value = {
+            key: data.get(key)
+            for key in (
+                "deviceId",
+                "deviceType",
+                "browser",
+                "operatingSystem",
+                "deviceName",
+                "clientName",
+                "clientVersion",
+            )
+            if data.get(key) is not None
+        }
+    normalized = normalize_device_metadata(value)
+    if not any(
+        normalized.get(key)
+        for key in (
+            "deviceId",
+            "browser",
+            "operatingSystem",
+            "deviceName",
+            "clientName",
+            "clientVersion",
+        )
+    ):
+        return None
+    return normalized
+
+
+def _authenticate_and_create_session(
+    username: str,
+    password: str,
+    device_metadata: dict | None = None,
+    ip_address: str | None = None,
+):
+    account_model = Account()
+    account = account_model.authenticate_password(username, password)
+    if not account:
+        return None
+    if device_metadata is None:
+        session = account_model.create_session(account["id"])
+    else:
+        session = account_model.create_session(
+            account["id"], device_metadata=device_metadata, ip_address=ip_address
+        )
+    return account, session
+
+
+def _heartbeat_playback_viewer(
+    user_id: str,
+    auth_session_id: str,
+    viewer_id: str,
+    payload: dict,
+    ip_address: str | None,
+):
+    return PlaybackViewerStore().heartbeat(
+        user_id, auth_session_id, viewer_id, payload, ip_address
+    )
+
+
+def _end_playback_viewer_sync(user_id: str, auth_session_id: str, viewer_id: str):
+    return PlaybackViewerStore().end_viewer(user_id, auth_session_id, viewer_id)
+
+
+def _direct_path_and_size(user_id: str, entity_id: str, source_id: str | None):
+    path = media.direct_path(user_id, entity_id, source_id)
+    return path, path.stat().st_size
+
+
+def _read_playlist(path: Path, access: str) -> str:
+    lines = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        lines.append(
+            f"{line}{'&' if '?' in line else '?'}access={access}"
+            if line and not line.startswith("#")
+            else line
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _catalog_item(value: object) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and isinstance(value.get("id"), str)
+        and isinstance(value.get("metadata"), dict)
+        and "userState" in value
+    )
+
+
+def _card_item(value: dict) -> dict:
+    result = dict(value)
+    source_metadata = value.get("metadata")
+    metadata = {
+        key: field
+        for key, field in source_metadata.items()
+        if key in CARD_METADATA_FIELDS
+    }
+    images = metadata.get("images")
+    if isinstance(images, dict):
+        metadata["images"] = {
+            image_type: image
+            for image_type in ("Primary", "Backdrop")
+            if isinstance((image := images.get(image_type)), dict)
+        }
+    result["metadata"] = metadata
+    return result
+
+
+def _catalog_response(value, view: str | None, limit: int | None = None):
+    if view not in {None, "full", "card"}:
+        raise HTTPException(400, "Unsupported catalog view.")
+    if view != "card" and limit is None:
+        return value
+
+    def transform(current):
+        if _catalog_item(current):
+            return _card_item(current) if view == "card" else current
+        if isinstance(current, list):
+            items = [transform(item) for item in current]
+            if (
+                limit is not None
+                and items
+                and all(_catalog_item(item) for item in items)
+            ):
+                return items[:limit]
+            return items
+        if isinstance(current, dict):
+            return {key: transform(item) for key, item in current.items()}
+        return current
+
+    return transform(value)
 
 
 def _client_address(request: Request) -> str:
@@ -171,24 +330,104 @@ def _catalog_status_fingerprint(payload: dict) -> tuple:
     )
 
 
+def _catalog_update_event(
+    previous_libraries: dict[str, tuple],
+    library: dict,
+    current_time: float,
+    last_scan_sent: dict[str, float],
+) -> dict | None:
+    current_value = (
+        library["id"],
+        library["scanState"],
+        library["lastScanFinishedAt"],
+        library["catalogGeneration"],
+        library["lastRootEntityId"],
+    )
+    if previous_libraries.get(library["id"]) == current_value:
+        return None
+
+    scanning = library["scanState"] == "scanning"
+    if scanning:
+        previous_time = last_scan_sent.get(library["id"])
+        if (
+            previous_time is not None
+            and current_time - previous_time < CATALOG_SCAN_EVENT_INTERVAL_SECONDS
+        ):
+            return None
+        last_scan_sent[library["id"]] = current_time
+    else:
+        # A ready/error/idle transition is the terminal refresh signal for
+        # the scan, regardless of when the last progress event was sent.
+        last_scan_sent.pop(library["id"], None)
+
+    return {
+        "type": "catalog.updated",
+        "libraryId": library["id"],
+        "rootEntityId": library["lastRootEntityId"],
+        "generation": library["catalogGeneration"],
+        "reason": "scan" if scanning else "refresh",
+    }
+
+
 @router.post("/api/auth/login")
 async def login(request: Request):
     _enforce_rate_limit(request, "login", 10)
     data = await _bounded_json_object(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
-    account_model = Account()
-    account = account_model.authenticate_password(username, password)
-    if not account:
+    authenticated = await run_auth(
+        _authenticate_and_create_session,
+        username,
+        password,
+        _request_device_metadata(data),
+        _client_address(request),
+    )
+
+    if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
-    session = account_model.create_session(account["id"])
+    account, session = authenticated
     return {**session, "user": account}
 
 
 @router.get("/api/auth/me")
 async def me(request: Request):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     return {"user": account}
+
+
+@router.get("/api/auth/bootstrap")
+async def auth_bootstrap(request: Request):
+    """Return the authenticated session's small, parallel-startup payload.
+
+    This is additive to ``/auth/me`` and deliberately keeps the ticket optional:
+    catalog JSON can render before artwork authorization is available.
+    """
+    account, token = await _require_account(request)
+    session_id = await run_auth(session_id_for_token, token)
+    if not session_id:
+        raise HTTPException(401, "Authentication required.")
+    preference = AccountPreference(account["id"])
+    locale, metadata_language, subtitles, languages = await asyncio.gather(
+        run_control(preference.locale),
+        run_control(preference.metadata_language),
+        run_control(preference.subtitle_style),
+        run_control(MetadataLanguageSettings().get),
+    )
+    return {
+        "user": account,
+        "resourceTicket": issue_ticket(
+            account["id"],
+            "resource",
+            RESOURCE_TICKET_TTL_SECONDS,
+            sessionId=session_id,
+        ),
+        "resourceTicketExpiresIn": RESOURCE_TICKET_TTL_SECONDS,
+        "locale": locale,
+        "metadataLanguage": metadata_language,
+        "subtitleStyle": subtitles,
+        "languages": languages,
+        "languageOptions": language_options(locale),
+    }
 
 
 @router.post("/api/auth/browser-login")
@@ -198,10 +437,16 @@ async def browser_login(request: Request):
     data = await _bounded_json_object(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
-    account = Account().authenticate_password(username, password)
-    if not account:
+    authenticated = await run_auth(
+        _authenticate_and_create_session,
+        username,
+        password,
+        _request_device_metadata(data),
+        _client_address(request),
+    )
+    if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
-    session = Account().create_session(account["id"])
+    account, session = authenticated
     response = JSONResponse({"user": account}, status_code=200)
     response.set_cookie(
         session_cookie_name(request),
@@ -212,30 +457,52 @@ async def browser_login(request: Request):
         samesite="strict",
         path="/",
     )
+    response.delete_cookie(
+        DEV_CLIENT_SESSION_COOKIE,
+        secure=False,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
     return response
 
 
 @router.post("/api/auth/logout", status_code=204)
 async def logout(request: Request):
-    _, token = require_account(request)
-    Account().revoke(token)
+    _, token = await _require_account(request)
+    await run_control(Account().revoke, token)
     response = Response(status_code=204)
+    primary_cookie = session_cookie_name(request)
     response.delete_cookie(
-        session_cookie_name(request),
+        primary_cookie,
         secure=cookie_secure(request),
         httponly=True,
         samesite="strict",
         path="/",
     )
-    if session_cookie_name(request) != CLIENT_SESSION_COOKIE:
-        response.delete_cookie(CLIENT_SESSION_COOKIE, path="/")
+    if primary_cookie != CLIENT_SESSION_COOKIE:
+        response.delete_cookie(
+            CLIENT_SESSION_COOKIE,
+            secure=True,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    if primary_cookie != DEV_CLIENT_SESSION_COOKIE:
+        response.delete_cookie(
+            DEV_CLIENT_SESSION_COOKIE,
+            secure=False,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
     return response
 
 
 @router.get("/api/auth/resource-ticket")
 async def resource_ticket(request: Request):
-    account, token = require_account(request)
-    session_id = session_id_for_token(token)
+    account, token = await _require_account(request)
+    session_id = await run_auth(session_id_for_token, token)
     if not session_id:
         raise HTTPException(401, "Authentication required.")
     return {
@@ -251,8 +518,8 @@ async def resource_ticket(request: Request):
 
 @router.post("/api/auth/socket-ticket")
 async def socket_ticket(request: Request):
-    account, token = require_account(request)
-    session_id = session_id_for_token(token)
+    account, token = await _require_account(request)
+    session_id = await run_auth(session_id_for_token, token)
     if not session_id:
         raise HTTPException(401, "Authentication required.")
     return {
@@ -263,22 +530,23 @@ async def socket_ticket(request: Request):
 
 @router.get("/api/catalog/status")
 async def catalog_status(request: Request):
-    account, _ = require_account(request)
-    return await asyncio.to_thread(_catalog_status_payload, account["id"])
+    account, _ = await _require_account(request)
+    return await run_foreground(_catalog_status_payload, account["id"])
 
 
 @router.websocket("/api/ws/catalog")
 async def catalog_socket(websocket: WebSocket):
-    account = websocket_account(websocket)
+    account = await run_auth(websocket_account, websocket)
     if not account:
         await websocket.close(code=1008)
         return
     await websocket.accept()
     previous = None
     last_sent = 0.0
+    last_scan_sent: dict[str, float] = {}
     try:
         while True:
-            payload = await asyncio.to_thread(_catalog_status_payload, account["id"])
+            payload = await run_foreground(_catalog_status_payload, account["id"])
             fingerprint = _catalog_status_fingerprint(payload)
             current = asyncio.get_running_loop().time()
             changed = fingerprint != previous
@@ -286,26 +554,15 @@ async def catalog_socket(websocket: WebSocket):
                 if previous is not None and changed:
                     previous_libraries = {value[0]: value for value in previous[2]}
                     for library in payload["libraries"]:
-                        current_value = (
-                            library["id"],
-                            library["scanState"],
-                            library["lastScanFinishedAt"],
-                            library["catalogGeneration"],
-                            library["lastRootEntityId"],
+                        event = _catalog_update_event(
+                            previous_libraries,
+                            library,
+                            current,
+                            last_scan_sent,
                         )
-                        if previous_libraries.get(library["id"]) == current_value:
+                        if event is None:
                             continue
-                        await websocket.send_json(
-                            {
-                                "type": "catalog.updated",
-                                "libraryId": library["id"],
-                                "rootEntityId": library["lastRootEntityId"],
-                                "generation": library["catalogGeneration"],
-                                "reason": "scan"
-                                if library["scanState"] != "idle"
-                                else "refresh",
-                            }
-                        )
+                        await websocket.send_json(event)
                 else:
                     await websocket.send_json({"type": "catalog.status", **payload})
                 previous = fingerprint
@@ -317,23 +574,35 @@ async def catalog_socket(websocket: WebSocket):
 
 @router.get("/api/metadata/languages")
 async def metadata_languages(request: Request):
-    require_account(request)
-    return {"languages": MetadataLanguageSettings().get()}
+    await _require_account(request)
+    return {"languages": await run_control(MetadataLanguageSettings().get)}
+
+
+@router.get("/api/languages")
+async def supported_languages(
+    request: Request,
+    display_language: str | None = Query(None, alias="displayLanguage"),
+):
+    account, _ = await _require_account(request)
+    if not display_language:
+        display_language = await run_control(AccountPreference(account["id"]).locale)
+    return {"languages": language_options(display_language)}
 
 
 @router.get("/api/preferences/locale")
 async def get_locale(request: Request):
-    account, _ = require_account(request)
-    return {"locale": AccountPreference(account["id"]).locale()}
+    account, _ = await _require_account(request)
+    return {"locale": await run_control(AccountPreference(account["id"]).locale)}
 
 
 @router.patch("/api/preferences/locale")
 async def set_locale(request: Request):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     try:
         return {
-            "locale": AccountPreference(account["id"]).set_locale(
-                (await request.json()).get("locale")
+            "locale": await run_control(
+                AccountPreference(account["id"]).set_locale,
+                (await _bounded_json_object(request)).get("locale"),
             )
         }
     except ValueError as error:
@@ -342,16 +611,17 @@ async def set_locale(request: Request):
 
 @router.get("/api/preferences/metadata-language")
 async def get_metadata_language(request: Request):
-    account, _ = require_account(request)
-    return AccountPreference(account["id"]).metadata_language()
+    account, _ = await _require_account(request)
+    return await run_control(AccountPreference(account["id"]).metadata_language)
 
 
 @router.patch("/api/preferences/metadata-language")
 async def set_metadata_language(request: Request):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     try:
-        return AccountPreference(account["id"]).set_metadata_language(
-            (await request.json()).get("language")
+        return await run_control(
+            AccountPreference(account["id"]).set_metadata_language,
+            (await _bounded_json_object(request)).get("language"),
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -359,23 +629,72 @@ async def set_metadata_language(request: Request):
 
 @router.get("/api/preferences/subtitles")
 async def get_subtitles(request: Request):
-    account, _ = require_account(request)
-    return AccountPreference(account["id"]).subtitle_style()
+    account, _ = await _require_account(request)
+    return await run_control(AccountPreference(account["id"]).subtitle_style)
 
 
 @router.patch("/api/preferences/subtitles")
 async def set_subtitles(request: Request):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     try:
-        return AccountPreference(account["id"]).set_subtitle_style(await request.json())
+        return await run_control(
+            AccountPreference(account["id"]).set_subtitle_style,
+            await _bounded_json_object(request),
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@router.get("/api/preferences/playback")
+async def get_playback_preferences(request: Request):
+    account, _ = await _require_account(request)
+    return await run_control(AccountPreference(account["id"]).playback)
+
+
+@router.patch("/api/preferences/playback")
+async def set_playback_preferences(request: Request):
+    account, _ = await _require_account(request)
+    try:
+        value = await _bounded_json_object(request)
+        return await run_control(
+            AccountPreference(account["id"]).set_playback,
+            value,
+        )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 
 
 @router.get("/api/catalog/libraries")
-async def libraries(request: Request):
-    account, _ = require_account(request)
-    return {"libraries": await run_foreground(catalog.libraries, account["id"])}
+async def libraries(
+    request: Request,
+    language: str | None = Query(None),
+    includeFirstPage: bool = Query(False),
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(40, ge=1, le=100),
+    sortBy: str | None = Query(None),
+    sortOrder: str = Query("ascending"),
+):
+    account, _ = await _require_account(request)
+    libraries_value = await run_foreground(catalog.libraries, account["id"])
+    if not includeFirstPage:
+        return {"libraries": libraries_value}
+    preferred = await run_foreground(_preferred, account, language)
+    first_pages = await asyncio.gather(
+        *(
+            run_foreground(
+                catalog.list_items,
+                account["id"],
+                library["id"],
+                preferred,
+                page=page,
+                page_size=pageSize,
+                sort_by=sortBy,
+                sort_order=sortOrder,
+            )
+            for library in libraries_value
+        )
+    )
+    return {"libraries": libraries_value, "initialPage": first_pages}
 
 
 @router.get("/api/catalog/home")
@@ -383,31 +702,59 @@ async def home(
     request: Request,
     language: str | None = Query(None),
     section: str | None = Query(None),
+    libraryId: str | None = Query(None),
+    view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
     if section is None:
-        return await run_foreground(catalog.home, account["id"], preferred)
+        result = await run_foreground(catalog.home, account["id"], preferred)
+        return _catalog_response(result, view, limit)
     if section == "featured":
-        return {
-            "latestItems": await run_foreground(
-                catalog.home_featured, account["id"], preferred
-            )
-        }
+        return _catalog_response(
+            {
+                "latestItems": await run_foreground(
+                    catalog.home_featured, account["id"], preferred
+                )
+            },
+            view,
+            limit,
+        )
     if section == "continueWatching":
-        return {
-            "continueWatching": await run_foreground(
-                catalog.home_continue_watching, account["id"], preferred
-            )
-        }
+        return _catalog_response(
+            {
+                "continueWatching": await run_foreground(
+                    catalog.home_continue_watching, account["id"], preferred
+                )
+            },
+            view,
+            limit,
+        )
     if section == "nextUp":
-        return {
-            "nextUp": await run_foreground(
-                catalog.home_next_up, account["id"], preferred
-            )
-        }
+        return _catalog_response(
+            {
+                "nextUp": await run_foreground(
+                    catalog.home_next_up, account["id"], preferred
+                )
+            },
+            view,
+            limit,
+        )
     if section == "derived":
-        return await run_foreground(catalog.home_derived, account["id"], preferred)
+        result = await run_foreground(catalog.home_derived, account["id"], preferred)
+        return _catalog_response(result, view, limit)
+    if section == "library":
+        if not libraryId:
+            raise HTTPException(
+                400, "libraryId is required for the library Home section."
+            )
+        rows = await run_foreground(
+            catalog.home_library_rows, account["id"], preferred, libraryId
+        )
+        if rows is None:
+            raise HTTPException(404, "Library not found.")
+        return _catalog_response({"libraryRows": rows}, view, limit)
     else:
         raise HTTPException(400, "Unsupported home section.")
 
@@ -426,20 +773,24 @@ async def items(
     pageSize: int = Query(40, ge=1, le=100),
     sortBy: str | None = Query(None),
     sortOrder: str = Query("ascending"),
+    view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
+    result = await run_foreground(
         catalog.list_items,
         account["id"],
         libraryId,
         preferred,
         parent_id=parentId,
         page=page,
-        page_size=pageSize,
+        page_size=effective_page_size,
         sort_by=sortBy,
         sort_order=sortOrder,
     )
+    return _catalog_response(result, view)
 
 
 @router.get("/api/catalog/search")
@@ -449,17 +800,21 @@ async def search(
     language: str | None = Query(None),
     page: int = Query(1, ge=1),
     pageSize: int = Query(40, ge=1, le=100),
+    view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
+    result = await run_foreground(
         catalog.search,
         account["id"],
         query,
         preferred,
         page,
-        pageSize,
+        effective_page_size,
     )
+    return _catalog_response(result, view)
 
 
 @router.get("/api/catalog/favorites")
@@ -470,37 +825,56 @@ async def favorites(
     pageSize: int = Query(100, ge=1, le=100),
     sortBy: str = Query("title"),
     sortOrder: str = Query("ascending"),
+    view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
+    result = await run_foreground(
         catalog.favorites,
         account["id"],
         preferred,
         page,
-        pageSize,
+        effective_page_size,
         sortBy,
         sortOrder,
     )
+    return _catalog_response(result, view)
 
 
 @router.get("/api/catalog/items/{entity_id}")
-async def item(entity_id: str, request: Request, language: str | None = Query(None)):
-    account, _ = require_account(request)
+async def item(
+    entity_id: str,
+    request: Request,
+    language: str | None = Query(None),
+    view: str | None = Query(None),
+):
+    account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(catalog.item, account["id"], entity_id, preferred)
+    result = await run_foreground(catalog.item, account["id"], entity_id, preferred)
+    return _catalog_response(result, view)
 
 
 @router.get("/api/catalog/items/{entity_id}/similar")
-async def similar(entity_id: str, request: Request, language: str | None = Query(None)):
-    account, _ = require_account(request)
+async def similar(
+    entity_id: str,
+    request: Request,
+    language: str | None = Query(None),
+    view: str | None = Query(None),
+    limit: int = Query(8, ge=1, le=40),
+):
+    account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(catalog.similar, account["id"], entity_id, preferred)
+    result = await run_foreground(
+        catalog.similar, account["id"], entity_id, preferred, limit
+    )
+    return _catalog_response(result, view)
 
 
 @router.get("/api/catalog/items/{entity_id}/metadata")
 async def item_metadata(entity_id: str, request: Request, language: str = Query(...)):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     return await run_foreground(
         catalog.metadata, account["id"], entity_id, language, include_credits=True
     )
@@ -510,8 +884,10 @@ async def item_metadata(entity_id: str, request: Request, language: str = Query(
 async def item_image(
     entity_id: str, image_type: str, request: Request, language: str = Query(...)
 ):
+    requested_version = request.query_params.get("v")
+    account = await _require_access(request)
+
     def resolve_cached_image() -> Path | None:
-        account = account_from_access(request)
         row = catalog.require_entity(account["id"], entity_id)
         library_rows = catalog.db.execute(
             "SELECT directory FROM libraries WHERE id=?", (row[1],)
@@ -533,25 +909,51 @@ async def item_image(
                     if cached and cached.is_file():
                         return cached
                     raise HTTPException(404, "Image not found.")
+        # The catalog selection is canonical. Request-time provider reselection
+        # can disagree with the projection while a secondary provider refreshes
+        # and would reject a valid versioned URL from the catalog payload.
         if catalog._has_table("catalog_artwork_selection"):
             projected = catalog.db.execute(
-                "SELECT local_path FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
+                "SELECT local_path,version FROM catalog_artwork_selection WHERE entity_id=? AND locale=? AND image_type=?",
                 (entity_id, language, image_type),
             )
-            if projected and projected[0][0] and Path(projected[0][0]).is_file():
-                return Path(projected[0][0])
+            if projected:
+                selected_path, selected_version = projected[0]
+                if requested_version and requested_version != selected_version:
+                    # Versioned URLs are immutable.  Never substitute a
+                    # different fallback file under a stale client URL.
+                    raise HTTPException(404, "Image version is no longer available.")
+                if selected_path and Path(selected_path).is_file():
+                    return Path(selected_path)
+                if requested_version:
+                    raise HTTPException(404, "Image version is no longer available.")
+                return None
+        # Legacy/cache-only fallback is used only when no canonical selection
+        # exists. It never substitutes a different file for a versioned URL.
         image = catalog.selected_image(account["id"], entity_id, language, image_type)
-        if not image:
-            raise HTTPException(404, "Image not found.")
-        rows = catalog.db.execute(
-            "SELECT local_path FROM metadata_images WHERE image_type=? AND image_url=? ORDER BY fetched_at DESC",
-            (image_type, image.get("url")),
-        )
-        if rows and rows[0][0] and Path(rows[0][0]).is_file():
-            return Path(rows[0][0])
+        if image:
+            provider = image.get("provider")
+            provider_id = next(
+                (
+                    identity.get("id")
+                    for identity in catalog._provider_ids(entity_id, row[3])
+                    if identity.get("provider") == provider
+                ),
+                None,
+            )
+            rows = catalog.db.execute(
+                "SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=? AND image_url=? AND local_path IS NOT NULL LIMIT 1",
+                (provider, row[3], provider_id, image_type, image.get("url")),
+            )
+            if rows and rows[0][0] and Path(rows[0][0]).is_file():
+                if requested_version:
+                    raise HTTPException(404, "Image version is no longer available.")
+                return Path(rows[0][0])
+        if requested_version:
+            raise HTTPException(404, "Image version is no longer available.")
         return None
 
-    cached_image = await run_foreground(resolve_cached_image)
+    cached_image = await run_control(resolve_cached_image)
     if cached_image:
         versioned = bool(request.query_params.get("v"))
         return FileResponse(
@@ -573,10 +975,8 @@ async def item_image(
 
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
-    account = await run_foreground(account_from_access, request)
-    image = await run_foreground(
-        catalog.person_image, account["id"], entity_id, person_id
-    )
+    account = await _require_access(request)
+    image = await run_control(catalog.person_image, account["id"], entity_id, person_id)
     if image is None:
         raise HTTPException(404, "Person image not found.")
     return FileResponse(
@@ -592,54 +992,104 @@ async def item_detail(
     request: Request,
     language: str | None = Query(None),
     seasonId: str | None = Query(None),
+    section: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(40, ge=1, le=100),
+    view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
 ):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
+    result = await run_foreground(
         catalog.detail,
         account["id"],
         entity_id,
         preferred,
         seasonId,
+        section,
+        page,
+        effective_page_size,
     )
+    return _catalog_response(result, view)
 
 
 @router.patch("/api/catalog/items/{entity_id}/state")
 async def update_item_state(entity_id: str, request: Request):
-    account, _ = require_account(request)
+    account, _ = await _require_account(request)
     state = await request.json()
-    return await asyncio.to_thread(
-        catalog.update_state, account["id"], entity_id, state
-    )
+    return await run_control(catalog.update_state, account["id"], entity_id, state)
 
 
 @router.post("/api/playback/items/{entity_id}/negotiate")
 async def negotiate_playback(entity_id: str, request: Request):
-    account, token = require_account(request)
-    session_id = session_id_for_token(token)
-    return await asyncio.to_thread(
+    account, token = await _require_account(request)
+    session_id = await run_auth(session_id_for_token, token)
+    return await run_foreground(
         media.negotiate,
         account["id"],
         entity_id,
         await request.json(),
         session_id,
+        _client_address(request),
     )
+
+
+@router.post("/api/playback/viewers/{viewer_id}/heartbeat")
+async def playback_viewer_heartbeat(viewer_id: str, request: Request):
+    account, token = await _require_account(request)
+    auth_session_id = await run_auth(session_id_for_token, token)
+    if not auth_session_id:
+        raise HTTPException(401, "Authentication required.")
+    try:
+        return await run_foreground(
+            _heartbeat_playback_viewer,
+            account["id"],
+            auth_session_id,
+            viewer_id,
+            await _bounded_json_object(request),
+            _client_address(request),
+        )
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@router.delete("/api/playback/viewers/{viewer_id}")
+async def end_playback_viewer(viewer_id: str, request: Request):
+    account, token = await _require_account(request)
+    auth_session_id = await run_auth(session_id_for_token, token)
+    if not auth_session_id:
+        raise HTTPException(401, "Authentication required.")
+    try:
+        result = await run_foreground(
+            _end_playback_viewer_sync,
+            account["id"],
+            auth_session_id,
+            viewer_id,
+        )
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+    if result.get("stopWorker") and result.get("workerSessionId"):
+        await run_control(
+            media.cancel_session, account["id"], result["workerSessionId"]
+        )
+    return result
 
 
 @router.get("/api/playback/items/{entity_id}/source")
 async def playback_source_metadata(entity_id: str, request: Request):
-    account, _ = require_account(request)
-    return await asyncio.to_thread(media.source_metadata, account["id"], entity_id)
+    account, _ = await _require_account(request)
+    return await run_foreground(media.source_metadata, account["id"], entity_id)
 
 
 @router.get("/api/playback/items/{entity_id}/trickplay")
 async def trickplay_manifest(
     entity_id: str, request: Request, sourceId: str | None = Query(None)
 ):
-    account, token = require_account(request)
-    session_id = session_id_for_token(token)
-    catalog.require_entity(account["id"], entity_id)
-    payload = await asyncio.to_thread(
+    account, token = await _require_account(request)
+    session_id = await run_auth(session_id_for_token, token)
+    await run_control(catalog.require_entity, account["id"], entity_id)
+    payload = await run_foreground(
         trickplay.manifest, account["id"], entity_id, sourceId, session_id
     )
     if payload["state"] != "ready":
@@ -656,20 +1106,18 @@ async def trickplay_manifest(
 async def playback_segments(
     entity_id: str, request: Request, sourceId: str | None = Query(None)
 ):
-    account, _ = require_account(request)
-    catalog.require_entity(account["id"], entity_id)
-    return await asyncio.to_thread(intro_outro.segments, entity_id, sourceId)
+    account, _ = await _require_account(request)
+    await run_control(catalog.require_entity, account["id"], entity_id)
+    return await run_control(intro_outro.segments, entity_id, sourceId)
 
 
 @router.get("/api/playback/items/{entity_id}/trickplay/{generation}/{sheet_index}.webp")
 async def trickplay_sheet(
     entity_id: str, generation: str, sheet_index: int, request: Request
 ):
-    account = account_from_access(request)
-    catalog.require_entity(account["id"], entity_id)
-    path = await asyncio.to_thread(
-        trickplay.sheet_path, entity_id, generation, sheet_index
-    )
+    account = await _require_access(request)
+    await run_control(catalog.require_entity, account["id"], entity_id)
+    path = await run_control(trickplay.sheet_path, entity_id, generation, sheet_index)
     return FileResponse(
         path,
         media_type="image/webp",
@@ -679,12 +1127,11 @@ async def trickplay_sheet(
 
 @router.api_route("/api/playback/items/{entity_id}/stream", methods=["GET", "HEAD"])
 async def direct_stream(entity_id: str, request: Request):
-    account = account_from_access(request)
+    account = await _require_access(request)
     media_source_id = request.query_params.get("sourceId")
-    path = await asyncio.to_thread(
-        media.direct_path, account["id"], entity_id, media_source_id
+    path, size = await run_control(
+        _direct_path_and_size, account["id"], entity_id, media_source_id
     )
-    size = path.stat().st_size
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     headers = {"Accept-Ranges": "bytes", "Content-Length": str(size)}
     range_header = request.headers.get("range")
@@ -738,28 +1185,18 @@ async def direct_stream(entity_id: str, request: Request):
 
 @router.get("/api/playback/sessions/{session_id}/{filename}")
 async def playback_output(session_id: str, filename: str, request: Request):
-    account = account_from_access(request)
+    account = await _require_access(request)
     logger.debug(
         "playback output request session_id=%s filename=%s user_id=%s",
         session_id,
         filename,
         account["id"],
     )
-    path = await asyncio.to_thread(
-        media.session_file, account["id"], session_id, filename
-    )
+    path = await run_control(media.session_file, account["id"], session_id, filename)
     if path.suffix.lower() == ".m3u8":
         access = request.query_params.get("access") or ""
-        lines = []
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            lines.append(
-                f"{line}{'&' if '?' in line else '?'}access={access}"
-                if line and not line.startswith("#")
-                else line
-            )
-        return Response(
-            "\n".join(lines) + "\n", media_type="application/vnd.apple.mpegurl"
-        )
+        playlist = await run_control(_read_playlist, path, access)
+        return Response(playlist, media_type="application/vnd.apple.mpegurl")
     logger.debug(
         "playback segment response session_id=%s filename=%s user_id=%s",
         session_id,
@@ -774,17 +1211,17 @@ async def playback_output(session_id: str, filename: str, request: Request):
 
 @router.get("/api/playback/sessions/{session_id}")
 async def playback_session_status(session_id: str, request: Request):
-    account = account_from_access(request)
+    account = await _require_access(request)
     logger.debug(
         "playback status request session_id=%s user_id=%s", session_id, account["id"]
     )
-    return await asyncio.to_thread(media.session_status, account["id"], session_id)
+    return await run_control(media.session_status, account["id"], session_id)
 
 
 @router.delete("/api/playback/sessions/{session_id}")
 async def cancel_playback_session(session_id: str, request: Request):
-    account = account_from_access(request)
-    await asyncio.to_thread(media.cancel_session, account["id"], session_id)
+    account = await _require_access(request)
+    await run_control(media.cancel_session, account["id"], session_id)
     return {"sessionId": session_id, "sessionState": "stopping"}
 
 
@@ -824,10 +1261,11 @@ def _vtt_time(seconds: float) -> str:
     return f"{int(hours):02d}:{int(minutes):02d}:{remainder:06.3f}"
 
 
-@router.get("/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt")
-async def subtitle(entity_id: str, media_file_id: str, request: Request):
-    account = account_from_access(request)
-    catalog.require_entity(account["id"], entity_id)
+def _prepare_subtitle(
+    account_id: str, entity_id: str, media_file_id: str
+) -> dict[str, object]:
+    """Authorize and prepare all subtitle filesystem/cache work in one worker."""
+    catalog.require_entity(account_id, entity_id)
     rows = catalog.db.execute(
         "SELECT f.relative_path,l.directory,f.role FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.id=? AND f.entity_id=? AND f.role IN ('subtitle','lyrics')",
         (media_file_id, entity_id),
@@ -845,27 +1283,43 @@ async def subtitle(entity_id: str, media_file_id: str, request: Request):
             or target.stat().st_mtime_ns < source.stat().st_mtime_ns
         ):
             target.write_text(_lyrics_to_vtt(source), encoding="utf-8")
-        return FileResponse(target, media_type="text/vtt")
+        return {"path": target, "convert": False}
     if source.suffix.lower() == ".vtt":
-        return FileResponse(source, media_type="text/vtt")
+        return {"path": source, "convert": False}
     executable = ffmpeg_path()
     if not executable:
         raise HTTPException(503, "FFmpeg is not available.")
     target_root = Path(catalog.db.db_file).parent / "subtitle-cache"
     target_root.mkdir(parents=True, exist_ok=True)
     target = target_root / f"{hashlib.sha256(str(source).encode()).hexdigest()}.vtt"
-    if not target.is_file() or target.stat().st_mtime_ns < source.stat().st_mtime_ns:
+    return {
+        "path": target,
+        "convert": not target.is_file()
+        or target.stat().st_mtime_ns < source.stat().st_mtime_ns,
+        "source": source,
+        "executable": executable,
+    }
+
+
+@router.get("/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt")
+async def subtitle(entity_id: str, media_file_id: str, request: Request):
+    account = await _require_access(request)
+    prepared = await run_control(
+        _prepare_subtitle, account["id"], entity_id, media_file_id
+    )
+    target = prepared["path"]
+    if prepared["convert"]:
         try:
-            completed = await asyncio.to_thread(
+            completed = await run_foreground(
                 subprocess.run,
                 [
-                    executable,
+                    prepared["executable"],
                     "-hide_banner",
                     "-loglevel",
                     "error",
                     "-y",
                     "-i",
-                    str(source),
+                    str(prepared["source"]),
                     str(target),
                 ],
                 stdout=subprocess.DEVNULL,
@@ -887,8 +1341,8 @@ async def admin_users(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
-    return {"users": Account().list()}
+    await run_auth(authenticate_admin_request, request, TOKEN)
+    return {"users": await run_control(Account().list)}
 
 
 @router.post("/api/admin/users", status_code=201)
@@ -897,11 +1351,13 @@ async def create_user(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
+    await run_auth(authenticate_admin_request, request, TOKEN)
     data = await request.json()
     try:
-        return Account().create(
-            str(data.get("username") or ""), str(data.get("password") or "")
+        return await run_auth(
+            Account().create,
+            str(data.get("username") or ""),
+            str(data.get("password") or ""),
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -914,12 +1370,12 @@ async def set_user_libraries(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
+    await run_auth(authenticate_admin_request, request, TOKEN)
     data = await request.json()
     try:
         return {
-            "libraryIds": Account().set_library_ids(
-                user_id, data.get("libraryIds") or []
+            "libraryIds": await run_control(
+                Account().set_library_ids, user_id, data.get("libraryIds") or []
             )
         }
     except KeyError as error:
@@ -935,10 +1391,12 @@ async def reset_user_password(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
+    await run_auth(authenticate_admin_request, request, TOKEN)
     try:
-        return Account().set_password(
-            user_id, str((await request.json()).get("password") or "")
+        return await run_auth(
+            Account().set_password,
+            user_id,
+            str((await request.json()).get("password") or ""),
         )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
@@ -953,10 +1411,12 @@ async def update_user(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
+    await run_auth(authenticate_admin_request, request, TOKEN)
     try:
-        return Account().set_disabled(
-            user_id, bool((await request.json()).get("disabled"))
+        return await run_control(
+            Account().set_disabled,
+            user_id,
+            bool((await request.json()).get("disabled")),
         )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
@@ -969,6 +1429,6 @@ async def delete_user(
     Username: str | None = Header(None),
     TOKEN: str | None = Header(None),
 ):
-    authenticate_admin_request(request, TOKEN)
-    if not Account().delete(user_id):
+    await run_auth(authenticate_admin_request, request, TOKEN)
+    if not await run_control(Account().delete, user_id):
         raise HTTPException(404, "User not found.")

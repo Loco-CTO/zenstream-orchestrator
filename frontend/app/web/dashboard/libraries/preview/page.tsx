@@ -47,6 +47,7 @@ type Item = {
 	primaryProvider?: string | null;
 	children?: Child[];
 	trickplay?: TrickplayAsset | null;
+	revision?: string;
 };
 
 type TrickplayAsset = {
@@ -123,6 +124,7 @@ type CardItem = Navigable & {
 	matchStatus?: string;
 	seasonNumber?: number;
 	episodeNumber?: number;
+	revision?: string;
 };
 type LanguageOption = { value: string; label: string };
 type ArtworkType = "Primary" | "Backdrop" | "Logo" | "Banner";
@@ -137,6 +139,8 @@ function LibraryViewPage() {
 	const urlEntityId = params.get("entityId");
 	const urlEntityPathValue = params.get("entityPath") || "";
 	const urlLocale = params.get("locale");
+	const urlQuery = params.get("query") || "";
+	const parsedUrlPage = Number(params.get("page") || "1");
 	const [session, setSession] = useState<Session | null>(null);
 	const [items, setItems] = useState<Item[]>([]);
 	const [libraryName, setLibraryName] = useState("");
@@ -144,21 +148,44 @@ function LibraryViewPage() {
 	const [locale, setLocale] = useState("");
 	const [locales, setLocales] = useState<string[]>([]);
 	const [languageOptions, setLanguageOptions] = useState<LanguageOption[]>([]);
-	const [searchInput, setSearchInput] = useState("");
-	const [searchQuery, setSearchQuery] = useState("");
-	const [page, setPage] = useState(1);
+	const [searchInput, setSearchInput] = useState(urlQuery);
+	const [searchQuery, setSearchQuery] = useState(urlQuery);
+	const [page, setPage] = useState(
+		Number.isFinite(parsedUrlPage) && parsedUrlPage > 0 ? parsedUrlPage : 1,
+	);
 	const [total, setTotal] = useState(0);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
 	const [navigation, setNavigation] = useState<NavigationEntry[]>([]);
 	const requestId = useRef(0);
 	const abortRef = useRef<AbortController | null>(null);
+	const catalogGeneration = useRef<number | null>(null);
+	const backgroundRefresh = useRef(false);
+	const trailingRefresh = useRef(false);
+	const loadRef = useRef<
+		| ((
+				current: Session | null,
+				parentId: string | null,
+				currentPage: number,
+				background?: boolean,
+		  ) => Promise<void>)
+		| null
+	>(null);
+
+	function mergeItems(previous: Item[], next: Item[]) {
+		const byId = new Map(previous.map((item) => [item.id, item]));
+		return next.map((item) => {
+			const old = byId.get(item.id);
+			return old && old.revision === item.revision ? old : item;
+		});
+	}
 
 	const load = useCallback(
 		async (
 			current: Session | null,
 			parentId: string | null,
 			currentPage: number,
+			background = false,
 		) => {
 			if (!current || !libraryId || !locale) return;
 			const id = ++requestId.current;
@@ -166,7 +193,7 @@ function LibraryViewPage() {
 			const controller = new AbortController();
 			abortRef.current = controller;
 			setError("");
-			setLoading(true);
+			if (!background) setLoading(true);
 			try {
 				const init = { signal: controller.signal };
 				const [libraryResponse, itemsResponse] = await Promise.all([
@@ -197,8 +224,14 @@ function LibraryViewPage() {
 				]);
 				if (id !== requestId.current) return;
 				setLibraryName(library.name || "Library");
-				setItems(value.items || []);
+				setItems((currentItems) =>
+					background
+						? mergeItems(currentItems, value.items || [])
+						: value.items || [],
+				);
 				setTotal(value.total || 0);
+				if (typeof value.catalogGeneration === "number")
+					catalogGeneration.current = value.catalogGeneration;
 			} catch (caught) {
 				if ((caught as Error).name !== "AbortError" && id === requestId.current)
 					setError(
@@ -207,11 +240,12 @@ function LibraryViewPage() {
 							: "The library could not be loaded.",
 					);
 			} finally {
-				if (id === requestId.current) setLoading(false);
+				if (id === requestId.current && !background) setLoading(false);
 			}
 		},
 		[libraryId, locale, searchQuery],
 	);
+	loadRef.current = load;
 
 	useEffect(() => {
 		const current = readSession();
@@ -265,12 +299,21 @@ function LibraryViewPage() {
 	}, [libraryId, urlLocale]);
 
 	useEffect(() => {
-		const timer = window.setTimeout(
-			() => setSearchQuery(searchInput.trim()),
-			300,
-		);
+		const timer = window.setTimeout(() => {
+			const nextQuery = searchInput.trim();
+			setSearchQuery(nextQuery);
+			if (navigation.length === 0 && (params.get("query") || "") !== nextQuery) {
+				setPage(1);
+				const next = new URLSearchParams(params.toString());
+				if (nextQuery) next.set("query", nextQuery);
+				else next.delete("query");
+				next.delete("page");
+				const nextHref = `${pathname}${next.toString() ? `?${next.toString()}` : ""}`;
+				router.replace(nextHref);
+			}
+		}, 300);
 		return () => window.clearTimeout(timer);
-	}, [searchInput]);
+	}, [navigation.length, params, pathname, router, searchInput]);
 
 	useEffect(() => {
 		const current = readSession();
@@ -283,16 +326,9 @@ function LibraryViewPage() {
 	}, [libraryId]);
 
 	useEffect(() => {
-		if (session && locale && navigation.length === 0) void load(session, null, 1);
-	}, [locale, load, navigation.length, session]);
-
-	useEffect(() => {
-		if (session && locale && navigation.length === 0 && searchQuery !== undefined)
-			void load(session, parent, 1);
-		// Search reloads must never clear an open series/season navigation stack.
-		// The library/locale effect above owns the initial root load.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [searchQuery]);
+		if (session && locale && navigation.length === 0)
+			void load(session, parent, page, false);
+	}, [locale, load, navigation.length, page, parent, session]);
 
 	useEffect(() => {
 		const ids = urlEntityPathValue.split(",").filter(Boolean);
@@ -309,9 +345,51 @@ function LibraryViewPage() {
 	}, [urlEntityId, urlEntityPathValue]);
 
 	useEffect(() => {
-		if (session && page !== 1 && navigation.length === 0)
-			void load(session, parent, page);
-	}, [load, navigation.length, page, parent, session]);
+		if (!session || !locale || !libraryId || navigation.length !== 0) return;
+		let cancelled = false;
+		let timer: number | undefined;
+		const refresh = async () => {
+			if (document.visibilityState !== "visible") {
+				timer = window.setTimeout(refresh, 2000);
+				return;
+			}
+			try {
+				const response = await adminFetch(
+					`/api/admin/libraries/${libraryId}/catalog-status`,
+					session,
+					{ cache: "no-store" },
+				);
+				if (!response.ok) throw new Error("Catalog status unavailable.");
+				const status = await response.json();
+				const generation = Number(status.catalogGeneration || 0);
+				if (catalogGeneration.current == null)
+					catalogGeneration.current = generation;
+				else if (generation > catalogGeneration.current) {
+					catalogGeneration.current = generation;
+					if (backgroundRefresh.current) trailingRefresh.current = true;
+					else {
+						backgroundRefresh.current = true;
+						await loadRef.current?.(session, parent, page, true);
+						backgroundRefresh.current = false;
+						if (trailingRefresh.current) {
+							trailingRefresh.current = false;
+							backgroundRefresh.current = true;
+							await loadRef.current?.(session, parent, page, true);
+							backgroundRefresh.current = false;
+						}
+					}
+				}
+			} catch {
+				// The current grid remains usable while status polling is unavailable.
+			}
+			if (!cancelled) timer = window.setTimeout(refresh, 2000);
+		};
+		void refresh();
+		return () => {
+			cancelled = true;
+			if (timer) window.clearTimeout(timer);
+		};
+	}, [libraryId, locale, navigation.length, page, parent, session]);
 
 	useEffect(() => {
 		const onKeyDown = (event: KeyboardEvent) => {
@@ -420,6 +498,7 @@ function LibraryViewPage() {
 									);
 									const next = new URLSearchParams(params.toString());
 									next.set("locale", nextLocale);
+									next.delete("page");
 									router.replace(`${pathname}?${next.toString()}`);
 									setItems([]);
 								}}
@@ -468,7 +547,7 @@ function LibraryViewPage() {
 							Loading entries…
 						</div>
 					)}
-					{!loading && !error && (
+					{!error && (
 						<>
 							<div
 								className="mt-7 grid w-full gap-4"
@@ -482,6 +561,7 @@ function LibraryViewPage() {
 										item={item}
 										session={session}
 										locale={locale}
+										revision={item.revision}
 										onOpen={() => openItem(item)}
 									/>
 								))}
@@ -498,7 +578,13 @@ function LibraryViewPage() {
 								<div className="flex gap-2">
 									<button
 										disabled={page <= 1}
-										onClick={() => setPage((value) => value - 1)}
+										onClick={() => {
+											const nextPage = page - 1;
+											setPage(nextPage);
+											const next = new URLSearchParams(params.toString());
+											next.set("page", String(nextPage));
+											router.push(`${pathname}?${next.toString()}`);
+										}}
 										className="material-icon-button disabled:opacity-30"
 										aria-label="Previous page"
 									>
@@ -506,7 +592,13 @@ function LibraryViewPage() {
 									</button>
 									<button
 										disabled={page >= pageCount}
-										onClick={() => setPage((value) => value + 1)}
+										onClick={() => {
+											const nextPage = page + 1;
+											setPage(nextPage);
+											const next = new URLSearchParams(params.toString());
+											next.set("page", String(nextPage));
+											router.push(`${pathname}?${next.toString()}`);
+										}}
 										className="material-icon-button disabled:opacity-30"
 										aria-label="Next page"
 									>
@@ -534,11 +626,13 @@ function EntityCard({
 	item,
 	session,
 	locale,
+	revision,
 	onOpen,
 }: {
 	item: CardItem;
 	session: Session | null;
 	locale: string;
+	revision?: string;
 	onOpen: () => void;
 }) {
 	const label = item.displayName || item.relativePath || item.type;
@@ -553,6 +647,7 @@ function EntityCard({
 				entityId={item.id}
 				session={session}
 				locale={locale}
+				revision={revision}
 				alt={metadataPending ? "" : item.metadata?.title || label}
 			/>
 			<div className="p-3">
@@ -622,6 +717,7 @@ function EntityPoster({
 	entityId,
 	session,
 	locale,
+	revision,
 	alt,
 	imageType = "Primary",
 	landscape = false,
@@ -629,6 +725,7 @@ function EntityPoster({
 	entityId: string;
 	session: Session | null;
 	locale: string;
+	revision?: string;
 	alt: string;
 	imageType?: ArtworkType;
 	landscape?: boolean;
@@ -686,7 +783,7 @@ function EntityPoster({
 			if (timer) window.clearTimeout(timer);
 			if (objectUrl) URL.revokeObjectURL(objectUrl);
 		};
-	}, [entityId, imageType, locale, session]);
+	}, [entityId, imageType, locale, revision, session]);
 	return (
 		<div
 			className={`flex ${landscape ? "aspect-video" : "aspect-[2/3]"} items-center justify-center overflow-hidden bg-[#0d0d0e]`}
@@ -700,7 +797,7 @@ function EntityPoster({
 				/>
 			) : (
 				<IconPhoto
-					className={state === "missing" ? "material-muted" : "text-[#aeb9ff]"}
+					className={state === "missing" ? "material-muted" : "text-[#5ee3d8]"}
 					size={28}
 				/>
 			)}
@@ -1053,12 +1150,19 @@ function IntroOutroInspectionPanel({
 			setLoadingAudio(null);
 		}
 	};
+	const partialWarning =
+		inspection?.state === "scanned" && Boolean(inspection.error);
 	const state =
 		inspection?.state === "scanned"
-			? "Ready"
+			? partialWarning
+				? "Ready with warnings"
+				: "Ready"
 			: inspection?.state === "failed"
 				? "Failed"
 				: "Pending";
+	const stateClass = partialWarning
+		? "border-[#f0bf6a]/30 text-[#f0bf6a]"
+		: "border-[#5ee3d8]/30 text-[#5ee3d8]";
 	return (
 		<section className="dashboard-card space-y-4 p-5">
 			<div className="flex flex-wrap items-center justify-between gap-3">
@@ -1069,11 +1173,19 @@ function IntroOutroInspectionPanel({
 						not an audio waveform.
 					</p>
 				</div>
-				<span className="rounded-full border border-[#aeb9ff]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#aeb9ff]">
+				<span
+					className={`rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${stateClass}`}
+				>
 					{state}
 				</span>
 			</div>
 			{error && <p className="material-alert text-sm">{error}</p>}
+			{partialWarning && inspection?.error && (
+				<p className="rounded-lg border border-[#f0bf6a]/20 bg-[#f0bf6a]/5 px-3 py-2 text-sm text-[#f0bf6a]">
+					One fingerprint window could not be read; available fingerprint data and
+					matches are still shown. {inspection.error}
+				</p>
+			)}
 			{inspection ? (
 				<div className="grid gap-4 lg:grid-cols-2">
 					{(["intro", "outro"] as const).map((kind) => {
@@ -1166,7 +1278,7 @@ function FingerprintPreview({
 					aria-label={`${kind} Chromaprint bit-density preview`}
 					className="mt-3 h-20 w-full rounded bg-black/35"
 				>
-					<polyline fill="none" stroke="#aeb9ff" strokeWidth="2" points={points} />
+					<polyline fill="none" stroke="#5ee3d8" strokeWidth="2" points={points} />
 				</svg>
 			) : (
 				<div className="mt-3 flex h-20 items-center justify-center rounded bg-black/35 text-xs material-muted">
@@ -1178,7 +1290,7 @@ function FingerprintPreview({
 					<div
 						className={
 							segment
-								? "h-full rounded-full bg-[#aeb9ff]"
+								? "h-full rounded-full bg-[#5ee3d8]"
 								: "h-full rounded-full bg-white/20"
 						}
 						style={{ marginLeft: `${left}%`, width: `${width}%` }}
@@ -1254,7 +1366,7 @@ function TrickplayAssetPanel({
 				<p className="text-xs uppercase tracking-[.18em] material-muted">
 					Trickplay assets
 				</p>
-				<span className="rounded-full border border-[#aeb9ff]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#aeb9ff]">
+				<span className="rounded-full border border-[#5ee3d8]/30 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#5ee3d8]">
 					{status}
 				</span>
 			</div>
@@ -1390,7 +1502,7 @@ function MetadataSummary({ detail }: { detail: Item }) {
 							href={trailer.url}
 							target="_blank"
 							rel="noreferrer"
-							className="mr-2 text-[#aeb9ff] hover:underline"
+							className="mr-2 text-[#5ee3d8] hover:underline"
 						>
 							{trailer.name || trailer.language || `Trailer ${index + 1}`}
 						</a>

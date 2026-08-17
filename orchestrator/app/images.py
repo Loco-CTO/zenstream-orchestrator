@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import math
+import re
+import struct
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
 
 WEBP_QUALITY = 85
+WEBP_COMPRESSION_LEVEL = 5
+_SVG_MAX_DIMENSION = 4096
+_SVG_MAX_PIXELS = 16 * 1024 * 1024
 _BASE83 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~"
 
 
@@ -96,6 +101,7 @@ def blurhash_for_image(source: Path) -> str:
             "-hide_banner",
             "-loglevel",
             "error",
+            "-nostdin",
             "-i",
             str(source),
             "-map",
@@ -111,8 +117,10 @@ def blurhash_for_image(source: Path) -> str:
             "pipe:1",
         ],
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         timeout=30,
         check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if completed.returncode != 0 or len(completed.stdout) != 32 * 32 * 3:
         detail = completed.stderr.decode("utf-8", "replace").strip()
@@ -135,6 +143,7 @@ def encode_webp(source: Path, target: Path) -> None:
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                "-nostdin",
                 "-y",
                 "-i",
                 str(source),
@@ -147,15 +156,17 @@ def encode_webp(source: Path, target: Path) -> None:
                 "-quality",
                 str(WEBP_QUALITY),
                 "-compression_level",
-                "6",
+                str(WEBP_COMPRESSION_LEVEL),
                 str(temporary),
             ],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=60,
             check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if (
             completed.returncode != 0
@@ -171,9 +182,119 @@ def encode_webp(source: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _svg_dimension(value: str | None) -> float | None:
+    if not value:
+        return None
+    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:px)?\s*", value, re.IGNORECASE)
+    return float(match.group(1)) if match else None
+
+
+def _rasterize_svg(content: bytes) -> bytes:
+    """Render provider SVG input to a bounded transparent PNG."""
+    try:
+        markup = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("SVG artwork is not valid UTF-8") from error
+    lowered = markup.lower()
+    if any(
+        token in lowered
+        for token in (
+            "<!doctype",
+            "<script",
+            " onload=",
+            "javascript:",
+            'href="http:',
+            "href='http:",
+            'href="https:',
+            "href='https:",
+            'href="file:',
+            "href='file:",
+        )
+    ):
+        raise ValueError("SVG artwork contains unsupported or external content")
+    root = re.search(r"<svg\b([^>]*)>", markup, re.IGNORECASE | re.DOTALL)
+    if not root:
+        raise ValueError("SVG artwork has no root element")
+    attributes = root.group(1)
+    width = _svg_dimension(
+        (
+            re.search(r"\bwidth\s*=\s*['\"]([^'\"]+)['\"]", attributes, re.IGNORECASE)
+            or [None, None]
+        )[1]
+    )
+    height = _svg_dimension(
+        (
+            re.search(r"\bheight\s*=\s*['\"]([^'\"]+)['\"]", attributes, re.IGNORECASE)
+            or [None, None]
+        )[1]
+    )
+    view_box = re.search(
+        r"\bviewBox\s*=\s*['\"]\s*([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s+([0-9.+-]+)\s*['\"]",
+        attributes,
+        re.IGNORECASE,
+    )
+    if view_box:
+        width = width or float(view_box.group(3))
+        height = height or float(view_box.group(4))
+    if (
+        width
+        and height
+        and (
+            width > _SVG_MAX_DIMENSION
+            or height > _SVG_MAX_DIMENSION
+            or width * height > _SVG_MAX_PIXELS
+        )
+    ):
+        raise ValueError("SVG artwork dimensions exceed the supported limit")
+    try:
+        import resvg_py
+
+        rendered = bytes(
+            resvg_py.svg_to_bytes(
+                svg_string=markup,
+                resources_dir=None,
+                skip_system_fonts=False,
+            )
+        )
+        if len(rendered) < 24 or rendered[:8] != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("SVG rasterizer did not produce a PNG")
+        rendered_width, rendered_height = struct.unpack(">II", rendered[16:24])
+        if (
+            not rendered_width
+            or not rendered_height
+            or rendered_width > _SVG_MAX_DIMENSION
+            or rendered_height > _SVG_MAX_DIMENSION
+            or rendered_width * rendered_height > _SVG_MAX_PIXELS
+        ):
+            raise ValueError("SVG rasterized dimensions exceed the supported limit")
+        return rendered
+    except ImportError as error:
+        raise RuntimeError("SVG artwork support is unavailable") from error
+    except Exception as error:
+        raise ValueError(f"SVG artwork could not be rasterized: {error}") from error
+
+
 def encode_webp_bytes(content: bytes, target: Path, suffix: str = ".image") -> None:
     normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
     target.parent.mkdir(parents=True, exist_ok=True)
+    if (
+        normalized_suffix.lower() in {".svg", ".svgz"}
+        or content.lstrip().startswith(b"<svg")
+        or content.lstrip().startswith(b"<?xml")
+        and b"<svg" in content[:4096].lower()
+    ):
+        raster = tempfile.NamedTemporaryFile(
+            dir=target.parent, prefix=".raster-", suffix=".png", delete=False
+        )
+        raster_path = Path(raster.name)
+        try:
+            raster.write(_rasterize_svg(content))
+            raster.close()
+            encode_webp(raster_path, target)
+        finally:
+            raster.close()
+            raster_path.unlink(missing_ok=True)
+        return
     with tempfile.NamedTemporaryFile(
         dir=target.parent, prefix=".source-", suffix=normalized_suffix, delete=False
     ) as handle:

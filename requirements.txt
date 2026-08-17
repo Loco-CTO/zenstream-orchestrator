@@ -1,5 +1,5 @@
 fastapi>=0.141.1
-uvicorn[standard]>=0.51.0
+uvicorn[standard]>=0.52.1
 websockets>=17.0
 python-dotenv>=1.2.2
 requests>=2.34.2

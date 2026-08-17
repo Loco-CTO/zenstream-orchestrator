@@ -1,6 +1,6 @@
 {
   "name": "zenstream-orchestrator-launcher",
-  "version": "0.4.1",
+  "version": "1.0.5",
   "private": true,
   "description": "Windows launcher for ZenStream Orchestrator",
   "author": "Rystal Team",
@@ -13,7 +13,7 @@
     "test": "vitest run",
     "lint": "npm run typecheck && prettier --check .",
     "lint:fix": "prettier --write .",
-    "pack:windows": "npm run build && electron-builder --win nsis portable --x64"
+    "pack:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/pack-windows.ps1"
   },
   "dependencies": {
     "@tabler/icons-react": "^3.44.0",

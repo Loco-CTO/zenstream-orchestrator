@@ -1,3 +1,5 @@
+import { apiUrl } from "../../api-url";
+
 export type Session = { username: string };
 
 export function readSession(): Session | null {
@@ -27,9 +29,9 @@ export async function adminFetch(
 	session: Session,
 	init: RequestInit = {},
 ) {
-	const response = await fetch(path, {
+	const response = await fetch(apiUrl(path), {
 		...init,
-		credentials: "same-origin",
+		credentials: "include",
 		headers: init.headers,
 	});
 	if (response.status === 401 && typeof window !== "undefined") {

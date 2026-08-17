@@ -12,7 +12,7 @@ class MemoryDatabase:
     def execute(self, query, params=None):
         if query.startswith("SELECT"):
             return [self.row] if self.row else []
-        self.row = tuple(params[:6])
+        self.row = tuple(params[:7])
         return []
 
 
@@ -28,6 +28,7 @@ class PlaybackSettingsTest(unittest.TestCase):
                 "trickplayFrameHeight": 180,
                 "trickplayIntervalSeconds": 10,
                 "trickplayWorkers": 1,
+                "trickplayFfmpegThreads": 4,
             },
         )
         self.assertEqual(
@@ -39,6 +40,7 @@ class PlaybackSettingsTest(unittest.TestCase):
                 "trickplayFrameHeight": 180,
                 "trickplayIntervalSeconds": 10,
                 "trickplayWorkers": 1,
+                "trickplayFfmpegThreads": 4,
             },
         )
 
@@ -57,6 +59,7 @@ class PlaybackSettingsTest(unittest.TestCase):
                     "trickplayFrameHeight": 180,
                     "trickplayIntervalSeconds": 10,
                     "trickplayWorkers": 1,
+                    "trickplayFfmpegThreads": 4,
                 },
             )
 
@@ -76,6 +79,7 @@ class PlaybackSettingsTest(unittest.TestCase):
                     "trickplayFrameHeight": 180,
                     "trickplayIntervalSeconds": 10,
                     "trickplayWorkers": 1,
+                    "trickplayFfmpegThreads": 4,
                 },
             )
 
@@ -91,6 +95,7 @@ class PlaybackSettingsTest(unittest.TestCase):
                 "trickplayFrameHeight": 180,
                 "trickplayIntervalSeconds": 10,
                 "trickplayWorkers": 1,
+                "trickplayFfmpegThreads": 4,
             },
         )
         self.assertEqual(settings.get(), settings.set(6, 3))
@@ -113,6 +118,7 @@ class PlaybackSettingsTest(unittest.TestCase):
                 "trickplayFrameHeight": 180,
                 "trickplayIntervalSeconds": 10,
                 "trickplayWorkers": 1,
+                "trickplayFfmpegThreads": 4,
             },
         )
         self.assertEqual(
@@ -124,6 +130,7 @@ class PlaybackSettingsTest(unittest.TestCase):
                 "trickplayFrameHeight": 180,
                 "trickplayIntervalSeconds": 10,
                 "trickplayWorkers": 1,
+                "trickplayFfmpegThreads": 4,
             },
         )
 
@@ -153,3 +160,25 @@ class PlaybackSettingsTest(unittest.TestCase):
         settings = PlaybackSettings(database)
         self.assertEqual(settings.set(0, 0, 320, 180, 10, 4)["trickplayWorkers"], 4)
         self.assertEqual(settings.get()["trickplayWorkers"], 4)
+
+    def test_trickplay_ffmpeg_threads_allow_auto_and_are_bounded(self):
+        self.assertEqual(
+            PlaybackSettings.normalize(0, 0, 320, 180, 10, 1, 0)[
+                "trickplayFfmpegThreads"
+            ],
+            0,
+        )
+        self.assertEqual(
+            PlaybackSettings.normalize(0, 0, 320, 180, 10, 1, 64)[
+                "trickplayFfmpegThreads"
+            ],
+            64,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "trickplayFfmpegThreads must be between 0 and 64"
+        ):
+            PlaybackSettings.normalize(0, 0, 320, 180, 10, 1, -1)
+        with self.assertRaisesRegex(
+            ValueError, "trickplayFfmpegThreads must be between 0 and 64"
+        ):
+            PlaybackSettings.normalize(0, 0, 320, 180, 10, 1, 65)

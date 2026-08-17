@@ -85,18 +85,27 @@ class MetadataImage:
     height: int = 0
 
 
-def image_language_rank(image: dict, requested: str, original: str | None) -> int:
+def image_language_rank(
+    image: dict,
+    requested: str,
+    original: str | None,
+    *,
+    include_english: bool = True,
+    prefer_no_language_for_backdrop: bool = False,
+) -> int:
     language = str(image.get("language") or "").lower()
     requested = str(requested or "").lower()
-    if language == requested:
+    if prefer_no_language_for_backdrop and not language:
         return 0
+    if language == requested:
+        return 1 if prefer_no_language_for_backdrop else 0
     if language and language_family(language) == language_family(requested):
-        return 1
+        return 2 if prefer_no_language_for_backdrop else 1
     if not language:
         return 2
-    if language == "en":
+    if include_english and language == "en":
         return 3
-    if language_family(language) == "en":
+    if include_english and language_family(language) == "en":
         return 4
     if original and language == str(original).lower():
         return 5
@@ -111,31 +120,72 @@ def choose_artwork(
     image_type: str,
     original: str | None,
     providers: list[str],
+    *,
+    include_english: bool = True,
+    prefer_no_language_for_backdrop: bool = False,
 ) -> dict | None:
+    ranked = rank_artwork_candidates(
+        images,
+        requested,
+        image_type,
+        original,
+        providers,
+        include_english=include_english,
+        prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
+    )
+    return ranked[0] if ranked else None
+
+
+def rank_artwork_candidates(
+    images: Iterable[dict],
+    requested: str,
+    image_type: str,
+    original: str | None,
+    providers: list[str],
+    *,
+    include_english: bool = True,
+    prefer_no_language_for_backdrop: bool = False,
+) -> list[dict]:
+    """Return provider-ordered artwork candidates for one locale/category.
+
+    TMDB and TVDB already return each artwork category in their preferred
+    order.  ZenStream only applies locale and provider precedence; it must not
+    replace the provider's ordering with local score, dimension, or timestamp
+    sorting.
+    """
     if image_type not in ARTWORK_CATEGORY_SET:
         raise ValueError(
             f"Unsupported image type '{image_type}'. Expected one of: {', '.join(ARTWORK_CATEGORIES)}"
         )
-    values = [
-        image
-        for image in images
-        if isinstance(image, dict) and image.get("type") == image_type
-    ]
-    ranked = [
-        image
-        for image in values
-        if image_language_rank(image, requested, original) < 99
-    ]
-    if not ranked:
-        return None
     provider_rank = {provider: index for index, provider in enumerate(providers)}
-    return min(
-        ranked,
-        key=lambda image: (
-            image_language_rank(image, requested, original),
+    best_by_url: dict[str, tuple[int, int, int, dict]] = {}
+    for index, image in enumerate(images):
+        if not isinstance(image, dict) or image.get("type") != image_type:
+            continue
+        language_rank = image_language_rank(
+            image,
+            requested,
+            original,
+            include_english=include_english,
+            prefer_no_language_for_backdrop=(
+                prefer_no_language_for_backdrop and image_type == "Backdrop"
+            ),
+        )
+        if language_rank >= 99:
+            continue
+        url = image.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        candidate = (
+            language_rank,
             provider_rank.get(image.get("provider"), 99),
-            -(image.get("score") or 0),
-            -(image.get("width") or 0),
-            image.get("url") or "",
-        ),
-    )
+            index,
+            image,
+        )
+        previous = best_by_url.get(url)
+        if previous is None or candidate[:3] < previous[:3]:
+            best_by_url[url] = candidate
+    return [
+        candidate[3]
+        for candidate in sorted(best_by_url.values(), key=lambda value: value[:3])
+    ]

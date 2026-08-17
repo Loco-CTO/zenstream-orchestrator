@@ -15,6 +15,8 @@ from urllib.parse import quote
 
 import httpx
 import pycountry
+from app.language_registry import language_options as registry_language_options
+from app.language_registry import normalize_language
 from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORIES,
@@ -26,6 +28,10 @@ from version import __version__
 
 
 class ProviderError(RuntimeError):
+    pass
+
+
+class ProviderNotFoundError(ProviderError):
     pass
 
 
@@ -165,14 +171,18 @@ def _names(values: Any) -> list[str]:
 
 
 def _normalize_language_tag(value: str | None) -> str:
-    parts = str(value or "").strip().replace("_", "-").split("-", 1)
-    if not parts[0]:
+    raw = str(value or "").strip()
+    if not raw:
         return ""
-    return (
-        parts[0].lower()
-        if len(parts) == 1
-        else f"{parts[0].lower()}-{parts[1].upper()}"
-    )
+    try:
+        return normalize_language(raw, allow_unsupported=True)
+    except ValueError:
+        parts = raw.replace("_", "-").split("-", 1)
+        return (
+            parts[0].lower()
+            if len(parts) == 1
+            else f"{parts[0].lower()}-{parts[1].upper()}"
+        )
 
 
 def _catalog_language_tag(
@@ -335,6 +345,14 @@ class ProviderClient:
                 )
                 time.sleep(delay)
             assert response is not None
+            if response.status_code == 404:
+                logger.info(
+                    "metadata provider resource not found client=%s url=%s duration_seconds=%.1f",
+                    client_name,
+                    url,
+                    time.monotonic() - started,
+                )
+                raise ProviderNotFoundError("provider resource not found")
             response.raise_for_status()
             payload = response.json()
             logger.info(
@@ -425,7 +443,7 @@ class TMDBClient(ProviderClient):
                         "TMDB language catalog unavailable; using locale fallback"
                     )
                 self.__class__._language_codes_loaded = True
-        return self._language_catalog.provider(locale)
+        return self._language_catalog.provider(_normalize_language_tag(locale))
 
     def _canonical_language(self, value: str | None) -> tuple[str | None, str | None]:
         if not value:
@@ -510,26 +528,40 @@ class TMDBClient(ProviderClient):
         )
         if entity_type == "season":
             series_id, season = provider_id.split(":", 1)
-            payload = self._request(
-                f"/tv/{quote(series_id)}/season/{quote(season)}",
-                params={
-                    "language": language,
-                    "include_image_language": image_language,
-                    "include_video_language": video_language,
-                    "append_to_response": "images,external_ids,videos,translations",
-                },
-            )
+            try:
+                payload = self._request(
+                    f"/tv/{quote(series_id)}/season/{quote(season)}",
+                    params={
+                        "language": language,
+                        "include_image_language": image_language,
+                        "include_video_language": video_language,
+                        "append_to_response": "images,external_ids,videos,translations",
+                    },
+                )
+            except ProviderNotFoundError:
+                logger.info(
+                    "TMDB season layout has no matching resource provider_id=%s",
+                    provider_id,
+                )
+                payload = {}
         elif entity_type == "episode":
             series_id, season, episode = provider_id.split(":", 2)
-            payload = self._request(
-                f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}",
-                params={
-                    "language": language,
-                    "include_image_language": image_language,
-                    "include_video_language": video_language,
-                    "append_to_response": "images,external_ids,videos,translations",
-                },
-            )
+            try:
+                payload = self._request(
+                    f"/tv/{quote(series_id)}/season/{quote(season)}/episode/{quote(episode)}",
+                    params={
+                        "language": language,
+                        "include_image_language": image_language,
+                        "include_video_language": video_language,
+                        "append_to_response": "images,external_ids,videos,translations",
+                    },
+                )
+            except ProviderNotFoundError:
+                logger.info(
+                    "TMDB episode layout has no matching resource provider_id=%s",
+                    provider_id,
+                )
+                payload = {}
         else:
             kind = "tv" if entity_type == "series" else "movie"
             payload = self._request(
@@ -709,7 +741,11 @@ class TMDBClient(ProviderClient):
             "originalCountry": (payload.get("origin_country") or [None])[0],
             "year": (dates or "")[:4] or None,
             "tags": _names(genres),
-            "originalLanguage": payload.get("original_language"),
+            "originalLanguage": normalize_language(
+                payload.get("original_language"), allow_unsupported=True
+            )
+            if payload.get("original_language")
+            else None,
             "communityRating": payload.get("vote_average"),
             "trailers": videos,
             "people": people,
@@ -919,7 +955,7 @@ class TVDBClient(ProviderClient):
         # Keep unknown locale values intact when the provider catalog cannot
         # resolve them. This lets newly supported locales pass through
         # without another provider-specific hard-coded table.
-        return self._language_catalog.provider(locale)
+        return self._language_catalog.provider(_normalize_language_tag(locale))
 
     def _language_code_for_artwork(self, value: str | None) -> str | None:
         if not value:
@@ -1085,6 +1121,7 @@ class TVDBClient(ProviderClient):
         data = payload.get("data", payload)
         translation = payload.get("translation") or {}
         ids = []
+        linked_providers: set[str] = set()
         for remote in data.get("remoteIds", []) or data.get("remote_ids", []) or []:
             source = str(
                 remote.get("sourceName")
@@ -1095,7 +1132,16 @@ class TVDBClient(ProviderClient):
             value = remote.get("id") or remote.get("value")
             if not value:
                 continue
-            if "tmdb" in source:
+            # TVDB labels this source as ``TheMovieDB.com`` in its v4
+            # responses (rather than the literal ``tmdb``).  Accept both
+            # spellings, but only attach TMDB as a secondary identity for
+            # series roots; TVDB remains authoritative for the hierarchy.
+            if entity_type == "series" and (
+                "tmdb" in source or "themoviedb" in source or "movie database" in source
+            ):
+                if "tmdb" in linked_providers:
+                    continue
+                linked_providers.add("tmdb")
                 ids.append(
                     {
                         "provider": "tmdb",
@@ -1104,6 +1150,9 @@ class TVDBClient(ProviderClient):
                     }
                 )
             elif "imdb" in source:
+                if "imdb" in linked_providers:
+                    continue
+                linked_providers.add("imdb")
                 ids.append(
                     {"provider": "imdb", "identifierType": "imdb", "id": str(value)}
                 )
@@ -1226,10 +1275,12 @@ class TVDBClient(ProviderClient):
             ),
             "year": str(data.get("year") or dates or "")[:4] or None,
             "tags": _names(genres),
-            "originalLanguage": _catalog_language_tag(
-                str(data.get("originalLanguage") or "")
+            "originalLanguage": normalize_language(
+                _catalog_language_tag(str(data.get("originalLanguage") or "")),
+                allow_unsupported=True,
             )
-            or data.get("originalLanguage"),
+            if data.get("originalLanguage")
+            else None,
             "trailers": trailers,
             "people": people,
             "credits": normalized_credits,
@@ -1570,38 +1621,13 @@ class MetadataService:
         self._clients = {}
         self._clients_lock = threading.Lock()
 
-    def language_options(self) -> list[dict[str, str]]:
-        """Return canonical metadata locales known by configured providers."""
-        values = {
-            "en",
-            "ja",
-            "zh-CN",
-            "zh-TW",
-            "ko",
-            "fr",
-            "de",
-            "es",
-            "it",
-            "pt",
-            "ru",
-        }
-        for provider, client_type in (("tmdb", TMDBClient), ("tvdb", TVDBClient)):
-            try:
-                client = self.client(provider)
-                client._language_code("en")
-                values.update(
-                    client_type._language_catalog.provider_to_canonical.values()
-                )
-            except Exception:
-                logger.debug(
-                    "metadata language catalog unavailable provider=%s",
-                    provider,
-                    exc_info=True,
-                )
-        return [
-            {"value": value, "label": value}
-            for value in sorted(values, key=lambda item: (item != "en", item.lower()))
-        ]
+    def language_options(self) -> list[dict[str, object]]:
+        """Return the stable ZenStream language registry.
+
+        Provider catalogs remain request-code adapters; they must not change
+        which locales ZenStream advertises or stores.
+        """
+        return registry_language_options()
 
     @classmethod
     def _lock_for(
@@ -1679,6 +1705,8 @@ class MetadataService:
         provider_id: str,
         locales: list[str],
         force: bool = False,
+        *,
+        project: bool = True,
     ) -> dict[str, dict]:
         locales = list(dict.fromkeys(locales))
         if not locales:
@@ -1742,11 +1770,12 @@ class MetadataService:
                         f"{provider} {entity_type} {provider_id} {locale} normalization failed: {type(error).__name__}: {error}"
                     ) from error
                 self.cache.put(provider, entity_type, provider_id, locale, normalized)
-                from app.metadata_services import MetadataSearchProjection
+                if project:
+                    from app.metadata_services import MetadataSearchProjection
 
-                MetadataSearchProjection(self.cache.db).project(
-                    provider, entity_type, provider_id, locale, normalized
-                )
+                    MetadataSearchProjection(self.cache.db).project(
+                        provider, entity_type, provider_id, locale, normalized
+                    )
                 logger.info(
                     "metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d",
                     provider,

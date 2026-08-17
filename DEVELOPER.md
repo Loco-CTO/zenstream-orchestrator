@@ -19,6 +19,22 @@ executable with `requirements.txt` installed, build `frontend/` once, and run
 source/virtual-environment and installer pipeline. Do not commit generated files
 beneath `assets/ffmpeg/windows`,
 `dist/`, `.build/`, or `launcher/release/`.
+Windows packaging is serialized by `scripts/pack-windows.ps1`; never bypass its
+lock or publish artifacts unless `scripts/validate-electron-package.mjs` passes.
+Electron Builder writes its unpacked application to a unique temporary directory
+beneath `.build/`, while only the installer and portable executable are published
+to `launcher/release/`. This keeps a stale lock on an older unpacked `app.asar`
+from blocking later builds.
+
+## Metadata artwork conversion
+
+Artwork selection follows provider-native TMDB/TVDB order after configured
+language tiers and provider priority. Only the selected winner and one native
+order fallback are materialized per locale/category. SVG artwork is rasterized
+with `resvg_py==0.3.4`, then encoded as quality-85 WebP using compression level
+5. WebP and BlurHash FFmpeg calls are non-interactive and run through the
+existing `METADATA_ASSET_WORKERS` pool; there is no separate conversion-worker
+setting or FFmpeg thread cap.
 
 ## 📜 Using the Swagger API
 

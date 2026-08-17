@@ -434,6 +434,8 @@ class MetadataServicesTest(unittest.TestCase):
                 "sqlite", {}, str(Path(directory) / "orchestrator.db")
             )
             try:
+                cached_path = Path(directory) / "movie.webp"
+                cached_path.write_bytes(b"cached")
                 database.execute(
                     "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)"
                 )
@@ -465,7 +467,7 @@ class MetadataServicesTest(unittest.TestCase):
                         "Primary",
                         "https://images.example/movie.jpg",
                         "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
-                        "/cache/movie.webp",
+                        str(cached_path),
                         "now",
                         "later",
                     ),
@@ -843,6 +845,137 @@ class MetadataServicesTest(unittest.TestCase):
             self.assertTrue(
                 all(str(value[-1]).endswith(".webp") for value in cache.rows)
             )
+
+    def test_image_ingest_materializes_only_the_first_provider_candidate(self):
+        cache = _ImageCache(self.db)
+        downloads = []
+        with tempfile.TemporaryDirectory() as directory:
+            image_ingest = MetadataImageIngestService(
+                cache,
+                directory,
+                downloader=lambda url: downloads.append(url) or b"image-data",
+                encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
+                hasher=lambda target: "hash",
+            )
+            result = image_ingest.ingest(
+                "tmdb",
+                "movie",
+                "10",
+                "en",
+                {
+                    "images": [
+                        {
+                            "type": "Primary",
+                            "url": "https://images.example/first.jpg",
+                            "language": "en",
+                            "score": 0,
+                        },
+                        {
+                            "type": "Primary",
+                            "url": "https://images.example/second.jpg",
+                            "language": "en",
+                            "score": 100,
+                        },
+                    ]
+                },
+            )
+
+        self.assertEqual(downloads, ["https://images.example/first.jpg"])
+        self.assertEqual(result, {"ready": 1, "failed": 0, "skipped": 0})
+        self.assertEqual(len(cache.rows), 1)
+
+    def test_batch_image_ingest_deduplicates_a_shared_winner_across_locales(self):
+        cache = _ImageCache(self.db)
+        downloads = []
+        with tempfile.TemporaryDirectory() as directory:
+            image_ingest = MetadataImageIngestService(
+                cache,
+                directory,
+                downloader=lambda url: downloads.append(url) or b"image-data",
+                encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
+                hasher=lambda target: "hash",
+            )
+            image_ingest.ingest_documents(
+                "tmdb",
+                "movie",
+                "10",
+                {
+                    "en": {
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "url": "https://images.example/shared.jpg",
+                                "language": "en",
+                            }
+                        ]
+                    },
+                    "en-US": {
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "url": "https://images.example/shared.jpg",
+                                "language": "en",
+                            }
+                        ]
+                    },
+                },
+            )
+
+        self.assertEqual(downloads, ["https://images.example/shared.jpg"])
+        self.assertEqual(len(cache.rows), 2)
+
+    def test_image_ingest_tries_only_one_native_fallback_after_winner_failure(self):
+        cache = _ImageCache(self.db)
+        downloads = []
+
+        def downloader(url):
+            downloads.append(url)
+            if url.endswith("first.jpg"):
+                raise RuntimeError("winner unavailable")
+            return b"image-data"
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_ingest = MetadataImageIngestService(
+                cache,
+                directory,
+                downloader=downloader,
+                encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
+                hasher=lambda target: "hash",
+            )
+            result = image_ingest.ingest(
+                "tmdb",
+                "movie",
+                "10",
+                "en",
+                {
+                    "images": [
+                        {
+                            "type": "Primary",
+                            "url": "https://images.example/first.jpg",
+                            "language": "en",
+                        },
+                        {
+                            "type": "Primary",
+                            "url": "https://images.example/second.jpg",
+                            "language": "en",
+                        },
+                        {
+                            "type": "Primary",
+                            "url": "https://images.example/third.jpg",
+                            "language": "en",
+                        },
+                    ]
+                },
+            )
+
+        self.assertEqual(
+            downloads,
+            [
+                "https://images.example/first.jpg",
+                "https://images.example/second.jpg",
+            ],
+        )
+        self.assertEqual(result, {"ready": 1, "failed": 1, "skipped": 0})
 
     def test_forced_ingest_redownloads_existing_artwork_and_portraits(self):
         fetcher = _BulkFetcher()

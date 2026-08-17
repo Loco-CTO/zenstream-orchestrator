@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -90,14 +90,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.sha }}
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: |
             frontend/package-lock.json
             launcher/package-lock.json
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
@@ -110,25 +110,20 @@ jobs:
         run: ./scripts/build-windows.ps1 -PythonExecutable python
       - name: Smoke-test packaged backend lifecycle
         run: node scripts/smoke-windows-backend.mjs
-      - uses: actions/upload-artifact@v6
-        with:
-          name: release-windows-x64
-          path: |
-            launcher/release/*.exe
-            launcher/release/SHA256SUMS.txt
-          if-no-files-found: error
-
-  publish:
-    needs: [version, windows-package]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v7
-        with:
-          name: release-windows-x64
-          path: release-assets
       - name: Create GitHub release and attach Windows artifacts
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
           SHA: ${{ needs.version.outputs.sha }}
-        run: gh release create "$TAG" release-assets/* --target "$SHA" --title "$TAG" --generate-notes
+        run: |
+          $releaseFiles = @(
+            Get-ChildItem -LiteralPath launcher/release -File -Filter '*.exe' |
+              Sort-Object Name |
+              ForEach-Object { $_.FullName }
+            (Resolve-Path -LiteralPath launcher/release/SHA256SUMS.txt).Path
+          )
+          if ($releaseFiles.Count -lt 3) {
+            throw 'Expected both Windows executables and SHA256SUMS.txt in launcher/release.'
+          }
+          & gh release create $env:TAG @releaseFiles --target $env:SHA --title $env:TAG --generate-notes

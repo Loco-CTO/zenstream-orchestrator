@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url";
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -26,15 +27,15 @@ import type {
   EnvironmentKey,
   LauncherState,
   LogEntry,
+  ReadLogsRequest,
   SaveConfigRequest,
 } from "../shared";
 import { ConfigStore } from "./config-store";
+import { LauncherLogStore } from "./log-store";
 import { BackendSupervisor, type BackendCommand } from "./supervisor";
 
-const MAX_LOG_ENTRIES = 10_000;
 const configStore = new ConfigStore();
-const logs: LogEntry[] = [];
-let nextLogId = 1;
+let logStore: LauncherLogStore | null = null;
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let pendingCredentials: BootstrapCredentials | null = null;
@@ -45,6 +46,10 @@ let packagedBackendCommand: BackendCommand | null = null;
 const supervisor = new BackendSupervisor({
   resolveCommand: resolveBackendCommand,
   getEnvironment: () => configStore.environment(),
+  persistLog: async (entry) => {
+    if (!logStore) throw new Error("Launcher log store is not ready.");
+    return logStore.append(entry);
+  },
 });
 
 function resolveBackendCommand(): BackendCommand {
@@ -139,23 +144,9 @@ function send(channel: string, value: unknown): void {
     mainWindow.webContents.send(channel, value);
 }
 
-function recordLog(source: LogEntry["source"], message: string): void {
-  const entry: LogEntry = {
-    id: nextLogId++,
-    timestamp: new Date().toISOString(),
-    source,
-    message,
-  };
-  logs.push(entry);
-  if (logs.length > MAX_LOG_ENTRIES)
-    logs.splice(0, logs.length - MAX_LOG_ENTRIES);
-  send("launcher:log", entry);
-}
-
-supervisor.on(
-  "log",
-  ({ source, message }: Pick<LogEntry, "source" | "message">) =>
-    recordLog(source, message),
+supervisor.on("log", (entry: LogEntry) => send("launcher:log", entry));
+supervisor.on("log-error", (error) =>
+  console.error("Could not persist launcher log", error),
 );
 supervisor.on("state", (state: LauncherState) => {
   send("launcher:state", state);
@@ -205,7 +196,6 @@ function registerIpc(): void {
   registerHandler("launcher:initialize", () => ({
     config: configStore.view(),
     state: supervisor.snapshot(),
-    logs: [...logs],
     credentials: pendingCredentials,
   }));
   registerHandler("launcher:reset-defaults", () => configStore.defaults());
@@ -215,6 +205,15 @@ function registerIpc(): void {
       const before = configStore.view();
       const config = await configStore.save(request);
       configureLoginStartup(config.startWithWindows);
+      if (
+        logStore &&
+        before.environment.METADATA_PATH !== config.environment.METADATA_PATH
+      ) {
+        await logStore.setDirectory(
+          path.join(config.environment.METADATA_PATH, "logs"),
+        );
+        send("launcher:logs-reset", undefined);
+      }
       const changed =
         JSON.stringify(before.environment) !==
         JSON.stringify(config.environment);
@@ -233,6 +232,9 @@ function registerIpc(): void {
   registerHandler("launcher:stop", () => supervisor.stop());
   registerHandler("launcher:restart", () => supervisor.restart());
   registerHandler("launcher:quit", async () => requestQuit());
+  registerHandler("launcher:hide-window", () => {
+    mainWindow?.hide();
+  });
   registerHandler("launcher:open-dashboard", async () => {
     if (supervisor.snapshot().status !== "running") {
       throw new Error(
@@ -282,8 +284,25 @@ function registerIpc(): void {
     const error = await shell.openPath(directory);
     if (error) throw new Error(error);
   });
-  registerHandler("launcher:clear-logs", () => {
-    logs.length = 0;
+  registerHandler(
+    "launcher:read-logs",
+    async (_event, request: ReadLogsRequest) => {
+      if (!logStore) throw new Error("Launcher log store is not ready.");
+      return logStore.read(request);
+    },
+  );
+  registerHandler("launcher:copy-log-text", (_event, text: string) => {
+    if (
+      typeof text !== "string" ||
+      Buffer.byteLength(text, "utf8") > 2 * 1024 * 1024
+    )
+      throw new Error("The selected log text is too large to copy at once.");
+    clipboard.writeText(text);
+  });
+  registerHandler("launcher:clear-logs", async () => {
+    if (!logStore) return;
+    await logStore.clear();
+    send("launcher:logs-reset", undefined);
   });
   registerHandler("launcher:export-logs", async () => {
     const result = await dialog.showSaveDialog(mainWindow!, {
@@ -291,18 +310,16 @@ function registerIpc(): void {
       filters: [{ name: "Log file", extensions: ["log", "txt"] }],
     });
     if (result.canceled || !result.filePath) return false;
-    const text = logs
-      .map((entry) => {
-        const message = /^Password:\s*/i.test(entry.message)
-          ? "Password: <redacted>"
-          : entry.message;
-        return `${entry.timestamp} [${entry.source}] ${message}`;
-      })
-      .join("\n");
-    await writeFile(result.filePath, `${text}\n`, "utf8");
+    if (!logStore) throw new Error("Launcher log store is not ready.");
+    await logStore.exportTo(result.filePath);
     return true;
   });
-  registerHandler("launcher:acknowledge-credentials", () => {
+  registerHandler("launcher:copy-and-acknowledge-credentials", () => {
+    if (!pendingCredentials)
+      throw new Error("No bootstrap credentials are waiting to be copied.");
+    clipboard.writeText(
+      `Username: ${pendingCredentials.username}\nPassword: ${pendingCredentials.password}`,
+    );
     pendingCredentials = null;
   });
 }
@@ -415,6 +432,7 @@ async function requestQuit(): Promise<void> {
   quitRequested = true;
   mainWindow?.hide();
   await supervisor.stop();
+  await logStore?.close();
   exitReady = true;
   tray?.destroy();
   tray = null;
@@ -441,6 +459,9 @@ if (!app.requestSingleInstanceLock()) {
         );
       }
       await configStore.load();
+      logStore = new LauncherLogStore(
+        path.join(configStore.view().environment.METADATA_PATH, "logs"),
+      );
       await preparePackagedBackend();
       configureLoginStartup(configStore.view().startWithWindows);
       session.defaultSession.setPermissionRequestHandler(

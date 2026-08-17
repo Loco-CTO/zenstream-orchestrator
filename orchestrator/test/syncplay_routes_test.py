@@ -89,6 +89,51 @@ class SyncplayRouteAuthenticationTest(unittest.TestCase):
         create.assert_called_once_with("user-1", "browser-tab", "Viewer")
         broadcast.assert_awaited_once()
 
+    def test_join_uses_authenticated_username_when_client_omits_username_header(self):
+        account_model = MagicMock()
+        account_model.authenticate_token.return_value = {
+            "id": "user-1",
+            "username": "anson",
+        }
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None
+        cursor.fetchall.return_value = []
+        state = {"id": "group-1", "revision": 0, "members": []}
+        group = MagicMock()
+        group.state.return_value = state
+
+        def mutate(user, expected_revision, operation_id, apply):
+            apply(cursor, state)
+            return state
+
+        group.mutate.side_effect = mutate
+
+        async def run_control_inline(function, *args, **kwargs):
+            if function is app_module.SyncplayGroup:
+                return group
+            return function(*args, **kwargs)
+
+        with (
+            patch("app.client_auth.Account", return_value=account_model),
+            patch.object(app_module, "run_control", side_effect=run_control_inline),
+            patch.object(app_module.hub, "broadcast", new=AsyncMock()) as broadcast,
+        ):
+            response = asyncio.run(
+                app_module.syncplay_join(
+                    "group-1", _request(method="POST", cookie="browser-session")
+                )
+            )
+
+        self.assertIs(response, state)
+        self.assertIn(
+            (
+                "UPDATE syncplay_members SET username=? WHERE group_id=? AND user_id=? AND participant_id=?",
+                ("anson", "group-1", "user-1", "browser-tab"),
+            ),
+            [call.args for call in cursor.execute.call_args_list],
+        )
+        broadcast.assert_awaited_once()
+
     def test_bearer_client_remains_supported(self):
         account_model = MagicMock()
         account_model.authenticate_token.return_value = {

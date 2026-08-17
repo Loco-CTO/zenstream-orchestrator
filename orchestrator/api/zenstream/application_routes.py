@@ -6,15 +6,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.client_auth import (
-    DEV_CLIENT_SESSION_COOKIE,
-    administrator_origin_allowed,
-    cookie_secure,
-    require_account,
-    session_cookie_name,
-    websocket_account,
-)
-from app.foreground import run_auth, run_control
+from app.client_auth import cookie_secure, require_account, websocket_account
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite

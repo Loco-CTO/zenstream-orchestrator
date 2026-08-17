@@ -6,7 +6,15 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.client_auth import cookie_secure, require_account, websocket_account
+from app.client_auth import (
+    DEV_CLIENT_SESSION_COOKIE,
+    administrator_origin_allowed,
+    cookie_secure,
+    require_account,
+    session_cookie_name,
+    websocket_account,
+)
+from app.foreground import run_auth, run_control
 from app.intro_outro import IntroOutroStore
 from app.jobs import scheduler
 from app.models import Invite
@@ -920,18 +928,15 @@ def _sync_identity(request: Request):
     participant = request.headers.get("x-zenstream-participant")
     if not participant:
         raise HTTPException(401, "Authentication required.")
-    return account["id"], participant
+    return account["id"], participant, account["username"]
 
 
 async def _sync_identity_async(request: Request):
     return await run_auth(_sync_identity, request)
 
 
-def _syncplay_create_sync(user: str, participant: str):
-    account = Account()._row(user_id=user, read_only=True)
-    return SyncplayGroup.create(
-        user, participant, account[1] if account else "ZenStream"
-    ).state()
+def _syncplay_create_sync(user: str, participant: str, username: str):
+    return SyncplayGroup.create(user, participant, username).state()
 
 
 def _syncplay_group_snapshot_sync(group_id: str, user: str, participant: str):
@@ -956,7 +961,7 @@ def _syncplay_socket_initial_sync(user: str, participant: str):
 async def syncplay_groups(
     request: Request,
 ):
-    user_id, participant = await _sync_identity_async(request)
+    user_id, participant, _ = await _sync_identity_async(request)
     states = await run_control(SyncplayGroup.states)
     return {
         "groups": [
@@ -967,9 +972,9 @@ async def syncplay_groups(
 
 @router.post("/api/syncplay/groups")
 async def syncplay_create(request: Request):
-    user, participant = await _sync_identity_async(request)
+    user, participant, username = await _sync_identity_async(request)
     try:
-        state = await run_control(_syncplay_create_sync, user, participant)
+        state = await run_control(_syncplay_create_sync, user, participant, username)
     except SyncplayMembershipConflict:
         raise HTTPException(409, "You already belong to an active Syncplay group.")
     await hub.broadcast({"version": 1, "type": "group", "group": state})
@@ -978,7 +983,7 @@ async def syncplay_create(request: Request):
 
 @router.get("/api/syncplay/groups/{group_id}")
 async def syncplay_group(group_id: str, request: Request):
-    user, participant = await _sync_identity_async(request)
+    user, participant, _ = await _sync_identity_async(request)
     group, state, is_member = await run_control(
         _syncplay_group_snapshot_sync, group_id, user, participant
     )
@@ -990,7 +995,7 @@ async def syncplay_group(group_id: str, request: Request):
 
 
 async def _sync_group_context(group_id: str, request: Request):
-    user, participant = await _sync_identity_async(request)
+    user, participant, _ = await _sync_identity_async(request)
     group, state, is_member = await run_control(
         _syncplay_group_snapshot_sync, group_id, user, participant
     )
@@ -1010,7 +1015,7 @@ async def _sync_group_context(group_id: str, request: Request):
 
 @router.post("/api/syncplay/groups/{group_id}/join")
 async def syncplay_join(group_id: str, request: Request):
-    user, participant = await _sync_identity_async(request)
+    user, participant, username = await _sync_identity_async(request)
     group = await run_control(SyncplayGroup, group_id)
     if not await run_control(group.state):
         raise HTTPException(404, "Group not found.")
@@ -1020,7 +1025,6 @@ async def syncplay_join(group_id: str, request: Request):
         else {}
     )
     replaced = []
-    username = request.headers.get("x-zenstream-username", "ZenStream")
     try:
 
         def apply(cursor, state):
@@ -1038,6 +1042,10 @@ async def syncplay_join(group_id: str, request: Request):
             cursor.execute(
                 "DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id<>?",
                 (group_id, user, participant),
+            )
+            cursor.execute(
+                "UPDATE syncplay_members SET username=? WHERE group_id=? AND user_id=? AND participant_id=?",
+                (username, group_id, user, participant),
             )
             cursor.execute(
                 "INSERT OR IGNORE INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)",

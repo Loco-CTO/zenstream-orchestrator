@@ -15,4 +15,4 @@ watchdog>=6.0.0
 guessit>=4.4.0
 pycountry>=26.2.16
 langcodes[data]>=3.5.0
-resvg_py==0.3.4
+resvg_py==0.4.0

@@ -47,10 +47,3 @@ jobs:
         run: ./scripts/build-windows.ps1 -PythonExecutable python
       - name: Smoke-test packaged backend lifecycle
         run: node scripts/smoke-windows-backend.mjs
-      - uses: actions/upload-artifact@v7
-        with:
-          name: zenstream-orchestrator-windows-x64
-          path: |
-            launcher/release/*.exe
-            launcher/release/SHA256SUMS.txt
-          if-no-files-found: error

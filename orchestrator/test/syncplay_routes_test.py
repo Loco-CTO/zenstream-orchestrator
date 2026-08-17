@@ -61,7 +61,9 @@ class SyncplayWebSocketHubTest(unittest.TestCase):
             new = _HubWebSocket()
             await hub.connect(old, "user-1", "tab-1")
             await hub.connect(new, "user-1", "tab-1")
-            await hub.broadcast({"version": 1, "type": "group", "group": {"id": "group-1"}})
+            await hub.broadcast(
+                {"version": 1, "type": "group", "group": {"id": "group-1"}}
+            )
             await asyncio.sleep(0)
             try:
                 self.assertEqual(await hub.sockets_for("user-1", "tab-1"), (new,))

@@ -38,6 +38,62 @@ def _request(
     )
 
 
+class _HubWebSocket:
+    def __init__(self):
+        self.messages = []
+        self.closed = []
+
+    async def accept(self):
+        return None
+
+    async def send_json(self, payload):
+        self.messages.append(payload)
+
+    async def close(self, code=1000, reason=""):
+        self.closed.append((code, reason))
+
+
+class SyncplayWebSocketHubTest(unittest.TestCase):
+    def test_replaces_duplicate_socket_for_same_participant(self):
+        async def scenario():
+            hub = app_module.WebSocketHub()
+            old = _HubWebSocket()
+            new = _HubWebSocket()
+            await hub.connect(old, "user-1", "tab-1")
+            await hub.connect(new, "user-1", "tab-1")
+            await hub.broadcast({"version": 1, "type": "group", "group": {"id": "group-1"}})
+            await asyncio.sleep(0)
+            try:
+                self.assertEqual(await hub.sockets_for("user-1", "tab-1"), (new,))
+                self.assertEqual(old.messages, [])
+                self.assertEqual(len(new.messages), 1)
+                self.assertEqual(old.closed, [(1000, "Replaced")])
+            finally:
+                await hub.remove(new)
+
+        asyncio.run(scenario())
+
+    def test_keeps_different_participants_independent(self):
+        async def scenario():
+            hub = app_module.WebSocketHub()
+            first = _HubWebSocket()
+            second = _HubWebSocket()
+            await hub.connect(first, "user-1", "tab-1")
+            await hub.connect(second, "user-1", "tab-2")
+            await hub.broadcast({"version": 1, "type": "group-ended", "id": "group-1"})
+            await asyncio.sleep(0)
+            try:
+                self.assertEqual(len(first.messages), 1)
+                self.assertEqual(len(second.messages), 1)
+                self.assertEqual(await hub.sockets_for("user-1", "tab-1"), (first,))
+                self.assertEqual(await hub.sockets_for("user-1", "tab-2"), (second,))
+            finally:
+                await hub.remove(first)
+                await hub.remove(second)
+
+        asyncio.run(scenario())
+
+
 class SyncplayRouteAuthenticationTest(unittest.TestCase):
     def test_browser_cookie_can_list_groups(self):
         account_model = MagicMock()
@@ -65,14 +121,11 @@ class SyncplayRouteAuthenticationTest(unittest.TestCase):
             "id": "user-1",
             "username": "Viewer",
         }
-        directory_model = MagicMock()
-        directory_model._row.return_value = ("user-1", "Viewer")
         group = MagicMock()
         group.state.return_value = {"id": "group-1", "members": []}
 
         with (
             patch("app.client_auth.Account", return_value=account_model),
-            patch.object(app_module, "Account", return_value=directory_model),
             patch.object(
                 app_module.SyncplayGroup, "create", return_value=group
             ) as create,

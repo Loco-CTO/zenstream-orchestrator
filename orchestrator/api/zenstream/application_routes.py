@@ -131,13 +131,35 @@ class WebSocketHub:
             identity=(user, participant),
             initializing=initialize,
         )
+        replaced: list[_SocketClient] = []
+        key = (user, participant)
         async with self.lock:
+            replaced = [
+                existing
+                for existing in self._connections.values()
+                if existing.identity == key and existing.websocket is not websocket
+            ]
+            # A participant ID identifies one logical client tab/device. Install
+            # the replacement before removing the old socket so its delayed
+            # disconnect cleanup cannot make the participant look offline.
+            for existing in replaced:
+                self.clients.discard(existing.websocket)
+                self.identities.pop(existing.websocket, None)
+                self._connections.pop(existing.websocket, None)
             self.clients.add(websocket)
-            self.identities[websocket] = (user, participant)
+            self.identities[websocket] = key
             self._connections[websocket] = connection
-            key = (user, participant)
             self.disconnect_epochs[key] = self.disconnect_epochs.get(key, 0) + 1
             connection.sender = asyncio.create_task(self._sender(connection))
+        current = asyncio.current_task()
+        for existing in replaced:
+            sender = existing.sender
+            if sender is not None and sender is not current:
+                sender.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sender
+            with contextlib.suppress(Exception):
+                await existing.websocket.close(code=1000, reason="Replaced")
 
     async def _sender(self, connection: _SocketClient):
         websocket = connection.websocket

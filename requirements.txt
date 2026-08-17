@@ -12,7 +12,7 @@ cryptography>=50.0.0
 argon2-cffi>=25.1.0
 mutagen>=1.48.1
 watchdog>=6.0.0
-guessit>=4.1.0
+guessit>=4.4.0
 pycountry>=26.2.16
 langcodes[data]>=3.5.0
 resvg_py==0.3.4

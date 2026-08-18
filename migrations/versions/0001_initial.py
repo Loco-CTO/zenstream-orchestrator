@@ -137,7 +137,7 @@ TABLES = [
         user_id TEXT PRIMARY KEY NOT NULL, locale TEXT NOT NULL DEFAULT 'en', metadata_language TEXT,
         subtitle_font_family TEXT NOT NULL DEFAULT 'sans', subtitle_bold INTEGER NOT NULL DEFAULT 0,
         subtitle_text_scale REAL NOT NULL DEFAULT 100, subtitle_font_color TEXT NOT NULL DEFAULT '#ffffff',
-        subtitle_border_size REAL NOT NULL DEFAULT 0, subtitle_border_color TEXT NOT NULL DEFAULT '#000000',
+        subtitle_border_size REAL NOT NULL DEFAULT 2, subtitle_border_color TEXT NOT NULL DEFAULT '#000000',
         subtitle_background_color TEXT NOT NULL DEFAULT '#000000', subtitle_background_opacity REAL NOT NULL DEFAULT 0,
         subtitle_renderer TEXT NOT NULL DEFAULT 'native',
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE

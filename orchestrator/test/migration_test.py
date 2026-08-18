@@ -206,6 +206,61 @@ class PersistenceMigrationTest(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_subtitle_outline_default_preserves_existing_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "0034_intro_outro_comparison_state")
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "INSERT INTO users(id,username,password) VALUES(?,?,?)",
+                    ("user-1", "viewer", "hash"),
+                )
+                connection.execute(
+                    "INSERT INTO account_preferences(user_id,subtitle_border_size) VALUES(?,?)",
+                    ("user-1", 0),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                column = next(
+                    row
+                    for row in connection.execute(
+                        "PRAGMA table_info(account_preferences)"
+                    )
+                    if row[1] == "subtitle_border_size"
+                )
+                self.assertEqual(str(column[4]).strip("'\""), "2")
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT subtitle_border_size FROM account_preferences WHERE user_id=?",
+                        ("user-1",),
+                    ).fetchone()[0],
+                    0.0,
+                )
+                connection.execute(
+                    "INSERT INTO users(id,username,password) VALUES(?,?,?)",
+                    ("user-2", "new-viewer", "hash"),
+                )
+                connection.execute(
+                    "INSERT INTO account_preferences(user_id) VALUES(?)",
+                    ("user-2",),
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT subtitle_border_size FROM account_preferences WHERE user_id=?",
+                        ("user-2",),
+                    ).fetchone()[0],
+                    2.0,
+                )
+            finally:
+                connection.close()
+
     def test_catalog_performance_migration_round_trips(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "orchestrator.db"

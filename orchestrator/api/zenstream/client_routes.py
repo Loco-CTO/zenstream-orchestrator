@@ -11,8 +11,6 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 
-from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
-from app.catalog_read_model import CatalogReadModel
 from app.avatar import (
     AVATAR_MAX_BYTES,
     AvatarCrop,
@@ -21,6 +19,8 @@ from app.avatar import (
     AvatarUnsupportedError,
     UserAvatarStore,
 )
+from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
+from app.catalog_read_model import CatalogReadModel
 from app.client_auth import (
     CLIENT_SESSION_COOKIE,
     DEV_CLIENT_SESSION_COOKIE,
@@ -87,7 +87,9 @@ async def _require_access(request: Request, kind: str = "resource", **claims):
     return await run_auth(account_from_access, request, kind, **claims)
 
 
-def _save_avatar(user_id: str, content: bytes, content_type: str | None, crop: AvatarCrop):
+def _save_avatar(
+    user_id: str, content: bytes, content_type: str | None, crop: AvatarCrop
+):
     return UserAvatarStore().save(user_id, content, content_type, crop)
 
 
@@ -294,7 +296,9 @@ async def _bounded_json_object(
     return value
 
 
-async def _bounded_binary_body(request: Request, limit: int = AVATAR_MAX_BYTES) -> bytes:
+async def _bounded_binary_body(
+    request: Request, limit: int = AVATAR_MAX_BYTES
+) -> bytes:
     content_length = request.headers.get("content-length")
     if content_length:
         try:

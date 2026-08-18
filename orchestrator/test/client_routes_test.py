@@ -217,15 +217,15 @@ class ClientAvatarRouteTest(unittest.TestCase):
         request = _binary_request(
             b"small", declared_length=client_routes.AVATAR_MAX_BYTES + 1
         )
-        with patch.object(
-            client_routes,
-            "_require_account",
-            new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ),
+            self.assertRaises(client_routes.HTTPException) as raised,
         ):
-            with self.assertRaises(client_routes.HTTPException) as raised:
-                asyncio.run(
-                    client_routes.upload_avatar(request, 0.0, 0.0, 100.0, 0)
-                )
+            asyncio.run(client_routes.upload_avatar(request, 0.0, 0.0, 100.0, 0))
         self.assertEqual(raised.exception.status_code, 413)
 
     def test_processing_errors_are_client_errors_and_remove_is_authenticated(self):
@@ -241,11 +241,9 @@ class ClientAvatarRouteTest(unittest.TestCase):
                 "run_control",
                 new=AsyncMock(side_effect=client_routes.AvatarUnsupportedError("bad")),
             ),
+            self.assertRaises(client_routes.HTTPException) as raised,
         ):
-            with self.assertRaises(client_routes.HTTPException) as raised:
-                asyncio.run(
-                    client_routes.upload_avatar(request, 0.0, 0.0, 100.0, 0)
-                )
+            asyncio.run(client_routes.upload_avatar(request, 0.0, 0.0, 100.0, 0))
         self.assertEqual(raised.exception.status_code, 415)
 
         with (

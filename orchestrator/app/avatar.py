@@ -194,7 +194,9 @@ def avatar_filter(crop: _ValidatedCrop) -> str:
     )
 
 
-def _encode_avatar(source: Path, target: Path, image_format: str, crop: _ValidatedCrop) -> None:
+def _encode_avatar(
+    source: Path, target: Path, image_format: str, crop: _ValidatedCrop
+) -> None:
     executable = ffmpeg_path()
     if not executable:
         raise AvatarError("Image processing is unavailable.")
@@ -307,7 +309,9 @@ class UserAvatarStore:
             return None
         return path, version, file_format
 
-    def save(self, user_id: str, content: bytes, content_type: str | None, crop: AvatarCrop) -> str:
+    def save(
+        self, user_id: str, content: bytes, content_type: str | None, crop: AvatarCrop
+    ) -> str:
         del content_type  # The bytes are authoritative; MIME is advisory only.
         if len(content) > AVATAR_MAX_BYTES:
             raise AvatarTooLargeError("Avatar file is too large.")

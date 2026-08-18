@@ -11,8 +11,8 @@ from app.avatar import (
     AvatarCrop,
     AvatarError,
     UserAvatarStore,
-    _Probe,
     _encode_avatar,
+    _Probe,
     _probe_image,
     _validated_crop,
     avatar_filter,
@@ -83,7 +83,9 @@ class AvatarProcessingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "avatar.webp"
             probe = _probe_image(source)
-            crop = _validated_crop(AvatarCrop(0, 0, min(probe.width, probe.height), 0), probe)
+            crop = _validated_crop(
+                AvatarCrop(0, 0, min(probe.width, probe.height), 0), probe
+            )
             _encode_avatar(source, target, "png", crop)
             self.assertEqual(_probe_image(target), _Probe(500, 500))
             self.assertGreater(target.stat().st_size, 0)
@@ -198,7 +200,9 @@ class AvatarStoreTests(unittest.TestCase):
                 side_effect=AvatarError("processing failed"),
             ):
                 with self.assertRaises(AvatarError):
-                    self.store.save("user-1", b"\x89PNG\r\n\x1a\n", None, AvatarCrop(0, 0, 100, 0))
+                    self.store.save(
+                        "user-1", b"\x89PNG\r\n\x1a\n", None, AvatarCrop(0, 0, 100, 0)
+                    )
         self.assertEqual(self.store.version("user-1"), "old-version")
         self.assertEqual(previous.read_bytes(), b"old-avatar")
 
@@ -208,14 +212,16 @@ class AvatarStoreTests(unittest.TestCase):
         def write_output(_source, target, _format, _crop):
             target.write_bytes(b"new-avatar")
 
-        with patch(
-            "app.avatar._probe_image",
-            side_effect=[_Probe(100, 100), _Probe(500, 500)],
+        with (
+            patch(
+                "app.avatar._probe_image",
+                side_effect=[_Probe(100, 100), _Probe(500, 500)],
+            ),
+            patch("app.avatar._encode_avatar", side_effect=write_output),
         ):
-            with patch("app.avatar._encode_avatar", side_effect=write_output):
-                version = self.store.save(
-                    "user-1", b"\x89PNG\r\n\x1a\n", None, AvatarCrop(0, 0, 100, 0)
-                )
+            version = self.store.save(
+                "user-1", b"\x89PNG\r\n\x1a\n", None, AvatarCrop(0, 0, 100, 0)
+            )
         self.assertNotEqual(version, "old-version")
         self.assertFalse(previous.exists())
         resolved = self.store.resolve("user-1", version)

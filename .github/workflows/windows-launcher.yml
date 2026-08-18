@@ -21,7 +21,7 @@ name: Windows launcher
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

@@ -38,7 +38,7 @@ concurrency:
 jobs:
   fix:
     if: github.actor != 'github-actions[bot]'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - name: Check out branch
         uses: actions/checkout@v7

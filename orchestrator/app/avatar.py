@@ -89,18 +89,20 @@ def _safe_user_directory(root: Path, user_id: str) -> Path:
 
 
 def _run_process(command: list[str], timeout: int, *, json_output: bool = False):
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        stdin=subprocess.DEVNULL,
-        text=json_output,
-        encoding="utf-8" if json_output else None,
-        errors="replace" if json_output else None,
-        timeout=timeout,
-        check=False,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    return completed
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=json_output,
+            encoding="utf-8" if json_output else None,
+            errors="replace" if json_output else None,
+            timeout=timeout,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise AvatarError("Image processing is unavailable.") from error
 
 
 def _probe_image(source: Path) -> _Probe:
@@ -261,11 +263,13 @@ class UserAvatarStore:
         )
 
     def _has_table(self) -> bool:
-        return bool(
-            self.db.read_execute(
+        try:
+            rows = self.db.read_execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_avatars'"
             )
-        )
+        except Exception:
+            return False
+        return bool(rows and isinstance(rows[0], (tuple, list)))
 
     def _record(self, user_id: str):
         if not self._has_table():
@@ -312,7 +316,7 @@ class UserAvatarStore:
         image_format = _format_from_bytes(content)
         if image_format not in AVATAR_FORMATS:
             raise AvatarUnsupportedError("Unsupported avatar image format.")
-        if self.root is None:
+        if self.root is None or not self._has_table():
             raise AvatarError("Avatar storage is unavailable.")
 
         self.root.mkdir(parents=True, exist_ok=True)

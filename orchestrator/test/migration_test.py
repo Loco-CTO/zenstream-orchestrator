@@ -133,6 +133,49 @@ class PersistenceMigrationTest(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_avatar_migration_preserves_existing_accounts_without_avatar_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "0035_subtitle_outline_default")
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "INSERT INTO users(id,username,password) VALUES(?,?,?)",
+                    ("user-1", "Alex", "password"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                self.assertIn("user_avatars", tables)
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM user_avatars WHERE user_id=?",
+                        ("user-1",),
+                    ).fetchone()[0],
+                    0,
+                )
+                columns = {
+                    row[1]: row
+                    for row in connection.execute("PRAGMA table_info(user_avatars)")
+                }
+                self.assertEqual(
+                    set(columns),
+                    {"user_id", "version", "file_format", "created_at", "updated_at"},
+                )
+            finally:
+                connection.close()
+
     def test_legacy_invites_are_migrated_to_single_use_records(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "orchestrator.db"

@@ -185,6 +185,10 @@ class AsyncRouteBlockingGuardTests(unittest.TestCase):
         "set_participation",
         "apply_presence",
         "reconcile_readiness",
+        "version",
+        "save",
+        "remove",
+        "resolve",
     }
     _DOMAIN_ROOTS = {
         "Account",
@@ -209,6 +213,7 @@ class AsyncRouteBlockingGuardTests(unittest.TestCase):
         "store",
         "trickplay",
         "intro_outro",
+        "UserAvatarStore",
     }
 
     @staticmethod

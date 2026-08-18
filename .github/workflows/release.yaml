@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -85,7 +85,7 @@ jobs:
 
   windows-package:
     needs: version
-    runs-on: windows-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v7
         with:

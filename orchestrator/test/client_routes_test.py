@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from api.zenstream import client_routes
 from starlette.requests import Request
@@ -41,6 +41,43 @@ def _json_request(
             ],
             "client": ("127.0.0.1", 12345),
             "server": (host, 443 if scheme == "https" else 80),
+        },
+        receive,
+    )
+
+
+def _binary_request(
+    body: bytes,
+    *,
+    content_type: str = "image/png",
+    declared_length: int | None = None,
+    method: str = "POST",
+    path: str = "/api/account/avatar",
+) -> Request:
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    length = len(body) if declared_length is None else declared_length
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "scheme": "https",
+            "path": path,
+            "query_string": b"cropX=0&cropY=0&cropSize=100&rotation=0",
+            "headers": [
+                (b"host", b"example.test"),
+                (b"content-type", content_type.encode("ascii")),
+                (b"content-length", str(length).encode("ascii")),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("example.test", 443),
         },
         receive,
     )
@@ -145,6 +182,114 @@ class ClientBrowserLoginRouteTest(unittest.TestCase):
         )
         scoped = next(value for value in cookies if "opaque-session" in value)
         self.assertNotIn("Secure", scoped)
+
+
+class ClientAvatarRouteTest(unittest.TestCase):
+    def test_upload_uses_raw_body_and_pixel_crop_in_control_lane(self):
+        request = _binary_request(b"avatar-bytes")
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ),
+            patch.object(
+                client_routes,
+                "run_control",
+                new=AsyncMock(return_value="new-version"),
+            ) as control,
+        ):
+            response = asyncio.run(
+                client_routes.upload_avatar(request, 12.5, 24.5, 80.0, 90)
+            )
+
+        self.assertEqual(response, {"avatarVersion": "new-version"})
+        control.assert_awaited_once()
+        arguments = control.await_args.args
+        self.assertIs(arguments[0], client_routes._save_avatar)
+        self.assertEqual(arguments[1:3], ("user-1", b"avatar-bytes"))
+        self.assertEqual(arguments[4].crop_x, 12.5)
+        self.assertEqual(arguments[4].crop_y, 24.5)
+        self.assertEqual(arguments[4].crop_size, 80.0)
+        self.assertEqual(arguments[4].rotation, 90)
+
+    def test_upload_rejects_oversized_content_length_before_processing(self):
+        request = _binary_request(
+            b"small", declared_length=client_routes.AVATAR_MAX_BYTES + 1
+        )
+        with patch.object(
+            client_routes,
+            "_require_account",
+            new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+        ):
+            with self.assertRaises(client_routes.HTTPException) as raised:
+                asyncio.run(
+                    client_routes.upload_avatar(request, 0.0, 0.0, 100.0, 0)
+                )
+        self.assertEqual(raised.exception.status_code, 413)
+
+    def test_processing_errors_are_client_errors_and_remove_is_authenticated(self):
+        request = _binary_request(b"avatar-bytes")
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ),
+            patch.object(
+                client_routes,
+                "run_control",
+                new=AsyncMock(side_effect=client_routes.AvatarUnsupportedError("bad")),
+            ),
+        ):
+            with self.assertRaises(client_routes.HTTPException) as raised:
+                asyncio.run(
+                    client_routes.upload_avatar(request, 0.0, 0.0, 100.0, 0)
+                )
+        self.assertEqual(raised.exception.status_code, 415)
+
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ),
+            patch.object(
+                client_routes,
+                "run_control",
+                new=AsyncMock(),
+            ) as control,
+        ):
+            response = asyncio.run(client_routes.delete_avatar(request))
+        self.assertEqual(response, {"avatarVersion": None})
+        control.assert_awaited_once_with(client_routes._remove_avatar, "user-1")
+
+    def test_avatar_delivery_is_authenticated_and_versioned_cacheable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "avatar.webp"
+            path.write_bytes(b"webp")
+            request = _binary_request(
+                b"",
+                method="GET",
+                path="/api/users/user-1/avatar",
+            )
+            request.scope["query_string"] = b"v=version-1"
+            with (
+                patch.object(
+                    client_routes,
+                    "_require_access",
+                    new=AsyncMock(return_value={"id": "viewer"}),
+                ) as access,
+                patch.object(
+                    client_routes,
+                    "run_control",
+                    new=AsyncMock(return_value=(path, "version-1", "webp")),
+                ),
+            ):
+                response = asyncio.run(client_routes.user_avatar("user-1", request))
+            self.assertEqual(response.media_type, "image/webp")
+            self.assertIn("immutable", response.headers["cache-control"])
+            access.assert_awaited_once_with(request)
 
     def test_logout_expires_scoped_production_and_legacy_cookie_names(self):
         request = _json_request(

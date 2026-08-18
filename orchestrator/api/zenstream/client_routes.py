@@ -13,6 +13,14 @@ from pathlib import Path
 
 from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
 from app.catalog_read_model import CatalogReadModel
+from app.avatar import (
+    AVATAR_MAX_BYTES,
+    AvatarCrop,
+    AvatarError,
+    AvatarTooLargeError,
+    AvatarUnsupportedError,
+    UserAvatarStore,
+)
 from app.client_auth import (
     CLIENT_SESSION_COOKIE,
     DEV_CLIENT_SESSION_COOKIE,
@@ -77,6 +85,18 @@ async def _require_account(request: Request) -> tuple[dict, str]:
 
 async def _require_access(request: Request, kind: str = "resource", **claims):
     return await run_auth(account_from_access, request, kind, **claims)
+
+
+def _save_avatar(user_id: str, content: bytes, content_type: str | None, crop: AvatarCrop):
+    return UserAvatarStore().save(user_id, content, content_type, crop)
+
+
+def _remove_avatar(user_id: str) -> None:
+    UserAvatarStore().remove(user_id)
+
+
+def _resolve_avatar(user_id: str, requested_version: str | None):
+    return UserAvatarStore().resolve(user_id, requested_version)
 
 
 def _request_device_metadata(data: dict) -> dict | None:
@@ -274,6 +294,27 @@ async def _bounded_json_object(
     return value
 
 
+async def _bounded_binary_body(request: Request, limit: int = AVATAR_MAX_BYTES) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            length = int(content_length)
+            if length < 0:
+                raise ValueError
+            if length > limit:
+                raise HTTPException(413, "Avatar file is too large.")
+        except ValueError as error:
+            raise HTTPException(400, "Invalid Content-Length header.") from error
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise HTTPException(413, "Avatar file is too large.")
+    if not body:
+        raise HTTPException(400, "Avatar file is empty.")
+    return bytes(body)
+
+
 def _catalog_status_payload(user_id: str) -> dict:
     status = CatalogReadModel(catalog.db).status()
     allowed = catalog.allowed_libraries(user_id)
@@ -393,6 +434,61 @@ async def login(request: Request):
 async def me(request: Request):
     account, _ = await _require_account(request)
     return {"user": account}
+
+
+@router.post("/api/account/avatar")
+async def upload_avatar(
+    request: Request,
+    crop_x: float = Query(..., alias="cropX"),
+    crop_y: float = Query(..., alias="cropY"),
+    crop_size: float = Query(..., alias="cropSize"),
+    rotation: int = Query(...),
+):
+    account, _ = await _require_account(request)
+    content = await _bounded_binary_body(request)
+    try:
+        version = await run_control(
+            _save_avatar,
+            account["id"],
+            content,
+            request.headers.get("content-type"),
+            AvatarCrop(crop_x, crop_y, crop_size, rotation),
+        )
+    except AvatarTooLargeError as error:
+        raise HTTPException(413, str(error)) from error
+    except AvatarUnsupportedError as error:
+        raise HTTPException(415, str(error)) from error
+    except AvatarError as error:
+        raise HTTPException(422, str(error)) from error
+    return {"avatarVersion": version}
+
+
+@router.delete("/api/account/avatar")
+async def delete_avatar(request: Request):
+    account, _ = await _require_account(request)
+    await run_control(_remove_avatar, account["id"])
+    return {"avatarVersion": None}
+
+
+@router.get("/api/users/{user_id}/avatar")
+async def user_avatar(user_id: str, request: Request):
+    await _require_access(request)
+    requested_version = request.query_params.get("v") or None
+    result = await run_control(_resolve_avatar, user_id, requested_version)
+    if result is None:
+        raise HTTPException(404, "Avatar not found.")
+    path, _, file_format = result
+    return FileResponse(
+        path,
+        media_type="image/gif" if file_format == "gif" else "image/webp",
+        headers={
+            "Cache-Control": (
+                "private, max-age=31536000, immutable"
+                if requested_version
+                else "private, no-cache"
+            )
+        },
+    )
 
 
 @router.get("/api/auth/bootstrap")

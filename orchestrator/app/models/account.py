@@ -59,6 +59,13 @@ class Account:
     def _public(row) -> dict:
         return {"id": row[0], "username": row[1], "disabled": bool(row[4])}
 
+    def public(self, row) -> dict:
+        value = self._public(row)
+        from app.avatar import UserAvatarStore
+
+        value["avatarVersion"] = UserAvatarStore(self.db).version(row[0])
+        return value
+
     def create(self, username: str, password: str) -> dict:
         username = username.strip()
         if not username or len(password) < 8:
@@ -74,7 +81,7 @@ class Account:
                 )
         except Exception as error:
             raise ValueError("Username is already in use.") from error
-        return self._public(self._row(user_id=user_id, read_only=True))
+        return self.public(self._row(user_id=user_id, read_only=True))
 
     def authenticate_password(self, username: str, password: str) -> dict | None:
         row = self._row(username=username, read_only=True)
@@ -99,7 +106,7 @@ class Account:
                 (_hasher.hash(password), row[0]),
             )
             row = self._row(user_id=row[0], read_only=True)
-        return self._public(row)
+        return self.public(row)
 
     def create_session(
         self,
@@ -152,7 +159,7 @@ class Account:
         if not rows:
             return None
         self._queue_session_touch(rows[0][5], now)
-        return self._public(rows[0])
+        return self.public(rows[0])
 
     @classmethod
     def _queue_session_touch(cls, session_id: str, seen_at: str) -> None:
@@ -200,7 +207,7 @@ class Account:
         for row in self.db.read_execute(
             "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users ORDER BY username"
         ):
-            value = self._public(row)
+            value = self.public(row)
             value["libraryIds"] = self.library_ids(row[0])
             values.append(value)
         return values
@@ -215,7 +222,7 @@ class Account:
             (_hasher.hash(password), user_id),
         )
         self.revoke_user(user_id)
-        return self._public(self._row(user_id=user_id, read_only=True))
+        return self.public(self._row(user_id=user_id, read_only=True))
 
     def set_disabled(self, user_id: str, disabled: bool) -> dict:
         if not self._row(user_id=user_id, read_only=True):
@@ -225,12 +232,19 @@ class Account:
         )
         if disabled:
             self.revoke_user(user_id)
-        return self._public(self._row(user_id=user_id, read_only=True))
+        return self.public(self._row(user_id=user_id, read_only=True))
 
     def delete(self, user_id: str) -> bool:
+        from app.avatar import UserAvatarStore
+
+        avatar_store = UserAvatarStore(self.db)
+        avatar_record = avatar_store.record_for_cleanup(user_id)
         with self.db.transaction() as cursor:
             cursor.execute("DELETE FROM users WHERE id=?", (user_id,))
-            return cursor.rowcount == 1
+            deleted = cursor.rowcount == 1
+        if deleted:
+            avatar_store.remove_path_for_deleted_user(user_id, avatar_record)
+        return deleted
 
     def library_ids(self, user_id: str) -> list[str]:
         return [

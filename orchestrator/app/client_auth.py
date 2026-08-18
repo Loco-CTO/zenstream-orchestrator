@@ -251,7 +251,8 @@ def account_from_access(
     if claimed_entity is not None and route_entity is not None:
         if claimed_entity != route_entity:
             raise HTTPException(401, "Invalid or expired access ticket.")
-    rows = Account().db.read_execute(
+    account_model = Account()
+    rows = account_model.db.read_execute(
         "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users WHERE id=?",
         (payload.get("uid"),),
     )
@@ -274,7 +275,7 @@ def account_from_access(
         )
         if not sessions:
             raise HTTPException(401, "Invalid or expired access ticket.")
-    return Account._public(rows[0])
+    return account_model.public(rows[0])
 
 
 def websocket_account(websocket: WebSocket) -> dict | None:
@@ -285,15 +286,16 @@ def websocket_account(websocket: WebSocket) -> dict | None:
         payload = read_ticket(ticket, "socket")
     except HTTPException:
         return None
-    rows = Account().db.read_execute(
+    account_model = Account()
+    rows = account_model.db.read_execute(
         "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users WHERE id=?",
         (payload.get("uid"),),
     )
     if not rows or rows[0][4]:
         return None
     session_id = payload.get("sessionId")
-    valid_session = Account().db.read_execute(
+    valid_session = account_model.db.read_execute(
         "SELECT 1 FROM user_sessions WHERE id=? AND user_id=? AND expires_at>?",
         (session_id, payload.get("uid"), _iso_now()),
     )
-    return Account._public(rows[0]) if valid_session else None
+    return account_model.public(rows[0]) if valid_session else None

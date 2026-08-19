@@ -324,6 +324,76 @@ class ClientAvatarRouteTest(unittest.TestCase):
         account_model.revoke.assert_called_once_with("opaque-session")
 
 
+class ClientPasswordRouteTest(unittest.TestCase):
+    def test_change_password_authenticates_runs_in_auth_lane_and_clears_cookies(self):
+        request = _json_request(
+            {
+                "currentPassword": "current-password",
+                "newPassword": "new-password",
+                "confirmNewPassword": "new-password",
+            },
+            path="/api/account/password",
+        )
+        account_model = MagicMock()
+        account_model.change_password = MagicMock()
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ) as require_account,
+            patch.object(client_routes, "Account", return_value=account_model),
+            patch.object(client_routes, "run_auth", new=AsyncMock()) as auth,
+        ):
+            response = asyncio.run(client_routes.change_password(request))
+
+        self.assertEqual(response.status_code, 204)
+        require_account.assert_awaited_once_with(request)
+        auth.assert_awaited_once_with(
+            account_model.change_password,
+            "user-1",
+            "current-password",
+            "new-password",
+            "new-password",
+        )
+        cookies = [
+            value.decode("latin-1")
+            for name, value in response.raw_headers
+            if name.lower() == b"set-cookie"
+        ]
+        self.assertTrue(any(value.startswith('__Host-zenstream-session=""') for value in cookies))
+        self.assertTrue(any(value.startswith('zenstream-session=""') for value in cookies))
+
+    def test_change_password_maps_invalid_input_to_bad_request(self):
+        request = _json_request(
+            {
+                "currentPassword": "wrong",
+                "newPassword": "new-password",
+                "confirmNewPassword": "new-password",
+            },
+            path="/api/account/password",
+        )
+        account_model = MagicMock()
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ),
+            patch.object(client_routes, "Account", return_value=account_model),
+            patch.object(
+                client_routes,
+                "run_auth",
+                new=AsyncMock(side_effect=ValueError("Current password is incorrect.")),
+            ),
+            self.assertRaises(client_routes.HTTPException) as raised,
+        ):
+            asyncio.run(client_routes.change_password(request))
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(str(raised.exception.detail), "Current password is incorrect.")
+
+
 class ClientCatalogPerformanceRouteTest(unittest.TestCase):
     def test_card_view_is_additive_and_does_not_mutate_legacy_payload(self):
         item = {

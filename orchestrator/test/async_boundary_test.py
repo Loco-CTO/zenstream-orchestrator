@@ -139,6 +139,7 @@ class AsyncRouteBlockingGuardTests(unittest.TestCase):
         "set_disabled",
         "set_library_ids",
         "set_password",
+        "change_password",
         "register",
         "validate",
         "definitions",

@@ -1480,16 +1480,16 @@ class CatalogTest(unittest.TestCase):
                 created["id"], "wrong-password", "new-password", "new-password"
             )
         with self.assertRaises(ValueError):
-            account.change_password(
-                created["id"], "password-123", "short", "short"
-            )
+            account.change_password(created["id"], "password-123", "short", "short")
         with self.assertRaises(ValueError):
             account.change_password(
                 created["id"], "password-123", "new-password", "different-password"
             )
 
         self.assertEqual(
-            self.db.execute("SELECT password FROM users WHERE id=?", (created["id"],))[0][0],
+            self.db.execute("SELECT password FROM users WHERE id=?", (created["id"],))[
+                0
+            ][0],
             original_hash,
         )
         self.assertIsNotNone(account.authenticate_token(first_session["token"]))
@@ -1530,7 +1530,9 @@ class CatalogTest(unittest.TestCase):
         )
 
         self.assertEqual(
-            account.authenticate_password("legacy-change-password", "legacy-new-pass")["id"],
+            account.authenticate_password("legacy-change-password", "legacy-new-pass")[
+                "id"
+            ],
             legacy_id,
         )
         self.assertEqual(

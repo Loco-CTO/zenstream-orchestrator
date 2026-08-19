@@ -361,8 +361,12 @@ class ClientPasswordRouteTest(unittest.TestCase):
             for name, value in response.raw_headers
             if name.lower() == b"set-cookie"
         ]
-        self.assertTrue(any(value.startswith('__Host-zenstream-session=""') for value in cookies))
-        self.assertTrue(any(value.startswith('zenstream-session=""') for value in cookies))
+        self.assertTrue(
+            any(value.startswith('__Host-zenstream-session=""') for value in cookies)
+        )
+        self.assertTrue(
+            any(value.startswith('zenstream-session=""') for value in cookies)
+        )
 
     def test_change_password_maps_invalid_input_to_bad_request(self):
         request = _json_request(

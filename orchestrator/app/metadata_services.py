@@ -208,7 +208,9 @@ class MetadataAssetExecutor:
                 for key, updated in self._state_times.items()
                 if key not in self._pending
             )
-            for _updated, key in candidates[: max(0, len(self._states) - self.MAX_STATE_ENTRIES)]:
+            for _updated, key in candidates[
+                : max(0, len(self._states) - self.MAX_STATE_ENTRIES)
+            ]:
                 self._state_times.pop(key, None)
                 self._states.pop(key, None)
 

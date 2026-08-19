@@ -5077,7 +5077,10 @@ class LibraryRuntime:
                 self._reconcile_pending,
             ):
                 for library_id in list(mapping):
-                    if library_id not in library_ids and library_id not in active_libraries:
+                    if (
+                        library_id not in library_ids
+                        and library_id not in active_libraries
+                    ):
                         mapping.pop(library_id, None)
             protected = active_libraries | set(self._reconcile_pending)
             for mapping in (

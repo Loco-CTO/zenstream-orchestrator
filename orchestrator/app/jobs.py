@@ -1207,7 +1207,9 @@ class JobStore:
             for row in rows
         ]
 
-    def cleanup_history(self, retention_days: int = 30, batch_size: int = 500) -> dict[str, int]:
+    def cleanup_history(
+        self, retention_days: int = 30, batch_size: int = 500
+    ) -> dict[str, int]:
         """Delete old terminal history in bounded transactions.
 
         Definitions and active/terminating work are durable control state and
@@ -1220,7 +1222,9 @@ class JobStore:
         removed = {"job_runs": 0, "library_jobs": 0}
         for table in removed:
             try:
-                columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+                columns = {
+                    row[1] for row in self.db.execute(f"PRAGMA table_info({table})")
+                }
             except Exception:
                 columns = set()
             if not {"id", "state", "finished_at"}.issubset(columns):

@@ -289,9 +289,11 @@ def prune_rate_limit_events(now: float | None = None) -> int:
     if len(_RATE_LIMIT_EVENTS) > MAX_RATE_LIMIT_KEYS:
         oldest = sorted(
             _RATE_LIMIT_EVENTS,
-            key=lambda key: _RATE_LIMIT_EVENTS[key][-1]
-            if _RATE_LIMIT_EVENTS[key]
-            else float("-inf"),
+            key=lambda key: (
+                _RATE_LIMIT_EVENTS[key][-1]
+                if _RATE_LIMIT_EVENTS[key]
+                else float("-inf")
+            ),
         )
         for key in oldest[: len(_RATE_LIMIT_EVENTS) - MAX_RATE_LIMIT_KEYS]:
             _RATE_LIMIT_EVENTS.pop(key, None)

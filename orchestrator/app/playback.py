@@ -173,7 +173,9 @@ class PlaybackManager:
         cls._session_locks.pop(session_id, None)
         if key is not None:
             base_key = key[:3]
-            if not any(existing[:3] == base_key for existing in cls._session_keys.values()):
+            if not any(
+                existing[:3] == base_key for existing in cls._session_keys.values()
+            ):
                 cls._seek_generations.pop(base_key, None)
 
     @classmethod

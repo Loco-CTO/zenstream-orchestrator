@@ -55,6 +55,7 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
     The pass is synchronous by design and is called through the control lane,
     so its SQLite/filesystem work never crosses an async route boundary.
     """
+    from app.library import runtime as library_runtime
     from app.metadata_services import asset_executor
     from app.models.account import Account
     from app.models.admin import Admin
@@ -62,7 +63,6 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
     from app.models.syncplay import SyncplayGroup
     from app.playback import PlaybackManager
     from app.providers import MetadataService
-    from app.library import runtime as library_runtime
 
     days = configured_retention_days()
     db = Config().database
@@ -75,7 +75,9 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
         "syncplay_expiry": _run(
             "syncplay_expiry", SyncplayGroup.expire_due_host_disconnects
         ),
-        "syncplay_history": _run("syncplay_history", SyncplayGroup.cleanup_history, days),
+        "syncplay_history": _run(
+            "syncplay_history", SyncplayGroup.cleanup_history, days
+        ),
         "subtitle_cache": _run("subtitle_cache", _prune_subtitle_cache, db, days),
     }
     if job_store is not None:

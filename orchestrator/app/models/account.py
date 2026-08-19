@@ -175,9 +175,7 @@ class Account:
             cls._pending_session_touches[session_id] = seen_at
             if len(cls._pending_session_touches) > cls.MAX_PENDING_SESSION_TOUCHES:
                 oldest = next(
-                    key
-                    for key in cls._pending_session_touches
-                    if key != session_id
+                    key for key in cls._pending_session_touches if key != session_id
                 )
                 cls._pending_session_touches.pop(oldest, None)
                 cls._session_touch_deadlines.pop(oldest, None)

@@ -247,12 +247,8 @@ class WebSocketHub:
         async with self.lock:
             if self._disconnect_tasks.get(key) is task:
                 self._disconnect_tasks.pop(key, None)
-            if (
-                self.disconnect_epochs.get(key) == epoch
-                and not any(
-                    connection.identity == key
-                    for connection in self._connections.values()
-                )
+            if self.disconnect_epochs.get(key) == epoch and not any(
+                connection.identity == key for connection in self._connections.values()
             ):
                 self.disconnect_epochs.pop(key, None)
 

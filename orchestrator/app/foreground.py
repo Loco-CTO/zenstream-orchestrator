@@ -5,7 +5,8 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
+from concurrent.futures import Future as ConcurrentFuture
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import TypeVar
 

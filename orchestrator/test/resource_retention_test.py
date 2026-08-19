@@ -1,9 +1,9 @@
 import asyncio
 import os
 import subprocess
+import tempfile
 import threading
 import time
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,7 +49,9 @@ class ResourceRetentionTest(unittest.TestCase):
             executor.submit(key, lambda: None)
             executor.drain(2)
             with executor._lock:
-                executor._state_times[key] = time.monotonic() - executor.STATE_RETENTION_SECONDS - 1
+                executor._state_times[key] = (
+                    time.monotonic() - executor.STATE_RETENTION_SECONDS - 1
+                )
 
             executor.prune()
 
@@ -70,9 +72,18 @@ class ResourceRetentionTest(unittest.TestCase):
             old = _iso(2)
             recent = _iso()
             for table in ("job_runs", "library_jobs"):
-                db.execute(f"INSERT INTO {table} VALUES(?,?,?)", (f"{table}-old", "completed", old))
-                db.execute(f"INSERT INTO {table} VALUES(?,?,?)", (f"{table}-recent", "completed", recent))
-                db.execute(f"INSERT INTO {table} VALUES(?,?,?)", (f"{table}-active", "running", old))
+                db.execute(
+                    f"INSERT INTO {table} VALUES(?,?,?)",
+                    (f"{table}-old", "completed", old),
+                )
+                db.execute(
+                    f"INSERT INTO {table} VALUES(?,?,?)",
+                    (f"{table}-recent", "completed", recent),
+                )
+                db.execute(
+                    f"INSERT INTO {table} VALUES(?,?,?)",
+                    (f"{table}-active", "running", old),
+                )
             store = JobStore.__new__(JobStore)
             store.db = db
 
@@ -97,7 +108,9 @@ class ResourceRetentionTest(unittest.TestCase):
                 "CREATE TABLE playback_viewer_commands(id TEXT PRIMARY KEY,viewer_session_id TEXT,state TEXT,acknowledged_at TEXT,expires_at TEXT,issued_at TEXT)",
             ):
                 db.execute(statement)
-            db.execute("INSERT INTO user_devices VALUES('device-old','user',?)", (_iso(2),))
+            db.execute(
+                "INSERT INTO user_devices VALUES('device-old','user',?)", (_iso(2),)
+            )
             db.execute(
                 "INSERT INTO playback_viewer_sessions VALUES('viewer-old','ended',?,?,?,?)",
                 (_iso(2), _iso(2), _iso(2), "device-old"),
@@ -111,8 +124,12 @@ class ResourceRetentionTest(unittest.TestCase):
             removed = store.cleanup_history(retention_days=1)
 
             self.assertEqual(removed, 3)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM playback_viewer_sessions")[0][0], 0)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM playback_viewer_commands")[0][0], 0)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM playback_viewer_sessions")[0][0], 0
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM playback_viewer_commands")[0][0], 0
+            )
             self.assertEqual(db.execute("SELECT COUNT(*) FROM user_devices")[0][0], 0)
         finally:
             db.close()
@@ -120,10 +137,17 @@ class ResourceRetentionTest(unittest.TestCase):
     def test_syncplay_history_cleanup_removes_ended_groups_and_operations(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         try:
-            db.execute("CREATE TABLE syncplay_groups(id TEXT PRIMARY KEY,ended INTEGER,updated REAL)")
+            db.execute(
+                "CREATE TABLE syncplay_groups(id TEXT PRIMARY KEY,ended INTEGER,updated REAL)"
+            )
             db.execute("CREATE TABLE syncplay_members(group_id TEXT)")
-            db.execute("CREATE TABLE syncplay_operations(operation_id TEXT PRIMARY KEY,group_id TEXT,user_id TEXT,state TEXT)")
-            db.execute("INSERT INTO syncplay_groups VALUES('old',1,?)", (time.time() - 2 * 86400,))
+            db.execute(
+                "CREATE TABLE syncplay_operations(operation_id TEXT PRIMARY KEY,group_id TEXT,user_id TEXT,state TEXT)"
+            )
+            db.execute(
+                "INSERT INTO syncplay_groups VALUES('old',1,?)",
+                (time.time() - 2 * 86400,),
+            )
             db.execute("INSERT INTO syncplay_members VALUES('old')")
             db.execute("INSERT INTO syncplay_operations VALUES('op','old','user','{}')")
             with patch("app.models.syncplay.Config") as config:
@@ -131,8 +155,12 @@ class ResourceRetentionTest(unittest.TestCase):
                 removed = SyncplayGroup.cleanup_history(retention_days=1)
 
             self.assertEqual(removed, 3)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM syncplay_groups")[0][0], 0)
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM syncplay_operations")[0][0], 0)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM syncplay_groups")[0][0], 0
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM syncplay_operations")[0][0], 0
+            )
         finally:
             db.close()
 
@@ -193,7 +221,9 @@ class ResourceRetentionTest(unittest.TestCase):
 
                 manager._cleanup_expired()
 
-                self.assertEqual(db.execute("SELECT COUNT(*) FROM playback_sessions")[0][0], 0)
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM playback_sessions")[0][0], 0
+                )
                 self.assertFalse(output.exists())
         finally:
             db.close()

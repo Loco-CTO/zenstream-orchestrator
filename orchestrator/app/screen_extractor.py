@@ -605,7 +605,10 @@ class ScreenExtractor:
                 # A broken child or test double must not hold the worker
                 # forever after kill.  Closing the pipe handles releases the
                 # Python-side resources even when the OS process is stuck.
-                for stream in (getattr(process, "stdout", None), getattr(process, "stderr", None)):
+                for stream in (
+                    getattr(process, "stdout", None),
+                    getattr(process, "stderr", None),
+                ):
                     try:
                         if stream is not None:
                             stream.close()

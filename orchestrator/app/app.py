@@ -11,6 +11,7 @@ from api.zenstream.application_routes import (
 from api.zenstream.application_routes import (
     router as application_router,
 )
+from api.zenstream.client_routes import prune_rate_limit_events
 from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
 from app.catalog_read_model import CatalogReadModel
@@ -22,6 +23,7 @@ from app.foreground import (
     active_requests,
     run_auth,
     run_control,
+    wait_for_shutdown,
 )
 from app.foreground import (
     metrics as foreground_metrics,
@@ -33,6 +35,7 @@ from app.logging_config import get_logger
 from app.metadata_services import asset_executor
 from app.models.account import Account
 from app.playback import PlaybackManager
+from app.resource_retention import run_resource_retention
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -62,7 +65,16 @@ async def lifespan(_app: FastAPI):
     async def maintain_sessions():
         while True:
             await asyncio.sleep(60)
-            await asyncio.to_thread(Account.flush_session_activity)
+            prune_rate_limit_events()
+            try:
+                await run_control(Account.flush_session_activity)
+                await run_control(run_resource_retention, job_scheduler.store)
+            except Exception:
+                # Maintenance is best-effort and must remain alive after a
+                # transient database/control-lane failure.
+                request_logger.warning(
+                    "periodic resource maintenance failed", exc_info=True
+                )
 
     async def monitor_event_loop():
         """Report event-loop stalls without adding work to request handlers."""
@@ -97,13 +109,20 @@ async def lifespan(_app: FastAPI):
         for task in (maintenance_task, event_loop_task):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        await run_control(Account.flush_session_activity)
+        try:
+            await run_control(Account.flush_session_activity)
+        except Exception:
+            request_logger.warning(
+                "could not flush session activity during shutdown", exc_info=True
+            )
         PlaybackManager.stop_all()
         job_scheduler.stop()
         library_runtime.stop()
         asset_executor.shutdown()
+        await wait_for_shutdown(5)
         shutdown_foreground()
         await hub.broadcast({"type": "system", "event": "shutdown"})
+        await hub.shutdown()
 
 
 app = FastAPI(

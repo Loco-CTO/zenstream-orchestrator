@@ -570,6 +570,8 @@ class JobStore:
             "name": row[2],
             "description": row[3],
             "kind": row[4],
+            "intervalMinutes": interval_minutes,
+            "enabled": True if enabled is None else bool(enabled),
             "config": config,
             "nextRunAt": next_run,
             "lastRunAt": last_run,
@@ -1204,6 +1206,38 @@ class JobStore:
             }
             for row in rows
         ]
+
+    def cleanup_history(self, retention_days: int = 30, batch_size: int = 500) -> dict[str, int]:
+        """Delete old terminal history in bounded transactions.
+
+        Definitions and active/terminating work are durable control state and
+        are intentionally preserved.  Only completed history is retention
+        managed, and each batch keeps the SQLite writer hold short.
+        """
+        days = max(1, int(retention_days))
+        batch = max(1, min(5000, int(batch_size)))
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        removed = {"job_runs": 0, "library_jobs": 0}
+        for table in removed:
+            try:
+                columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            except Exception:
+                columns = set()
+            if not {"id", "state", "finished_at"}.issubset(columns):
+                continue
+            while True:
+                with self.db.transaction() as cursor:
+                    cursor.execute(
+                        f"DELETE FROM {table} WHERE id IN ("
+                        f"SELECT id FROM {table} WHERE state IN ('completed','failed','terminated','cancelled') "
+                        "AND finished_at IS NOT NULL AND finished_at<? ORDER BY finished_at LIMIT ?)",
+                        (cutoff, batch),
+                    )
+                    count = max(0, cursor.rowcount)
+                removed[table] += count
+                if count < batch:
+                    break
+        return removed
 
     def create_run(self, definition: dict) -> dict:
         run_id = new_id()
@@ -2559,7 +2593,18 @@ class JobScheduler:
                     library_work,
                 )
                 pressure_logged = True
-            time.sleep(0.05)
+            # Foreground/library transitions wake the scheduler condition when
+            # they enqueue or finish work.  The timeout is only a safety net
+            # because request counters live in another module; it avoids a
+            # tight polling loop while retaining prompt cancellation.
+            condition = getattr(self, "condition", None)
+            if condition is None:
+                # Lightweight test doubles and legacy callers may construct
+                # the scheduler without its dispatch condition.
+                time.sleep(0.01)
+            else:
+                with condition:
+                    condition.wait(timeout=0.5)
         logger.info(
             "analysis job starting independent worker pool run_id=%s kind=%s",
             run_id,

@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
@@ -169,6 +170,9 @@ def metadata_task_results(tasks, work, should_terminate=None, max_workers=None):
 
 
 class MetadataAssetExecutor:
+    STATE_RETENTION_SECONDS = 15 * 60
+    MAX_STATE_ENTRIES = 4096
+
     def __init__(self, max_workers: int | None = None):
         self.max_workers = (
             configured_worker_limit("METADATA_ASSET_WORKERS", 64, default=12)
@@ -182,13 +186,40 @@ class MetadataAssetExecutor:
         self._lock = threading.RLock()
         self._pending: dict[tuple, Future] = {}
         self._states: dict[tuple, str] = {}
+        self._state_times: dict[tuple, float] = {}
+
+    def _prune_states_locked(self, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else now
+        cutoff = current - self.STATE_RETENTION_SECONDS
+        stale = [
+            key
+            for key, updated in self._state_times.items()
+            if updated < cutoff and key not in self._pending
+        ]
+        for key in stale:
+            self._state_times.pop(key, None)
+            self._states.pop(key, None)
+        if len(self._states) > self.MAX_STATE_ENTRIES:
+            candidates = sorted(
+                (
+                    updated,
+                    key,
+                )
+                for key, updated in self._state_times.items()
+                if key not in self._pending
+            )
+            for _updated, key in candidates[: max(0, len(self._states) - self.MAX_STATE_ENTRIES)]:
+                self._state_times.pop(key, None)
+                self._states.pop(key, None)
 
     def submit_future(self, key: tuple, work) -> Future:
         with self._lock:
+            self._prune_states_locked()
             current = self._pending.get(key)
             if current is not None and not current.done():
                 return current
             self._states[key] = "pending"
+            self._state_times[key] = time.monotonic()
 
             future = self._executor.submit(work)
             self._pending[key] = future
@@ -204,7 +235,9 @@ class MetadataAssetExecutor:
                     )
                 with self._lock:
                     self._states[key] = state
+                    self._state_times[key] = time.monotonic()
                     self._pending.pop(key, None)
+                    self._prune_states_locked()
 
             future.add_done_callback(finished)
             return future
@@ -228,7 +261,12 @@ class MetadataAssetExecutor:
 
     def state(self, key: tuple) -> str | None:
         with self._lock:
+            self._prune_states_locked()
             return self._states.get(key)
+
+    def prune(self) -> None:
+        with self._lock:
+            self._prune_states_locked()
 
 
 asset_executor = MetadataAssetExecutor()

@@ -28,6 +28,7 @@ def _token_hash(token: str) -> str:
 
 class Account:
     SESSION_DAYS = 7
+    MAX_PENDING_SESSION_TOUCHES = 10_000
     _pending_session_touches: dict[str, str] = {}
     _session_touch_deadlines: dict[str, float] = {}
     _session_touch_lock = threading.Lock()
@@ -172,6 +173,36 @@ class Account:
                 return
             cls._session_touch_deadlines[session_id] = now + 600
             cls._pending_session_touches[session_id] = seen_at
+            if len(cls._pending_session_touches) > cls.MAX_PENDING_SESSION_TOUCHES:
+                oldest = next(
+                    key
+                    for key in cls._pending_session_touches
+                    if key != session_id
+                )
+                cls._pending_session_touches.pop(oldest, None)
+                cls._session_touch_deadlines.pop(oldest, None)
+
+    @classmethod
+    def _forget_session_ids(cls, session_ids) -> None:
+        with cls._session_touch_lock:
+            for session_id in session_ids:
+                cls._pending_session_touches.pop(session_id, None)
+                cls._session_touch_deadlines.pop(session_id, None)
+
+    def _session_ids_for_user(self, user_id: str) -> list[str]:
+        try:
+            return [
+                row[0]
+                for row in self.db.read_execute(
+                    "SELECT id FROM user_sessions WHERE user_id=?", (user_id,)
+                )
+            ]
+        except Exception as error:
+            # Keep account deletion/password workflows compatible with the
+            # minimal pre-session databases used by migration/fixture code.
+            if "no such table: user_sessions" in str(error):
+                return []
+            raise
 
     @classmethod
     def flush_session_activity(cls, limit: int = 100) -> int:
@@ -179,31 +210,57 @@ class Account:
             pending = list(cls._pending_session_touches.items())[:limit]
             for session_id, _ in pending:
                 cls._pending_session_touches.pop(session_id, None)
+                cls._session_touch_deadlines.pop(session_id, None)
         if not pending:
             return 0
         db = Config().database
-        with db.transaction() as cursor:
-            cursor.executemany(
-                "UPDATE user_sessions SET last_seen_at=? WHERE id=?",
-                [(seen_at, session_id) for session_id, seen_at in pending],
-            )
+        try:
+            with db.transaction() as cursor:
+                cursor.executemany(
+                    "UPDATE user_sessions SET last_seen_at=? WHERE id=?",
+                    [(seen_at, session_id) for session_id, seen_at in pending],
+                )
+        except Exception:
+            # Do not lose a touch when a maintenance transaction is briefly
+            # unavailable.  The deadline is also restored so the next
+            # authenticated request can enqueue it again.
+            with cls._session_touch_lock:
+                retry_at = time.monotonic() + 600
+                for session_id, seen_at in pending:
+                    cls._pending_session_touches.setdefault(session_id, seen_at)
+                    cls._session_touch_deadlines.setdefault(session_id, retry_at)
+            raise
         return len(pending)
 
     @classmethod
     def cleanup_expired_sessions(cls) -> int:
-        return len(
-            Config().database.execute(
-                "DELETE FROM user_sessions WHERE expires_at<=?", (_iso(),)
+        db = Config().database
+        expired = [
+            row[0]
+            for row in db.read_execute(
+                "SELECT id FROM user_sessions WHERE expires_at<=?", (_iso(),)
             )
-        )
+        ]
+        if expired:
+            db.execute("DELETE FROM user_sessions WHERE expires_at<=?", (_iso(),))
+            cls._forget_session_ids(expired)
+        return len(expired)
 
     def revoke(self, token: str) -> None:
+        rows = self.db.read_execute(
+            "SELECT id FROM user_sessions WHERE token_hash=?", (_token_hash(token),)
+        )
         self.db.execute(
             "DELETE FROM user_sessions WHERE token_hash=?", (_token_hash(token),)
         )
+        self._forget_session_ids(row[0] for row in rows)
 
     def revoke_user(self, user_id: str) -> None:
+        rows = self.db.read_execute(
+            "SELECT id FROM user_sessions WHERE user_id=?", (user_id,)
+        )
         self.db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+        self._forget_session_ids(row[0] for row in rows)
 
     def list(self) -> list[dict]:
         values = []
@@ -246,6 +303,7 @@ class Account:
             raise ValueError("Current password is incorrect.")
 
         password_hash = _hasher.hash(new_password)
+        session_ids = self._session_ids_for_user(user_id)
         with self.db.transaction() as cursor:
             cursor.execute(
                 "UPDATE users SET password=?,password_scheme='argon2id',disabled=0 WHERE id=?",
@@ -254,6 +312,7 @@ class Account:
             if cursor.rowcount != 1:
                 raise KeyError("User not found.")
             cursor.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+        self._forget_session_ids(session_ids)
 
     def set_disabled(self, user_id: str, disabled: bool) -> dict:
         if not self._row(user_id=user_id, read_only=True):
@@ -270,10 +329,12 @@ class Account:
 
         avatar_store = UserAvatarStore(self.db)
         avatar_record = avatar_store.record_for_cleanup(user_id)
+        session_ids = self._session_ids_for_user(user_id)
         with self.db.transaction() as cursor:
             cursor.execute("DELETE FROM users WHERE id=?", (user_id,))
             deleted = cursor.rowcount == 1
         if deleted:
+            self._forget_session_ids(session_ids)
             avatar_store.remove_path_for_deleted_user(user_id, avatar_record)
         return deleted
 

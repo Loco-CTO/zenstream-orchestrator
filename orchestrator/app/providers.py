@@ -1610,9 +1610,38 @@ def _tvdb_children(data: dict) -> list[dict]:
     return values
 
 
+class _ReservedFetchLock:
+    """Reserve a keyed lock before a caller enters its context."""
+
+    def __init__(self, owner, key, lock):
+        self.owner = owner
+        self.key = key
+        self.lock = lock
+
+    def __enter__(self):
+        self.lock.acquire()
+        with self.owner._fetch_locks_guard:
+            remaining = self.owner._fetch_lock_reservations.get(self.key, 0) - 1
+            if remaining > 0:
+                self.owner._fetch_lock_reservations[self.key] = remaining
+            else:
+                self.owner._fetch_lock_reservations.pop(self.key, None)
+        return self.lock
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.lock.release()
+
+    def locked(self) -> bool:
+        return self.lock.locked()
+
+
 class MetadataService:
+    MAX_FETCH_LOCKS = 8192
+    MAX_TVDB_HIERARCHIES = 256
     _fetch_locks_guard = threading.Lock()
     _fetch_locks: dict[tuple[str, str, str, str], threading.Lock] = {}
+    _fetch_lock_last_used: dict[tuple[str, str, str, str], float] = {}
+    _fetch_lock_reservations: dict[tuple[str, str, str, str], int] = {}
 
     def __init__(self):
         self.credentials = MetadataCredentials()
@@ -1632,14 +1661,45 @@ class MetadataService:
     @classmethod
     def _lock_for(
         cls, provider: str, entity_type: str, provider_id: str, locale: str
-    ) -> threading.Lock:
+    ) -> _ReservedFetchLock:
         key = (provider, entity_type, provider_id, locale or "en")
         with cls._fetch_locks_guard:
             lock = cls._fetch_locks.get(key)
             if lock is None:
                 lock = threading.Lock()
                 cls._fetch_locks[key] = lock
-            return lock
+            cls._fetch_lock_last_used[key] = time.monotonic()
+            cls._fetch_lock_reservations[key] = (
+                cls._fetch_lock_reservations.get(key, 0) + 1
+            )
+            cls._prune_fetch_locks_locked()
+            return _ReservedFetchLock(cls, key, lock)
+
+    @classmethod
+    def _prune_fetch_locks_locked(cls) -> None:
+        if len(cls._fetch_locks) <= cls.MAX_FETCH_LOCKS:
+            return
+        candidates = sorted(
+            cls._fetch_locks,
+            key=lambda key: cls._fetch_lock_last_used.get(key, 0.0),
+        )
+        for key in candidates:
+            if len(cls._fetch_locks) <= cls.MAX_FETCH_LOCKS // 2:
+                break
+            lock = cls._fetch_locks.get(key)
+            if (
+                lock is None
+                or lock.locked()
+                or cls._fetch_lock_reservations.get(key, 0) > 0
+            ):
+                continue
+            cls._fetch_locks.pop(key, None)
+            cls._fetch_lock_last_used.pop(key, None)
+
+    @classmethod
+    def prune_fetch_locks(cls) -> None:
+        with cls._fetch_locks_guard:
+            cls._prune_fetch_locks_locked()
 
     def client(self, provider: str):
         clients = getattr(self, "_clients", None)
@@ -1877,6 +1937,11 @@ class MetadataService:
             if hierarchy is None:
                 hierarchy = client.series_hierarchy(provider_id)
                 hierarchies[provider_id] = hierarchy
+                if len(hierarchies) > self.MAX_TVDB_HIERARCHIES:
+                    oldest = next(
+                        (key for key in hierarchies if key != provider_id), provider_id
+                    )
+                    hierarchies.pop(oldest, None)
             # TVDB's hierarchy endpoint has no locale parameter and its
             # extended series record is commonly returned in the catalogue's
             # default language.  Caching that record under every configured

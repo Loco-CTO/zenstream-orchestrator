@@ -99,6 +99,17 @@ class Admin:
         username = cls._username_for_token(db, token)
         return cls(username) if username else None
 
+    @classmethod
+    def cleanup_expired_sessions(cls) -> int:
+        db = Config().database
+        expired = db.read_execute(
+            "SELECT COUNT(*) FROM admin_sessions WHERE expires_at<=?", (_iso(),)
+        )
+        count = int(expired[0][0]) if expired else 0
+        if count:
+            db.execute("DELETE FROM admin_sessions WHERE expires_at<=?", (_iso(),))
+        return count
+
     def logout(self, token: str) -> bool:
         with self._db.transaction() as cursor:
             cursor.execute(

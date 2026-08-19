@@ -125,10 +125,7 @@ class PlaybackManager:
             cls._stop_process(process, f"shutdown session_id={session_id}")
             with cls._lock:
                 cls._processes.pop(session_id, None)
-                cls._session_keys.pop(session_id, None)
-                cls._session_specs.pop(session_id, None)
-                cls._session_workers.pop(session_id, None)
-                cls._session_locks.pop(session_id, None)
+                cls._remove_session_indexes_locked(session_id)
         try:
             database = Config().database
             persisted = database.execute(
@@ -148,12 +145,67 @@ class PlaybackManager:
             logger.exception(
                 "could not clean persisted playback workers during shutdown"
             )
-        cls._users.clear()
+        with cls._lock:
+            cls._users.clear()
+            cls._session_keys.clear()
+            cls._session_specs.clear()
+            cls._session_workers.clear()
+            cls._session_locks.clear()
+            cls._seek_generations.clear()
         if cleanup_thread and cleanup_thread is not threading.current_thread():
             cleanup_thread.join(timeout=2)
         with cls._cleanup_thread_lock:
             if cls._cleanup_thread is cleanup_thread:
                 cls._cleanup_thread = None
+
+    @classmethod
+    def _remove_session_indexes_locked(cls, session_id: str) -> None:
+        spec = cls._session_specs.pop(session_id, None)
+        user_id = spec.get("user_id") if isinstance(spec, dict) else None
+        if user_id:
+            sessions = cls._users.get(user_id)
+            if sessions is not None:
+                sessions.discard(session_id)
+                if not sessions:
+                    cls._users.pop(user_id, None)
+        key = cls._session_keys.pop(session_id, None)
+        cls._session_workers.pop(session_id, None)
+        cls._session_locks.pop(session_id, None)
+        if key is not None:
+            base_key = key[:3]
+            if not any(existing[:3] == base_key for existing in cls._session_keys.values()):
+                cls._seek_generations.pop(base_key, None)
+
+    @classmethod
+    def _remove_active_user_index_locked(
+        cls, session_id: str, user_id: str | None = None
+    ) -> None:
+        if user_id is None:
+            spec = cls._session_specs.get(session_id)
+            user_id = spec.get("user_id") if isinstance(spec, dict) else None
+        if not user_id:
+            return
+        sessions = cls._users.get(user_id)
+        if sessions is not None:
+            sessions.discard(session_id)
+            if not sessions:
+                cls._users.pop(user_id, None)
+
+    @classmethod
+    def prune_runtime_state(cls) -> None:
+        """Remove inactive user indexes and stale generation entries."""
+        with cls._lock:
+            for user_id, session_ids in list(cls._users.items()):
+                for session_id in list(session_ids):
+                    process = cls._processes.get(session_id)
+                    if process is None or process.poll() is not None:
+                        session_ids.discard(session_id)
+                if not session_ids:
+                    cls._users.pop(user_id, None)
+            active_bases = {key[:3] for key in cls._session_keys.values()}
+            for base_key in list(cls._seek_generations):
+                if base_key not in active_bases:
+                    cls._seek_generations.pop(base_key, None)
 
     @staticmethod
     def _stop_process(process: subprocess.Popen | None, reason: str) -> None:
@@ -912,17 +964,19 @@ class PlaybackManager:
                     start_time,
                 )
                 return result
-            active = [
-                process
-                for process in self._processes.values()
-                if process.poll() is None
-            ]
-            per_user = [
-                process
-                for session_id in self._users.get(user_id, set())
-                if (process := self._processes.get(session_id))
-                and process.poll() is None
-            ]
+            with self._lock:
+                active = [
+                    process
+                    for process in self._processes.values()
+                    if process.poll() is None
+                ]
+                per_user = []
+                for session_id in list(self._users.get(user_id, set())):
+                    process = self._processes.get(session_id)
+                    if process is not None and process.poll() is None:
+                        per_user.append(process)
+                    else:
+                        self._remove_active_user_index_locked(session_id, user_id)
             global_limit, user_limit = self._limits()
             global_limit_reached = global_limit > 0 and len(active) >= global_limit
             user_limit_reached = user_limit > 0 and len(per_user) >= user_limit
@@ -1010,7 +1064,12 @@ class PlaybackManager:
                 "output": output,
                 "generation": generation,
             }
-            self._start_worker_locked(session_id, start_index)
+            try:
+                self._start_worker_locked(session_id, start_index)
+            except Exception:
+                self._remove_session_indexes_locked(session_id)
+                shutil.rmtree(output, ignore_errors=True)
+                raise
         result = self._hls_result(session_id, source, access, transcode_mode)
         result["startPositionSeconds"] = start_time
         result["sessionState"] = "ready" if self._startup_ready(output) else "starting"
@@ -1743,6 +1802,14 @@ class PlaybackManager:
             )
             if is_current:
                 self._processes.pop(session_id, None)
+                self._remove_active_user_index_locked(session_id, user_id)
+                key = self._session_keys.get(session_id)
+                if key is not None and not any(
+                    existing[:3] == key[:3]
+                    for existing_id, existing in self._session_keys.items()
+                    if existing_id != session_id
+                ):
+                    self._seek_generations.pop(key[:3], None)
         row = self.db.execute(
             "SELECT output_directory,state,failure_code FROM playback_sessions WHERE id=?",
             (session_id,),
@@ -1795,17 +1862,22 @@ class PlaybackManager:
             snapshot,
             "present" if stderr_lines else "empty",
         )
-        self.db.execute(
-            "UPDATE playback_sessions SET state=?,completed_at=?,failure_code=?,failure_detail=?,process_id=NULL WHERE id=? AND seek_generation=?",
-            (
-                state,
-                _iso(),
-                failure_code,
-                detail,
-                session_id,
-                generation,
-            ),
-        )
+        try:
+            self.db.execute(
+                "UPDATE playback_sessions SET state=?,completed_at=?,failure_code=?,failure_detail=?,process_id=NULL WHERE id=? AND seek_generation=?",
+                (
+                    state,
+                    _iso(),
+                    failure_code,
+                    detail,
+                    session_id,
+                    generation,
+                ),
+            )
+        finally:
+            if state != "completed":
+                with self._lock:
+                    self._remove_session_indexes_locked(session_id)
 
     def _cleanup_expired(self) -> None:
         self.db.execute(
@@ -1830,13 +1902,10 @@ class PlaybackManager:
                 shutil.rmtree(output_directory, ignore_errors=True)
             with self._lock:
                 self._processes.pop(session_id, None)
-                self._session_keys.pop(session_id, None)
-                self._session_specs.pop(session_id, None)
-                self._session_workers.pop(session_id, None)
-                self._session_locks.pop(session_id, None)
+                self._remove_session_indexes_locked(session_id)
             self.db.execute(
-                "UPDATE playback_sessions SET state='expired' WHERE id=?",
-                (session_id,),
+                "UPDATE playback_sessions SET state='expired',completed_at=COALESCE(completed_at,?),output_directory=NULL,process_id=NULL WHERE id=?",
+                (_iso(), session_id),
             )
 
         timeout = self._idle_timeout_seconds()
@@ -1890,13 +1959,27 @@ class PlaybackManager:
                     (session_id, generation),
                 )
 
-        # Keep terminal rows only for bounded diagnostics.  Purging is
-        # deliberately restricted to rows with no worker and no output path so
-        # a delayed cleanup cannot erase evidence for an active process.
+        # Keep terminal rows only for bounded diagnostics.  Remove any
+        # verified old output before deleting its row; completed sessions can
+        # otherwise retain a non-null path forever and evade the old purge.
         retention_cutoff = _iso(datetime.now(timezone.utc) - timedelta(days=7))
+        terminal_rows = self.db.execute(
+            "SELECT id,output_directory FROM playback_sessions "
+            "WHERE state IN ('failed','completed','expired','stopping') "
+            "AND completed_at IS NOT NULL AND completed_at<? "
+            "AND process_id IS NULL AND output_directory IS NOT NULL AND output_directory<>''",
+            (retention_cutoff,),
+        )
+        for session_id, output_directory in terminal_rows or []:
+            if output_directory:
+                shutil.rmtree(output_directory, ignore_errors=True)
+            self.db.execute(
+                "UPDATE playback_sessions SET output_directory=NULL WHERE id=? AND process_id IS NULL",
+                (session_id,),
+            )
         self.db.execute(
             "DELETE FROM playback_sessions "
-            "WHERE state IN ('failed','completed','expired') "
+            "WHERE state IN ('failed','completed','expired','stopping') "
             "AND completed_at IS NOT NULL AND completed_at<? "
             "AND process_id IS NULL AND (output_directory IS NULL OR output_directory='')",
             (retention_cutoff,),

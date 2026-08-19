@@ -197,6 +197,45 @@ class PlaybackViewerStore:
                 (_iso(now),),
             )
 
+    def cleanup_history(self, retention_days: int = 30) -> int:
+        """Retain only recent viewer history and inactive device records."""
+        if not self.available():
+            return 0
+        self._expire_stale()
+        cutoff = _iso(_now() - timedelta(days=max(1, int(retention_days))))
+        removed = 0
+        session_device_guard = ""
+        if self._has_column("user_sessions", "device_id"):
+            session_device_guard = (
+                "AND NOT EXISTS (SELECT 1 FROM user_sessions s "
+                "WHERE s.device_id=user_devices.id)"
+            )
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM playback_viewer_commands WHERE "
+                "viewer_session_id IN (SELECT id FROM playback_viewer_sessions "
+                "WHERE state IN ('ended','expired') AND COALESCE(ended_at,created_at)<?) "
+                "OR (state IN ('expired','acknowledged','failed') "
+                "AND COALESCE(acknowledged_at,expires_at,issued_at)<?)",
+                (cutoff, cutoff),
+            )
+            removed += max(0, cursor.rowcount)
+            cursor.execute(
+                "DELETE FROM playback_viewer_sessions WHERE state IN ('ended','expired') "
+                "AND COALESCE(ended_at,created_at, last_heartbeat_at)<?",
+                (cutoff,),
+            )
+            removed += max(0, cursor.rowcount)
+            cursor.execute(
+                "DELETE FROM user_devices WHERE last_seen_at<? "
+                "AND NOT EXISTS (SELECT 1 FROM playback_viewer_sessions v "
+                "WHERE v.device_id=user_devices.id AND v.state='active') "
+                + session_device_guard,
+                (cutoff,),
+            )
+            removed += max(0, cursor.rowcount)
+        return removed
+
     def _expire_stale_if_due(self) -> None:
         current = time.monotonic()
         with self._expiry_check_lock:

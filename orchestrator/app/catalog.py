@@ -190,6 +190,10 @@ class Catalog:
                 self._home_user_epochs[user_id] = (
                     self._home_user_epochs.get(user_id, 0) + 1
                 )
+                if len(self._home_user_epochs) > 4096:
+                    for stale_user in list(self._home_user_epochs)[:2048]:
+                        if stale_user != user_id:
+                            self._home_user_epochs.pop(stale_user, None)
                 self._home_cache = {
                     key: value
                     for key, value in self._home_cache.items()

@@ -588,12 +588,30 @@ class ScreenExtractor:
 
     @staticmethod
     def _stop(process: subprocess.Popen) -> tuple[str, str]:
-        process.terminate()
+        try:
+            process.terminate()
+        except (OSError, ProcessLookupError):
+            pass
         try:
             return process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
-            process.kill()
-            return process.communicate()
+            try:
+                process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                return process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # A broken child or test double must not hold the worker
+                # forever after kill.  Closing the pipe handles releases the
+                # Python-side resources even when the OS process is stuck.
+                for stream in (getattr(process, "stdout", None), getattr(process, "stderr", None)):
+                    try:
+                        if stream is not None:
+                            stream.close()
+                    except Exception:
+                        pass
+                return "", "FFmpeg process did not exit after termination."
 
     def _generate(
         self, asset: dict, should_terminate: Callable[[], bool]

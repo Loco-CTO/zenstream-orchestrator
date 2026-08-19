@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future as ConcurrentFuture, ThreadPoolExecutor
 from functools import partial
 from typing import TypeVar
 
@@ -44,6 +44,8 @@ _queued_seconds = {"foreground": 0.0, "control": 0.0, "auth": 0.0}
 _execution_seconds = {"foreground": 0.0, "control": 0.0, "auth": 0.0}
 _queue_depth = {"foreground": 0, "control": 0, "auth": 0}
 _lock = threading.Lock()
+_pending_futures: set[ConcurrentFuture] = set()
+_settlement_tasks: set[asyncio.Task] = set()
 
 
 def active_requests() -> int:
@@ -137,9 +139,21 @@ async def _run(
         waiting = False
         with _lock:
             _queue_depth[lane] -= 1
-        future = loop.run_in_executor(executor, partial(run))
+        # Submit explicitly so shutdown can observe work that outlives an
+        # awaiting request. ``run_in_executor`` hides the concurrent future
+        # behind an asyncio wrapper.
+        future = executor.submit(partial(run))
+        with _lock:
+            _pending_futures.add(future)
+
+        def forget(done: ConcurrentFuture) -> None:
+            with _lock:
+                _pending_futures.discard(done)
+
+        future.add_done_callback(forget)
+        awaited = asyncio.wrap_future(future, loop=loop)
         try:
-            result = await asyncio.shield(future)
+            result = await asyncio.shield(awaited)
         except asyncio.CancelledError:
             defer_timing = True
             release_slot = slot if slot_acquired else None
@@ -147,7 +161,7 @@ async def _run(
 
             async def settle_cancelled():
                 try:
-                    await future
+                    await awaited
                 except BaseException:
                     pass
                 finally:
@@ -155,7 +169,15 @@ async def _run(
                         release_slot.release()
                     record_timing()
 
-            asyncio.create_task(settle_cancelled())
+            settlement = asyncio.create_task(settle_cancelled())
+            with _lock:
+                _settlement_tasks.add(settlement)
+
+            def forget_settlement(done: asyncio.Task) -> None:
+                with _lock:
+                    _settlement_tasks.discard(done)
+
+            settlement.add_done_callback(forget_settlement)
             raise
         finally:
             if slot_acquired and slot is not None:
@@ -185,6 +207,28 @@ async def run_control(function: Callable[..., T], /, *args, **kwargs) -> T:
 async def run_auth(function: Callable[..., T], /, *args, **kwargs) -> T:
     """Run password, session, ticket, and identity workflows off-loop."""
     return await _run("auth", _auth_executor, function, *args, **kwargs)
+
+
+async def wait_for_shutdown(timeout: float = 5.0) -> None:
+    """Give cancelled bridge calls a bounded chance to settle."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        with _lock:
+            pending_futures = len(_pending_futures)
+            settlement_tasks = len(_settlement_tasks)
+        if not pending_futures and not settlement_tasks:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            from app.logging_config import get_logger
+
+            get_logger("foreground").warning(
+                "foreground shutdown timed out pending_futures=%s settlement_tasks=%s",
+                pending_futures,
+                settlement_tasks,
+            )
+            return
+        await asyncio.sleep(min(0.05, remaining))
 
 
 def shutdown() -> None:

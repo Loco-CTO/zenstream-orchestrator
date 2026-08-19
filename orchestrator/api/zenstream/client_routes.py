@@ -66,6 +66,8 @@ AUTH_BODY_LIMIT_BYTES = 16 * 1024
 RESOURCE_TICKET_TTL_SECONDS = 15 * 60
 CATALOG_SCAN_EVENT_INTERVAL_SECONDS = 5.0
 _RATE_LIMIT_EVENTS: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+RATE_LIMIT_KEY_RETENTION_SECONDS = 5 * 60
+MAX_RATE_LIMIT_KEYS = 10_000
 CARD_METADATA_FIELDS = {
     "title",
     "date",
@@ -255,6 +257,8 @@ def _enforce_rate_limit(
     request: Request, bucket: str, limit: int, window: int = 60
 ) -> None:
     now = time.monotonic()
+    if len(_RATE_LIMIT_EVENTS) >= MAX_RATE_LIMIT_KEYS:
+        prune_rate_limit_events(now)
     key = (bucket, _client_address(request))
     events = _RATE_LIMIT_EVENTS[key]
     while events and now - events[0] >= window:
@@ -267,6 +271,31 @@ def _enforce_rate_limit(
             headers={"Retry-After": str(retry_after)},
         )
     events.append(now)
+    if len(_RATE_LIMIT_EVENTS) > MAX_RATE_LIMIT_KEYS:
+        prune_rate_limit_events(now)
+
+
+def prune_rate_limit_events(now: float | None = None) -> int:
+    """Drop idle rate-limit buckets and enforce a hard key ceiling."""
+    current = time.monotonic() if now is None else now
+    cutoff = current - RATE_LIMIT_KEY_RETENTION_SECONDS
+    stale = [
+        key
+        for key, events in _RATE_LIMIT_EVENTS.items()
+        if not events or events[-1] < cutoff
+    ]
+    for key in stale:
+        _RATE_LIMIT_EVENTS.pop(key, None)
+    if len(_RATE_LIMIT_EVENTS) > MAX_RATE_LIMIT_KEYS:
+        oldest = sorted(
+            _RATE_LIMIT_EVENTS,
+            key=lambda key: _RATE_LIMIT_EVENTS[key][-1]
+            if _RATE_LIMIT_EVENTS[key]
+            else float("-inf"),
+        )
+        for key in oldest[: len(_RATE_LIMIT_EVENTS) - MAX_RATE_LIMIT_KEYS]:
+            _RATE_LIMIT_EVENTS.pop(key, None)
+    return len(stale)
 
 
 async def _bounded_json_object(

@@ -4499,8 +4499,10 @@ class LibraryRuntime:
         self._job_target_revisions: dict[str, dict[str, int]] = {}
         self._active_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
+        self._worker_threads: dict[str, threading.Thread] = {}
         self._active_lock = threading.RLock()
         self._root_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._root_lock_last_used: dict[tuple[str, str], float] = {}
         self._root_locks_guard = threading.RLock()
         self._reconcile_state_lock = threading.RLock()
         self._reconcile_target_cache: dict[str, dict[str, dict[str, object]]] = {}
@@ -4520,8 +4522,24 @@ class LibraryRuntime:
         )
         self.thread.start()
 
-    def stop(self):
+    def stop(self, timeout: float = 30.0):
         self.stop_event.set()
+        with self._active_lock:
+            active = list(self._cancel_events.items())
+        for job_id, cancel_event in active:
+            cancel_event.set()
+            try:
+                self.store.update_job(
+                    job_id,
+                    state="terminating",
+                    message="Termination requested during Orchestrator shutdown",
+                )
+            except Exception:
+                logger.warning(
+                    "could not mark library job terminating during shutdown job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
         with self.condition:
             self.condition.notify_all()
         if self.observer:
@@ -4530,8 +4548,40 @@ class LibraryRuntime:
             self.observer = None
         if self.thread:
             self.thread.join(timeout=5)
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._active_lock:
+                workers = list(getattr(self, "_worker_threads", {}).values())
+            workers = [
+                worker
+                for worker in workers
+                if worker is not threading.current_thread() and worker.is_alive()
+            ]
+            if not workers:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            for worker in workers:
+                worker.join(timeout=min(0.25, remaining))
+                if time.monotonic() >= deadline:
+                    break
+        with self._active_lock:
+            remaining_workers = [
+                worker
+                for worker in getattr(self, "_worker_threads", {}).values()
+                if worker.is_alive() and worker is not threading.current_thread()
+            ]
+            if remaining_workers:
+                logger.warning(
+                    "library jobs did not stop before shutdown timeout active=%s",
+                    len(remaining_workers),
+                )
         self._flush_reconcile_updates(force=True)
         self._watch_paths.clear()
+        with self._active_lock:
+            self._job_targets.clear()
+            self._job_target_revisions.clear()
 
     def refresh_watchers(self) -> None:
         if not (self.thread and self.thread.is_alive()):
@@ -4965,15 +5015,108 @@ class LibraryRuntime:
     def _root_lock(self, library_id: str, root: str) -> threading.Lock:
         key = (library_id, _top_level_key(root))
         with self._root_locks_guard:
-            return self._root_locks.setdefault(key, threading.Lock())
+            if not hasattr(self, "_root_lock_last_used"):
+                self._root_lock_last_used = {}
+            lock = self._root_locks.setdefault(key, threading.Lock())
+            self._root_lock_last_used[key] = time.monotonic()
+            return lock
+
+    def prune_runtime_state(self) -> None:
+        """Drop locks and watcher caches for libraries no longer present."""
+        try:
+            library_ids = {
+                row[0] for row in self.store.db.read_execute("SELECT id FROM libraries")
+            }
+        except Exception:
+            return
+        try:
+            queued_job_ids = {
+                row[0]
+                for row in self.store.db.read_execute(
+                    "SELECT id FROM library_jobs WHERE state='queued'"
+                )
+            }
+        except Exception:
+            queued_job_ids = set()
+        with self._active_lock:
+            active_job_ids = set(getattr(self, "_active_jobs", set()))
+            for mapping in (
+                getattr(self, "_job_targets", {}),
+                getattr(self, "_job_target_revisions", {}),
+            ):
+                for job_id in list(mapping):
+                    if job_id not in active_job_ids and job_id not in queued_job_ids:
+                        mapping.pop(job_id, None)
+        with self._root_locks_guard:
+            for key in list(self._root_locks):
+                lock = self._root_locks.get(key)
+                if key[0] not in library_ids and lock is not None and not lock.locked():
+                    self._root_locks.pop(key, None)
+                    getattr(self, "_root_lock_last_used", {}).pop(key, None)
+            if len(self._root_locks) > 4096:
+                last_used = getattr(self, "_root_lock_last_used", {})
+                for key in sorted(
+                    self._root_locks,
+                    key=lambda item: last_used.get(item, 0.0),
+                ):
+                    if len(self._root_locks) <= 2048:
+                        break
+                    lock = self._root_locks.get(key)
+                    if lock is None or lock.locked():
+                        continue
+                    self._root_locks.pop(key, None)
+                    last_used.pop(key, None)
+        with self._reconcile_state_lock:
+            active_libraries = {
+                library_id for library_id, _ in self._active_jobs_by_library()
+            }
+            for mapping in (
+                self._reconcile_due,
+                self._reconcile_targets,
+                self._reconcile_target_cache,
+                self._reconcile_pending,
+            ):
+                for library_id in list(mapping):
+                    if library_id not in library_ids and library_id not in active_libraries:
+                        mapping.pop(library_id, None)
+            protected = active_libraries | set(self._reconcile_pending)
+            for mapping in (
+                self._reconcile_due,
+                self._reconcile_targets,
+                self._reconcile_target_cache,
+            ):
+                for library_id in list(mapping):
+                    if len(mapping) <= 1024:
+                        break
+                    if library_id in protected:
+                        continue
+                    mapping.pop(library_id, None)
+                    if mapping is self._reconcile_target_cache:
+                        self._reconcile_cache_loaded.discard(library_id)
+            self._reconcile_cache_loaded.intersection_update(library_ids)
+
+    def _active_jobs_by_library(self):
+        rows = []
+        with self._active_lock:
+            job_ids = set(getattr(self, "_active_jobs", set()))
+        for job_id in job_ids:
+            row = self.store.db.execute(
+                "SELECT library_id FROM library_jobs WHERE id=?", (job_id,)
+            )
+            if row:
+                rows.append((row[0][0], job_id))
+        return rows
 
     def _acquire_roots(self, library_id: str, roots: set[str]):
-        locks = [
-            self._root_lock(library_id, root)
-            for root in sorted(roots, key=_top_level_key)
-        ]
-        for lock in locks:
-            lock.acquire()
+        # Keep the map guard while acquiring so a retention pass cannot evict
+        # a lock after one worker has looked it up but before it owns it.
+        with self._root_locks_guard:
+            locks = [
+                self._root_lock(library_id, root)
+                for root in sorted(roots, key=_top_level_key)
+            ]
+            for lock in locks:
+                lock.acquire()
         return locks
 
     def _aggregate_scan_state(self, library_id: str) -> None:
@@ -5085,12 +5228,15 @@ class LibraryRuntime:
                     self._active_jobs.discard(job_id)
                     self._cancel_events.pop(job_id, None)
                     continue
-            threading.Thread(
+            worker = threading.Thread(
                 target=self._execute_job,
                 args=(job_id, library_id, kind),
                 name=f"zenstream-library-{job_id[:8]}",
                 daemon=True,
-            ).start()
+            )
+            with self._active_lock:
+                self._worker_threads[job_id] = worker
+            worker.start()
 
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
         locks: list[threading.Lock] = []
@@ -5173,6 +5319,7 @@ class LibraryRuntime:
             with self._active_lock:
                 self._active_jobs.discard(job_id)
                 self._cancel_events.pop(job_id, None)
+                getattr(self, "_worker_threads", {}).pop(job_id, None)
             self._aggregate_scan_state(library_id)
             with self.condition:
                 self.condition.notify_all()

@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Sequence
 
 DEFAULT_FFMPEG_TIMEOUT_SECONDS = 900.0
+MAX_STDERR_BYTES = 1_048_576
 
 
 class FFmpegError(RuntimeError):
@@ -110,11 +111,20 @@ def run_ffmpeg(
     def read_stderr() -> None:
         try:
             assert process.stderr is not None
-            value = process.stderr.read()
-            if isinstance(value, str):
-                stderr_chunks.append(value.encode("utf-8", "replace"))
-            else:
-                stderr_chunks.append(value or b"")
+            tail = bytearray()
+            while True:
+                chunk = process.stderr.read(64 * 1024)
+                if not chunk:
+                    break
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8", "replace")
+                tail.extend(chunk)
+                if len(tail) > MAX_STDERR_BYTES:
+                    del tail[:-MAX_STDERR_BYTES]
+            # FFmpeg can emit repeated progress/diagnostic lines for a very
+            # long job.  Keep a diagnostic tail rather than retaining all of
+            # stderr until the process exits.
+            stderr_chunks.append(bytes(tail))
         except BaseException as error:  # pragma: no cover - defensive cleanup
             reader_errors.append(error)
 

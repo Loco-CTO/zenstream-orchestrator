@@ -217,6 +217,43 @@ class SyncplayGroup:
             rows = group.db.read_execute(query, tuple(args))
         return [cls(row[0]) for row in rows]
 
+    @classmethod
+    def cleanup_history(cls, retention_days: int = 30) -> int:
+        """Remove ended groups and their idempotency records after retention."""
+        group = cls("_")
+        tables = {
+            row[0]
+            for row in group.db.read_execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('syncplay_groups','syncplay_members','syncplay_operations')"
+            )
+        }
+        if "syncplay_groups" not in tables:
+            return 0
+        cutoff = time.time() - max(1, int(retention_days)) * 86400
+        removed = 0
+        with group.db.transaction() as cursor:
+            if "syncplay_operations" in tables:
+                cursor.execute(
+                    "DELETE FROM syncplay_operations WHERE group_id IN "
+                    "(SELECT id FROM syncplay_groups WHERE ended=1 AND updated<?)",
+                    (cutoff,),
+                )
+                removed += max(0, cursor.rowcount)
+            if "syncplay_members" in tables:
+                cursor.execute(
+                    "DELETE FROM syncplay_members WHERE group_id IN "
+                    "(SELECT id FROM syncplay_groups WHERE ended=1 AND updated<?)",
+                    (cutoff,),
+                )
+                removed += max(0, cursor.rowcount)
+            cursor.execute(
+                "DELETE FROM syncplay_groups WHERE ended=1 AND updated<?",
+                (cutoff,),
+            )
+            removed += max(0, cursor.rowcount)
+        return removed
+
     def _remembered(self, cursor, operation_id, user):
         if not operation_id:
             return None

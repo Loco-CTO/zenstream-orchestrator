@@ -1466,6 +1466,80 @@ class CatalogTest(unittest.TestCase):
             "argon2id",
         )
 
+    def test_change_password_validates_atomically_rehashes_and_revokes_sessions(self):
+        account = self.account()
+        created = account.create("change-password", "password-123")
+        first_session = account.create_session(created["id"])
+        second_session = account.create_session(created["id"])
+        original_hash = self.db.execute(
+            "SELECT password FROM users WHERE id=?", (created["id"],)
+        )[0][0]
+
+        with self.assertRaises(ValueError):
+            account.change_password(
+                created["id"], "wrong-password", "new-password", "new-password"
+            )
+        with self.assertRaises(ValueError):
+            account.change_password(
+                created["id"], "password-123", "short", "short"
+            )
+        with self.assertRaises(ValueError):
+            account.change_password(
+                created["id"], "password-123", "new-password", "different-password"
+            )
+
+        self.assertEqual(
+            self.db.execute("SELECT password FROM users WHERE id=?", (created["id"],))[0][0],
+            original_hash,
+        )
+        self.assertIsNotNone(account.authenticate_token(first_session["token"]))
+        self.assertIsNotNone(account.authenticate_token(second_session["token"]))
+
+        account.change_password(
+            created["id"], "password-123", "new-password", "new-password"
+        )
+
+        self.assertIsNone(account.authenticate_token(first_session["token"]))
+        self.assertIsNone(account.authenticate_token(second_session["token"]))
+        self.assertEqual(
+            account.authenticate_password("change-password", "new-password")["id"],
+            created["id"],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT password_scheme FROM users WHERE id=?", (created["id"],)
+            )[0][0],
+            "argon2id",
+        )
+
+    def test_change_password_accepts_legacy_sha256_current_password(self):
+        account = self.account()
+        legacy_id = "legacy-change-password"
+        self.db.execute(
+            "INSERT INTO users VALUES(?,?,?,?,0)",
+            (
+                legacy_id,
+                "legacy-change-password",
+                hashlib.sha256(b"legacy-pass").hexdigest(),
+                "sha256",
+            ),
+        )
+
+        account.change_password(
+            legacy_id, "legacy-pass", "legacy-new-pass", "legacy-new-pass"
+        )
+
+        self.assertEqual(
+            account.authenticate_password("legacy-change-password", "legacy-new-pass")["id"],
+            legacy_id,
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT password_scheme FROM users WHERE id=?", (legacy_id,)
+            )[0][0],
+            "argon2id",
+        )
+
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
     def test_permissions_and_field_level_language_fallback(self, _languages):
         account = self.account().create("viewer", "password-123")

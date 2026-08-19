@@ -296,6 +296,33 @@ async def _bounded_json_object(
     return value
 
 
+def _clear_browser_session_cookies(response: Response, request: Request) -> None:
+    primary_cookie = session_cookie_name(request)
+    response.delete_cookie(
+        primary_cookie,
+        secure=cookie_secure(request),
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    if primary_cookie != CLIENT_SESSION_COOKIE:
+        response.delete_cookie(
+            CLIENT_SESSION_COOKIE,
+            secure=True,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    if primary_cookie != DEV_CLIENT_SESSION_COOKIE:
+        response.delete_cookie(
+            DEV_CLIENT_SESSION_COOKIE,
+            secure=False,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+
+
 async def _bounded_binary_body(
     request: Request, limit: int = AVATAR_MAX_BYTES
 ) -> bytes:
@@ -474,6 +501,28 @@ async def delete_avatar(request: Request):
     return {"avatarVersion": None}
 
 
+@router.post("/api/account/password", status_code=204)
+async def change_password(request: Request):
+    account, _ = await _require_account(request)
+    data = await _bounded_json_object(request)
+    try:
+        await run_auth(
+            Account().change_password,
+            account["id"],
+            str(data.get("currentPassword") or ""),
+            str(data.get("newPassword") or ""),
+            str(data.get("confirmNewPassword") or ""),
+        )
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+    response = Response(status_code=204)
+    _clear_browser_session_cookies(response, request)
+    return response
+
+
 @router.get("/api/users/{user_id}/avatar")
 async def user_avatar(user_id: str, request: Request):
     await _require_access(request)
@@ -572,30 +621,7 @@ async def logout(request: Request):
     _, token = await _require_account(request)
     await run_control(Account().revoke, token)
     response = Response(status_code=204)
-    primary_cookie = session_cookie_name(request)
-    response.delete_cookie(
-        primary_cookie,
-        secure=cookie_secure(request),
-        httponly=True,
-        samesite="strict",
-        path="/",
-    )
-    if primary_cookie != CLIENT_SESSION_COOKIE:
-        response.delete_cookie(
-            CLIENT_SESSION_COOKIE,
-            secure=True,
-            httponly=True,
-            samesite="strict",
-            path="/",
-        )
-    if primary_cookie != DEV_CLIENT_SESSION_COOKIE:
-        response.delete_cookie(
-            DEV_CLIENT_SESSION_COOKIE,
-            secure=False,
-            httponly=True,
-            samesite="strict",
-            path="/",
-        )
+    _clear_browser_session_cookies(response, request)
     return response
 
 

@@ -83,21 +83,24 @@ class Account:
             raise ValueError("Username is already in use.") from error
         return self.public(self._row(user_id=user_id, read_only=True))
 
+    @staticmethod
+    def _password_matches(row, password: str) -> bool:
+        scheme = row[3] or "sha256"
+        if scheme == "argon2id":
+            try:
+                return _hasher.verify(row[2], password)
+            except (VerifyMismatchError, InvalidHashError):
+                return False
+        return secrets.compare_digest(
+            row[2], hashlib.sha256(password.encode("utf-8")).hexdigest()
+        )
+
     def authenticate_password(self, username: str, password: str) -> dict | None:
         row = self._row(username=username, read_only=True)
         if not row or row[4]:
             return None
         scheme = row[3] or "sha256"
-        valid = False
-        if scheme == "argon2id":
-            try:
-                valid = _hasher.verify(row[2], password)
-            except (VerifyMismatchError, InvalidHashError):
-                valid = False
-        else:
-            valid = secrets.compare_digest(
-                row[2], hashlib.sha256(password.encode("utf-8")).hexdigest()
-            )
+        valid = self._password_matches(row, password)
         if not valid:
             return None
         if scheme != "argon2id" or _hasher.check_needs_rehash(row[2]):
@@ -223,6 +226,34 @@ class Account:
         )
         self.revoke_user(user_id)
         return self.public(self._row(user_id=user_id, read_only=True))
+
+    def change_password(
+        self,
+        user_id: str,
+        current_password: str,
+        new_password: str,
+        confirm_new_password: str,
+    ) -> None:
+        if len(new_password) < 8:
+            raise ValueError("Password must be at least 8 characters.")
+        if new_password != confirm_new_password:
+            raise ValueError("New passwords do not match.")
+
+        row = self._row(user_id=user_id, read_only=True)
+        if not row:
+            raise KeyError("User not found.")
+        if not current_password or not self._password_matches(row, current_password):
+            raise ValueError("Current password is incorrect.")
+
+        password_hash = _hasher.hash(new_password)
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE users SET password=?,password_scheme='argon2id',disabled=0 WHERE id=?",
+                (password_hash, user_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("User not found.")
+            cursor.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
 
     def set_disabled(self, user_id: str, disabled: bool) -> dict:
         if not self._row(user_id=user_id, read_only=True):

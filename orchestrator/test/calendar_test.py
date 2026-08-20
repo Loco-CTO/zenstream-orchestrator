@@ -122,20 +122,89 @@ class CalendarReadTest(unittest.TestCase):
             CalendarReadService._catalog_date(
                 {"releaseDate": "2026-09-10"}, "movie"
             ),
-            ("2026-09-10T00:00:00+00:00", "2026-09-10"),
+            ("2026-09-10T00:00:00+00:00", "2026-09-10", True),
         )
         self.assertEqual(
             CalendarReadService._catalog_date(
                 {"firstAired": "2026-09-11"}, "series"
             ),
-            ("2026-09-11T00:00:00+00:00", "2026-09-11"),
+            ("2026-09-11T00:00:00+00:00", "2026-09-11", True),
         )
         self.assertEqual(
             CalendarReadService._catalog_date(
                 {"date": "2026-09-12"}, "episode"
             ),
-            ("2026-09-12T00:00:00+00:00", "2026-09-12"),
+            ("2026-09-12T00:00:00+00:00", "2026-09-12", True),
         )
+
+    def test_catalog_episode_inherits_series_broadcast_time(self):
+        self.assertEqual(
+            CalendarReadService._catalog_date(
+                {"date": "2026-09-12"},
+                "episode",
+                {"airTime": "21:00", "airTimeZone": "America/New_York"},
+            ),
+            ("2026-09-13T01:00:00+00:00", "2026-09-13", False),
+        )
+
+    def test_catalog_utc_broadcast_time_does_not_require_a_timezone(self):
+        self.assertEqual(
+            CalendarReadService._catalog_date(
+                {"date": "2026-09-12"},
+                "episode",
+                {"airTimeUtc": "21:00"},
+            ),
+            ("2026-09-12T21:00:00+00:00", "2026-09-12", False),
+        )
+
+    def test_catalog_events_serialize_inherited_episode_broadcast_time(self):
+        service, db = self.catalog_service()
+        db.execute("INSERT INTO libraries(id,name) VALUES(?,?)", ("library", "Library"))
+        db.execute(
+            "INSERT INTO user_library_access(user_id,library_id) VALUES(?,?)",
+            ("user", "library"),
+        )
+        db.executemany(
+            "INSERT INTO library_entities(id,library_id,parent_id,entity_type) VALUES(?,?,?,?)",
+            [
+                ("series", "library", None, "series"),
+                ("episode", "library", "series", "episode"),
+            ],
+        )
+        db.executemany(
+            "INSERT INTO catalog_item_projection(entity_id,locale,payload) VALUES(?,?,?)",
+            [
+                (
+                    "series",
+                    "en",
+                    json.dumps(
+                        {
+                            "title": "Series",
+                            "firstAired": "2026-09-12",
+                            "airTimeUtc": "21:00",
+                        }
+                    ),
+                ),
+                (
+                    "episode",
+                    "en",
+                    json.dumps({"title": "Episode", "date": "2026-09-12"}),
+                ),
+            ],
+        )
+        with patch("app.calendar.MetadataLanguageSettings") as settings:
+            settings.return_value.get.return_value = ["en"]
+            events = service._catalog_events(
+                "user",
+                datetime(2026, 9, 1, tzinfo=timezone.utc),
+                datetime(2026, 9, 30, tzinfo=timezone.utc),
+                "en",
+                set(),
+            )
+        episode = next(event for event in events if event["kind"] == "episode")
+        self.assertEqual(episode["eventAt"], "2026-09-12T21:00:00+00:00")
+        self.assertEqual(episode["eventDate"], "2026-09-12")
+        self.assertFalse(episode["allDay"])
 
     def test_catalog_events_apply_grants_locale_fallback_and_all_day_serialization(self):
         service, db = self.catalog_service()

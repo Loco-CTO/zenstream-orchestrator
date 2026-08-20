@@ -144,6 +144,41 @@ def _normalize_trailers(values: object, provider: str) -> list[dict]:
     return result
 
 
+def _tvdb_air_schedule(data: dict) -> tuple[object, object, object]:
+    """Return TVDB's broadcast time, UTC time, and timezone variants.
+
+    TVDB has returned both the current ``airsTime`` shape and the older
+    nested ``airs.time`` shape. Keep the normalized values small and
+    provider-neutral so catalog consumers can use them without depending on
+    the raw TVDB response shape.
+    """
+    airs = data.get("airs") if isinstance(data.get("airs"), dict) else {}
+    air_time = (
+        airs.get("time")
+        or airs.get("airTime")
+        or data.get("airsTime")
+        or data.get("airTime")
+    )
+    air_time_utc = (
+        airs.get("timeUtc")
+        or airs.get("timeUTC")
+        or airs.get("airTimeUtc")
+        or airs.get("airTimeUTC")
+        or data.get("airsTimeUTC")
+        or data.get("airTimeUTC")
+        or data.get("airTimeUtc")
+    )
+    air_time_zone = (
+        airs.get("timezone")
+        or airs.get("timeZone")
+        or data.get("airTimeZone")
+        or data.get("airsTimeZone")
+        or data.get("timezone")
+        or data.get("timeZone")
+    )
+    return air_time, air_time_utc, air_time_zone
+
+
 def _trailer_language_tag(trailer: dict) -> str | None:
     """Return a canonical language/region tag for a provider video record."""
     explicit = (
@@ -1214,6 +1249,7 @@ class TVDBClient(ProviderClient):
         images, extra_images = _tvdb_images(
             entity_type, data, self._language_code_for_artwork, self._artwork_type
         )
+        air_time, air_time_utc, air_time_zone = _tvdb_air_schedule(data)
         overview_translations = data.get("overviewTranslations") or []
         translated_overview = next(
             (
@@ -1252,9 +1288,9 @@ class TVDBClient(ProviderClient):
             "date": dates or None,
             "firstAired": data.get("firstAired"),
             "lastAired": data.get("lastAired"),
-            "airTime": data.get("airs", {}).get("time")
-            if isinstance(data.get("airs"), dict)
-            else data.get("airTime"),
+            "airTime": air_time,
+            "airTimeUtc": air_time_utc,
+            "airTimeZone": air_time_zone,
             "status": _name(data.get("status")),
             "studios": _names(data.get("studios")),
             "networks": _names(data.get("networks") or data.get("network")),

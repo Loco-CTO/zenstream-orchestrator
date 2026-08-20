@@ -361,7 +361,6 @@ class CalendarEventValue:
     series_tvdb_id: str | None = None
     season_number: int | None = None
     episode_number: int | None = None
-    has_file: bool = False
     monitored: bool = True
 
 
@@ -393,7 +392,6 @@ def _normalize_sonarr(item: dict, library_id: str) -> CalendarEventValue | None:
         series_tvdb_id=series_tvdb_id,
         season_number=season,
         episode_number=episode,
-        has_file=bool(item.get("hasFile")),
         monitored=bool(item.get("monitored", True)),
     )
 
@@ -426,7 +424,6 @@ def _normalize_radarr(item: dict, library_id: str) -> list[CalendarEventValue]:
                 event_date=parsed[1],
                 all_day=parsed[2],
                 tmdb_id=tmdb_id,
-                has_file=bool(item.get("hasFile")),
                 monitored=bool(item.get("monitored", True)),
             )
         )
@@ -504,7 +501,7 @@ class CalendarSyncService:
             event.series_tvdb_id,
             event.season_number,
             event.episode_number,
-            int(event.has_file),
+            0,
             int(event.monitored),
             "future",
             seen_at,
@@ -798,7 +795,15 @@ class CalendarReadService:
         locale = AccountPreference(user_id).metadata_language()["language"]
         rows = self.db.execute(
             "SELECT DISTINCT e.id,e.provider,e.library_id,l.name,e.kind,e.release_type,e.event_at,e.event_date,e.all_day,"
-            "e.tvdb_id,e.tmdb_id,e.series_tvdb_id,e.season_number,e.episode_number,e.has_file,e.monitored,e.state,"
+            "e.tvdb_id,e.tmdb_id,e.series_tvdb_id,e.season_number,e.episode_number,"
+            "CASE WHEN EXISTS ("
+            "SELECT 1 FROM calendar_event_entities playable_link "
+            "JOIN library_entities playable_entity ON playable_entity.id=playable_link.entity_id "
+            "JOIN media_files playable_media ON playable_media.entity_id=playable_entity.id "
+            "WHERE playable_link.event_id=e.id AND playable_entity.library_id=e.library_id "
+            "AND playable_entity.entity_type=CASE WHEN e.kind='movie' THEN 'movie' ELSE 'episode' END "
+            "AND playable_media.role='media'"
+            ") THEN 1 ELSE 0 END,e.monitored,e.state,"
             "x.entity_id,entity.entity_type,parent.id,parent.entity_type,grandparent.id,grandparent.entity_type "
             "FROM calendar_events e JOIN user_library_access access ON access.library_id=e.library_id AND access.user_id=? "
             "JOIN libraries l ON l.id=e.library_id LEFT JOIN calendar_event_entities x ON x.event_id=e.id "

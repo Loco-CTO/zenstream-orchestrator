@@ -10,6 +10,7 @@ from app.calendar import (
     CalendarFutureMetadataService,
     CalendarReadService,
     CalendarSyncService,
+    _normalize_sonarr,
     calendar_window,
     parse_calendar_window,
 )
@@ -32,6 +33,20 @@ class CalendarWindowTest(unittest.TestCase):
 
 
 class CalendarProviderTest(unittest.TestCase):
+    def test_provider_file_flag_is_not_calendar_presence(self):
+        event = _normalize_sonarr(
+            {
+                "id": 1,
+                "tvdbId": 2,
+                "airDateUtc": "2026-08-20T12:00:00Z",
+                "hasFile": True,
+            },
+            "library",
+        )
+
+        self.assertIsNotNone(event)
+        self.assertFalse(hasattr(event, "has_file"))
+
     def test_fetch_sends_the_inclusive_provider_dates(self):
         response = MagicMock(status_code=200)
         response.json.return_value = []
@@ -139,6 +154,51 @@ class CalendarSyncTest(unittest.TestCase):
 
 
 class CalendarReadTest(unittest.TestCase):
+    def test_has_file_comes_from_granted_playable_catalog_media(self):
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.db = MagicMock()
+        service.db.execute.return_value = [
+            (
+                "event-1",
+                "sonarr",
+                "library",
+                "Anime",
+                "episode",
+                "air",
+                "2026-08-20T12:00:00+00:00",
+                "2026-08-20",
+                0,
+                "episode-tvdb",
+                None,
+                "series-tvdb",
+                1,
+                2,
+                1,
+                1,
+                "future",
+                "episode-1",
+                "episode",
+                "season-1",
+                "season",
+                "series-1",
+                "series",
+            )
+        ]
+        service._title = MagicMock(return_value=None)
+        with patch("app.calendar.AccountPreference") as preference:
+            preference.return_value.metadata_language.return_value = {"language": "en"}
+            result = service.list(
+                "user",
+                datetime(2026, 8, 20, tzinfo=timezone.utc),
+                datetime(2026, 8, 21, tzinfo=timezone.utc),
+            )
+
+        query, params = service.db.execute.call_args.args
+        self.assertIn("JOIN user_library_access access", query)
+        self.assertIn("playable_media.role='media'", query)
+        self.assertEqual(params[0], "user")
+        self.assertTrue(result["events"][0]["hasFile"])
+
     def test_series_only_link_does_not_become_episode_catalog_item(self):
         self.assertEqual(
             CalendarReadService._linked_item(

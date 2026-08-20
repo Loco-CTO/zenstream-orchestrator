@@ -152,6 +152,75 @@ class CalendarSyncTest(unittest.TestCase):
         self.assertEqual(result, (1, 0))
         service._upsert.assert_called_once_with(inside, seen_at)
 
+    def test_unlinked_events_collect_episode_and_series_metadata_targets(self):
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service._upsert = MagicMock(return_value=False)
+        targets = set()
+
+        with patch(
+            "app.calendar.normalize_calendar_events",
+            return_value=[self.event()],
+        ):
+            service._replace_provider_events(
+                "sonarr",
+                "library",
+                [],
+                "2026-08-20T00:00:00+00:00",
+                datetime(2026, 8, 9, tzinfo=timezone.utc),
+                datetime(2026, 12, 12, 23, 59, 59, 999999, tzinfo=timezone.utc),
+                targets,
+            )
+
+        self.assertEqual(
+            targets,
+            {
+                ("tvdb", "episode", "episode-tvdb"),
+                ("tvdb", "series", "series-tvdb"),
+            },
+        )
+
+    def test_sync_fetches_unlinked_metadata_immediately(self):
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.connections = MagicMock()
+        service.connections.internal.return_value = [
+            {"provider": "sonarr", "libraryId": "library"}
+        ]
+        event = self.event()
+
+        def replace_events(*args):
+            args[-1].update(
+                {
+                    ("tvdb", "episode", event.tvdb_id),
+                    ("tvdb", "series", event.series_tvdb_id),
+                }
+            )
+            return 1, 0
+
+        service._replace_provider_events = MagicMock(side_effect=replace_events)
+        metadata_result = {"targets": 2, "updated": 2, "errors": []}
+
+        with (
+            patch("app.calendar.ArrCalendarClient") as client_type,
+            patch("app.calendar.CalendarFutureMetadataService") as future_type,
+        ):
+            client_type.return_value.fetch.return_value = []
+            future_type.return_value.refetch.return_value = metadata_result
+
+            result = service.sync()
+
+        future_type.return_value.refetch.assert_called_once()
+        kwargs = future_type.return_value.refetch.call_args.kwargs
+        self.assertFalse(kwargs["force"])
+        self.assertEqual(
+            set(kwargs["targets"]),
+            {
+                ("tvdb", "episode", "episode-tvdb"),
+                ("tvdb", "series", "series-tvdb"),
+            },
+        )
+        self.assertEqual(result["metadata"], metadata_result)
+
 
 class CalendarReadTest(unittest.TestCase):
     def test_has_file_comes_from_granted_playable_catalog_media(self):
@@ -295,6 +364,35 @@ class CalendarFutureMetadataTest(unittest.TestCase):
         self.assertEqual(progress[0], (0, 2, None, False))
         self.assertEqual(progress[-1][:2], (2, 2))
         self.assertEqual(len(progress), 3)
+
+    def test_refetch_accepts_explicit_targets_without_scanning_calendar_events(self):
+        service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
+        service.db = MagicMock()
+        service.cache = MagicMock()
+        service.metadata = MagicMock()
+        service._targets = MagicMock(side_effect=AssertionError("unexpected scan"))
+        service._ingest_images = MagicMock()
+        service.metadata.fetch_locales.return_value = {
+            "en": {"title": "Episode title", "images": []}
+        }
+
+        with patch("app.calendar.MetadataLanguageSettings") as settings:
+            settings.return_value.get.return_value = ["en"]
+            result = service.refetch(
+                force=False,
+                targets=[("tvdb", "episode", "episode-1")],
+            )
+
+        self.assertEqual(result["targets"], 1)
+        service.metadata.fetch_locales.assert_called_once_with(
+            "tvdb",
+            "episode",
+            "episode-1",
+            ["en"],
+            force=False,
+            project=False,
+            cache=service.cache,
+        )
 
     def test_job_persists_progress_detail(self):
         class Store:

@@ -442,6 +442,34 @@ def normalize_calendar_events(provider: str, library_id: str, payload: Iterable[
     return values
 
 
+def _future_metadata_identity_targets(
+    kind: str,
+    tvdb_id: str | None = None,
+    series_tvdb_id: str | None = None,
+    tmdb_id: str | None = None,
+) -> tuple[tuple[str, str, str], ...]:
+    values = []
+    if kind == "episode":
+        if tvdb_id:
+            values.append(("tvdb", "episode", str(tvdb_id)))
+        if series_tvdb_id:
+            values.append(("tvdb", "series", str(series_tvdb_id)))
+    elif tmdb_id:
+        values.append(("tmdb", "movie", str(tmdb_id)))
+    return tuple(dict.fromkeys(values))
+
+
+def _event_future_metadata_targets(
+    event: CalendarEventValue,
+) -> tuple[tuple[str, str, str], ...]:
+    return _future_metadata_identity_targets(
+        event.kind,
+        tvdb_id=event.tvdb_id,
+        series_tvdb_id=event.series_tvdb_id,
+        tmdb_id=event.tmdb_id,
+    )
+
+
 class CalendarSyncService:
     def __init__(self):
         self.db = Config().database
@@ -556,6 +584,7 @@ class CalendarSyncService:
         seen_at: str,
         start: datetime,
         end: datetime,
+        future_metadata_targets: set[tuple[str, str, str]] | None = None,
     ) -> tuple[int, int]:
         start_date = start.date().isoformat()
         end_date = end.date().isoformat()
@@ -568,16 +597,34 @@ class CalendarSyncService:
         for event in normalized:
             if self._upsert(event, seen_at):
                 existing += 1
+            elif future_metadata_targets is not None:
+                future_metadata_targets.update(_event_future_metadata_targets(event))
         self.db.execute(
             "DELETE FROM calendar_events WHERE provider=? AND library_id=? AND last_seen_at<>?",
             (provider, library_id, seen_at),
         )
         return len(normalized), existing
 
-    def sync(self) -> dict:
+    def sync(
+        self,
+        should_terminate=None,
+        metadata_progress: Callable[[int, int, str | None, bool], None] | None = None,
+    ) -> dict:
+        should_terminate = should_terminate or (lambda: False)
         start, end = calendar_window()
-        results = {"providers": 0, "events": 0, "existing": 0, "errors": []}
+        results = {
+            "providers": 0,
+            "events": 0,
+            "existing": 0,
+            "errors": [],
+            "metadata": {"targets": 0, "updated": 0, "errors": []},
+        }
+        future_metadata_targets: set[tuple[str, str, str]] = set()
         for connection in self.connections.internal():
+            if should_terminate():
+                from app.library import JobTerminated
+
+                raise JobTerminated()
             provider = connection["provider"]
             try:
                 payload = ArrCalendarClient(connection).fetch(start, end)
@@ -589,6 +636,7 @@ class CalendarSyncService:
                     seen_at,
                     start,
                     end,
+                    future_metadata_targets,
                 )
                 self.connections.record_sync(provider)
                 results["providers"] += 1
@@ -599,6 +647,21 @@ class CalendarSyncService:
                 logger.warning("calendar sync failed provider=%s error=%s", provider, error)
                 self.connections.record_sync(provider, error=message[:500])
                 results["errors"].append(message[:500])
+
+        if future_metadata_targets:
+            try:
+                results["metadata"] = CalendarFutureMetadataService().refetch(
+                    should_terminate=should_terminate,
+                    force=False,
+                    progress=metadata_progress,
+                    targets=future_metadata_targets,
+                )
+            except Exception as error:
+                message = f"{type(error).__name__}: {error}"
+                logger.warning(
+                    "immediate future metadata fetch failed error=%s", error
+                )
+                results["metadata"]["errors"].append(message[:500])
         return results
 
 
@@ -620,13 +683,14 @@ class CalendarFutureMetadataService:
         )
         values = set()
         for kind, tvdb_id, series_tvdb_id, tmdb_id in rows:
-            if kind == "episode":
-                if tvdb_id:
-                    values.add(("tvdb", "episode", str(tvdb_id)))
-                if series_tvdb_id:
-                    values.add(("tvdb", "series", str(series_tvdb_id)))
-            elif tmdb_id:
-                values.add(("tmdb", "movie", str(tmdb_id)))
+            values.update(
+                _future_metadata_identity_targets(
+                    kind,
+                    tvdb_id=tvdb_id,
+                    series_tvdb_id=series_tvdb_id,
+                    tmdb_id=tmdb_id,
+                )
+            )
         return sorted(values)
 
     def _ingest_images(self, provider: str, entity_type: str, provider_id: str, documents: dict[str, dict], force: bool) -> None:
@@ -683,11 +747,16 @@ class CalendarFutureMetadataService:
         should_terminate=None,
         force: bool = True,
         progress: Callable[[int, int, str | None, bool], None] | None = None,
+        *,
+        targets: Iterable[tuple[str, str, str]] | None = None,
     ) -> dict:
         should_terminate = should_terminate or (lambda: False)
         locales = MetadataLanguageSettings().get()
         values = {"targets": 0, "updated": 0, "errors": []}
-        targets = self._targets()
+        if targets is None:
+            targets = self._targets()
+        else:
+            targets = sorted(set(targets))
         total = len(targets)
         if progress:
             progress(0, total, None, False)
@@ -919,7 +988,36 @@ class CalendarSyncJob:
             from app.library import JobTerminated
 
             raise JobTerminated()
-        result = CalendarSyncService().sync()
+
+        def metadata_progress(
+            current: int, total: int, item: str | None, failed: bool
+        ) -> None:
+            label = "Fetching new calendar metadata"
+            if failed:
+                label = "Calendar metadata identity failed"
+            self.store.update_run(
+                run_id,
+                progress_current=current,
+                progress_total=total,
+                progress_phase="metadata",
+                progress_label=label,
+                progress_stage_current=current,
+                progress_stage_total=total,
+                progress_stage_unit="identities",
+                progress_current_item=item,
+                message=format_progress_message(
+                    label,
+                    item=item,
+                    current=current,
+                    total=total,
+                    unit="identities",
+                ),
+            )
+
+        result = CalendarSyncService().sync(
+            should_terminate=should_terminate,
+            metadata_progress=metadata_progress,
+        )
         if should_terminate():
             from app.library import JobTerminated
 
@@ -927,6 +1025,13 @@ class CalendarSyncJob:
         message = f"Synced {result['events']} calendar events ({result['existing']} linked to catalog)."
         if result["errors"]:
             message += f" {len(result['errors'])} provider connection(s) failed."
+        metadata = result["metadata"]
+        if metadata["targets"]:
+            message += (
+                f" Fetched metadata for {metadata['targets']} new calendar identities."
+            )
+        if metadata["errors"]:
+            message += f" {len(metadata['errors'])} calendar metadata identity(ies) failed."
         self.store.update_run(
             run_id,
             state="completed",

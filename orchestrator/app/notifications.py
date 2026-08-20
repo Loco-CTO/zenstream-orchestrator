@@ -84,7 +84,9 @@ class FollowService:
             if not target:
                 raise HTTPException(404, "Series not found.")
         if target[3] not in {"movie", "series"}:
-            raise HTTPException(400, "Only movies, series, and episodes can be followed.")
+            raise HTTPException(
+                400, "Only movies, series, and episodes can be followed."
+            )
 
         target_type = target[3]
         preferred = "tmdb" if target_type == "movie" else "tvdb"
@@ -259,7 +261,9 @@ class FollowService:
             provider = identity["provider"]
             provider_id = identity["provider_id"]
         if not provider_id:
-            raise HTTPException(400, "This calendar event has no followable provider identity.")
+            raise HTTPException(
+                400, "This calendar event has no followable provider identity."
+            )
         return self._set_identity(
             user_id,
             {
@@ -480,7 +484,9 @@ class NotificationService:
         ).fetchall()
         return str(rows[0][0]) if rows else None
 
-    def record_admissions(self, entity_ids: set[str] | list[str] | tuple[str, ...]) -> int:
+    def record_admissions(
+        self, entity_ids: set[str] | list[str] | tuple[str, ...]
+    ) -> int:
         """Create one notification per newly admitted playable item.
 
         This is called only after a scan has completed and the read model has
@@ -561,7 +567,9 @@ class NotificationService:
                     navigation = f"/show/{target_entity_id}/episode/{row[0]}"
                     kind = "new_episode"
                 else:
-                    title = self._projection_title(cursor, row[0], fallback or "New movie")
+                    title = self._projection_title(
+                        cursor, row[0], fallback or "New movie"
+                    )
                     subtitle = "New movie added"
                     navigation = f"/show/{row[0]}"
                     season = None

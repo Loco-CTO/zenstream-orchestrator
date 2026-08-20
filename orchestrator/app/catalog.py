@@ -2167,9 +2167,7 @@ class Catalog:
         if following_change is not None:
             from app.notifications import FollowService
 
-            FollowService(self.db).set_for_entity(
-                user_id, entity_id, following_change
-            )
+            FollowService(self.db).set_for_entity(user_id, entity_id, following_change)
             if set(changes) <= {"following"}:
                 self._invalidate_home_cache(user_id)
                 return self._state(user_id, entity_id)

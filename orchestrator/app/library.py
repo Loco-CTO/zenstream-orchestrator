@@ -1072,9 +1072,8 @@ class LibraryScanner:
             try:
                 from app.notifications import NotificationService
 
-                admission_candidates = (
-                    set(self._scan_delta["added"])
-                    | set(self._scan_delta["content_changed"])
+                admission_candidates = set(self._scan_delta["added"]) | set(
+                    self._scan_delta["content_changed"]
                 )
                 NotificationService(self.db).record_admissions(admission_candidates)
             except Exception:

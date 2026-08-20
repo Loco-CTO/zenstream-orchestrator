@@ -410,6 +410,28 @@ class NotificationService:
                     )
         return {"removed": True}
 
+    def cleanup(self, retention_days: int) -> int:
+        if not _table_exists(self.db, "notifications"):
+            return 0
+        cutoff = datetime.fromtimestamp(
+            time.time() - max(1, retention_days) * 86400, tz=timezone.utc
+        ).isoformat()
+        has_outbox = _table_exists(self.db, "notification_push_outbox")
+        removed = 0
+        with self.db.transaction() as cursor:
+            if has_outbox:
+                cursor.execute(
+                    "DELETE FROM notification_push_outbox WHERE state IN ('delivered','failed') "
+                    "AND created_at<?",
+                    (cutoff,),
+                )
+            cursor.execute(
+                "DELETE FROM notifications WHERE read_at IS NOT NULL AND created_at<?",
+                (cutoff,),
+            )
+            removed = cursor.rowcount
+        return int(removed or 0)
+
     @staticmethod
     def _projection_title(cursor, entity_id: str | None, fallback: str) -> str:
         if not entity_id:

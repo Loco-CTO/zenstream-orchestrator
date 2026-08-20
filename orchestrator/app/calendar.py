@@ -13,7 +13,14 @@ import httpx
 
 from app.config import Config
 from app.logging_config import get_logger
-from app.metadata_domain import ARTWORK_CATEGORIES, language_family, rank_artwork_candidates
+from app.metadata_domain import (
+    ARTWORK_CATEGORIES,
+    fallback_tiers,
+    language_family,
+    locale_variants,
+    rank_artwork_candidates,
+    usable_text,
+)
 from app.metadata_services import MetadataImageIngestService
 from app.models.account_preference import AccountPreference
 from app.models.calendar import (
@@ -500,7 +507,15 @@ class CalendarSyncService:
             "season_number=excluded.season_number,episode_number=excluded.episode_number,has_file=excluded.has_file,monitored=excluded.monitored,last_seen_at=excluded.last_seen_at,fetched_at=excluded.fetched_at,updated_at=excluded.updated_at",
             values,
         )
-        matches = self._matching_entities(event)
+        expected_entity_type = "movie" if event.kind == "movie" else "episode"
+        # A parent series is useful for future metadata, but it is not the
+        # catalog item represented by an episode calendar event.  Only an
+        # exact episode/movie identity can make an event existing.
+        matches = [
+            match
+            for match in self._matching_entities(event)
+            if match[1] == expected_entity_type
+        ]
         self.db.execute("DELETE FROM calendar_event_entities WHERE event_id=?", (event_id,))
         if matches:
             with self.db.transaction() as cursor:
@@ -677,18 +692,45 @@ class CalendarReadService:
     def _title(self, provider: str, entity_type: str, provider_id: str | None, locale: str, future: bool) -> str | None:
         if not provider_id:
             return None
-        payload = self._payload(provider, entity_type, provider_id, locale, future)
-        if not payload:
+        cache = self.future_cache if future else self.normal_cache
+        payloads = cache.get_locales(provider, entity_type, provider_id)
+        if not payloads:
             return None
-        value = payload.get("title") or payload.get("name")
-        return str(value) if value else None
+        original = next(
+            (
+                str(payload.get("originalLanguage"))
+                for payload in payloads.values()
+                if payload.get("originalLanguage")
+            ),
+            None,
+        )
+        configured = MetadataLanguageSettings().get()
+        tiers = fallback_tiers(
+            locale,
+            original,
+            media=False,
+            include_english=any(language_family(value) == "en" for value in configured),
+        )
+        available = list(payloads)
+        for tier in tiers:
+            for candidate_locale in locale_variants(tier, available):
+                payload = payloads[candidate_locale]
+                for field in ("title", "name"):
+                    value = payload.get(field)
+                    if usable_text(field, value):
+                        return str(value)
+        return None
 
     @staticmethod
     def _linked_item(rows: list[dict], kind: str) -> tuple[str | None, str | None]:
         if not rows:
             return None, None
         expected = "movie" if kind == "movie" else "episode"
-        selected = next((row for row in rows if row["entityType"] == expected), rows[0])
+        # Do not turn a parent series row into the episode/movie catalog item.
+        # Older calendar rows may still contain that link until the next sync.
+        selected = next((row for row in rows if row["entityType"] == expected), None)
+        if selected is None:
+            return None, None
         series_id = selected.get("seriesId")
         if not series_id and selected["entityType"] == "series":
             series_id = selected["entityId"]

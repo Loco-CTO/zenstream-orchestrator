@@ -36,6 +36,32 @@ class FutureMetadataCache:
     def __init__(self):
         self.db = Config().database
 
+    def get_locales(
+        self, provider: str, entity_type: str, provider_id: str
+    ) -> dict[str, dict]:
+        """Return every usable cached locale for one future identity.
+
+        Future documents remain readable after expiry so the calendar can show
+        the last known title while the daily refetch job obtains a replacement.
+        """
+        rows = self.db.read_execute(
+            "SELECT locale,payload,expires_at FROM future_metadata_cache "
+            "WHERE provider=? AND entity_type=? AND provider_id=?",
+            (provider, entity_type, provider_id),
+        )
+        values: dict[str, dict] = {}
+        now = _iso_now()
+        for locale, encoded, expires_at in rows:
+            try:
+                payload = json.loads(encoded)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA:
+                continue
+            payload["_stale"] = bool(expires_at and expires_at <= now)
+            values[str(locale)] = payload
+        return values
+
     def get(
         self, provider: str, entity_type: str, provider_id: str, locale: str
     ) -> dict | None:

@@ -36,8 +36,9 @@ logger = get_logger("calendar")
 
 CALENDAR_PROVIDERS = ("sonarr", "radarr")
 EXPECTED_LIBRARY_TYPES = {"sonarr": "tv_series", "radarr": "movies"}
-DEFAULT_PAST_DAYS = 7
-DEFAULT_FUTURE_DAYS = 90
+CALENDAR_PAST_WEEKS = 1
+CALENDAR_FUTURE_WEEKS = 16
+MAX_CALENDAR_WINDOW_DAYS = 130
 CALENDAR_TITLE_PLACEHOLDERS = frozenset(
     {"tba", "tbd", "to be announced", "to be determined", "unknown"}
 )
@@ -49,14 +50,20 @@ def iso_now() -> str:
 
 def calendar_window(
     current: datetime | None = None,
-    past_days: int = DEFAULT_PAST_DAYS,
-    future_days: int = DEFAULT_FUTURE_DAYS,
 ) -> tuple[datetime, datetime]:
     current = current or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     current = current.astimezone(timezone.utc)
-    return current - timedelta(days=past_days), current + timedelta(days=future_days)
+    current_week = current - timedelta(days=(current.weekday() + 1) % 7)
+    current_week = current_week.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = current_week - timedelta(weeks=CALENDAR_PAST_WEEKS)
+    end = (
+        current_week
+        + timedelta(weeks=CALENDAR_FUTURE_WEEKS + 1)
+        - timedelta(microseconds=1)
+    )
+    return start, end
 
 
 def _parse_datetime(value) -> tuple[str, str, bool] | None:
@@ -545,9 +552,21 @@ class CalendarSyncService:
         return bool(matches)
 
     def _replace_provider_events(
-        self, provider: str, library_id: str, payload: Iterable[dict], seen_at: str
+        self,
+        provider: str,
+        library_id: str,
+        payload: Iterable[dict],
+        seen_at: str,
+        start: datetime,
+        end: datetime,
     ) -> tuple[int, int]:
-        normalized = normalize_calendar_events(provider, library_id, payload)
+        start_date = start.date().isoformat()
+        end_date = end.date().isoformat()
+        normalized = [
+            event
+            for event in normalize_calendar_events(provider, library_id, payload)
+            if start_date <= event.event_date <= end_date
+        ]
         existing = 0
         for event in normalized:
             if self._upsert(event, seen_at):
@@ -567,7 +586,12 @@ class CalendarSyncService:
                 payload = ArrCalendarClient(connection).fetch(start, end)
                 seen_at = iso_now()
                 events, existing = self._replace_provider_events(
-                    provider, connection["libraryId"], payload, seen_at
+                    provider,
+                    connection["libraryId"],
+                    payload,
+                    seen_at,
+                    start,
+                    end,
                 )
                 self.connections.record_sync(provider)
                 results["providers"] += 1
@@ -874,8 +898,10 @@ def parse_calendar_window(start: str | None, end: str | None) -> tuple[datetime,
     parsed_end = parsed_end.astimezone(timezone.utc)
     if parsed_end <= parsed_start:
         raise ValueError("Calendar end must be after start")
-    if parsed_end - parsed_start > timedelta(days=100):
-        raise ValueError("Calendar windows cannot exceed 100 days")
+    if parsed_end - parsed_start > timedelta(days=MAX_CALENDAR_WINDOW_DAYS):
+        raise ValueError(
+            f"Calendar windows cannot exceed {MAX_CALENDAR_WINDOW_DAYS} days"
+        )
     return parsed_start, parsed_end
 
 

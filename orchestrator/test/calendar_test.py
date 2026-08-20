@@ -1,13 +1,65 @@
 import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from app.calendar import (
+    ArrCalendarClient,
     CalendarEventValue,
     CalendarFutureMetadataJob,
     CalendarFutureMetadataService,
     CalendarReadService,
     CalendarSyncService,
+    calendar_window,
+    parse_calendar_window,
 )
+
+
+class CalendarWindowTest(unittest.TestCase):
+    def test_window_is_one_week_back_and_sixteen_weeks_forward(self):
+        start, end = calendar_window(datetime(2026, 8, 20, 12, tzinfo=timezone.utc))
+
+        self.assertEqual(start, datetime(2026, 8, 9, tzinfo=timezone.utc))
+        self.assertEqual(
+            end,
+            datetime(2026, 12, 12, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        )
+
+    def test_default_api_range_accepts_the_provider_window(self):
+        start, end = parse_calendar_window(None, None)
+
+        self.assertLessEqual(end - start, timedelta(days=130))
+
+
+class CalendarProviderTest(unittest.TestCase):
+    def test_fetch_sends_the_inclusive_provider_dates(self):
+        response = MagicMock(status_code=200)
+        response.json.return_value = []
+        client = MagicMock()
+        client.get.return_value = response
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with patch("app.calendar.httpx.Client", http_client):
+            self.assertEqual(
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 8, 9, tzinfo=timezone.utc),
+                    datetime(2026, 12, 12, 23, 59, 59, 999999, tzinfo=timezone.utc),
+                ),
+                [],
+            )
+
+        params = client.get.call_args.kwargs["params"]
+        self.assertEqual(params["start"], "2026-08-09")
+        self.assertEqual(params["end"], "2026-12-12")
 
 
 class CalendarSyncTest(unittest.TestCase):
@@ -55,6 +107,35 @@ class CalendarSyncTest(unittest.TestCase):
         self.assertEqual(linked, [(linked[0][0], "episode-id")])
         update = service.db.execute.call_args_list[-1]
         self.assertEqual(update.args[1][0], "existing")
+
+    def test_out_of_window_provider_events_are_not_persisted(self):
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service._upsert = MagicMock(return_value=False)
+        inside = self.event()
+        outside = replace(
+            inside,
+            source_event_id="outside",
+            event_at="2026-12-13T12:00:00+00:00",
+            event_date="2026-12-13",
+        )
+        seen_at = "2026-08-20T00:00:00+00:00"
+
+        with patch(
+            "app.calendar.normalize_calendar_events",
+            return_value=[inside, outside],
+        ):
+            result = service._replace_provider_events(
+                "sonarr",
+                "library",
+                [],
+                seen_at,
+                datetime(2026, 8, 9, tzinfo=timezone.utc),
+                datetime(2026, 12, 12, 23, 59, 59, 999999, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(result, (1, 0))
+        service._upsert.assert_called_once_with(inside, seen_at)
 
 
 class CalendarReadTest(unittest.TestCase):

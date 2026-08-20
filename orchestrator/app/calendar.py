@@ -586,7 +586,11 @@ class CalendarFutureMetadataService:
     def _targets(self) -> list[tuple[str, str, str]]:
         start, end = calendar_window()
         rows = self.db.execute(
-            "SELECT kind,tvdb_id,series_tvdb_id,tmdb_id FROM calendar_events WHERE state='future' AND event_at>=? AND event_at<=?",
+            "SELECT kind,tvdb_id,series_tvdb_id,tmdb_id FROM calendar_events e "
+            "WHERE e.event_at>=? AND e.event_at<=? AND (e.state='future' OR NOT EXISTS ("
+            "SELECT 1 FROM calendar_event_entities x JOIN library_entities linked ON linked.id=x.entity_id "
+            "WHERE x.event_id=e.id AND linked.entity_type=CASE WHEN e.kind='movie' THEN 'movie' ELSE 'episode' END"
+            "))",
             (start.isoformat(), end.isoformat()),
         )
         values = set()

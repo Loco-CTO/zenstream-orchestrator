@@ -56,7 +56,10 @@ class FutureMetadataCache:
                 payload = json.loads(encoded)
             except (TypeError, json.JSONDecodeError):
                 continue
-            if payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA:
+            if (
+                not isinstance(payload, dict)
+                or payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA
+            ):
                 continue
             payload["_stale"] = bool(expires_at and expires_at <= now)
             values[str(locale)] = payload

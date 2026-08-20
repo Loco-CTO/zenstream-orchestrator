@@ -30,11 +30,10 @@ def _id() -> str:
 
 
 def _table_exists(db, name: str) -> bool:
-    return bool(
-        db.read_execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-        )
+    rows = db.read_execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
     )
+    return isinstance(rows, (list, tuple)) and bool(rows)
 
 
 class FollowService:
@@ -101,9 +100,9 @@ class FollowService:
         else:
             rows = self.db.execute(
                 "SELECT provider,provider_id FROM entity_provider_ids "
-                "WHERE entity_id=? AND provider IN ('tmdb','tvdb') "
+                "WHERE entity_id=? AND provider IN ('tmdb','tvdb') AND identifier_type=? "
                 "ORDER BY is_primary DESC,provider,provider_id LIMIT 1",
-                (target[0],),
+                (target[0], preferred_type),
             )
             if rows:
                 provider, provider_id = rows[0]

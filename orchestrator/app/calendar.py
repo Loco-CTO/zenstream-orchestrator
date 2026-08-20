@@ -3,13 +3,12 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Iterable
 from urllib.parse import urlparse
 
 import httpx
-
 from app.config import Config
 from app.logging_config import get_logger
 from app.metadata_domain import (
@@ -25,8 +24,8 @@ from app.models.calendar import (
     encrypt_calendar_api_key,
 )
 from app.models.metadata import MetadataCache, MetadataLanguageSettings
-from app.providers import MetadataService, ProviderError
 from app.progress import format_progress_message
+from app.providers import MetadataService, ProviderError
 
 logger = get_logger("calendar")
 
@@ -108,7 +107,12 @@ def _normalize_address(value: str | None) -> str:
     if "://" in address or "/" in address:
         raise ValueError("address must not include a scheme or path")
     parsed = urlparse(f"//{address}")
-    if not parsed.hostname or parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+    if (
+        not parsed.hostname
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ValueError("address must be a host or IP address")
     return address
 
@@ -128,7 +132,20 @@ class CalendarConnectionStore:
         self.db = Config().database
 
     def _public_row(self, row) -> dict:
-        provider, address, port, base_url, use_ssl, library_id, api_key, validated, last_sync, last_error, updated, library_name = row
+        (
+            provider,
+            address,
+            port,
+            base_url,
+            use_ssl,
+            library_id,
+            api_key,
+            validated,
+            last_sync,
+            last_error,
+            updated,
+            library_name,
+        ) = row
         return {
             "provider": provider,
             "address": address,
@@ -157,7 +174,11 @@ class CalendarConnectionStore:
             values[provider] = (
                 self._public_row(rows[0])
                 if rows
-                else {"provider": provider, "configured": False, "apiKeyConfigured": False}
+                else {
+                    "provider": provider,
+                    "configured": False,
+                    "apiKeyConfigured": False,
+                }
             )
         return values
 
@@ -171,7 +192,9 @@ class CalendarConnectionStore:
             try:
                 api_key = decrypt_calendar_api_key(ciphertext)
             except ValueError:
-                logger.error("calendar API key could not be decrypted provider=%s", provider)
+                logger.error(
+                    "calendar API key could not be decrypted provider=%s", provider
+                )
                 continue
             values.append(
                 {
@@ -245,7 +268,9 @@ class CalendarConnectionStore:
         return self.public()[provider]
 
     def clear(self, provider: str) -> None:
-        self.db.execute("DELETE FROM calendar_connections WHERE provider=?", (provider,))
+        self.db.execute(
+            "DELETE FROM calendar_connections WHERE provider=?", (provider,)
+        )
         self.db.execute("DELETE FROM calendar_events WHERE provider=?", (provider,))
 
     def record_sync(self, provider: str, *, error: str | None = None) -> None:
@@ -260,7 +285,9 @@ class ArrCalendarClient:
     def __init__(self, connection: dict):
         self.connection = connection
         try:
-            configured_timeout = float(os.getenv("METADATA_PROVIDER_TIMEOUT_SECONDS", "20"))
+            configured_timeout = float(
+                os.getenv("METADATA_PROVIDER_TIMEOUT_SECONDS", "20")
+            )
         except ValueError:
             configured_timeout = 20
         self.timeout = max(3.0, min(60.0, configured_timeout))
@@ -365,7 +392,9 @@ def _normalize_sonarr(item: dict, library_id: str) -> CalendarEventValue | None:
     tvdb_id = _string_id(item.get("tvdbId") or item.get("tvdbID"))
     series = item.get("series") if isinstance(item.get("series"), dict) else {}
     series_tvdb_id = _string_id(series.get("tvdbId") or series.get("tvdbID"))
-    parsed = _parse_datetime(item.get("airDateUtc")) or _parse_datetime(item.get("airDate"))
+    parsed = _parse_datetime(item.get("airDateUtc")) or _parse_datetime(
+        item.get("airDate")
+    )
     if not source_id or not tvdb_id or not parsed:
         return None
     season = item.get("seasonNumber")
@@ -426,7 +455,9 @@ def _normalize_radarr(item: dict, library_id: str) -> list[CalendarEventValue]:
     return values
 
 
-def normalize_calendar_events(provider: str, library_id: str, payload: Iterable[dict]) -> list[CalendarEventValue]:
+def normalize_calendar_events(
+    provider: str, library_id: str, payload: Iterable[dict]
+) -> list[CalendarEventValue]:
     values = []
     for item in payload:
         if provider == "sonarr":
@@ -540,7 +571,9 @@ class CalendarSyncService:
             for match in self._matching_entities(event)
             if match[1] == expected_entity_type
         ]
-        self.db.execute("DELETE FROM calendar_event_entities WHERE event_id=?", (event_id,))
+        self.db.execute(
+            "DELETE FROM calendar_event_entities WHERE event_id=?", (event_id,)
+        )
         if matches:
             with self.db.transaction() as cursor:
                 cursor.executemany(
@@ -632,7 +665,9 @@ class CalendarSyncService:
                 results["existing"] += existing
             except Exception as error:
                 message = f"{provider}: {type(error).__name__}: {error}"
-                logger.warning("calendar sync failed provider=%s error=%s", provider, error)
+                logger.warning(
+                    "calendar sync failed provider=%s error=%s", provider, error
+                )
                 self.connections.record_sync(provider, error=message[:500])
                 results["errors"].append(message[:500])
 
@@ -646,9 +681,7 @@ class CalendarSyncService:
                 )
             except Exception as error:
                 message = f"{type(error).__name__}: {error}"
-                logger.warning(
-                    "immediate future metadata fetch failed error=%s", error
-                )
+                logger.warning("immediate future metadata fetch failed error=%s", error)
                 results["metadata"]["errors"].append(message[:500])
         return results
 
@@ -720,7 +753,11 @@ class CalendarFutureMetadataService:
             except Exception as error:
                 failed = True
                 message = f"{provider} {entity_type} {provider_id}: {type(error).__name__}: {error}"
-                logger.warning("future metadata refetch failed identity=%s error=%s", provider_id, error)
+                logger.warning(
+                    "future metadata refetch failed identity=%s error=%s",
+                    provider_id,
+                    error,
+                )
                 values["errors"].append(message[:500])
             finally:
                 if progress:
@@ -747,11 +784,25 @@ class CalendarReadService:
         normalized = " ".join(str(value).split()).casefold()
         return normalized not in CALENDAR_TITLE_PLACEHOLDERS
 
-    def _payload(self, provider: str, entity_type: str, provider_id: str, locale: str, future: bool) -> dict | None:
+    def _payload(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locale: str,
+        future: bool,
+    ) -> dict | None:
         cache = self.future_cache if future else self.normal_cache
         return cache.get(provider, entity_type, provider_id, locale)
 
-    def _title(self, provider: str, entity_type: str, provider_id: str | None, locale: str, future: bool) -> str | None:
+    def _title(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str | None,
+        locale: str,
+        future: bool,
+    ) -> str | None:
         if not provider_id:
             return None
         cache = self.future_cache if future else self.normal_cache
@@ -869,11 +920,15 @@ class CalendarReadService:
         events = []
         for event_id, value in grouped.items():
             linked_rows = links.get(event_id, [])
-            catalog_item_id, catalog_series_id = self._linked_item(linked_rows, value["kind"])
+            catalog_item_id, catalog_series_id = self._linked_item(
+                linked_rows, value["kind"]
+            )
             future = not catalog_item_id
             provider = "tmdb" if value["kind"] == "movie" else "tvdb"
             entity_type = "movie" if value["kind"] == "movie" else "episode"
-            provider_id = value["tmdbId"] if value["kind"] == "movie" else value["tvdbId"]
+            provider_id = (
+                value["tmdbId"] if value["kind"] == "movie" else value["tvdbId"]
+            )
             title = self._title(provider, entity_type, provider_id, locale, future)
             series_title = self._title(
                 "tvdb", "series", value["seriesTvdbId"], locale, future
@@ -892,14 +947,28 @@ class CalendarReadService:
             value.pop("tmdbId", None)
             value.pop("seriesTvdbId", None)
             events.append(value)
-        return {"start": start.astimezone(timezone.utc).isoformat(), "end": end.astimezone(timezone.utc).isoformat(), "events": events}
+        return {
+            "start": start.astimezone(timezone.utc).isoformat(),
+            "end": end.astimezone(timezone.utc).isoformat(),
+            "events": events,
+        }
 
 
-def parse_calendar_window(start: str | None, end: str | None) -> tuple[datetime, datetime]:
+def parse_calendar_window(
+    start: str | None, end: str | None
+) -> tuple[datetime, datetime]:
     current_start, current_end = calendar_window()
     try:
-        parsed_start = datetime.fromisoformat(str(start).replace("Z", "+00:00")) if start else current_start
-        parsed_end = datetime.fromisoformat(str(end).replace("Z", "+00:00")) if end else current_end
+        parsed_start = (
+            datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+            if start
+            else current_start
+        )
+        parsed_end = (
+            datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+            if end
+            else current_end
+        )
     except ValueError as error:
         raise ValueError("Calendar start and end must be ISO dates") from error
     if parsed_start.tzinfo is None:
@@ -969,7 +1038,9 @@ class CalendarSyncJob:
                 f" Fetched metadata for {metadata['targets']} new calendar identities."
             )
         if metadata["errors"]:
-            message += f" {len(metadata['errors'])} calendar metadata identity(ies) failed."
+            message += (
+                f" {len(metadata['errors'])} calendar metadata identity(ies) failed."
+            )
         self.store.update_run(
             run_id,
             state="completed",

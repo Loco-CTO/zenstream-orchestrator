@@ -63,4 +63,3 @@ def _save_calendar_settings(data: dict) -> dict:
         if provider in data:
             store.save(provider, data[provider])
     return store.public()
-

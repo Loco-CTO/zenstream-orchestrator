@@ -114,9 +114,7 @@ class CalendarSyncTest(unittest.TestCase):
         service.future_cache.promote_identity.assert_not_called()
 
     def test_exact_episode_match_is_existing_and_only_episode_is_linked(self):
-        service = self.service(
-            [("series-id", "series"), ("episode-id", "episode")]
-        )
+        service = self.service([("series-id", "series"), ("episode-id", "episode")])
         cursor = service.db.transaction.return_value.__enter__.return_value
 
         self.assertTrue(service._upsert(self.event(), "2026-08-20T00:00:00+00:00"))
@@ -425,7 +423,9 @@ class CalendarFutureMetadataTest(unittest.TestCase):
                 return {"targets": 2, "updated": 1, "errors": ["failed"]}
 
         store = Store()
-        with patch("app.calendar.CalendarFutureMetadataService", return_value=Service()):
+        with patch(
+            "app.calendar.CalendarFutureMetadataService", return_value=Service()
+        ):
             CalendarFutureMetadataJob(store).run("run-1", lambda: False)
 
         self.assertEqual(len(store.updates), 4)

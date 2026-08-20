@@ -24,7 +24,9 @@ def decrypt_calendar_api_key(value: str) -> str:
     try:
         return _fernet().decrypt(value.encode("ascii")).decode("utf-8")
     except (InvalidToken, UnicodeDecodeError, ValueError) as error:
-        raise ValueError("Stored calendar API key cannot be decrypted; enter it again.") from error
+        raise ValueError(
+            "Stored calendar API key cannot be decrypted; enter it again."
+        ) from error
 
 
 class FutureMetadataCache:
@@ -112,7 +114,9 @@ class FutureMetadataCache:
             ),
         )
 
-    def delete_identity(self, provider: str, entity_type: str, provider_id: str) -> None:
+    def delete_identity(
+        self, provider: str, entity_type: str, provider_id: str
+    ) -> None:
         paths = self.db.execute(
             "SELECT local_path FROM future_metadata_images WHERE provider=? AND entity_type=? AND provider_id=?",
             (provider, entity_type, provider_id),
@@ -144,7 +148,9 @@ class FutureMetadataCache:
                 except OSError:
                     pass
 
-    def promote_identity(self, provider: str, entity_type: str, provider_id: str) -> int:
+    def promote_identity(
+        self, provider: str, entity_type: str, provider_id: str
+    ) -> int:
         rows = self.db.execute(
             "SELECT locale,payload FROM future_metadata_cache WHERE provider=? AND entity_type=? AND provider_id=?",
             (provider, entity_type, provider_id),
@@ -170,7 +176,9 @@ class FutureMetadataCache:
             "SELECT local_path FROM future_metadata_images WHERE local_path IS NOT NULL"
         )
         with self.db.transaction() as cursor:
-            cursor.execute("DELETE FROM future_metadata_cache WHERE expires_at<?", (cutoff,))
+            cursor.execute(
+                "DELETE FROM future_metadata_cache WHERE expires_at<?", (cutoff,)
+            )
             removed = max(0, cursor.rowcount)
             cursor.execute("DELETE FROM future_metadata_images")
             removed += max(0, cursor.rowcount)

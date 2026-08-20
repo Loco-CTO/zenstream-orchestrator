@@ -1767,7 +1767,9 @@ class MetadataService:
         force: bool = False,
         *,
         project: bool = True,
+        cache=None,
     ) -> dict[str, dict]:
+        cache_store = cache or self.cache
         locales = list(dict.fromkeys(locales))
         if not locales:
             return {}
@@ -1781,7 +1783,7 @@ class MetadataService:
             values = {}
             missing = []
             for locale in locales:
-                cached = self.cache.get(provider, entity_type, provider_id, locale)
+                cached = cache_store.get(provider, entity_type, provider_id, locale)
                 if cached and not force and not cached.pop("_stale", False):
                     values[locale] = cached
                 else:
@@ -1829,11 +1831,11 @@ class MetadataService:
                     raise ProviderError(
                         f"{provider} {entity_type} {provider_id} {locale} normalization failed: {type(error).__name__}: {error}"
                     ) from error
-                self.cache.put(provider, entity_type, provider_id, locale, normalized)
+                cache_store.put(provider, entity_type, provider_id, locale, normalized)
                 if project:
                     from app.metadata_services import MetadataSearchProjection
 
-                    MetadataSearchProjection(self.cache.db).project(
+                    MetadataSearchProjection(cache_store.db).project(
                         provider, entity_type, provider_id, locale, normalized
                     )
                 logger.info(

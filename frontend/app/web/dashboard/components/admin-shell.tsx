@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import {
 	IconAdjustments,
 	IconChartDonut,
+	IconCalendar,
 	IconClock,
 	IconDatabase,
 	IconDeviceDesktop,
@@ -25,6 +26,7 @@ const links = [
 	["Dashboard", "/web/dashboard", IconChartDonut],
 	["Tasks", "/web/dashboard/jobs", IconClock],
 	["Libraries", "/web/dashboard/libraries", IconLibrary],
+	["Calendar", "/web/dashboard/calendar", IconCalendar],
 	["Metadata", "/web/dashboard/metadata", IconDatabase],
 	["Playback", "/web/dashboard/playback", IconPlayerPlay],
 	["Intro & Outro", "/web/dashboard/intro-outro", IconSparkles],

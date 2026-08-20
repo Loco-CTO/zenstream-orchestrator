@@ -833,6 +833,38 @@ class JobStore:
                 "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
                 (now(), now(), intro_outro["id"]),
             )
+        calendar_sync = self.ensure(
+            "calendar_sync",
+            "Sync calendar data",
+            "Fetch the rolling Sonarr and Radarr calendar window.",
+            "calendar_sync",
+            1440,
+            {},
+        )
+        if not calendar_sync.get("triggers") or (
+            len(calendar_sync["triggers"]) == 1
+            and calendar_sync["triggers"][0].get("type") == "interval"
+            and calendar_sync["triggers"][0].get("intervalSeconds") == 86400
+        ):
+            self._replace_triggers(
+                calendar_sync["id"], [{"type": "daily", "time": "03:00"}]
+            )
+        future_metadata = self.ensure(
+            "calendar_future_metadata",
+            "Refetch future calendar metadata",
+            "Refetch isolated TMDB and TVDB metadata for upcoming calendar events.",
+            "calendar_future_metadata",
+            1440,
+            {},
+        )
+        if not future_metadata.get("triggers") or (
+            len(future_metadata["triggers"]) == 1
+            and future_metadata["triggers"][0].get("type") == "interval"
+            and future_metadata["triggers"][0].get("intervalSeconds") == 86400
+        ):
+            self._replace_triggers(
+                future_metadata["id"], [{"type": "daily", "time": "04:00"}]
+            )
 
     def ensure_library(self, library: dict) -> dict:
         description = "Index the library without moving or renaming files."
@@ -2514,6 +2546,18 @@ class JobScheduler:
                     kind,
                     IntroOutroDetector(),
                     self.cancel_events[run_id].is_set,
+                )
+            elif kind == "calendar_sync":
+                from app.calendar import CalendarSyncJob
+
+                CalendarSyncJob(self.store).run(
+                    run_id, self.cancel_events[run_id].is_set
+                )
+            elif kind == "calendar_future_metadata":
+                from app.calendar import CalendarFutureMetadataJob
+
+                CalendarFutureMetadataJob(self.store).run(
+                    run_id, self.cancel_events[run_id].is_set
                 )
             else:
                 self.store.update_run(

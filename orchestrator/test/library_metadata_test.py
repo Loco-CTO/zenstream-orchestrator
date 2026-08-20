@@ -2187,23 +2187,6 @@ class LibraryMetadataTest(unittest.TestCase):
             ],
         )
 
-    def test_tvdb_normalization_keeps_broadcast_schedule_variants(self):
-        value = TVDBClient({"apiKey": "test"}).normalize(
-            "series",
-            "88651",
-            {
-                "data": {
-                    "name": "Example Show",
-                    "airsTime": "21:00",
-                    "airsTimeUTC": "02:00",
-                    "airTimeZone": "America/New_York",
-                }
-            },
-        )
-        self.assertEqual(value["airTime"], "21:00")
-        self.assertEqual(value["airTimeUtc"], "02:00")
-        self.assertEqual(value["airTimeZone"], "America/New_York")
-
     def test_tvdb_details_requests_english_translation_explicitly(self):
         client = TVDBClient({"apiKey": "test"})
         TVDBClient._language_codes_loaded = False

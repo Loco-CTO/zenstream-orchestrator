@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlparse
 
 import httpx
@@ -30,6 +30,7 @@ from app.models.calendar import (
 )
 from app.models.metadata import MetadataCache, MetadataLanguageSettings
 from app.providers import MetadataService, ProviderError
+from app.progress import format_progress_message
 
 logger = get_logger("calendar")
 
@@ -37,6 +38,9 @@ CALENDAR_PROVIDERS = ("sonarr", "radarr")
 EXPECTED_LIBRARY_TYPES = {"sonarr": "tv_series", "radarr": "movies"}
 DEFAULT_PAST_DAYS = 7
 DEFAULT_FUTURE_DAYS = 90
+CALENDAR_TITLE_PLACEHOLDERS = frozenset(
+    {"tba", "tbd", "to be announced", "to be determined", "unknown"}
+)
 
 
 def iso_now() -> str:
@@ -587,11 +591,11 @@ class CalendarFutureMetadataService:
         start, end = calendar_window()
         rows = self.db.execute(
             "SELECT kind,tvdb_id,series_tvdb_id,tmdb_id FROM calendar_events e "
-            "WHERE e.event_at>=? AND e.event_at<=? AND (e.state='future' OR NOT EXISTS ("
+            "WHERE e.event_date>=? AND e.event_date<=? AND (e.state='future' OR NOT EXISTS ("
             "SELECT 1 FROM calendar_event_entities x JOIN library_entities linked ON linked.id=x.entity_id "
             "WHERE x.event_id=e.id AND linked.entity_type=CASE WHEN e.kind='movie' THEN 'movie' ELSE 'episode' END"
             "))",
-            (start.isoformat(), end.isoformat()),
+            (start.date().isoformat(), end.date().isoformat()),
         )
         values = set()
         for kind, tvdb_id, series_tvdb_id, tmdb_id in rows:
@@ -653,16 +657,26 @@ class CalendarFutureMetadataService:
                             error,
                         )
 
-    def refetch(self, should_terminate=None, force: bool = True) -> dict:
+    def refetch(
+        self,
+        should_terminate=None,
+        force: bool = True,
+        progress: Callable[[int, int, str | None, bool], None] | None = None,
+    ) -> dict:
         should_terminate = should_terminate or (lambda: False)
         locales = MetadataLanguageSettings().get()
         values = {"targets": 0, "updated": 0, "errors": []}
-        for provider, entity_type, provider_id in self._targets():
+        targets = self._targets()
+        total = len(targets)
+        if progress:
+            progress(0, total, None, False)
+        for index, (provider, entity_type, provider_id) in enumerate(targets, 1):
             if should_terminate():
                 from app.library import JobTerminated
 
                 raise JobTerminated()
             values["targets"] += 1
+            failed = False
             try:
                 documents = self.metadata.fetch_locales(
                     provider,
@@ -676,9 +690,18 @@ class CalendarFutureMetadataService:
                 self._ingest_images(provider, entity_type, provider_id, documents, force=False)
                 values["updated"] += len(documents)
             except Exception as error:
+                failed = True
                 message = f"{provider} {entity_type} {provider_id}: {type(error).__name__}: {error}"
                 logger.warning("future metadata refetch failed identity=%s error=%s", provider_id, error)
                 values["errors"].append(message[:500])
+            finally:
+                if progress:
+                    progress(
+                        index,
+                        total,
+                        f"{provider.upper()} {entity_type} {provider_id}",
+                        failed,
+                    )
         self.cache.prune_expired()
         return values
 
@@ -688,6 +711,13 @@ class CalendarReadService:
         self.db = Config().database
         self.normal_cache = MetadataCache()
         self.future_cache = FutureMetadataCache()
+
+    @staticmethod
+    def _usable_title(value) -> bool:
+        if not usable_text("title", value):
+            return False
+        normalized = " ".join(str(value).split()).casefold()
+        return normalized not in CALENDAR_TITLE_PLACEHOLDERS
 
     def _payload(self, provider: str, entity_type: str, provider_id: str, locale: str, future: bool) -> dict | None:
         cache = self.future_cache if future else self.normal_cache
@@ -721,7 +751,7 @@ class CalendarReadService:
                 payload = payloads[candidate_locale]
                 for field in ("title", "name"):
                     value = payload.get(field)
-                    if usable_text(field, value):
+                    if self._usable_title(value):
                         return str(value)
         return None
 
@@ -882,7 +912,33 @@ class CalendarFutureMetadataJob:
         self.store = store
 
     def run(self, run_id: str, should_terminate) -> None:
-        result = CalendarFutureMetadataService().refetch(should_terminate=should_terminate)
+        def progress(current: int, total: int, item: str | None, failed: bool) -> None:
+            label = "Refetching future metadata"
+            if failed:
+                label = "Future metadata identity failed"
+            self.store.update_run(
+                run_id,
+                progress_current=current,
+                progress_total=total,
+                progress_phase="metadata",
+                progress_label=label,
+                progress_stage_current=current,
+                progress_stage_total=total,
+                progress_stage_unit="identities",
+                progress_current_item=item,
+                message=format_progress_message(
+                    label,
+                    item=item,
+                    current=current,
+                    total=total,
+                    unit="identities",
+                ),
+            )
+
+        result = CalendarFutureMetadataService().refetch(
+            should_terminate=should_terminate,
+            progress=progress,
+        )
         message = f"Refetched future metadata for {result['updated']} locale documents across {result['targets']} identities."
         if result["errors"]:
             message += f" {len(result['errors'])} identities failed."
@@ -891,6 +947,12 @@ class CalendarFutureMetadataJob:
             state="completed",
             progress_current=10000,
             progress_total=10000,
+            progress_phase="finalization",
+            progress_label="Future metadata complete",
+            progress_stage_current=result["targets"],
+            progress_stage_total=result["targets"],
+            progress_stage_unit="identities",
+            progress_current_item=None,
             message=message,
             error=None,
             finished_at=iso_now(),

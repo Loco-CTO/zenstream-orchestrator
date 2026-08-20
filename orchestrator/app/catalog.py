@@ -1459,6 +1459,13 @@ class Catalog:
             if row[3] == "episode" and series_id and language
             else None
         )
+        user_state = (
+            self._leaf_state(user_id, row[0])
+            if row[3] in {"movie", "episode", "track"}
+            else self._state(user_id, row[0])
+        )
+        if row[3] not in {"movie", "series"}:
+            user_state.pop("following", None)
         return {
             "id": row[0],
             "libraryId": row[1],
@@ -1478,11 +1485,7 @@ class Catalog:
             "lastAddedAt": (dates or {}).get("lastAddedAt", row[8]),
             "updatedAt": row[9],
             "metadata": metadata,
-            "userState": (
-                self._leaf_state(user_id, row[0])
-                if row[3] in {"movie", "episode", "track"}
-                else self._state(user_id, row[0])
-            ),
+            "userState": user_state,
             "childIds": children or [],
         }
 
@@ -2264,7 +2267,10 @@ class Catalog:
 
             CatalogReadModel(self.db).refresh_user_entities(user_id, affected)
         self._invalidate_home_cache(user_id)
-        return self._state(user_id, entity_id)
+        result = self._state(user_id, entity_id)
+        if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+            result.pop("following", None)
+        return result
 
     @_catalog_read
     def favorites(

@@ -45,12 +45,13 @@ async def update_calendar_follow(event_id: str, request: Request):
     data = await request.json()
     if not isinstance(data, dict) or not isinstance(data.get("following"), bool):
         raise HTTPException(400, "The following field must be a boolean.")
-    return await run_control(
+    following = await run_control(
         FollowService().set_for_calendar_event,
         account["id"],
         event_id,
         data["following"],
     )
+    return {"following": following}
 
 
 @router.get("/api/admin/calendar/settings")

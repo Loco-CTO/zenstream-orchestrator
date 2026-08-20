@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -770,6 +771,135 @@ class CalendarReadService:
             series_id = selected["entityId"]
         return selected["entityId"], series_id
 
+    @staticmethod
+    def _catalog_date(payload: dict, entity_type: str) -> tuple[str, str] | None:
+        fields = ("date", "releaseDate") if entity_type == "movie" else ("date", "firstAired")
+        for field in fields:
+            parsed = _parse_datetime(payload.get(field))
+            if not parsed:
+                continue
+            event_date = parsed[1]
+            return f"{event_date}T00:00:00+00:00", event_date
+        return None
+
+    @staticmethod
+    def _catalog_locale_order(
+        requested: str, configured: list[str], available: list[str]
+    ) -> list[str]:
+        ordered: list[str] = []
+        tiers = [requested]
+        if any(language_family(value) == "en" for value in configured):
+            tiers.append("en")
+        tiers.extend(configured)
+        for tier in tiers:
+            for candidate in locale_variants(tier, available):
+                if candidate not in ordered:
+                    ordered.append(candidate)
+        return ordered
+
+    def _catalog_events(
+        self,
+        user_id: str,
+        start: datetime,
+        end: datetime,
+        locale: str,
+        provider_keys: set[tuple[str, str]],
+    ) -> list[dict]:
+        configured = list(dict.fromkeys(MetadataLanguageSettings().get()))
+        if not configured:
+            return []
+        placeholders = ",".join("?" for _ in configured)
+        rows = self.db.execute(
+            "SELECT p.entity_id,p.locale,e.library_id,l.name,e.entity_type,p.payload "
+            "FROM catalog_item_projection p "
+            "JOIN library_entities e ON e.id=p.entity_id "
+            "JOIN user_library_access access ON access.library_id=e.library_id AND access.user_id=? "
+            "JOIN libraries l ON l.id=e.library_id "
+            f"WHERE e.entity_type IN ('movie','series') AND p.locale IN ({placeholders}) "
+            "ORDER BY p.entity_id,p.locale",
+            (user_id, *configured),
+        )
+        grouped: dict[str, dict] = {}
+        for entity_id, projection_locale, library_id, library_name, entity_type, raw_payload in rows:
+            try:
+                payload = json.loads(raw_payload or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            entity = grouped.setdefault(
+                entity_id,
+                {
+                    "libraryId": library_id,
+                    "libraryName": library_name,
+                    "kind": entity_type,
+                    "payloads": {},
+                },
+            )
+            entity["payloads"][projection_locale] = payload
+
+        events = []
+        start_date = start.astimezone(timezone.utc).date()
+        end_date = end.astimezone(timezone.utc).date()
+        for entity_id, entity in grouped.items():
+            payloads = entity["payloads"]
+            locales = self._catalog_locale_order(locale, configured, list(payloads))
+            selected_payload = None
+            parsed_date = None
+            for candidate_locale in locales:
+                payload = payloads[candidate_locale]
+                parsed_date = self._catalog_date(payload, entity["kind"])
+                if parsed_date:
+                    selected_payload = payload
+                    break
+            if not selected_payload or not parsed_date:
+                continue
+            event_at, event_date = parsed_date
+            if event_date < start_date.isoformat() or event_date > end_date.isoformat():
+                continue
+            if (entity_id, event_date) in provider_keys:
+                continue
+            title = None
+            for candidate_locale in locales:
+                candidate = payloads[candidate_locale]
+                for field in ("title", "name"):
+                    value = candidate.get(field)
+                    if self._usable_title(value):
+                        title = str(value)
+                        break
+                if title:
+                    break
+            kind = entity["kind"]
+            events.append(
+                {
+                    "id": str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"catalog:{entity['libraryId']}:{entity_id}:{event_date}",
+                        )
+                    ),
+                    "provider": "catalog",
+                    "libraryId": entity["libraryId"],
+                    "libraryName": entity["libraryName"],
+                    "kind": kind,
+                    "releaseType": "release" if kind == "movie" else "premiere",
+                    "eventAt": event_at,
+                    "eventDate": event_date,
+                    "allDay": True,
+                    "seasonNumber": None,
+                    "episodeNumber": None,
+                    "hasFile": True,
+                    "monitored": False,
+                    "state": "existing",
+                    "title": title,
+                    "seriesTitle": None,
+                    "catalogItemId": entity_id,
+                    "catalogSeriesId": None,
+                    "metadataStatus": "catalog",
+                }
+            )
+        return events
+
     def list(self, user_id: str, start: datetime, end: datetime) -> dict:
         locale = AccountPreference(user_id).metadata_language()["language"]
         rows = self.db.execute(
@@ -831,6 +961,7 @@ class CalendarReadService:
                     }
                 )
         events = []
+        provider_keys: set[tuple[str, str]] = set()
         for event_id, value in grouped.items():
             linked_rows = links.get(event_id, [])
             catalog_item_id, catalog_series_id = self._linked_item(linked_rows, value["kind"])
@@ -856,6 +987,10 @@ class CalendarReadService:
             value.pop("tmdbId", None)
             value.pop("seriesTvdbId", None)
             events.append(value)
+            if catalog_item_id:
+                provider_keys.add((catalog_item_id, value["eventDate"]))
+        events.extend(self._catalog_events(user_id, start, end, locale, provider_keys))
+        events.sort(key=lambda event: (event["eventAt"], event["id"]))
         return {"start": start.astimezone(timezone.utc).isoformat(), "end": end.astimezone(timezone.utc).isoformat(), "events": events}
 
 

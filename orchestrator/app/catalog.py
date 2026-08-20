@@ -80,6 +80,7 @@ class _CatalogReadContext:
         self.projected_metadata_loaded: set[tuple[str, str]] = set()
         self.playable_descendants: dict[str, list[str]] = {}
         self.resolved_states: dict[str, dict] = {}
+        self.following_states: dict[str, bool] = {}
         self.series_primary_images: dict[tuple[str, str], dict | None] = {}
         self.series_metadata: dict[tuple[str, str], dict | None] = {}
         self.metadata_service = MetadataReadService(catalog.db)
@@ -915,6 +916,7 @@ class Catalog:
             return {
                 "favorite": False,
                 "played": False,
+                "following": False,
                 "playCount": 0,
                 "positionSeconds": 0,
                 "durationSeconds": 0,
@@ -930,12 +932,27 @@ class Catalog:
         return {
             "favorite": bool(row[0]),
             "played": bool(row[1]),
+            "following": False,
             "playCount": int(row[2] or 0),
             "positionSeconds": position,
             "durationSeconds": duration,
             "playedPercentage": percentage,
             "lastPlayedAt": row[5],
         }
+
+    def _following_for_entity(self, user_id: str, entity_id: str) -> bool:
+        context = self._context(user_id)
+        if context is not None and entity_id in context.following_states:
+            return context.following_states[entity_id]
+        from app.notifications import FollowService
+
+        try:
+            value = FollowService(self.db).following_for_entity(user_id, entity_id)
+        except HTTPException:
+            value = False
+        if context is not None:
+            context.following_states[entity_id] = value
+        return value
 
     def _state(self, user_id: str, entity_id: str) -> dict:
         context = self._context(user_id)
@@ -949,6 +966,7 @@ class Catalog:
             direct["played"] = bool(row[3]) and not bool(row[4])
             direct["playedPercentage"] = None
             direct["unplayedItemCount"] = int(row[4])
+            direct["following"] = self._following_for_entity(user_id, entity_id)
             context.resolved_states[entity_id] = dict(direct)
             return direct
         if context and entity_id in context.empty_state_counts:
@@ -956,6 +974,7 @@ class Catalog:
             direct["played"] = False
             direct["playedPercentage"] = None
             direct["unplayedItemCount"] = context.empty_state_counts[entity_id]
+            direct["following"] = self._following_for_entity(user_id, entity_id)
             context.resolved_states[entity_id] = dict(direct)
             return direct
         entities, children, _ = self._relationship_graph(user_id)
@@ -965,6 +984,7 @@ class Catalog:
             else self._state_row(user_id, entity_id)
         )
         direct = self._direct_state(row)
+        direct["following"] = self._following_for_entity(user_id, entity_id)
         leaves = self._playable_descendants(entity_id, entities, children)
         if not leaves or (len(leaves) == 1 and leaves[0] == entity_id):
             if entities.get(entity_id, (None, ""))[1] in {
@@ -1016,12 +1036,16 @@ class Catalog:
                         projected[7],
                     )
                 )
+                value["following"] = self._following_for_entity(user_id, entity_id)
                 context.resolved_states[entity_id] = dict(value)
                 return value
             value = self._direct_state(self._state_rows(user_id).get(entity_id))
+            value["following"] = self._following_for_entity(user_id, entity_id)
             context.resolved_states[entity_id] = dict(value)
             return value
-        return self._direct_state(self._state_row(user_id, entity_id))
+        value = self._direct_state(self._state_row(user_id, entity_id))
+        value["following"] = self._following_for_entity(user_id, entity_id)
+        return value
 
     def _preload_projected_states(self, user_id: str, entity_ids: list[str]) -> None:
         context = self._context(user_id)
@@ -2134,6 +2158,18 @@ class Catalog:
         self.require_entity(user_id, entity_id)
         if not isinstance(changes, dict):
             raise HTTPException(400, "Invalid item state.")
+        following_change = changes.get("following")
+        if following_change is not None and not isinstance(following_change, bool):
+            raise HTTPException(400, "Invalid follow state.")
+        if following_change is not None:
+            from app.notifications import FollowService
+
+            FollowService(self.db).set_for_entity(
+                user_id, entity_id, following_change
+            )
+            if set(changes) <= {"following"}:
+                self._invalidate_home_cache(user_id)
+                return self._state(user_id, entity_id)
         entities, children, parents = self._relationship_graph(user_id)
         current_row = self._state_row(user_id, entity_id)
         current = self._direct_state(current_row)

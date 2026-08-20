@@ -15,6 +15,7 @@ from api.zenstream.calendar_routes import router as calendar_router
 from api.zenstream.client_routes import prune_rate_limit_events
 from api.zenstream.client_routes import router as client_router
 from api.zenstream.library_routes import router as library_router
+from api.zenstream.notification_routes import router as notification_router
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import browser_origins
 from app.config import Config, load_config
@@ -35,6 +36,7 @@ from app.library import runtime as library_runtime
 from app.logging_config import get_logger
 from app.metadata_services import asset_executor
 from app.models.account import Account
+from app.notifications import PushDispatcher
 from app.playback import PlaybackManager
 from app.resource_retention import run_resource_retention
 from fastapi import FastAPI
@@ -62,6 +64,8 @@ async def lifespan(_app: FastAPI):
     await asyncio.to_thread(CatalogReadModel().bootstrap)
     library_runtime.start()
     job_scheduler.start()
+    push_dispatcher = PushDispatcher()
+    push_dispatcher.start()
 
     async def maintain_sessions():
         while True:
@@ -117,6 +121,7 @@ async def lifespan(_app: FastAPI):
                 "could not flush session activity during shutdown", exc_info=True
             )
         PlaybackManager.stop_all()
+        push_dispatcher.stop()
         job_scheduler.stop()
         library_runtime.stop()
         asset_executor.shutdown()
@@ -180,6 +185,7 @@ async def request_timing(request, call_next):
 
 app.include_router(client_router)
 app.include_router(calendar_router)
+app.include_router(notification_router)
 app.include_router(library_router)
 app.include_router(application_router)
 

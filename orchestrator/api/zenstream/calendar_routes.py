@@ -8,6 +8,7 @@ from app.calendar import (
 )
 from app.client_auth import require_account
 from app.foreground import run_auth, run_control, run_foreground
+from app.notifications import FollowService
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from api.zenstream.library_routes import authenticate_admin_request
@@ -35,6 +36,20 @@ async def calendar_events(
         account["id"],
         window_start,
         window_end,
+    )
+
+
+@router.patch("/api/calendar/events/{event_id}/follow")
+async def update_calendar_follow(event_id: str, request: Request):
+    account, _ = await run_auth(require_account, request)
+    data = await request.json()
+    if not isinstance(data, dict) or not isinstance(data.get("following"), bool):
+        raise HTTPException(400, "The following field must be a boolean.")
+    return await run_control(
+        FollowService().set_for_calendar_event,
+        account["id"],
+        event_id,
+        data["following"],
     )
 
 

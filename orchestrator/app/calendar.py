@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 from app.config import Config
 from app.logging_config import get_logger
+from app.notifications import FollowService
 from app.metadata_domain import (
     fallback_tiers,
     language_family,
@@ -942,6 +943,28 @@ class CalendarReadService:
                     "catalogSeriesId": catalog_series_id,
                     "metadataStatus": "future" if future else "catalog",
                 }
+            )
+            follow_entity_id = (
+                catalog_item_id if value["kind"] == "movie" else catalog_series_id
+            )
+            follow_provider_id = (
+                value["tmdbId"]
+                if value["kind"] == "movie"
+                else value["seriesTvdbId"]
+            )
+            follow_available = bool(follow_provider_id or follow_entity_id)
+            value["followAvailable"] = follow_available
+            value["following"] = (
+                FollowService(self.db).following_for_identity(
+                    user_id,
+                    value["libraryId"],
+                    "movie" if value["kind"] == "movie" else "series",
+                    "tmdb" if value["kind"] == "movie" else "tvdb",
+                    str(follow_provider_id) if follow_provider_id else None,
+                    follow_entity_id,
+                )
+                if follow_available
+                else False
             )
             value.pop("tvdbId", None)
             value.pop("tmdbId", None)

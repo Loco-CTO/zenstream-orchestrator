@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import shutil
 from datetime import datetime, timedelta, timezone
 
 from app.config import Config
-from app.metadata_domain import ARTWORK_CATEGORY_SET
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, _fernet
 from cryptography.fernet import InvalidToken
 
@@ -31,7 +28,7 @@ def decrypt_calendar_api_key(value: str) -> str:
 
 
 class FutureMetadataCache:
-    """The calendar's isolated metadata cache and artwork record boundary."""
+    """The calendar's isolated metadata-only cache boundary."""
 
     def __init__(self):
         self.db = Config().database
@@ -61,6 +58,7 @@ class FutureMetadataCache:
                 or payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA
             ):
                 continue
+            payload.pop("images", None)
             payload["_stale"] = bool(expires_at and expires_at <= now)
             values[str(locale)] = payload
         return values
@@ -81,6 +79,7 @@ class FutureMetadataCache:
             return None
         if payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA:
             return None
+        payload.pop("images", None)
         payload["_stale"] = rows[0][1] <= _iso_now()
         return payload
 
@@ -94,6 +93,7 @@ class FutureMetadataCache:
         days: int = 7,
     ) -> None:
         value = dict(payload)
+        value.pop("images", None)
         value["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
         value["_metadataLocale"] = locale
         current = _now()
@@ -111,59 +111,6 @@ class FutureMetadataCache:
                 (current + timedelta(days=days)).isoformat(),
             ),
         )
-
-    def put_image(
-        self,
-        provider: str,
-        entity_type: str,
-        provider_id: str,
-        locale: str | None,
-        image_type: str,
-        image_url: str,
-        blur_hash: str | None = None,
-        local_path: str | None = None,
-    ) -> None:
-        if image_type not in ARTWORK_CATEGORY_SET:
-            raise ValueError(f"Unsupported image type '{image_type}'.")
-        current = _now()
-        self.db.execute(
-            "INSERT INTO future_metadata_images(provider,entity_type,provider_id,locale,image_type,image_url,local_path,fetched_at,expires_at,blur_hash) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,entity_type,provider_id,locale,image_type,image_url) DO UPDATE SET "
-            "local_path=excluded.local_path,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at,blur_hash=excluded.blur_hash",
-            (
-                provider,
-                entity_type,
-                provider_id,
-                locale or "",
-                image_type,
-                image_url,
-                local_path,
-                current.isoformat(),
-                (current + timedelta(days=7)).isoformat(),
-                blur_hash,
-            ),
-        )
-
-    def put_images(self, records) -> None:
-        values = list(records)
-        if not values:
-            return
-        current = _now()
-        normalized = []
-        for record in values:
-            if record[4] not in ARTWORK_CATEGORY_SET:
-                raise ValueError(f"Unsupported image type '{record[4]}'.")
-            normalized.append((*record[:3], record[3] or "", *record[4:]))
-        with self.db.transaction() as cursor:
-            cursor.executemany(
-                "INSERT INTO future_metadata_images(provider,entity_type,provider_id,locale,image_type,image_url,blur_hash,local_path,fetched_at,expires_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,entity_type,provider_id,locale,image_type,image_url) DO UPDATE SET "
-                "blur_hash=excluded.blur_hash,local_path=excluded.local_path,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at",
-                [
-                    (*record, current.isoformat(), (current + timedelta(days=7)).isoformat())
-                    for record in normalized
-                ],
-            )
 
     def delete_identity(self, provider: str, entity_type: str, provider_id: str) -> None:
         paths = self.db.execute(

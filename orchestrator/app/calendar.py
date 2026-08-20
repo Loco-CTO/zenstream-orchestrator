@@ -5,7 +5,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import urlparse
 
@@ -14,14 +13,11 @@ import httpx
 from app.config import Config
 from app.logging_config import get_logger
 from app.metadata_domain import (
-    ARTWORK_CATEGORIES,
     fallback_tiers,
     language_family,
     locale_variants,
-    rank_artwork_candidates,
     usable_text,
 )
-from app.metadata_services import MetadataImageIngestService
 from app.models.account_preference import AccountPreference
 from app.models.calendar import (
     FutureMetadataCache,
@@ -481,15 +477,7 @@ class CalendarSyncService:
         return str(
             uuid.uuid5(
                 uuid.NAMESPACE_URL,
-                ":".join(
-                    (
-                        event.provider,
-                        event.library_id,
-                        event.source_event_id,
-                        event.release_type,
-                        event.event_at,
-                    )
-                ),
+                f"{event.provider}:{event.library_id}:{event.source_event_id}:{event.release_type}:{event.event_at}",
             )
         )
 
@@ -693,55 +681,6 @@ class CalendarFutureMetadataService:
             )
         return sorted(values)
 
-    def _ingest_images(self, provider: str, entity_type: str, provider_id: str, documents: dict[str, dict], force: bool) -> None:
-        db_file = getattr(self.db, "db_file", None)
-        if not db_file or db_file == ":memory:":
-            return
-        image_service = MetadataImageIngestService(
-            self.cache,
-            image_root=Path(db_file).parent / "future-metadata-cache" / "images",
-        )
-        include_english = any(language_family(value) == "en" for value in MetadataLanguageSettings().get())
-        prefer_no_language = MetadataLanguageSettings().prefer_no_language_for_backdrop()
-        for locale, document in documents.items():
-            images = document.get("images", []) if isinstance(document, dict) else []
-            if not isinstance(images, list):
-                continue
-            for image_type in ARTWORK_CATEGORIES:
-                candidates = rank_artwork_candidates(
-                    images,
-                    locale,
-                    image_type,
-                    document.get("originalLanguage"),
-                    [provider],
-                    include_english=include_english,
-                    prefer_no_language_for_backdrop=prefer_no_language,
-                )
-                for candidate in candidates[:2]:
-                    url = candidate.get("url")
-                    if not isinstance(url, str):
-                        continue
-                    target = image_service._target(url)
-                    if target is None:
-                        continue
-                    try:
-                        with image_service._file_lock(target):
-                            if force or not target.is_file() or target.stat().st_size <= 0:
-                                image_service._download(url, target)
-                        blur_hash = image_service.hasher(target)
-                        image_service._persist(provider, entity_type, provider_id, candidate, target, blur_hash)
-                        break
-                    except Exception as error:
-                        logger.warning(
-                            "future metadata image ingest failed provider=%s entity_type=%s provider_id=%s locale=%s type=%s error=%s",
-                            provider,
-                            entity_type,
-                            provider_id,
-                            locale,
-                            image_type,
-                            error,
-                        )
-
     def refetch(
         self,
         should_terminate=None,
@@ -777,7 +716,6 @@ class CalendarFutureMetadataService:
                     project=False,
                     cache=self.cache,
                 )
-                self._ingest_images(provider, entity_type, provider_id, documents, force=False)
                 values["updated"] += len(documents)
             except Exception as error:
                 failed = True

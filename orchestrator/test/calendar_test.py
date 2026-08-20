@@ -68,7 +68,7 @@ class CalendarReadTest(unittest.TestCase):
             """
             CREATE TABLE libraries(id TEXT PRIMARY KEY, name TEXT);
             CREATE TABLE user_library_access(user_id TEXT, library_id TEXT);
-            CREATE TABLE library_entities(id TEXT PRIMARY KEY, library_id TEXT, entity_type TEXT);
+            CREATE TABLE library_entities(id TEXT PRIMARY KEY, library_id TEXT, parent_id TEXT, entity_type TEXT);
             CREATE TABLE catalog_item_projection(entity_id TEXT, locale TEXT, payload TEXT);
             """
         )
@@ -77,13 +77,14 @@ class CalendarReadTest(unittest.TestCase):
         return service, db
 
     @staticmethod
-    def catalog_row(entity_id, locale, library_id, library_name, kind, payload):
+    def catalog_row(entity_id, locale, library_id, library_name, kind, payload, series_id=None):
         return (
             entity_id,
             locale,
             library_id,
             library_name,
             kind,
+            series_id,
             json.dumps(payload),
         )
 
@@ -129,6 +130,12 @@ class CalendarReadTest(unittest.TestCase):
             ),
             ("2026-09-11T00:00:00+00:00", "2026-09-11"),
         )
+        self.assertEqual(
+            CalendarReadService._catalog_date(
+                {"date": "2026-09-12"}, "episode"
+            ),
+            ("2026-09-12T00:00:00+00:00", "2026-09-12"),
+        )
 
     def test_catalog_events_apply_grants_locale_fallback_and_all_day_serialization(self):
         service, db = self.catalog_service()
@@ -141,11 +148,12 @@ class CalendarReadTest(unittest.TestCase):
             ("user", "granted"),
         )
         db.executemany(
-            "INSERT INTO library_entities(id,library_id,entity_type) VALUES(?,?,?)",
+            "INSERT INTO library_entities(id,library_id,parent_id,entity_type) VALUES(?,?,?,?)",
             [
-                ("movie", "granted", "movie"),
-                ("series", "granted", "series"),
-                ("private-movie", "private", "movie"),
+                ("movie", "granted", None, "movie"),
+                ("series", "granted", None, "series"),
+                ("episode", "granted", "series", "episode"),
+                ("private-movie", "private", None, "movie"),
             ],
         )
         db.executemany(
@@ -154,6 +162,18 @@ class CalendarReadTest(unittest.TestCase):
                 ("movie", "en", json.dumps({"title": "English movie", "releaseDate": "2026-08-10"})),
                 ("movie", "ja", json.dumps({"title": "映画", "date": "2026-08-10"})),
                 ("series", "en", json.dumps({"title": "Series", "firstAired": "2026-08-11"})),
+                (
+                    "episode",
+                    "en",
+                    json.dumps(
+                        {
+                            "title": "Episode",
+                            "date": "2026-08-12",
+                            "seasonNumber": 1,
+                            "episodeNumber": 2,
+                        }
+                    ),
+                ),
                 ("private-movie", "en", json.dumps({"title": "Private", "date": "2026-08-12"})),
             ],
         )
@@ -164,13 +184,20 @@ class CalendarReadTest(unittest.TestCase):
             settings.return_value.get.return_value = ["en", "ja"]
             events = service._catalog_events("user", start, end, "ja", set())
 
-        self.assertEqual({event["catalogItemId"] for event in events}, {"movie", "series"})
+        self.assertEqual({event["catalogItemId"] for event in events}, {"movie", "series", "episode"})
         movie = next(event for event in events if event["kind"] == "movie")
         series = next(event for event in events if event["kind"] == "series")
+        episode = next(event for event in events if event["kind"] == "episode")
         self.assertEqual(movie["title"], "映画")
         self.assertEqual(movie["releaseType"], "release")
         self.assertEqual(series["title"], "Series")
         self.assertEqual(series["releaseType"], "premiere")
+        self.assertEqual(episode["title"], "Episode")
+        self.assertEqual(episode["seriesTitle"], "Series")
+        self.assertEqual(episode["catalogSeriesId"], "series")
+        self.assertEqual(episode["releaseType"], "air")
+        self.assertEqual(episode["seasonNumber"], 1)
+        self.assertEqual(episode["episodeNumber"], 2)
         self.assertEqual(movie["eventAt"], "2026-08-10T00:00:00+00:00")
         self.assertEqual(movie["eventDate"], "2026-08-10")
         self.assertTrue(movie["allDay"])

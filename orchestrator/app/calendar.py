@@ -773,7 +773,12 @@ class CalendarReadService:
 
     @staticmethod
     def _catalog_date(payload: dict, entity_type: str) -> tuple[str, str] | None:
-        fields = ("date", "releaseDate") if entity_type == "movie" else ("date", "firstAired")
+        if entity_type == "movie":
+            fields = ("date", "releaseDate")
+        elif entity_type == "series":
+            fields = ("date", "firstAired")
+        else:
+            fields = ("date", "airDate", "firstAired")
         for field in fields:
             parsed = _parse_datetime(payload.get(field))
             if not parsed:
@@ -797,6 +802,25 @@ class CalendarReadService:
                     ordered.append(candidate)
         return ordered
 
+    @classmethod
+    def _catalog_title(cls, payloads: dict[str, dict], locales: list[str]) -> str | None:
+        for candidate_locale in locales:
+            candidate = payloads[candidate_locale]
+            for field in ("title", "name"):
+                value = candidate.get(field)
+                if cls._usable_title(value):
+                    return str(value)
+        return None
+
+    @staticmethod
+    def _catalog_number(value) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _catalog_events(
         self,
         user_id: str,
@@ -810,17 +834,29 @@ class CalendarReadService:
             return []
         placeholders = ",".join("?" for _ in configured)
         rows = self.db.execute(
-            "SELECT p.entity_id,p.locale,e.library_id,l.name,e.entity_type,p.payload "
+            "SELECT p.entity_id,p.locale,e.library_id,l.name,e.entity_type,"
+            "CASE WHEN parent.entity_type='series' THEN parent.id "
+            "WHEN grandparent.entity_type='series' THEN grandparent.id END,p.payload "
             "FROM catalog_item_projection p "
             "JOIN library_entities e ON e.id=p.entity_id "
+            "LEFT JOIN library_entities parent ON parent.id=e.parent_id "
+            "LEFT JOIN library_entities grandparent ON grandparent.id=parent.parent_id "
             "JOIN user_library_access access ON access.library_id=e.library_id AND access.user_id=? "
             "JOIN libraries l ON l.id=e.library_id "
-            f"WHERE e.entity_type IN ('movie','series') AND p.locale IN ({placeholders}) "
+            f"WHERE e.entity_type IN ('movie','series','episode') AND p.locale IN ({placeholders}) "
             "ORDER BY p.entity_id,p.locale",
             (user_id, *configured),
         )
         grouped: dict[str, dict] = {}
-        for entity_id, projection_locale, library_id, library_name, entity_type, raw_payload in rows:
+        for (
+            entity_id,
+            projection_locale,
+            library_id,
+            library_name,
+            entity_type,
+            series_id,
+            raw_payload,
+        ) in rows:
             try:
                 payload = json.loads(raw_payload or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
@@ -833,6 +869,7 @@ class CalendarReadService:
                     "libraryId": library_id,
                     "libraryName": library_name,
                     "kind": entity_type,
+                    "seriesId": series_id,
                     "payloads": {},
                 },
             )
@@ -849,27 +886,39 @@ class CalendarReadService:
             for candidate_locale in locales:
                 payload = payloads[candidate_locale]
                 parsed_date = self._catalog_date(payload, entity["kind"])
-                if parsed_date:
+                if parsed_date and start_date.isoformat() <= parsed_date[1] <= end_date.isoformat():
                     selected_payload = payload
                     break
             if not selected_payload or not parsed_date:
                 continue
             event_at, event_date = parsed_date
-            if event_date < start_date.isoformat() or event_date > end_date.isoformat():
-                continue
             if (entity_id, event_date) in provider_keys:
                 continue
-            title = None
-            for candidate_locale in locales:
-                candidate = payloads[candidate_locale]
-                for field in ("title", "name"):
-                    value = candidate.get(field)
-                    if self._usable_title(value):
-                        title = str(value)
-                        break
-                if title:
-                    break
+            title = self._catalog_title(payloads, locales)
             kind = entity["kind"]
+            season_number = None
+            episode_number = None
+            if kind == "episode":
+                for candidate_locale in locales:
+                    candidate = payloads[candidate_locale]
+                    if season_number is None:
+                        season_number = self._catalog_number(candidate.get("seasonNumber"))
+                    if episode_number is None:
+                        episode_number = self._catalog_number(candidate.get("episodeNumber"))
+                    if season_number is not None and episode_number is not None:
+                        break
+            series_title = None
+            catalog_series_id = None
+            if kind == "episode" and entity["seriesId"]:
+                parent = grouped.get(entity["seriesId"])
+                if parent and parent["kind"] == "series":
+                    parent_locales = self._catalog_locale_order(
+                        locale, configured, list(parent["payloads"])
+                    )
+                    series_title = self._catalog_title(
+                        parent["payloads"], parent_locales
+                    )
+                    catalog_series_id = entity["seriesId"]
             events.append(
                 {
                     "id": str(
@@ -882,19 +931,23 @@ class CalendarReadService:
                     "libraryId": entity["libraryId"],
                     "libraryName": entity["libraryName"],
                     "kind": kind,
-                    "releaseType": "release" if kind == "movie" else "premiere",
+                    "releaseType": {
+                        "movie": "release",
+                        "series": "premiere",
+                        "episode": "air",
+                    }[kind],
                     "eventAt": event_at,
                     "eventDate": event_date,
                     "allDay": True,
-                    "seasonNumber": None,
-                    "episodeNumber": None,
+                    "seasonNumber": season_number,
+                    "episodeNumber": episode_number,
                     "hasFile": True,
                     "monitored": False,
                     "state": "existing",
                     "title": title,
-                    "seriesTitle": None,
+                    "seriesTitle": series_title,
                     "catalogItemId": entity_id,
-                    "catalogSeriesId": None,
+                    "catalogSeriesId": catalog_series_id,
                     "metadataStatus": "catalog",
                 }
             )

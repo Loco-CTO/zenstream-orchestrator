@@ -42,6 +42,10 @@ function current(pathname: string | null, href: string) {
 	);
 }
 
+function routeMatches(pathname: string | null, route: string) {
+	return pathname === route || pathname?.startsWith(`${route}/`) === true;
+}
+
 export default function AdminShell({
 	children,
 }: {
@@ -49,6 +53,10 @@ export default function AdminShell({
 }) {
 	const router = useRouter();
 	const pathname = usePathname();
+	const wideContent =
+		routeMatches(pathname, "/web/dashboard/libraries/view") ||
+		routeMatches(pathname, "/web/dashboard/libraries/preview") ||
+		routeMatches(pathname, "/web/dashboard/devices");
 	const [session, setSession] = useState<Session | null>(null);
 	const [drawerOpen, setDrawerOpen] = useState(false);
 	const trigger = useRef<HTMLButtonElement>(null);
@@ -357,7 +365,12 @@ export default function AdminShell({
 			)}
 			<main
 				className="dashboard-content"
-				style={{ marginLeft: 52, flex: 1, padding: "44px 52px", maxWidth: 1080 }}
+				style={{
+					marginLeft: 52,
+					flex: 1,
+					padding: "44px 52px",
+					maxWidth: wideContent ? "none" : 1080,
+				}}
 			>
 				{children}
 			</main>

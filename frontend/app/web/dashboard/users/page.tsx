@@ -304,9 +304,9 @@ export default function UsersPage() {
 								/>
 								<div className="min-w-0">
 									<p className="truncate font-semibold">{user.username}</p>
-								<p className="mt-1 text-xs console-muted">
-									{user.disabled ? "Disabled" : "Active"} · deny by default
-								</p>
+									<p className="mt-1 text-xs console-muted">
+										{user.disabled ? "Disabled" : "Active"} · deny by default
+									</p>
 								</div>
 							</div>
 							<div className="flex items-center gap-2">

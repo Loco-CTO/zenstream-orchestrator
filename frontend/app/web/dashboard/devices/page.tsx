@@ -7,7 +7,6 @@ import {
 	ConfirmDialog,
 	EmptyState,
 	PageHeader,
-	SurfaceCard,
 } from "../components/dashboard-surface";
 
 type Device = {
@@ -134,214 +133,212 @@ export default function DevicesPage() {
 					{error}
 				</p>
 			)}
-			<SurfaceCard>
-				<div
+			<div
+				style={{
+					display: "flex",
+					alignItems: "center",
+					justifyContent: "space-between",
+					gap: 12,
+					marginBottom: 20,
+					flexWrap: "wrap",
+				}}
+			>
+				<label
 					style={{
 						display: "flex",
 						alignItems: "center",
-						justifyContent: "space-between",
-						gap: 12,
-						marginBottom: 20,
-						flexWrap: "wrap",
+						gap: 10,
+						color: "#777",
+						fontSize: 12,
 					}}
 				>
-					<label
-						style={{
-							display: "flex",
-							alignItems: "center",
-							gap: 10,
-							color: "#777",
-							fontSize: 12,
+					User
+					<select
+						value={userId}
+						onChange={(event) => {
+							setUserId(event.target.value);
+							void load(session, event.target.value);
 						}}
+						className="console-input h-10 rounded-xl px-3 text-sm"
 					>
-						User
-						<select
-							value={userId}
-							onChange={(event) => {
-								setUserId(event.target.value);
-								void load(session, event.target.value);
+						<option value="">All users</option>
+						{users.map((user) => (
+							<option key={user.id} value={user.id}>
+								{user.username}
+							</option>
+						))}
+					</select>
+				</label>
+				<span style={{ color: "#555", fontSize: 11 }}>
+					{devices.length} device{devices.length === 1 ? "" : "s"}
+				</span>
+			</div>
+			{devices.length ? (
+				<div
+					style={{
+						display: "grid",
+						gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))",
+						gap: 12,
+					}}
+				>
+					{devices.map((device) => (
+						<article
+							key={device.id}
+							style={{
+								border: "1px solid #191919",
+								borderRadius: 11,
+								overflow: "hidden",
+								background: "#0c0c0c",
 							}}
-							className="console-input h-10 rounded-xl px-3 text-sm"
 						>
-							<option value="">All users</option>
-							{users.map((user) => (
-								<option key={user.id} value={user.id}>
-									{user.username}
-								</option>
-							))}
-						</select>
-					</label>
-					<span style={{ color: "#555", fontSize: 11 }}>
-						{devices.length} device{devices.length === 1 ? "" : "s"}
-					</span>
-				</div>
-				{devices.length ? (
-					<div
-						style={{
-							display: "grid",
-							gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))",
-							gap: 12,
-						}}
-					>
-						{devices.map((device) => (
-							<article
-								key={device.id}
+							<div
 								style={{
-									border: "1px solid #191919",
-									borderRadius: 11,
-									overflow: "hidden",
-									background: "#0c0c0c",
+									height: 4,
+									background: device.active ? "var(--success)" : "#252525",
 								}}
-							>
-								<div
-									style={{
-										height: 4,
-										background: device.active ? "var(--success)" : "#252525",
-									}}
-								/>
-								<div style={{ padding: 16 }}>
-									<div style={{ display: "flex", alignItems: "flex-start", gap: 11 }}>
-										<div
-											style={{
-												width: 34,
-												height: 34,
-												display: "grid",
-												placeItems: "center",
-												borderRadius: 8,
-												background: "#161616",
-												color: "#999",
-											}}
-										>
-											<IconDeviceDesktop size={18} stroke={1.5} />
-										</div>
-										<div style={{ minWidth: 0, flex: 1 }}>
-											<div
-												style={{
-													color: "#eee",
-													fontSize: 13,
-													fontWeight: 600,
-													whiteSpace: "nowrap",
-													overflow: "hidden",
-													textOverflow: "ellipsis",
-												}}
-											>
-												{device.name || device.clientName || "Unknown device"}
-											</div>
-											<div style={{ color: "#666", fontSize: 11, marginTop: 3 }}>
-												{device.browser || device.type || "Unknown"} ·{" "}
-												{device.clientVersion || "Unknown version"}
-											</div>
-										</div>
-										<span
-											title={device.active ? "Active" : "Inactive"}
-											style={{
-												width: 7,
-												height: 7,
-												marginTop: 5,
-												borderRadius: "50%",
-												background: device.active ? "var(--success)" : "#444",
-											}}
-										/>
-									</div>
-									{device.nowPlaying && (
-										<div
-											style={{
-												marginTop: 16,
-												padding: "10px 11px",
-												borderRadius: 8,
-												background: "#111",
-												color: "#ccc",
-												fontSize: 11,
-											}}
-										>
-											<div
-												style={{
-													color: "#555",
-													fontSize: 9,
-													textTransform: "uppercase",
-													letterSpacing: ".08em",
-													marginBottom: 5,
-												}}
-											>
-												Now playing
-											</div>
-											{device.nowPlaying.title || "Unknown item"}
-											{device.nowPlaying.paused ? (
-												<span style={{ color: "var(--warning)", marginLeft: 6 }}>
-													Paused
-												</span>
-											) : null}
-										</div>
-									)}
+							/>
+							<div style={{ padding: 16 }}>
+								<div style={{ display: "flex", alignItems: "flex-start", gap: 11 }}>
 									<div
 										style={{
+											width: 34,
+											height: 34,
 											display: "grid",
-											gridTemplateColumns: "1fr 1fr",
-											gap: 13,
-											marginTop: 17,
+											placeItems: "center",
+											borderRadius: 8,
+											background: "#161616",
+											color: "#999",
 										}}
 									>
-										<div>
-											<div style={{ color: "#555", fontSize: 10 }}>User</div>
-											<div style={{ color: "#bbb", fontSize: 11, marginTop: 4 }}>
-												{device.user.username}
-											</div>
+										<IconDeviceDesktop size={18} stroke={1.5} />
+									</div>
+									<div style={{ minWidth: 0, flex: 1 }}>
+										<div
+											style={{
+												color: "#eee",
+												fontSize: 13,
+												fontWeight: 600,
+												whiteSpace: "nowrap",
+												overflow: "hidden",
+												textOverflow: "ellipsis",
+											}}
+										>
+											{device.name || device.clientName || "Unknown device"}
 										</div>
-										<div>
-											<div style={{ color: "#555", fontSize: 10 }}>Last active</div>
-											<div style={{ color: "#bbb", fontSize: 11, marginTop: 4 }}>
-												{dateLabel(device.lastActiveAt)}
-											</div>
-										</div>
-										<div>
-											<div style={{ color: "#555", fontSize: 10 }}>IP address</div>
-											<div
-												style={{
-													color: "#bbb",
-													fontSize: 11,
-													marginTop: 4,
-													fontFamily: "var(--font-mono)",
-												}}
-											>
-												{device.ipAddress || "Unknown"}
-											</div>
-										</div>
-										<div>
-											<div style={{ color: "#555", fontSize: 10 }}>OS</div>
-											<div style={{ color: "#bbb", fontSize: 11, marginTop: 4 }}>
-												{device.operatingSystem || "Unknown"}
-											</div>
+										<div style={{ color: "#666", fontSize: 11, marginTop: 3 }}>
+											{device.browser || device.type || "Unknown"} ·{" "}
+											{device.clientVersion || "Unknown version"}
 										</div>
 									</div>
-									<button
-										type="button"
-										onClick={() => setDeviceToRemove(device)}
+									<span
+										title={device.active ? "Active" : "Inactive"}
 										style={{
-											width: "100%",
-											marginTop: 18,
-											height: 32,
-											border: "1px solid #252525",
-											borderRadius: 7,
-											background: "transparent",
-											color: "#777",
-											cursor: "pointer",
-											display: "flex",
-											alignItems: "center",
-											justifyContent: "center",
-											gap: 6,
+											width: 7,
+											height: 7,
+											marginTop: 5,
+											borderRadius: "50%",
+											background: device.active ? "var(--success)" : "#444",
+										}}
+									/>
+								</div>
+								{device.nowPlaying && (
+									<div
+										style={{
+											marginTop: 16,
+											padding: "10px 11px",
+											borderRadius: 8,
+											background: "#111",
+											color: "#ccc",
 											fontSize: 11,
 										}}
 									>
-										<IconTrash size={13} /> Remove
-									</button>
+										<div
+											style={{
+												color: "#555",
+												fontSize: 9,
+												textTransform: "uppercase",
+												letterSpacing: ".08em",
+												marginBottom: 5,
+											}}
+										>
+											Now playing
+										</div>
+										{device.nowPlaying.title || "Unknown item"}
+										{device.nowPlaying.paused ? (
+											<span style={{ color: "var(--warning)", marginLeft: 6 }}>
+												Paused
+											</span>
+										) : null}
+									</div>
+								)}
+								<div
+									style={{
+										display: "grid",
+										gridTemplateColumns: "1fr 1fr",
+										gap: 13,
+										marginTop: 17,
+									}}
+								>
+									<div>
+										<div style={{ color: "#555", fontSize: 10 }}>User</div>
+										<div style={{ color: "#bbb", fontSize: 11, marginTop: 4 }}>
+											{device.user.username}
+										</div>
+									</div>
+									<div>
+										<div style={{ color: "#555", fontSize: 10 }}>Last active</div>
+										<div style={{ color: "#bbb", fontSize: 11, marginTop: 4 }}>
+											{dateLabel(device.lastActiveAt)}
+										</div>
+									</div>
+									<div>
+										<div style={{ color: "#555", fontSize: 10 }}>IP address</div>
+										<div
+											style={{
+												color: "#bbb",
+												fontSize: 11,
+												marginTop: 4,
+												fontFamily: "var(--font-mono)",
+											}}
+										>
+											{device.ipAddress || "Unknown"}
+										</div>
+									</div>
+									<div>
+										<div style={{ color: "#555", fontSize: 10 }}>OS</div>
+										<div style={{ color: "#bbb", fontSize: 11, marginTop: 4 }}>
+											{device.operatingSystem || "Unknown"}
+										</div>
+									</div>
 								</div>
-							</article>
-						))}
-					</div>
-				) : (
-					<EmptyState>No devices have logged in yet.</EmptyState>
-				)}
-			</SurfaceCard>
+								<button
+									type="button"
+									onClick={() => setDeviceToRemove(device)}
+									style={{
+										width: "100%",
+										marginTop: 18,
+										height: 32,
+										border: "1px solid #252525",
+										borderRadius: 7,
+										background: "transparent",
+										color: "#777",
+										cursor: "pointer",
+										display: "flex",
+										alignItems: "center",
+										justifyContent: "center",
+										gap: 6,
+										fontSize: 11,
+									}}
+								>
+									<IconTrash size={13} /> Remove
+								</button>
+							</div>
+						</article>
+					))}
+				</div>
+			) : (
+				<EmptyState>No devices have logged in yet.</EmptyState>
+			)}
 		</div>
 	);
 }

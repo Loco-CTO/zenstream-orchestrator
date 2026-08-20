@@ -93,6 +93,12 @@ class FollowAndNotificationTest(unittest.TestCase):
         self.assertEqual(notifications.summary("user")["unreadCount"], 0)
         notifications.mark_read("user", notification_id, False)
         self.assertEqual(notifications.mark_all_read("user")["unreadCount"], 0)
+        self.assertFalse(follow.set_for_entity("user", "episode", False))
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM user_follow_targets")[0][0],
+            0,
+        )
+        self.assertEqual(len(notifications.list("user")["items"]), 1)
 
     def test_future_movie_calendar_follow_uses_tmdb_identity(self):
         self.db.execute(

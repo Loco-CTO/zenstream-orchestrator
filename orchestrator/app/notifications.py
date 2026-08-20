@@ -132,34 +132,56 @@ class FollowService:
         now = _now()
         with self.db.transaction() as cursor:
             if following:
+                entity_id = identity.get("entity_id")
+                existing = (
+                    cursor.execute(
+                        "SELECT id FROM user_follow_targets WHERE user_id=? AND library_id=? "
+                        "AND target_type=? AND entity_id=? LIMIT 1",
+                        (user_id, library_id, identity["target_type"], entity_id),
+                    ).fetchone()
+                    if entity_id
+                    else None
+                )
+                if existing:
+                    cursor.execute(
+                        "UPDATE user_follow_targets SET provider=?,provider_id=?,updated_at=? WHERE id=?",
+                        (
+                            identity["provider"],
+                            identity["provider_id"],
+                            now,
+                            existing[0],
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO user_follow_targets "
+                        "(id,user_id,library_id,target_type,provider,provider_id,entity_id,created_at,updated_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(user_id,library_id,target_type,provider,provider_id) DO UPDATE SET "
+                        "entity_id=excluded.entity_id,updated_at=excluded.updated_at",
+                        (
+                            _id(),
+                            user_id,
+                            library_id,
+                            identity["target_type"],
+                            identity["provider"],
+                            identity["provider_id"],
+                            entity_id,
+                            now,
+                            now,
+                        ),
+                    )
+            else:
                 cursor.execute(
-                    "INSERT INTO user_follow_targets "
-                    "(id,user_id,library_id,target_type,provider,provider_id,entity_id,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT(user_id,library_id,target_type,provider,provider_id) DO UPDATE SET "
-                    "entity_id=excluded.entity_id,updated_at=excluded.updated_at",
+                    "DELETE FROM user_follow_targets WHERE user_id=? AND library_id=? "
+                    "AND target_type=? AND ((provider=? AND provider_id=?) OR entity_id=?)",
                     (
-                        _id(),
                         user_id,
                         library_id,
                         identity["target_type"],
                         identity["provider"],
                         identity["provider_id"],
                         identity.get("entity_id"),
-                        now,
-                        now,
-                    ),
-                )
-            else:
-                cursor.execute(
-                    "DELETE FROM user_follow_targets WHERE user_id=? AND library_id=? "
-                    "AND target_type=? AND provider=? AND provider_id=?",
-                    (
-                        user_id,
-                        library_id,
-                        identity["target_type"],
-                        identity["provider"],
-                        identity["provider_id"],
                     ),
                 )
         return following

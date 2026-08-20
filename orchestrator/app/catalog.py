@@ -2172,7 +2172,10 @@ class Catalog:
             )
             if set(changes) <= {"following"}:
                 self._invalidate_home_cache(user_id)
-                return self._state(user_id, entity_id)
+                result = self._state(user_id, entity_id)
+                if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+                    result.pop("following", None)
+                return result
         entities, children, parents = self._relationship_graph(user_id)
         current_row = self._state_row(user_id, entity_id)
         current = self._direct_state(current_row)

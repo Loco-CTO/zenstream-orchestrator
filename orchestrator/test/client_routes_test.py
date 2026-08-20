@@ -289,6 +289,43 @@ class ClientAvatarRouteTest(unittest.TestCase):
             self.assertIn("immutable", response.headers["cache-control"])
             access.assert_awaited_once_with(request)
 
+    def test_admin_avatar_delivery_uses_administrator_authentication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "avatar.webp"
+            path.write_bytes(b"webp")
+            request = _binary_request(
+                b"",
+                method="GET",
+                path="/api/admin/users/user-1/avatar",
+            )
+            request.scope["query_string"] = b"v=version-1"
+            with (
+                patch.object(
+                    client_routes,
+                    "run_auth",
+                    new=AsyncMock(return_value="root"),
+                ) as auth,
+                patch.object(
+                    client_routes,
+                    "run_control",
+                    new=AsyncMock(return_value=(path, "version-1", "webp")),
+                ) as control,
+            ):
+                response = asyncio.run(
+                    client_routes.admin_user_avatar("user-1", request)
+                )
+            self.assertEqual(response.media_type, "image/webp")
+            self.assertIn("immutable", response.headers["cache-control"])
+            auth.assert_awaited_once_with(
+                client_routes.authenticate_admin_request,
+                request,
+            )
+            control.assert_awaited_once_with(
+                client_routes._resolve_avatar,
+                "user-1",
+                "version-1",
+            )
+
     def test_logout_expires_scoped_production_and_legacy_cookie_names(self):
         request = _json_request(
             {},

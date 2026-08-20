@@ -103,6 +103,23 @@ def _resolve_avatar(user_id: str, requested_version: str | None):
     return UserAvatarStore().resolve(user_id, requested_version)
 
 
+def _avatar_file_response(result, requested_version: str | None):
+    if result is None:
+        raise HTTPException(404, "Avatar not found.")
+    path, _, file_format = result
+    return FileResponse(
+        path,
+        media_type="image/gif" if file_format == "gif" else "image/webp",
+        headers={
+            "Cache-Control": (
+                "private, max-age=31536000, immutable"
+                if requested_version
+                else "private, no-cache"
+            )
+        },
+    )
+
+
 def _request_device_metadata(data: dict) -> dict | None:
     value = data.get("device")
     if not isinstance(value, dict):
@@ -559,20 +576,7 @@ async def user_avatar(user_id: str, request: Request):
     await _require_access(request)
     requested_version = request.query_params.get("v") or None
     result = await run_control(_resolve_avatar, user_id, requested_version)
-    if result is None:
-        raise HTTPException(404, "Avatar not found.")
-    path, _, file_format = result
-    return FileResponse(
-        path,
-        media_type="image/gif" if file_format == "gif" else "image/webp",
-        headers={
-            "Cache-Control": (
-                "private, max-age=31536000, immutable"
-                if requested_version
-                else "private, no-cache"
-            )
-        },
-    )
+    return _avatar_file_response(result, requested_version)
 
 
 @router.get("/api/auth/bootstrap")
@@ -1500,6 +1504,14 @@ async def admin_users(
 ):
     await run_auth(authenticate_admin_request, request, TOKEN)
     return {"users": await run_control(Account().list)}
+
+
+@router.get("/api/admin/users/{user_id}/avatar")
+async def admin_user_avatar(user_id: str, request: Request):
+    await run_auth(authenticate_admin_request, request)
+    requested_version = request.query_params.get("v") or None
+    result = await run_control(_resolve_avatar, user_id, requested_version)
+    return _avatar_file_response(result, requested_version)
 
 
 @router.post("/api/admin/users", status_code=201)

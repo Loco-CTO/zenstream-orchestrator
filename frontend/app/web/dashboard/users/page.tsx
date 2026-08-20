@@ -9,6 +9,7 @@ import {
 	IconTrash,
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { UserAvatar } from "../components/user-avatar";
 import {
 	ConfirmDialog,
 	DashboardModal,
@@ -21,6 +22,7 @@ import {
 type User = {
 	id: string;
 	username: string;
+	avatarVersion?: string | null;
 	disabled: boolean;
 	libraryIds: string[];
 };
@@ -294,11 +296,18 @@ export default function UsersPage() {
 				{filtered.map((user) => (
 					<SurfaceCard key={user.id} className="p-5">
 						<div className="flex items-center justify-between gap-4">
-							<div>
-								<p className="font-semibold">{user.username}</p>
+							<div className="flex min-w-0 items-center gap-3">
+								<UserAvatar
+									displayName={user.username}
+									userId={user.id}
+									avatarVersion={user.avatarVersion}
+								/>
+								<div className="min-w-0">
+									<p className="truncate font-semibold">{user.username}</p>
 								<p className="mt-1 text-xs console-muted">
 									{user.disabled ? "Disabled" : "Active"} · deny by default
 								</p>
+								</div>
 							</div>
 							<div className="flex items-center gap-2">
 								<span className="mr-2 text-xs console-muted">

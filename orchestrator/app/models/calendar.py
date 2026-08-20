@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+import shutil
 
 from app.config import Config
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, _fernet
@@ -164,23 +166,65 @@ class FutureMetadataCache:
                 payload = json.loads(raw_payload)
             except (TypeError, json.JSONDecodeError):
                 continue
-            if isinstance(payload, dict):
-                payload.pop("images", None)
             normal.put(provider, entity_type, provider_id, locale, payload)
+        image_rows = self.db.execute(
+            "SELECT locale,image_type,image_url,local_path,blur_hash FROM future_metadata_images "
+            "WHERE provider=? AND entity_type=? AND provider_id=?",
+            (provider, entity_type, provider_id),
+        )
+        db_file = getattr(self.db, "db_file", None)
+        if db_file and db_file != ":memory:":
+            from pathlib import Path
+
+            future_root = (Path(db_file).parent / "future-metadata-cache").resolve()
+            normal_root = Path(db_file).parent / "metadata-cache" / "images"
+            for locale, image_type, image_url, local_path, blur_hash in image_rows:
+                if not local_path:
+                    continue
+                source = Path(str(local_path))
+                try:
+                    source.resolve().relative_to(future_root)
+                except (OSError, ValueError):
+                    continue
+                if not source.is_file() or source.stat().st_size <= 0:
+                    continue
+                destination = (
+                    normal_root
+                    / f"{hashlib.sha256(str(image_url).encode('utf-8')).hexdigest()}.webp"
+                )
+                try:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if not destination.is_file() or destination.stat().st_size <= 0:
+                        shutil.copy2(source, destination)
+                    normal.put_image(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        image_type,
+                        image_url,
+                        blur_hash,
+                        str(destination),
+                    )
+                except OSError:
+                    continue
         self.delete_identity(provider, entity_type, provider_id)
         return len(rows)
 
     def prune_expired(self, before: str | None = None) -> int:
         cutoff = before or _iso_now()
         paths = self.db.execute(
-            "SELECT local_path FROM future_metadata_images WHERE local_path IS NOT NULL"
+            "SELECT local_path FROM future_metadata_images WHERE expires_at<? AND local_path IS NOT NULL",
+            (cutoff,),
         )
         with self.db.transaction() as cursor:
             cursor.execute(
                 "DELETE FROM future_metadata_cache WHERE expires_at<?", (cutoff,)
             )
             removed = max(0, cursor.rowcount)
-            cursor.execute("DELETE FROM future_metadata_images")
+            cursor.execute(
+                "DELETE FROM future_metadata_images WHERE expires_at<?", (cutoff,)
+            )
             removed += max(0, cursor.rowcount)
         root = getattr(self.db, "db_file", None)
         if root and root != ":memory:":

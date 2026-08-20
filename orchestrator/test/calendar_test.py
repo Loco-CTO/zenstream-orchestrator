@@ -1,3 +1,4 @@
+import json
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ from app.calendar import (
     calendar_window,
     parse_calendar_window,
 )
+from app.models.calendar import FutureMetadataCache
 
 
 class CalendarWindowTest(unittest.TestCase):
@@ -339,7 +341,6 @@ class CalendarFutureMetadataTest(unittest.TestCase):
         service.db = MagicMock()
         service.cache = MagicMock()
         service.metadata = MagicMock()
-        service._ingest_images = MagicMock()
         service._targets = MagicMock(
             return_value=[
                 ("tvdb", "episode", "episode-1"),
@@ -371,7 +372,6 @@ class CalendarFutureMetadataTest(unittest.TestCase):
         service.cache = MagicMock()
         service.metadata = MagicMock()
         service._targets = MagicMock(side_effect=AssertionError("unexpected scan"))
-        service._ingest_images = MagicMock()
         service.metadata.fetch_locales.return_value = {
             "en": {"title": "Episode title", "images": []}
         }
@@ -393,6 +393,21 @@ class CalendarFutureMetadataTest(unittest.TestCase):
             project=False,
             cache=service.cache,
         )
+
+    def test_future_cache_drops_artwork_references(self):
+        cache = FutureMetadataCache.__new__(FutureMetadataCache)
+        cache.db = MagicMock()
+
+        cache.put(
+            "tvdb",
+            "episode",
+            "episode-1",
+            "en",
+            {"title": "Episode title", "images": [{"url": "https://example/image"}]},
+        )
+
+        payload = cache.db.execute.call_args.args[1][4]
+        self.assertNotIn("images", json.loads(payload))
 
     def test_job_persists_progress_detail(self):
         class Store:

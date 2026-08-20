@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -772,7 +773,65 @@ class CalendarReadService:
         return selected["entityId"], series_id
 
     @staticmethod
-    def _catalog_date(payload: dict, entity_type: str) -> tuple[str, str] | None:
+    def _catalog_air_time(value) -> tuple[datetime, bool] | None:
+        if value is None or isinstance(value, bool):
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+        for candidate in (raw, f"1970-01-01T{raw}"):
+            try:
+                parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            return parsed, parsed.tzinfo is not None
+        for pattern in ("%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p", "%I %p"):
+            try:
+                return datetime.strptime(raw, pattern), False
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _catalog_timed_date(event_date: str, payload: dict) -> tuple[str, str, bool] | None:
+        utc_value = payload.get("airTimeUtc") or payload.get("airsTimeUTC")
+        local_value = payload.get("airTime") or payload.get("airsTime")
+        parsed = CalendarReadService._catalog_air_time(utc_value)
+        use_utc = parsed is not None
+        if parsed is None:
+            parsed = CalendarReadService._catalog_air_time(local_value)
+        if parsed is None:
+            return None
+        air_time, has_offset = parsed
+        if has_offset:
+            aware = air_time
+        else:
+            tzinfo = timezone.utc
+            if not use_utc:
+                zone_name = payload.get("airTimeZone") or payload.get("timeZone")
+                if zone_name:
+                    try:
+                        tzinfo = ZoneInfo(str(zone_name))
+                    except (TypeError, ValueError, ZoneInfoNotFoundError):
+                        tzinfo = timezone.utc
+            aware = air_time.replace(tzinfo=tzinfo)
+        date_value = datetime.strptime(event_date, "%Y-%m-%d").date()
+        combined = datetime.combine(date_value, aware.timetz()).astimezone(timezone.utc)
+        return combined.isoformat(), combined.date().isoformat(), False
+
+    @staticmethod
+    def _catalog_has_air_time(payload: dict) -> bool:
+        return any(
+            payload.get(field)
+            for field in ("airTimeUtc", "airsTimeUTC", "airTime", "airsTime")
+        )
+
+    @staticmethod
+    def _catalog_date(
+        payload: dict,
+        entity_type: str,
+        schedule_payload: dict | None = None,
+    ) -> tuple[str, str, bool] | None:
         if entity_type == "movie":
             fields = ("date", "releaseDate")
         elif entity_type == "series":
@@ -783,8 +842,16 @@ class CalendarReadService:
             parsed = _parse_datetime(payload.get(field))
             if not parsed:
                 continue
+            if parsed[2]:
+                timed = CalendarReadService._catalog_timed_date(parsed[1], payload)
+                if timed is None and schedule_payload is not None:
+                    timed = CalendarReadService._catalog_timed_date(
+                        parsed[1], schedule_payload
+                    )
+                if timed is not None:
+                    return timed
             event_date = parsed[1]
-            return f"{event_date}T00:00:00+00:00", event_date
+            return parsed[0], event_date, parsed[2]
         return None
 
     @staticmethod
@@ -881,17 +948,37 @@ class CalendarReadService:
         for entity_id, entity in grouped.items():
             payloads = entity["payloads"]
             locales = self._catalog_locale_order(locale, configured, list(payloads))
+            schedule_payload = None
+            if entity["kind"] == "episode" and entity["seriesId"]:
+                parent = grouped.get(entity["seriesId"])
+                if parent and parent["kind"] == "series":
+                    parent_locales = self._catalog_locale_order(
+                        locale, configured, list(parent["payloads"])
+                    )
+                    schedule_payload = next(
+                        (
+                            parent["payloads"][parent_locale]
+                            for parent_locale in parent_locales
+                            if parent["payloads"].get(parent_locale)
+                            and self._catalog_has_air_time(
+                                parent["payloads"][parent_locale]
+                            )
+                        ),
+                        None,
+                    )
             selected_payload = None
             parsed_date = None
             for candidate_locale in locales:
                 payload = payloads[candidate_locale]
-                parsed_date = self._catalog_date(payload, entity["kind"])
+                parsed_date = self._catalog_date(
+                    payload, entity["kind"], schedule_payload
+                )
                 if parsed_date and start_date.isoformat() <= parsed_date[1] <= end_date.isoformat():
                     selected_payload = payload
                     break
             if not selected_payload or not parsed_date:
                 continue
-            event_at, event_date = parsed_date
+            event_at, event_date, all_day = parsed_date
             if (entity_id, event_date) in provider_keys:
                 continue
             title = self._catalog_title(payloads, locales)
@@ -938,7 +1025,7 @@ class CalendarReadService:
                     }[kind],
                     "eventAt": event_at,
                     "eventDate": event_date,
-                    "allDay": True,
+                    "allDay": all_day,
                     "seasonNumber": season_number,
                     "episodeNumber": episode_number,
                     "hasFile": True,

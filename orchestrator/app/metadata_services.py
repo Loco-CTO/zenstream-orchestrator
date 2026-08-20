@@ -77,6 +77,8 @@ FACT_FIELDS = {
     "firstAired",
     "lastAired",
     "airTime",
+    "airTimeUtc",
+    "airTimeZone",
     "runtimeMinutes",
     "seasonNumber",
     "episodeNumber",

@@ -571,7 +571,7 @@ function LibraryViewPage() {
 									</div>
 								)}
 							</div>
-							<div className="mt-6 flex items-center justify-between border-t material-divider pt-4">
+							<div className="mt-6 flex items-center justify-between pt-4">
 								<span className="text-xs material-muted">
 									Page {page} of {pageCount}
 								</span>

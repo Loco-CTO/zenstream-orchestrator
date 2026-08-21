@@ -3250,8 +3250,9 @@ class Catalog:
             generations: list[tuple] = []
             if allowed and self._has_table("catalog_library_summary"):
                 placeholders = ",".join("?" for _ in allowed)
+                sort_order = self._library_sort_order_sql("l")
                 generations = self.db.execute(
-                    f"SELECT library_id,generation FROM catalog_library_summary WHERE library_id IN ({placeholders}) ORDER BY library_id",
+                    f"SELECT l.id,COALESCE(p.generation,0),COALESCE({sort_order},0) FROM libraries l LEFT JOIN catalog_library_summary p ON p.library_id=l.id WHERE l.id IN ({placeholders}) ORDER BY l.id",
                     sorted(allowed),
                 )
             with self._home_cache_lock:

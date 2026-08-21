@@ -561,6 +561,21 @@ class CatalogTest(unittest.TestCase):
         libraries = self.catalog().libraries(user_id)
         self.assertTrue(libraries[0]["supportsLastAdded"])
 
+    def test_libraries_sort_by_highest_order_first(self):
+        self.db.execute(
+            "ALTER TABLE libraries ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+        )
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES('user','allowed','now'),('user','hidden','now')"
+        )
+        self.db.execute("UPDATE libraries SET sort_order=7 WHERE id='allowed'")
+        self.db.execute("UPDATE libraries SET sort_order=-2 WHERE id='hidden'")
+
+        values = self.catalog().libraries("user")
+
+        self.assertEqual([value["id"] for value in values], ["allowed", "hidden"])
+        self.assertEqual([value["sortOrder"] for value in values], [7, -2])
+
     def test_date_values_cache_overlapping_roots(self):
         self.seed_series_hierarchy()
         self.db.execute(

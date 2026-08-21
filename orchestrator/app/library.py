@@ -603,7 +603,7 @@ class LibraryStore:
         watch_enabled: bool = True,
         interval: int = 1440,
         source_ids: Iterable[str] = (),
-        sort_order: int = 0,
+        sort_order: int | None = None,
     ) -> dict:
         name = name.strip()
         if not name or library_type not in LIBRARY_TYPES:
@@ -620,8 +620,9 @@ class LibraryStore:
                 raise ValueError("A directory is required for physical libraries.")
             directory = normalized_path(directory)
         interval = max(15, min(43200, int(interval or 1440)))
-        sort_order = self._normalize_sort_order(sort_order)
         supports_sort_order = self._library_sort_order_sql() == "sort_order"
+        if sort_order is not None:
+            sort_order = self._normalize_sort_order(sort_order)
         library_id = new_id()
         timestamp = now()
         with self.db.transaction() as cursor:
@@ -637,6 +638,11 @@ class LibraryStore:
                 if cursor.fetchone():
                     raise ValueError("A library already uses that directory.")
             if supports_sort_order:
+                if sort_order is None:
+                    row = cursor.execute(
+                        "SELECT MIN(sort_order) FROM libraries"
+                    ).fetchone()
+                    sort_order = int(row[0]) - 1 if row and row[0] is not None else 0
                 cursor.execute(
                     "INSERT INTO libraries(id,name,type,sort_order,directory,watch_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (
@@ -675,6 +681,35 @@ class LibraryStore:
                 cursor.execute(
                     "INSERT INTO library_sources(library_id,source_library_id) VALUES(?,?)",
                     (library_id, source_id),
+                )
+        return self.get(library_id)  # type: ignore[return-value]
+
+    def move(self, library_id: str, direction: str) -> dict:
+        if direction not in {"up", "down"}:
+            raise ValueError("direction must be 'up' or 'down'.")
+        if not self.get(library_id):
+            raise KeyError("Library not found")
+        if self._library_sort_order_sql() != "sort_order":
+            raise ValueError("Library ordering is unavailable until migrations finish.")
+
+        with self.db.transaction() as cursor:
+            rows = cursor.execute(
+                "SELECT id FROM libraries ORDER BY COALESCE(sort_order,0) DESC,name COLLATE NOCASE,id"
+            ).fetchall()
+            ordered_ids = [row[0] for row in rows]
+            index = ordered_ids.index(library_id)
+            target = index - 1 if direction == "up" else index + 1
+            if target < 0 or target >= len(ordered_ids):
+                return self.get(library_id)  # type: ignore[return-value]
+            ordered_ids[index], ordered_ids[target] = (
+                ordered_ids[target],
+                ordered_ids[index],
+            )
+            timestamp = now()
+            for position, ordered_id in enumerate(ordered_ids):
+                cursor.execute(
+                    "UPDATE libraries SET sort_order=?,updated_at=? WHERE id=?",
+                    (len(ordered_ids) - position, timestamp, ordered_id),
                 )
         return self.get(library_id)  # type: ignore[return-value]
 

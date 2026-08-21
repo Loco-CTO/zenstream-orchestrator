@@ -16,6 +16,7 @@ type Library = {
 	id: string;
 	name: string;
 	type: string;
+	sortOrder: number;
 	directory?: string | null;
 	watchEnabled: boolean;
 	scanIntervalMinutes: number;
@@ -49,6 +50,7 @@ export default function LibrariesPage() {
 	const [sources, setSources] = useState<string[]>([]);
 	const [watch, setWatch] = useState(true);
 	const [interval, setIntervalValue] = useState(1440);
+	const [sortOrder, setSortOrder] = useState(0);
 	const [message, setMessage] = useState("");
 	const [addModal, setAddModal] = useState(false);
 	const [deleteModal, setDeleteModal] = useState<Library | null>(null);
@@ -76,6 +78,7 @@ export default function LibrariesPage() {
 				sourceLibraryIds: type === "collection" ? sources : [],
 				watchEnabled: watch,
 				scanIntervalMinutes: interval,
+				sortOrder,
 			}),
 		});
 		setMessage(
@@ -88,9 +91,29 @@ export default function LibrariesPage() {
 			setName("");
 			setDirectory("");
 			setSources([]);
+			setSortOrder(0);
 			setAddModal(false);
 			void load();
 		}
+	}
+	async function saveSortOrder(library: Library) {
+		if (!session) return;
+		const response = await adminFetch(
+			`/api/admin/libraries/${library.id}`,
+			session,
+			{
+				method: "PATCH",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ sortOrder: library.sortOrder }),
+			},
+		);
+		setMessage(
+			response.ok
+				? `Order saved for ${library.name}.`
+				: (await response.json().catch(() => null))?.detail ||
+						"Could not save library order.",
+		);
+		if (response.ok) void load();
 	}
 	async function rescan(library: Library) {
 		if (!session) return;
@@ -275,6 +298,58 @@ export default function LibrariesPage() {
 								</div>
 							</div>
 							<div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+								<div
+									style={{
+										display: "inline-flex",
+										alignItems: "center",
+										gap: 6,
+										color: "#555",
+										fontSize: 10,
+										marginRight: 6,
+									}}
+									title="Higher values appear first"
+								>
+									Order
+									<input
+										type="number"
+										step={1}
+										value={library.sortOrder ?? 0}
+										onChange={(event) =>
+											setLibraries((current) =>
+												current.map((value) =>
+													value.id === library.id
+														? { ...value, sortOrder: Number(event.target.value) }
+														: value,
+												),
+											)
+										}
+										style={{
+											width: 54,
+											background: "#141414",
+											border: "1px solid #242424",
+											borderRadius: 6,
+											padding: "6px 7px",
+											color: "#aaa",
+											fontSize: 11,
+											fontFamily: "var(--font-mono)",
+										}}
+									/>
+									<button
+										type="button"
+										onClick={() => void saveSortOrder(library)}
+										style={{
+											border: "1px solid #242424",
+											background: "transparent",
+											color: "#777",
+											borderRadius: 6,
+											padding: "5px 7px",
+											fontSize: 10,
+											cursor: "pointer",
+										}}
+									>
+										Save
+									</button>
+								</div>
 								<Link
 									href={`/web/dashboard/libraries/view/?libraryId=${encodeURIComponent(library.id)}`}
 									aria-label={`Browse ${library.name}`}
@@ -359,6 +434,16 @@ export default function LibrariesPage() {
 							value={name}
 							onChange={(event) => setName(event.target.value)}
 							placeholder="Library name"
+							style={{ ...inputStyle, marginTop: 8 }}
+						/>
+					</label>
+					<label style={{ color: "#777", fontSize: 12 }}>
+						Display order (higher values appear first)
+						<input
+							type="number"
+							step={1}
+							value={sortOrder}
+							onChange={(event) => setSortOrder(Number(event.target.value))}
 							style={{ ...inputStyle, marginTop: 8 }}
 						/>
 					</label>

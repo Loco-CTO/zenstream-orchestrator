@@ -912,9 +912,7 @@ class CalendarReadService:
                         "seriesId": (
                             row[21]
                             if row[22] == "series"
-                            else row[19]
-                            if row[20] == "series"
-                            else None
+                            else row[19] if row[20] == "series" else None
                         ),
                     }
                 )

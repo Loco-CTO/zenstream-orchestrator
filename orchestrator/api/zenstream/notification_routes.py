@@ -42,6 +42,16 @@ async def update_notification(notification_id: str, request: Request):
     )
 
 
+@router.delete("/api/notifications/{notification_id}")
+async def delete_notification(notification_id: str, request: Request):
+    account = await _account(request)
+    return await run_control(
+        NotificationService().delete_notification,
+        account["id"],
+        notification_id,
+    )
+
+
 @router.post("/api/notifications/read-all")
 async def read_all_notifications(request: Request):
     account = await _account(request)

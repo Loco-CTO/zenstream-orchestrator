@@ -657,6 +657,23 @@ class NotificationService:
                 raise HTTPException(404, "Notification not found.")
         return {"id": notification_id, "readAt": value}
 
+    def delete_notification(self, user_id: str, notification_id: str) -> dict:
+        if not _table_exists(self.db, "notifications"):
+            raise HTTPException(404, "Notification not found.")
+        with self.db.transaction() as cursor:
+            if _table_exists(self.db, "notification_push_outbox"):
+                cursor.execute(
+                    "DELETE FROM notification_push_outbox WHERE notification_id=?",
+                    (notification_id,),
+                )
+            cursor.execute(
+                "DELETE FROM notifications WHERE id=? AND user_id=?",
+                (notification_id, user_id),
+            )
+            if cursor.rowcount != 1:
+                raise HTTPException(404, "Notification not found.")
+        return {"id": notification_id, "removed": True}
+
     def mark_all_read(self, user_id: str) -> dict:
         if _table_exists(self.db, "notifications"):
             with self.db.transaction() as cursor:

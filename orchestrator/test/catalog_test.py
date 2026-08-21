@@ -1776,10 +1776,10 @@ class CatalogTest(unittest.TestCase):
             0,
         )
         legacy = self.db.read_execute(
-            "SELECT favorite,played,play_count,played_leaf_count,position_seconds,duration_seconds,last_played_at FROM catalog_user_rollups WHERE user_id=? AND entity_id=?",
+            "SELECT favorite,played,play_count,played_leaf_count,unplayed_leaf_count,position_seconds,duration_seconds,last_played_at FROM catalog_user_rollups WHERE user_id=? AND entity_id=?",
             (account["id"], "movie"),
         )[0]
-        self.assertEqual(legacy, (1, 0, 0, 0, 0.0, 0.0, None))
+        self.assertEqual(legacy, (1, 0, 0, 0, 1, 0.0, 0.0, None))
         self.assertEqual(
             self.db.read_execute(
                 "SELECT COUNT(*) FROM catalog_user_rollups WHERE user_id=? AND favorite=0",

@@ -2216,7 +2216,7 @@ class Catalog:
                     (user_id,),
                 )
                 cursor.execute(
-                    "UPDATE catalog_user_rollups SET played=0,play_count=0,played_leaf_count=0,position_seconds=0,duration_seconds=0,last_played_at=NULL,updated_at=? WHERE user_id=? AND favorite=1",
+                    "UPDATE catalog_user_rollups SET played=0,play_count=0,played_leaf_count=0,unplayed_leaf_count=unplayed_leaf_count+played_leaf_count,position_seconds=0,duration_seconds=0,last_played_at=NULL,updated_at=? WHERE user_id=? AND favorite=1",
                     (now, user_id),
                 )
         self._invalidate_home_cache(user_id)

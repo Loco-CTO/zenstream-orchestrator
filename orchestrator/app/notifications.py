@@ -353,9 +353,7 @@ class NotificationService:
         return locales or ["en"]
 
     @classmethod
-    def _user_locales(
-        cls, executor, user_id: str
-    ) -> tuple[str, str, list[str]]:
+    def _user_locales(cls, executor, user_id: str) -> tuple[str, str, list[str]]:
         configured = cls._configured_metadata_locales(executor)
         metadata_language = None
         interface_locale = "en"
@@ -407,7 +405,11 @@ class NotificationService:
     @staticmethod
     def _notification_label(kind: str, interface_locale: str) -> str:
         if language_family(interface_locale) == "ja":
-            return "新しいエピソード" if kind == "new_episode" else "新しい映画が追加されました"
+            return (
+                "新しいエピソード"
+                if kind == "new_episode"
+                else "新しい映画が追加されました"
+            )
         return "New episode" if kind == "new_episode" else "New movie added"
 
     @classmethod

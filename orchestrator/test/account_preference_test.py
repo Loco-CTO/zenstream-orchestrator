@@ -45,9 +45,7 @@ class AccountPreferenceTest(unittest.TestCase):
 
     def test_watch_history_defaults_enabled_and_persists(self):
         self.assertEqual(self.preference.watch_history(), {"enabled": True})
-        self.assertEqual(
-            self.preference.set_watch_history(False), {"enabled": False}
-        )
+        self.assertEqual(self.preference.set_watch_history(False), {"enabled": False})
         self.assertEqual(self.preference.watch_history(), {"enabled": False})
 
     def test_watch_history_rejects_non_boolean_values(self):

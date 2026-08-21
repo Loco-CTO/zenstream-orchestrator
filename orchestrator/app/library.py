@@ -1069,22 +1069,6 @@ class LibraryScanner:
             removed = rejected | missing
             self._flush_publications()
             self._refresh_catalog_after_cleanup(library_id)
-            try:
-                from app.notifications import NotificationService
-
-                admission_candidates = (
-                    set(self._scan_delta["added"])
-                    | set(self._scan_delta["content_changed"])
-                )
-                NotificationService(self.db).record_admissions(admission_candidates)
-            except Exception:
-                # Notification persistence must not turn an otherwise complete
-                # catalog scan into a failed media admission.
-                logger.warning(
-                    "could not record catalog admissions library_id=%s",
-                    library_id,
-                    exc_info=True,
-                )
             self._set_stage(job_id, "Pruning local artwork cache")
             LocalArtworkCache(self.db).prune()
             from app.trickplay import TrickplayStore
@@ -1125,6 +1109,22 @@ class LibraryScanner:
             if removed:
                 self._refresh_dependent_collections(library_id)
             self.db.schedule_maintenance(scan_complete=True)
+            try:
+                from app.notifications import NotificationService
+
+                admission_candidates = (
+                    set(self._scan_delta["added"])
+                    | set(self._scan_delta["content_changed"])
+                )
+                NotificationService(self.db).record_admissions(admission_candidates)
+            except Exception:
+                # Notification persistence must not turn an otherwise complete
+                # catalog scan into a failed media admission.
+                logger.warning(
+                    "could not record catalog admissions library_id=%s",
+                    library_id,
+                    exc_info=True,
+                )
         except JobTerminated:
             self._scan_complete = False
             # A terminated traversal is not authoritative. Remove only rows

@@ -601,9 +601,7 @@ class NotificationService:
                 interface_locale,
                 configured,
             )
-            thumbnail = self._projection_primary_image(
-                self.db, row[4], metadata_locale
-            )
+            thumbnail = self._projection_primary_image(self.db, row[4], metadata_locale)
             if thumbnail is None and row[5]:
                 thumbnail = self._projection_primary_image(
                     self.db, row[5], metadata_locale

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
 import shutil
+from datetime import datetime, timedelta, timezone
 
 from app.config import Config
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache, _fernet

@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 import httpx
 from app.config import Config
 from app.logging_config import get_logger
-from app.notifications import FollowService
 from app.metadata_domain import (
     fallback_tiers,
     language_family,
@@ -25,6 +24,7 @@ from app.models.calendar import (
     encrypt_calendar_api_key,
 )
 from app.models.metadata import MetadataCache, MetadataLanguageSettings
+from app.notifications import FollowService
 from app.progress import format_progress_message
 from app.providers import MetadataService, ProviderError
 
@@ -948,9 +948,7 @@ class CalendarReadService:
                 catalog_item_id if value["kind"] == "movie" else catalog_series_id
             )
             follow_provider_id = (
-                value["tmdbId"]
-                if value["kind"] == "movie"
-                else value["seriesTvdbId"]
+                value["tmdbId"] if value["kind"] == "movie" else value["seriesTvdbId"]
             )
             follow_available = bool(follow_provider_id or follow_entity_id)
             value["followAvailable"] = follow_available

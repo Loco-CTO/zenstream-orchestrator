@@ -1,7 +1,6 @@
 import sqlalchemy as sa
 from alembic import op
 
-
 revision = "0038_follow_notifications"
 down_revision = "0037_calendar"
 branch_labels = None
@@ -22,7 +21,9 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["entity_id"], ["library_entities.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["entity_id"], ["library_entities.id"], ondelete="SET NULL"
+        ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
             "user_id",
@@ -63,7 +64,9 @@ def upgrade() -> None:
         sa.Column("library_id", sa.Text(), nullable=False),
         sa.Column("entity_type", sa.Text(), nullable=False),
         sa.Column("admitted_at", sa.Text(), nullable=False),
-        sa.ForeignKeyConstraint(["entity_id"], ["library_entities.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["entity_id"], ["library_entities.id"], ondelete="CASCADE"
+        ),
         sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("entity_id"),
         sa.CheckConstraint(
@@ -101,10 +104,16 @@ def upgrade() -> None:
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("read_at", sa.Text(), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["entity_id"], ["library_entities.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["series_id"], ["library_entities.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["entity_id"], ["library_entities.id"], ondelete="SET NULL"
+        ),
+        sa.ForeignKeyConstraint(
+            ["series_id"], ["library_entities.id"], ondelete="SET NULL"
+        ),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("user_id", "dedupe_key", name="uq_notifications_user_dedupe"),
+        sa.UniqueConstraint(
+            "user_id", "dedupe_key", name="uq_notifications_user_dedupe"
+        ),
         sa.CheckConstraint(
             "kind IN ('new_episode','new_movie')",
             name="ck_notifications_kind",
@@ -133,7 +142,9 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("endpoint", name="uq_notification_push_subscriptions_endpoint"),
+        sa.UniqueConstraint(
+            "endpoint", name="uq_notification_push_subscriptions_endpoint"
+        ),
     )
     op.create_index(
         "ix_notification_push_subscriptions_user",
@@ -179,7 +190,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_notification_push_outbox_due", table_name="notification_push_outbox")
+    op.drop_index(
+        "ix_notification_push_outbox_due", table_name="notification_push_outbox"
+    )
     op.drop_table("notification_push_outbox")
     op.drop_index(
         "ix_notification_push_subscriptions_user",

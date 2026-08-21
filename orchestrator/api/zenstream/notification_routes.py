@@ -5,7 +5,6 @@ from app.foreground import run_auth, run_control, run_foreground
 from app.notifications import NotificationService
 from fastapi import APIRouter, HTTPException, Query, Request
 
-
 router = APIRouter()
 
 
@@ -85,4 +84,3 @@ async def remove_push_subscription(
         account["id"],
         endpoint,
     )
-

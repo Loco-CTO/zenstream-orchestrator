@@ -22,6 +22,7 @@ class CatalogTest(unittest.TestCase):
             "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT,relative_path TEXT,season_number INTEGER,episode_number INTEGER,episode_end_number INTEGER,track_number INTEGER,created_at TEXT,updated_at TEXT)",
             "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,is_primary INTEGER)",
             "CREATE TABLE metadata_cache(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,payload TEXT,fetched_at TEXT,expires_at TEXT)",
+            "CREATE TABLE account_preferences(user_id TEXT PRIMARY KEY,watch_history_enabled INTEGER NOT NULL DEFAULT 1)",
             "CREATE TABLE user_item_state(user_id TEXT,entity_id TEXT,favorite INTEGER,played INTEGER,play_count INTEGER,position_seconds REAL,duration_seconds REAL,last_played_at TEXT,updated_at TEXT,PRIMARY KEY(user_id,entity_id))",
         ]
         for statement in statements:
@@ -1655,6 +1656,103 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(state["playCount"], 1)
         self.assertEqual(state["positionSeconds"], 0)
         self.assertIsNone(state["playedPercentage"])
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_progress_is_ignored_when_watch_history_is_disabled(self, _languages):
+        account = self.account().create("progress-disabled", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.seed_item()
+        self.db.execute(
+            "INSERT INTO account_preferences(user_id,watch_history_enabled) VALUES(?,0)",
+            (account["id"],),
+        )
+
+        state = self.catalog().update_progress(
+            account["id"], "movie", {"positionSeconds": 90, "durationSeconds": 100}
+        )
+
+        self.assertFalse(state["played"])
+        self.assertEqual(state["positionSeconds"], 0)
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM user_item_state WHERE user_id=?",
+                (account["id"],),
+            )[0][0],
+            0,
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_explicit_watched_state_remains_available_when_history_is_disabled(
+        self, _languages
+    ):
+        account = self.account().create("manual-disabled", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.seed_item()
+        self.db.execute(
+            "INSERT INTO account_preferences(user_id,watch_history_enabled) VALUES(?,0)",
+            (account["id"],),
+        )
+
+        state = self.catalog().update_state(account["id"], "movie", {"played": True})
+
+        self.assertTrue(state["played"])
+        self.assertEqual(state["playCount"], 1)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_clear_watch_history_preserves_favorites_and_follow_targets(
+        self, _languages
+    ):
+        account = self.account().create("clear-history", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.seed_item()
+        self.db.execute(
+            "CREATE TABLE user_follow_targets(user_id TEXT,entity_id TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO user_follow_targets VALUES(?,?)", (account["id"], "movie")
+        )
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (account["id"], "movie", 1, 1, 3, 40, 100, "played", "updated"),
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_user_summary(user_id TEXT,entity_id TEXT,played_leaf_count INTEGER)"
+        )
+        self.db.execute(
+            "INSERT INTO catalog_user_summary VALUES(?,?,?)",
+            (account["id"], "movie", 1),
+        )
+
+        self.catalog().clear_watch_history(account["id"])
+
+        state = self.db.read_execute(
+            "SELECT favorite,played,play_count,position_seconds,duration_seconds,last_played_at FROM user_item_state WHERE user_id=? AND entity_id=?",
+            (account["id"], "movie"),
+        )[0]
+        self.assertEqual(state, (1, 0, 0, 0.0, 0.0, None))
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM user_follow_targets WHERE user_id=?",
+                (account["id"],),
+            )[0][0],
+            1,
+        )
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM catalog_user_summary WHERE user_id=?",
+                (account["id"],),
+            )[0][0],
+            0,
+        )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_parent_state_cascades_and_unwatch_clears_descendant_progress(

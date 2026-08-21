@@ -201,6 +201,15 @@ class Catalog:
                     if key[0] != user_id
                 }
 
+    def _watch_history_enabled(self, user_id: str) -> bool:
+        if not self._has_table("account_preferences"):
+            return True
+        rows = self.db.execute(
+            "SELECT watch_history_enabled FROM account_preferences WHERE user_id=?",
+            (user_id,),
+        )
+        return not rows or bool(rows[0][0])
+
     def _context(self, user_id: str) -> _CatalogReadContext | None:
         context = self._read_context.get()
         return context if context and context.user_id == user_id else None
@@ -2164,6 +2173,53 @@ class Catalog:
             "pageSize": page_size,
             "total": len(values),
         }
+
+    def update_progress(self, user_id: str, entity_id: str, changes: dict) -> dict:
+        self.require_entity(user_id, entity_id)
+        if not isinstance(changes, dict):
+            raise HTTPException(400, "Invalid playback progress.")
+        try:
+            position = float(changes.get("positionSeconds"))
+            duration_value = changes.get("durationSeconds")
+            duration = 0.0 if duration_value is None else float(duration_value)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, "Invalid playback position.") from error
+        if not math.isfinite(position) or not math.isfinite(duration):
+            raise HTTPException(400, "Invalid playback position.")
+        if not self._watch_history_enabled(user_id):
+            result = self._state(user_id, entity_id)
+            if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+                result.pop("following", None)
+            return result
+        return self.update_state(user_id, entity_id, changes)
+
+    def clear_watch_history(self, user_id: str) -> None:
+        has_user_summary = self._has_table("catalog_user_summary")
+        has_legacy_rollups = self._has_table("catalog_user_rollups")
+        now = _now()
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM user_item_state WHERE user_id=? AND favorite=0",
+                (user_id,),
+            )
+            cursor.execute(
+                "UPDATE user_item_state SET played=0,play_count=0,position_seconds=0,duration_seconds=0,last_played_at=NULL,updated_at=? WHERE user_id=? AND favorite=1",
+                (now, user_id),
+            )
+            if has_user_summary:
+                cursor.execute(
+                    "DELETE FROM catalog_user_summary WHERE user_id=?", (user_id,)
+                )
+            if has_legacy_rollups:
+                cursor.execute(
+                    "DELETE FROM catalog_user_rollups WHERE user_id=? AND favorite=0",
+                    (user_id,),
+                )
+                cursor.execute(
+                    "UPDATE catalog_user_rollups SET played=0,play_count=0,played_leaf_count=0,position_seconds=0,duration_seconds=0,last_played_at=NULL,updated_at=? WHERE user_id=? AND favorite=1",
+                    (now, user_id),
+                )
+        self._invalidate_home_cache(user_id)
 
     def update_state(self, user_id: str, entity_id: str, changes: dict) -> dict:
         self.require_entity(user_id, entity_id)

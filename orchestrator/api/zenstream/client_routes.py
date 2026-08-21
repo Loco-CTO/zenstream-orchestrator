@@ -825,6 +825,24 @@ async def set_playback_preferences(request: Request):
         raise HTTPException(400, str(error)) from error
 
 
+@router.get("/api/preferences/watch-history")
+async def get_watch_history(request: Request):
+    account, _ = await _require_account(request)
+    return await run_control(AccountPreference(account["id"]).watch_history)
+
+
+@router.patch("/api/preferences/watch-history")
+async def set_watch_history(request: Request):
+    account, _ = await _require_account(request)
+    try:
+        return await run_control(
+            AccountPreference(account["id"]).set_watch_history,
+            (await _bounded_json_object(request)).get("enabled"),
+        )
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
 @router.get("/api/catalog/libraries")
 async def libraries(
     request: Request,
@@ -1180,6 +1198,21 @@ async def update_item_state(entity_id: str, request: Request):
     account, _ = await _require_account(request)
     state = await request.json()
     return await run_control(catalog.update_state, account["id"], entity_id, state)
+
+
+@router.patch("/api/catalog/items/{entity_id}/progress")
+async def update_item_progress(entity_id: str, request: Request):
+    account, _ = await _require_account(request)
+    progress = await _bounded_json_object(request)
+    return await run_control(
+        catalog.update_progress, account["id"], entity_id, progress
+    )
+
+
+@router.delete("/api/account/watch-history", status_code=204)
+async def clear_watch_history(request: Request):
+    account, _ = await _require_account(request)
+    await run_control(catalog.clear_watch_history, account["id"])
 
 
 @router.post("/api/playback/items/{entity_id}/negotiate")

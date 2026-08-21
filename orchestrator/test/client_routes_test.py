@@ -592,6 +592,7 @@ class ClientPreferenceRouteTest(unittest.TestCase):
                 "/api/preferences/metadata-language",
             ),
             (client_routes.set_subtitles, "/api/preferences/subtitles"),
+            (client_routes.set_watch_history, "/api/preferences/watch-history"),
         )
         with patch.object(
             client_routes,

@@ -61,6 +61,16 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "PRAGMA table_info(playback_settings)"
                     )
                 }
+                preference_columns = {
+                    row[1]: row
+                    for row in connection.execute(
+                        "PRAGMA table_info(account_preferences)"
+                    )
+                }
+                self.assertEqual(
+                    str(preference_columns["watch_history_enabled"][4]).strip("'\""),
+                    "1",
+                )
                 intro_outro_columns = {
                     row[1]: row
                     for row in connection.execute(

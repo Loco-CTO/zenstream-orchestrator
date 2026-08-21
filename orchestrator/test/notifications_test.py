@@ -95,6 +95,38 @@ class FollowAndNotificationTest(unittest.TestCase):
         self.assertEqual(item["title"], "New episode: 例のシリーズ")
         self.assertEqual(item["subtitle"], "S01E01 — パイロット")
 
+    def test_notifications_include_the_selected_primary_thumbnail(self):
+        self.seed_series_episode()
+        self.db.execute(
+            "UPDATE catalog_item_projection SET payload=? WHERE entity_id=? AND locale=?",
+            (
+                json.dumps(
+                    {
+                        "title": "Pilot",
+                        "images": {
+                            "Primary": {
+                                "url": "/api/catalog/items/episode/images/Primary?language=en",
+                                "blurHash": "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+                            }
+                        },
+                    }
+                ),
+                "episode",
+                "en",
+            ),
+        )
+        self.assertTrue(FollowService(self.db).set_for_entity("user", "series", True))
+
+        self.assertEqual(NotificationService(self.db).record_admissions({"episode"}), 1)
+        item = NotificationService(self.db).list("user")["items"][0]
+        self.assertEqual(
+            item["thumbnail"],
+            {
+                "url": "/api/catalog/items/episode/images/Primary?language=en",
+                "blurHash": "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
+            },
+        )
+
     def test_episode_follow_resolves_to_series_and_notifications_dedupe(self):
         self.seed_series_episode()
         follow = FollowService(self.db)

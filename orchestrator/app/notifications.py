@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -11,16 +9,6 @@ from app.config import Config
 from app.logging_config import get_logger
 from app.metadata_domain import fallback_tiers, language_family, locale_variants
 from fastapi import HTTPException
-
-try:  # Web Push is optional; in-app notifications must work without it.
-    from pywebpush import WebPushException, webpush
-except ImportError:  # pragma: no cover - exercised in minimal installations
-    WebPushException = Exception  # type: ignore[assignment,misc]
-    webpush = None  # type: ignore[assignment]
-
-
-logger = get_logger("notifications")
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -303,16 +291,6 @@ class FollowService:
 class NotificationService:
     def __init__(self, database=None):
         self.db = database or Config().database
-
-    @staticmethod
-    def push_config() -> dict:
-        public_key = os.getenv("WEB_PUSH_VAPID_PUBLIC_KEY", "").strip()
-        private_key = os.getenv("WEB_PUSH_VAPID_PRIVATE_KEY", "").strip()
-        subject = os.getenv("WEB_PUSH_VAPID_SUBJECT", "").strip()
-        return {
-            "configured": bool(public_key and private_key and subject),
-            "publicKey": public_key or None,
-        }
 
     @staticmethod
     def _fetch(executor, query: str, params=()):
@@ -661,11 +639,6 @@ class NotificationService:
         if not _table_exists(self.db, "notifications"):
             raise HTTPException(404, "Notification not found.")
         with self.db.transaction() as cursor:
-            if _table_exists(self.db, "notification_push_outbox"):
-                cursor.execute(
-                    "DELETE FROM notification_push_outbox WHERE notification_id=?",
-                    (notification_id,),
-                )
             cursor.execute(
                 "DELETE FROM notifications WHERE id=? AND user_id=?",
                 (notification_id, user_id),
@@ -683,71 +656,14 @@ class NotificationService:
                 )
         return self.summary(user_id)
 
-    def put_subscription(self, user_id: str, value: dict) -> dict:
-        if not _table_exists(self.db, "notification_push_subscriptions"):
-            raise HTTPException(503, "Push subscriptions are not available yet.")
-        endpoint = str(value.get("endpoint") or "").strip()
-        keys = value.get("keys")
-        if not endpoint or not isinstance(keys, dict):
-            raise HTTPException(400, "A Web Push subscription is required.")
-        p256dh = str(keys.get("p256dh") or "").strip()
-        auth = str(keys.get("auth") or "").strip()
-        if not p256dh or not auth or len(endpoint) > 2048:
-            raise HTTPException(400, "The Web Push subscription is invalid.")
-        expiration = value.get("expirationTime")
-        expiration_value = str(expiration) if expiration is not None else None
-        now = _now()
-        subscription_id = _id()
-        with self.db.transaction() as cursor:
-            cursor.execute(
-                "INSERT INTO notification_push_subscriptions "
-                "(id,user_id,endpoint,p256dh,auth,expiration_time,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET "
-                "user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth,"
-                "expiration_time=excluded.expiration_time,updated_at=excluded.updated_at",
-                (
-                    subscription_id,
-                    user_id,
-                    endpoint,
-                    p256dh,
-                    auth,
-                    expiration_value,
-                    now,
-                    now,
-                ),
-            )
-        return {"registered": True}
-
-    def delete_subscription(self, user_id: str, endpoint: str | None = None) -> dict:
-        if _table_exists(self.db, "notification_push_subscriptions"):
-            with self.db.transaction() as cursor:
-                if endpoint:
-                    cursor.execute(
-                        "DELETE FROM notification_push_subscriptions WHERE user_id=? AND endpoint=?",
-                        (user_id, endpoint),
-                    )
-                else:
-                    cursor.execute(
-                        "DELETE FROM notification_push_subscriptions WHERE user_id=?",
-                        (user_id,),
-                    )
-        return {"removed": True}
-
     def cleanup(self, retention_days: int) -> int:
         if not _table_exists(self.db, "notifications"):
             return 0
         cutoff = datetime.fromtimestamp(
             time.time() - max(1, retention_days) * 86400, tz=timezone.utc
         ).isoformat()
-        has_outbox = _table_exists(self.db, "notification_push_outbox")
         removed = 0
         with self.db.transaction() as cursor:
-            if has_outbox:
-                cursor.execute(
-                    "DELETE FROM notification_push_outbox WHERE state IN ('delivered','failed') "
-                    "AND created_at<?",
-                    (cutoff,),
-                )
             cursor.execute(
                 "DELETE FROM notifications WHERE read_at IS NOT NULL AND created_at<?",
                 (cutoff,),
@@ -800,7 +716,6 @@ class NotificationService:
             self.db, "user_follow_targets"
         ):
             return 0
-        has_outbox = _table_exists(self.db, "notification_push_outbox")
         now = _now()
         created = 0
         with self.db.transaction() as cursor:
@@ -922,145 +837,4 @@ class NotificationService:
                     if cursor.rowcount != 1:
                         continue
                     created += 1
-                    if has_outbox:
-                        subscriptions = cursor.execute(
-                            "SELECT id FROM notification_push_subscriptions WHERE user_id=?",
-                            (user_id,),
-                        ).fetchall()
-                        notification_row = cursor.execute(
-                            "SELECT id FROM notifications WHERE user_id=? AND dedupe_key=?",
-                            (user_id, f"admission:{row[0]}"),
-                        ).fetchone()
-                        if notification_row:
-                            for (subscription_id,) in subscriptions:
-                                cursor.execute(
-                                    "INSERT OR IGNORE INTO notification_push_outbox "
-                                    "(id,notification_id,subscription_id,state,attempts,next_attempt_at,last_error,created_at,delivered_at) "
-                                    "VALUES(?,?,?,?,?,?,?,?,?)",
-                                    (
-                                        _id(),
-                                        notification_row[0],
-                                        subscription_id,
-                                        "queued",
-                                        0,
-                                        now,
-                                        None,
-                                        now,
-                                        None,
-                                    ),
-                                )
         return created
-
-
-class PushDispatcher:
-    """Lifecycle-owned Web Push delivery for the durable notification outbox."""
-
-    MAX_ATTEMPTS = 8
-
-    def __init__(self, database=None):
-        self.db = database or Config().database
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            name="zenstream-push-dispatcher",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def stop(self, timeout: float = 5.0) -> None:
-        self._stop.set()
-        thread = self._thread
-        if thread:
-            thread.join(timeout=max(0.0, timeout))
-            if thread.is_alive():
-                logger.warning("push dispatcher did not stop before shutdown deadline")
-        self._thread = None
-
-    def _run(self) -> None:
-        while not self._stop.wait(2.0):
-            try:
-                self.dispatch_pending()
-            except Exception:
-                logger.warning("push outbox dispatch failed", exc_info=True)
-
-    def dispatch_pending(self) -> int:
-        config = NotificationService.push_config()
-        private_key = os.getenv("WEB_PUSH_VAPID_PRIVATE_KEY", "").strip()
-        subject = os.getenv("WEB_PUSH_VAPID_SUBJECT", "").strip()
-        if not config["configured"] or webpush is None:
-            return 0
-        if not _table_exists(self.db, "notification_push_outbox"):
-            return 0
-        now = _now()
-        rows = self.db.execute(
-            "SELECT o.id,o.notification_id,o.subscription_id,o.attempts,n.title,n.subtitle,"
-            "n.navigation_path,s.endpoint,s.p256dh,s.auth FROM notification_push_outbox o "
-            "JOIN notifications n ON n.id=o.notification_id "
-            "JOIN notification_push_subscriptions s ON s.id=o.subscription_id "
-            "WHERE o.state IN ('queued','retry') AND o.next_attempt_at<=? "
-            "ORDER BY o.created_at,o.id LIMIT 20",
-            (now,),
-        )
-        delivered = 0
-        for row in rows:
-            outbox_id, notification_id, subscription_id, attempts = row[:4]
-            with self.db.transaction() as cursor:
-                cursor.execute(
-                    "UPDATE notification_push_outbox SET state='retry',attempts=attempts+1 "
-                    "WHERE id=? AND state IN ('queued','retry')",
-                    (outbox_id,),
-                )
-                if cursor.rowcount != 1:
-                    continue
-            try:
-                webpush(
-                    subscription_info={
-                        "endpoint": row[7],
-                        "keys": {"p256dh": row[8], "auth": row[9]},
-                    },
-                    data=json.dumps(
-                        {
-                            "notificationId": notification_id,
-                            "title": row[4],
-                            "body": row[5],
-                            "url": row[6],
-                        }
-                    ),
-                    vapid_private_key=private_key,
-                    vapid_claims={"sub": subject},
-                )
-            except Exception as error:  # WebPushException differs by backend.
-                response = getattr(error, "response", None)
-                status = getattr(response, "status_code", None)
-                if status in {404, 410}:
-                    with self.db.transaction() as cursor:
-                        cursor.execute(
-                            "DELETE FROM notification_push_subscriptions WHERE id=?",
-                            (subscription_id,),
-                        )
-                    continue
-                next_attempts = int(attempts or 0) + 1
-                state = "failed" if next_attempts >= self.MAX_ATTEMPTS else "retry"
-                delay = min(3600, 2 ** min(next_attempts, 10))
-                retry_at = datetime.fromtimestamp(
-                    time.time() + delay, tz=timezone.utc
-                ).isoformat()
-                with self.db.transaction() as cursor:
-                    cursor.execute(
-                        "UPDATE notification_push_outbox SET state=?,next_attempt_at=?,last_error=? WHERE id=?",
-                        (state, retry_at, str(error)[:500], outbox_id),
-                    )
-                continue
-            with self.db.transaction() as cursor:
-                cursor.execute(
-                    "UPDATE notification_push_outbox SET state='delivered',delivered_at=?,last_error=NULL WHERE id=?",
-                    (_now(), outbox_id),
-                )
-            delivered += 1
-        return delivered

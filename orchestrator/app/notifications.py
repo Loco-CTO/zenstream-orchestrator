@@ -528,6 +528,47 @@ class NotificationService:
         )
         return title, cls._notification_label(kind, interface_locale)
 
+    @classmethod
+    def _projection_primary_image(
+        cls,
+        executor,
+        entity_id: str | None,
+        locale: str,
+    ) -> dict | None:
+        if not entity_id:
+            return None
+        if cls._has_table(executor, "catalog_item_projection"):
+            table = "catalog_item_projection"
+        elif cls._has_table(executor, "catalog_metadata_projection"):
+            table = "catalog_metadata_projection"
+        else:
+            return None
+        rows = cls._fetch(
+            executor,
+            f"SELECT payload FROM {table} WHERE entity_id=? AND locale=? LIMIT 1",
+            (entity_id, locale),
+        )
+        for (raw_payload,) in rows:
+            try:
+                payload = json.loads(raw_payload or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            images = payload.get("images")
+            primary = images.get("Primary") if isinstance(images, dict) else None
+            if not isinstance(primary, dict):
+                continue
+            url = primary.get("url")
+            if not isinstance(url, str) or not url.strip():
+                continue
+            thumbnail = {"url": url.strip()}
+            blur_hash = primary.get("blurHash")
+            if isinstance(blur_hash, str) and blur_hash.strip():
+                thumbnail["blurHash"] = blur_hash.strip()
+            return thumbnail
+        return None
+
     def list(self, user_id: str, limit: int = 50, cursor: str | None = None) -> dict:
         limit = max(1, min(100, int(limit)))
         try:
@@ -560,6 +601,13 @@ class NotificationService:
                 interface_locale,
                 configured,
             )
+            thumbnail = self._projection_primary_image(
+                self.db, row[4], metadata_locale
+            )
+            if thumbnail is None and row[5]:
+                thumbnail = self._projection_primary_image(
+                    self.db, row[5], metadata_locale
+                )
             items.append(
                 {
                     "id": row[0],
@@ -573,6 +621,7 @@ class NotificationService:
                     "createdAt": row[8],
                     "readAt": row[9],
                     "navigationTarget": row[10],
+                    "thumbnail": thumbnail,
                 }
             )
         unread = self.db.execute(

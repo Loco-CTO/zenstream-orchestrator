@@ -1184,6 +1184,10 @@ class PlaybackManager:
         if mode == "video-transcode":
             command.extend(
                 [
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-profile:v",
+                    "main",
                     "-preset",
                     "veryfast",
                     "-force_key_frames",

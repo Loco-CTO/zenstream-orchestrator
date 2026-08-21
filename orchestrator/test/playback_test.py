@@ -91,6 +91,41 @@ class PlaybackTest(unittest.TestCase):
         self.assertNotIn("init.mp4", " ".join(command))
         self.assertNotIn(".m4s", " ".join(command))
 
+    def test_video_transcode_forces_8_bit_main_profile_h264(self):
+        manager = object.__new__(PlaybackManager)
+        manager._segment_seconds = 4.0
+        spec = {
+            "source": {
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_type": "video",
+                        "codec_name": "hevc",
+                        "pix_fmt": "yuv420p10le",
+                        "profile": "Main 10",
+                    },
+                    {
+                        "index": 1,
+                        "codec_type": "audio",
+                        "codec_name": "aac",
+                        "channels": 2,
+                    },
+                ],
+                "width": 1920,
+                "height": 1080,
+            },
+            "profile": {},
+            "mode": "video-transcode",
+            "executable": "ffmpeg",
+            "path": Path("movie.mkv"),
+        }
+
+        command = manager._build_ffmpeg_command(spec, Path("worker"), 0)
+
+        self.assertEqual(command[command.index("-c:v") + 1], "libx264")
+        self.assertEqual(command[command.index("-pix_fmt") + 1], "yuv420p")
+        self.assertEqual(command[command.index("-profile:v") + 1], "main")
+
     def test_failed_session_output_returns_structured_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = object.__new__(PlaybackManager)

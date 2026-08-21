@@ -2020,7 +2020,9 @@ class LibraryScanner:
                 identifier_type = (
                     "movie"
                     if entity_type == "movie"
-                    else "series" if entity_type == "series" else entity_type
+                    else "series"
+                    if entity_type == "series"
+                    else entity_type
                 )
                 values.append((value["provider"], identifier_type, value["id"]))
             self._ids(entity_id, values)

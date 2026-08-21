@@ -41,6 +41,23 @@ class AccountPreference:
         )
         return locale
 
+    def watch_history(self) -> dict:
+        rows = self.db.read_execute(
+            "SELECT watch_history_enabled FROM account_preferences WHERE user_id=?",
+            (self.user_id,),
+        )
+        return {"enabled": bool(rows[0][0]) if rows else True}
+
+    def set_watch_history(self, enabled: bool) -> dict:
+        if not isinstance(enabled, bool):
+            raise ValueError("Watch history enabled must be a boolean.")
+        self._ensure()
+        self.db.execute(
+            "UPDATE account_preferences SET watch_history_enabled=? WHERE user_id=?",
+            (int(enabled), self.user_id),
+        )
+        return self.watch_history()
+
     @staticmethod
     def _automatic(interface_locale: str, configured: list[str]) -> str:
         if not configured:

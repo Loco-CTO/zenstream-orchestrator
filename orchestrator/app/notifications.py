@@ -6,9 +6,9 @@ import uuid
 from datetime import datetime, timezone
 
 from app.config import Config
-from app.logging_config import get_logger
 from app.metadata_domain import fallback_tiers, language_family, locale_variants
 from fastapi import HTTPException
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()

@@ -94,11 +94,11 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "user_follow_targets",
                         "catalog_admissions",
                         "notifications",
-                        "notification_push_subscriptions",
-                        "notification_push_outbox",
                     }
                     <= tables
                 )
+                self.assertNotIn("notification_push_subscriptions", tables)
+                self.assertNotIn("notification_push_outbox", tables)
                 follow_columns = {
                     row[1]
                     for row in connection.execute(

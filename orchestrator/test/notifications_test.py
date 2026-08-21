@@ -21,8 +21,6 @@ class FollowAndNotificationTest(unittest.TestCase):
             "CREATE TABLE user_follow_targets(id TEXT PRIMARY KEY,user_id TEXT,library_id TEXT,target_type TEXT,provider TEXT,provider_id TEXT,entity_id TEXT,created_at TEXT,updated_at TEXT,UNIQUE(user_id,library_id,target_type,provider,provider_id))",
             "CREATE TABLE catalog_admissions(entity_id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT,admitted_at TEXT)",
             "CREATE TABLE notifications(id TEXT PRIMARY KEY,user_id TEXT,kind TEXT,entity_id TEXT,series_id TEXT,title TEXT,subtitle TEXT,season_number INTEGER,episode_number INTEGER,navigation_path TEXT,dedupe_key TEXT,created_at TEXT,read_at TEXT,UNIQUE(user_id,dedupe_key))",
-            "CREATE TABLE notification_push_subscriptions(id TEXT PRIMARY KEY,user_id TEXT,endpoint TEXT UNIQUE,p256dh TEXT,auth TEXT,expiration_time TEXT,created_at TEXT,updated_at TEXT)",
-            "CREATE TABLE notification_push_outbox(id TEXT PRIMARY KEY,notification_id TEXT,subscription_id TEXT,state TEXT,attempts INTEGER,next_attempt_at TEXT,last_error TEXT,created_at TEXT,delivered_at TEXT,UNIQUE(notification_id,subscription_id))",
             "CREATE TABLE calendar_events(id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,tvdb_id TEXT,tmdb_id TEXT,series_tvdb_id TEXT)",
             "CREATE TABLE calendar_event_entities(event_id TEXT,entity_id TEXT)",
         ]
@@ -139,25 +137,11 @@ class FollowAndNotificationTest(unittest.TestCase):
         self.assertTrue(follow.following_for_entity("user", "episode"))
 
         notifications = NotificationService(self.db)
-        self.assertEqual(
-            notifications.put_subscription(
-                "user",
-                {
-                    "endpoint": "https://push.example/subscription",
-                    "keys": {"p256dh": "key", "auth": "auth"},
-                },
-            ),
-            {"registered": True},
-        )
         self.assertEqual(notifications.record_admissions({"episode"}), 1)
         self.assertEqual(notifications.record_admissions({"episode"}), 0)
         page = notifications.list("user")
         self.assertEqual(page["unreadCount"], 1)
         self.assertEqual(page["items"][0]["kind"], "new_episode")
-        self.assertEqual(
-            self.db.execute("SELECT COUNT(*) FROM notification_push_outbox")[0][0],
-            1,
-        )
 
         notification_id = page["items"][0]["id"]
         self.assertEqual(

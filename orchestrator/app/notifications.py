@@ -638,7 +638,6 @@ class NotificationService:
     def delete_notification(self, user_id: str, notification_id: str) -> dict:
         if not _table_exists(self.db, "notifications"):
             raise HTTPException(404, "Notification not found.")
-        has_outbox = _table_exists(self.db, "notification_push_outbox")
         with self.db.transaction() as cursor:
             notification = cursor.execute(
                 "SELECT 1 FROM notifications WHERE id=? AND user_id=?",
@@ -646,11 +645,6 @@ class NotificationService:
             ).fetchone()
             if not notification:
                 raise HTTPException(404, "Notification not found.")
-            if has_outbox:
-                cursor.execute(
-                    "DELETE FROM notification_push_outbox WHERE notification_id=?",
-                    (notification_id,),
-                )
             cursor.execute(
                 "DELETE FROM notifications WHERE id=?",
                 (notification_id,),

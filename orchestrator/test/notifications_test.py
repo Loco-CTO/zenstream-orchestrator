@@ -159,6 +159,25 @@ class FollowAndNotificationTest(unittest.TestCase):
         )
         self.assertEqual(len(notifications.list("user")["items"]), 1)
 
+    def test_delete_notification_removes_record(self):
+        self.seed_series_episode()
+        self.assertTrue(FollowService(self.db).set_for_entity("user", "series", True))
+        notifications = NotificationService(self.db)
+        self.assertEqual(notifications.record_admissions({"episode"}), 1)
+        notification_id = notifications.list("user")["items"][0]["id"]
+
+        self.assertEqual(
+            notifications.delete_notification("user", notification_id),
+            {"id": notification_id, "removed": True},
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT COUNT(*) FROM notifications WHERE id=?", (notification_id,)
+            )[0][0],
+            0,
+        )
+        self.assertEqual(notifications.list("user")["items"], [])
+
     def test_future_movie_calendar_follow_uses_tmdb_identity(self):
         self.db.execute(
             "INSERT INTO calendar_events VALUES(?,?,?,?,?,?)",

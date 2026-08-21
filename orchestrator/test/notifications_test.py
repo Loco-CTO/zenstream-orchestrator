@@ -113,3 +113,20 @@ class FollowAndNotificationTest(unittest.TestCase):
             ),
             [("movie", "tmdb", "movie-tmdb", None)],
         )
+
+    def test_future_series_follow_merges_to_admitted_series(self):
+        self.db.execute(
+            "INSERT INTO calendar_events VALUES(?,?,?,?,?,?)",
+            ("episode-event", "library", "episode", "episode-tvdb", None, "series-tvdb"),
+        )
+        follow = FollowService(self.db)
+        self.assertTrue(follow.set_for_calendar_event("user", "episode-event", True))
+
+        self.seed_series_episode()
+        self.assertEqual(NotificationService(self.db).record_admissions({"episode"}), 1)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT entity_id FROM user_follow_targets WHERE provider='tvdb' AND provider_id='series-tvdb'"
+            ),
+            [("series",)],
+        )

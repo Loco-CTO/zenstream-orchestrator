@@ -549,6 +549,20 @@ class NotificationService:
                 if not provider_id:
                     provider = "entity"
                     provider_id = target_entity_id
+                elif target_entity_id:
+                    cursor.execute(
+                        "UPDATE user_follow_targets SET entity_id=?,updated_at=? "
+                        "WHERE library_id=? AND target_type=? AND provider=? "
+                        "AND provider_id=? AND entity_id IS NULL",
+                        (
+                            target_entity_id,
+                            now,
+                            row[1],
+                            target_type,
+                            provider,
+                            provider_id,
+                        ),
+                    )
                 matches = cursor.execute(
                     "SELECT DISTINCT f.user_id FROM user_follow_targets f "
                     "JOIN user_library_access access ON access.user_id=f.user_id "

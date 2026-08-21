@@ -76,6 +76,14 @@ def upgrade() -> None:
         "catalog_admissions",
         ["library_id", "admitted_at"],
     )
+    op.execute(
+        sa.text(
+            "INSERT INTO catalog_admissions(entity_id,library_id,entity_type,admitted_at) "
+            "SELECT e.id,e.library_id,e.entity_type,e.created_at "
+            "FROM library_entities e WHERE e.entity_type IN ('movie','episode') "
+            "AND EXISTS (SELECT 1 FROM media_files m WHERE m.entity_id=e.id AND m.role='media')"
+        )
+    )
 
     op.create_table(
         "notifications",

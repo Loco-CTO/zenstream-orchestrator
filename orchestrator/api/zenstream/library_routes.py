@@ -224,7 +224,7 @@ def _create_library_sync(values: dict):
         bool(values.get("watchEnabled", True)),
         int(values.get("scanIntervalMinutes") or 1440),
         values.get("sourceLibraryIds") or [],
-        values.get("sortOrder", 0),
+        values.get("sortOrder"),
     )
     scheduler.refresh_library_definition(library)
     runtime.refresh_watchers()
@@ -276,6 +276,12 @@ def _scan_library_sync(library_id: str):
         library_id,
         "collection_rebuild" if library["type"] == "collection" else "scan",
     )
+
+
+def _move_library_sync(library_id: str, direction: str):
+    library = store.move(library_id, direction)
+    library["sourceLibraryIds"] = store.sources(library_id)
+    return library
 
 
 def _list_jobs_sync():
@@ -898,6 +904,25 @@ async def scan_library(
 ):
     require_admin(Username, TOKEN)
     return await run_control(_scan_library_sync, library_id)
+
+
+@router.post("/libraries/{library_id}/move")
+async def move_library(
+    library_id: str,
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    try:
+        values = await request.json()
+        return await run_control(
+            _move_library_sync, library_id, str(values.get("direction") or "")
+        )
+    except KeyError as error:
+        raise HTTPException(404, str(error)) from error
+    except (ValueError, TypeError) as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.get("/library-jobs/{job_id}")

@@ -12,6 +12,8 @@ class FollowAndNotificationTest(unittest.TestCase):
             "CREATE TABLE users(id TEXT PRIMARY KEY)",
             "CREATE TABLE libraries(id TEXT PRIMARY KEY)",
             "CREATE TABLE user_library_access(user_id TEXT,library_id TEXT)",
+            "CREATE TABLE account_preferences(user_id TEXT PRIMARY KEY,locale TEXT NOT NULL DEFAULT 'en',metadata_language TEXT)",
+            "CREATE TABLE metadata_settings(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT)",
             "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT,relative_path TEXT,season_number INTEGER,episode_number INTEGER)",
             "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,is_primary INTEGER)",
             "CREATE TABLE media_files(entity_id TEXT,role TEXT)",
@@ -55,6 +57,43 @@ class FollowAndNotificationTest(unittest.TestCase):
             "INSERT INTO catalog_item_projection VALUES(?,?,?)",
             ("episode", "en", json.dumps({"title": "Pilot"})),
         )
+
+    def test_notifications_use_each_users_metadata_locale(self):
+        self.seed_series_episode()
+        self.db.execute(
+            "INSERT INTO metadata_settings(key,value,updated_at) VALUES(?,?,?)",
+            ("locales", json.dumps(["en", "ja"]), "now"),
+        )
+        self.db.execute(
+            "INSERT INTO account_preferences(user_id,locale,metadata_language) VALUES(?,?,?)",
+            ("user", "ja", "ja"),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("series", "ja", json.dumps({"title": "例のシリーズ"})),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("episode", "ja", json.dumps({"title": "パイロット"})),
+        )
+
+        follow = FollowService(self.db)
+        self.assertTrue(follow.set_for_entity("user", "series", True))
+        notifications = NotificationService(self.db)
+        self.assertEqual(notifications.record_admissions({"episode"}), 1)
+        item = notifications.list("user")["items"][0]
+        self.assertEqual(item["title"], "新しいエピソード: 例のシリーズ")
+        self.assertEqual(item["subtitle"], "S01E01 — パイロット")
+
+        # The display snapshot is re-resolved when read, so changing the
+        # preference also fixes notifications that were created earlier.
+        self.db.execute(
+            "UPDATE account_preferences SET locale=?,metadata_language=? WHERE user_id=?",
+            ("en", "ja", "user"),
+        )
+        item = notifications.list("user")["items"][0]
+        self.assertEqual(item["title"], "New episode: 例のシリーズ")
+        self.assertEqual(item["subtitle"], "S01E01 — パイロット")
 
     def test_episode_follow_resolves_to_series_and_notifications_dedupe(self):
         self.seed_series_episode()

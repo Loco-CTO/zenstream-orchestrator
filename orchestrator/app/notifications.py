@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from app.config import Config
 from app.logging_config import get_logger
+from app.metadata_domain import fallback_tiers, language_family, locale_variants
 from fastapi import HTTPException
 
 try:  # Web Push is optional; in-app notifications must work without it.
@@ -313,6 +314,218 @@ class NotificationService:
             "publicKey": public_key or None,
         }
 
+    @staticmethod
+    def _fetch(executor, query: str, params=()):
+        result = executor.execute(query, params)
+        return result.fetchall() if hasattr(result, "fetchall") else result
+
+    @classmethod
+    def _has_table(cls, executor, name: str) -> bool:
+        return bool(
+            cls._fetch(
+                executor,
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            )
+        )
+
+    @classmethod
+    def _configured_metadata_locales(cls, executor) -> list[str]:
+        if not cls._has_table(executor, "metadata_settings"):
+            return ["en"]
+        try:
+            rows = cls._fetch(
+                executor,
+                "SELECT value FROM metadata_settings WHERE key='locales'",
+            )
+            values = json.loads(rows[0][0]) if rows else ["en"]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ["en"]
+        if not isinstance(values, list):
+            return ["en"]
+        locales: list[str] = []
+        for value in values:
+            locale = str(value or "").strip()
+            if locale and locale.casefold() not in {
+                item.casefold() for item in locales
+            }:
+                locales.append(locale)
+        return locales or ["en"]
+
+    @classmethod
+    def _user_locales(
+        cls, executor, user_id: str
+    ) -> tuple[str, str, list[str]]:
+        configured = cls._configured_metadata_locales(executor)
+        metadata_language = None
+        interface_locale = "en"
+        if cls._has_table(executor, "account_preferences"):
+            try:
+                rows = cls._fetch(
+                    executor,
+                    "SELECT metadata_language,locale FROM account_preferences WHERE user_id=?",
+                    (user_id,),
+                )
+            except Exception:
+                rows = []
+            if rows:
+                metadata_language, interface_locale = rows[0]
+                interface_locale = str(interface_locale or "en")
+
+        explicit = next(
+            (
+                value
+                for value in configured
+                if metadata_language is not None
+                and value.casefold() == str(metadata_language).casefold()
+            ),
+            None,
+        )
+        if explicit:
+            return explicit, interface_locale, configured
+
+        metadata_language = next(
+            (
+                value
+                for value in configured
+                if value.casefold() == interface_locale.casefold()
+            ),
+            None,
+        )
+        if metadata_language is None:
+            interface_family = language_family(interface_locale)
+            metadata_language = next(
+                (
+                    value
+                    for value in configured
+                    if language_family(value) == interface_family
+                ),
+                None,
+            )
+        return metadata_language or configured[0], interface_locale, configured
+
+    @staticmethod
+    def _notification_label(kind: str, interface_locale: str) -> str:
+        if language_family(interface_locale) == "ja":
+            return "新しいエピソード" if kind == "new_episode" else "新しい映画が追加されました"
+        return "New episode" if kind == "new_episode" else "New movie added"
+
+    @classmethod
+    def _projection_title(
+        cls,
+        executor,
+        entity_id: str | None,
+        fallback: str,
+        locale: str = "en",
+        configured: list[str] | None = None,
+    ) -> str:
+        if not entity_id:
+            return fallback
+        if not cls._has_table(executor, "catalog_item_projection"):
+            return fallback
+        rows = cls._fetch(
+            executor,
+            "SELECT locale,payload FROM catalog_item_projection WHERE entity_id=?",
+            (entity_id,),
+        )
+        payloads: dict[str, dict] = {}
+        for row_locale, raw_payload in rows:
+            try:
+                payload = json.loads(raw_payload or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict):
+                payloads[str(row_locale)] = payload
+        if not payloads:
+            return fallback
+
+        original = next(
+            (
+                str(payload["originalLanguage"])
+                for payload in payloads.values()
+                if payload.get("originalLanguage")
+            ),
+            None,
+        )
+        configured = configured or cls._configured_metadata_locales(executor)
+        tiers = fallback_tiers(
+            locale,
+            original,
+            media=False,
+            include_english=any(language_family(value) == "en" for value in configured),
+        )
+        for tier in tiers:
+            for candidate_locale in locale_variants(tier, payloads):
+                title = payloads[candidate_locale].get("title")
+                if title:
+                    return str(title)
+
+        for candidate_locale in sorted(payloads, key=str.casefold):
+            title = payloads[candidate_locale].get("title")
+            if title:
+                return str(title)
+        return fallback
+
+    @classmethod
+    def _notification_copy(
+        cls,
+        executor,
+        kind: str,
+        entity_id: str | None,
+        series_id: str | None,
+        stored_title: str | None,
+        stored_subtitle: str | None,
+        season: int | None,
+        episode: int | None,
+        metadata_locale: str,
+        interface_locale: str,
+        configured: list[str],
+    ) -> tuple[str, str]:
+        if kind == "new_episode":
+            series_fallback = str(stored_title or "")
+            for prefix in ("New episode: ", "新しいエピソード: "):
+                if series_fallback.startswith(prefix):
+                    series_fallback = series_fallback[len(prefix) :]
+                    break
+            episode_fallback = str(stored_subtitle or "")
+            if " — " in episode_fallback:
+                episode_fallback = episode_fallback.split(" — ", 1)[1]
+            series_title = cls._projection_title(
+                executor,
+                series_id,
+                series_fallback or "Series",
+                metadata_locale,
+                configured,
+            )
+            episode_title = cls._projection_title(
+                executor,
+                entity_id,
+                episode_fallback or "Episode",
+                metadata_locale,
+                configured,
+            )
+            try:
+                position = (
+                    f"S{int(season):02d}E{int(episode):02d}"
+                    if season is not None and episode is not None
+                    else "New episode"
+                )
+            except (TypeError, ValueError):
+                position = "New episode"
+            return (
+                f"{cls._notification_label(kind, interface_locale)}: {series_title}",
+                f"{position} — {episode_title}",
+            )
+
+        title = cls._projection_title(
+            executor,
+            entity_id,
+            str(stored_title or "New movie"),
+            metadata_locale,
+            configured,
+        )
+        return title, cls._notification_label(kind, interface_locale)
+
     def list(self, user_id: str, limit: int = 50, cursor: str | None = None) -> dict:
         limit = max(1, min(100, int(limit)))
         try:
@@ -327,22 +540,39 @@ class NotificationService:
             "WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
             (user_id, limit + 1, offset),
         )
-        items = [
-            {
-                "id": row[0],
-                "kind": row[1],
-                "title": row[2],
-                "subtitle": row[3],
-                "itemId": row[4],
-                "seriesId": row[5],
-                "seasonNumber": row[6],
-                "episodeNumber": row[7],
-                "createdAt": row[8],
-                "readAt": row[9],
-                "navigationTarget": row[10],
-            }
-            for row in rows[:limit]
-        ]
+        metadata_locale, interface_locale, configured = self._user_locales(
+            self.db, user_id
+        )
+        items = []
+        for row in rows[:limit]:
+            title, subtitle = self._notification_copy(
+                self.db,
+                row[1],
+                row[4],
+                row[5],
+                row[2],
+                row[3],
+                row[6],
+                row[7],
+                metadata_locale,
+                interface_locale,
+                configured,
+            )
+            items.append(
+                {
+                    "id": row[0],
+                    "kind": row[1],
+                    "title": title,
+                    "subtitle": subtitle,
+                    "itemId": row[4],
+                    "seriesId": row[5],
+                    "seasonNumber": row[6],
+                    "episodeNumber": row[7],
+                    "createdAt": row[8],
+                    "readAt": row[9],
+                    "navigationTarget": row[10],
+                }
+            )
         unread = self.db.execute(
             "SELECT COUNT(*) FROM notifications WHERE user_id=? AND read_at IS NULL",
             (user_id,),
@@ -458,24 +688,6 @@ class NotificationService:
         return int(removed or 0)
 
     @staticmethod
-    def _projection_title(cursor, entity_id: str | None, fallback: str) -> str:
-        if not entity_id:
-            return fallback
-        rows = cursor.execute(
-            "SELECT payload FROM catalog_item_projection WHERE entity_id=? "
-            "ORDER BY CASE WHEN locale='en' THEN 0 ELSE 1 END,locale LIMIT 1",
-            (entity_id,),
-        ).fetchall()
-        if rows:
-            try:
-                payload = json.loads(rows[0][0] or "{}")
-                if isinstance(payload, dict) and payload.get("title"):
-                    return str(payload["title"])
-            except (TypeError, ValueError, json.JSONDecodeError):
-                pass
-        return fallback
-
-    @staticmethod
     def _entity_row(cursor, entity_id: str | None):
         if not entity_id:
             return None
@@ -587,32 +799,37 @@ class NotificationService:
 
                 fallback = (row[4] or "").replace("\\", "/").rsplit("/", 1)[-1]
                 if target_type == "series":
-                    series_title = self._projection_title(
-                        cursor, target_entity_id, "Series"
-                    )
-                    episode_title = self._projection_title(cursor, row[0], fallback)
                     season = row[5]
                     episode = row[6]
-                    position = (
-                        f"S{int(season):02d}E{int(episode):02d}"
-                        if season is not None and episode is not None
-                        else "New episode"
-                    )
-                    title = f"New episode: {series_title}"
-                    subtitle = f"{position} — {episode_title}"
+                    stored_title = "New episode: Series"
+                    stored_subtitle = f"New episode — {fallback or 'Episode'}"
                     navigation = f"/show/{target_entity_id}/episode/{row[0]}"
                     kind = "new_episode"
                 else:
-                    title = self._projection_title(
-                        cursor, row[0], fallback or "New movie"
-                    )
-                    subtitle = "New movie added"
+                    stored_title = fallback or "New movie"
+                    stored_subtitle = "New movie added"
                     navigation = f"/show/{row[0]}"
                     season = None
                     episode = None
                     kind = "new_movie"
 
                 for (user_id,) in matches:
+                    metadata_locale, interface_locale, configured = self._user_locales(
+                        cursor, user_id
+                    )
+                    title, subtitle = self._notification_copy(
+                        cursor,
+                        kind,
+                        row[0],
+                        target_entity_id if target_type == "series" else None,
+                        stored_title,
+                        stored_subtitle,
+                        season,
+                        episode,
+                        metadata_locale,
+                        interface_locale,
+                        configured,
+                    )
                     notification_id = _id()
                     cursor.execute(
                         "INSERT OR IGNORE INTO notifications "

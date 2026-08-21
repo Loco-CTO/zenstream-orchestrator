@@ -62,35 +62,3 @@ async def read_all_notifications(request: Request):
 async def notification_summary(request: Request):
     account = await _account(request)
     return await run_foreground(NotificationService().summary, account["id"])
-
-
-@router.get("/api/notifications/push-config")
-async def notification_push_config(request: Request):
-    await _account(request)
-    return NotificationService.push_config()
-
-
-@router.put("/api/notifications/push-subscription")
-async def register_push_subscription(request: Request):
-    account = await _account(request)
-    data = await request.json()
-    if not isinstance(data, dict):
-        raise HTTPException(400, "The push subscription must be an object.")
-    return await run_control(
-        NotificationService().put_subscription,
-        account["id"],
-        data,
-    )
-
-
-@router.delete("/api/notifications/push-subscription")
-async def remove_push_subscription(
-    request: Request,
-    endpoint: str | None = Query(None),
-):
-    account = await _account(request)
-    return await run_control(
-        NotificationService().delete_subscription,
-        account["id"],
-        endpoint,
-    )

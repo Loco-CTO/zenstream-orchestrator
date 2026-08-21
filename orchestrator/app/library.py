@@ -687,7 +687,8 @@ class LibraryStore:
     def move(self, library_id: str, direction: str) -> dict:
         if direction not in {"up", "down"}:
             raise ValueError("direction must be 'up' or 'down'.")
-        if not self.get(library_id):
+        current = self.get(library_id)
+        if not current:
             raise KeyError("Library not found")
         if self._library_sort_order_sql() != "sort_order":
             raise ValueError("Library ordering is unavailable until migrations finish.")
@@ -700,7 +701,7 @@ class LibraryStore:
             index = ordered_ids.index(library_id)
             target = index - 1 if direction == "up" else index + 1
             if target < 0 or target >= len(ordered_ids):
-                return self.get(library_id)  # type: ignore[return-value]
+                return current
             ordered_ids[index], ordered_ids[target] = (
                 ordered_ids[target],
                 ordered_ids[index],

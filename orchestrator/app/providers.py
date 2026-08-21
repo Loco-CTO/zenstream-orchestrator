@@ -1445,7 +1445,9 @@ class MusicBrainzClient(ProviderClient):
             provider = (
                 "imdb"
                 if "imdb.com" in resource.lower()
-                else "tmdb" if "themoviedb.org" in resource.lower() else "tvdb"
+                else "tmdb"
+                if "themoviedb.org" in resource.lower()
+                else "tvdb"
             )
             external_ids.append(
                 {

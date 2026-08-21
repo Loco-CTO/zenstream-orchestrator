@@ -1649,7 +1649,7 @@ class CatalogTest(unittest.TestCase):
             (account["id"], "allowed", "now"),
         )
         self.seed_item()
-        state = self.catalog().update_state(
+        state = self.catalog().update_progress(
             account["id"], "movie", {"positionSeconds": 90, "durationSeconds": 100}
         )
         self.assertTrue(state["played"])
@@ -1725,11 +1725,26 @@ class CatalogTest(unittest.TestCase):
             (account["id"], "movie", 1, 1, 3, 40, 100, "played", "updated"),
         )
         self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (account["id"], "other", 0, 1, 2, 20, 100, "played", "updated"),
+        )
+        self.db.execute(
             "CREATE TABLE catalog_user_summary(user_id TEXT,entity_id TEXT,played_leaf_count INTEGER)"
         )
         self.db.execute(
             "INSERT INTO catalog_user_summary VALUES(?,?,?)",
             (account["id"], "movie", 1),
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_user_rollups(user_id TEXT,entity_id TEXT,favorite INTEGER,played INTEGER,play_count INTEGER,played_leaf_count INTEGER,unplayed_leaf_count INTEGER,position_seconds REAL,duration_seconds REAL,last_played_at TEXT,updated_at TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO catalog_user_rollups VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (account["id"], "movie", 1, 1, 3, 1, 0, 40, 100, "played", "updated"),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_user_rollups VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (account["id"], "other", 0, 1, 2, 1, 1, 20, 100, "played", "updated"),
         )
 
         self.catalog().clear_watch_history(account["id"])
@@ -1749,6 +1764,25 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(
             self.db.read_execute(
                 "SELECT COUNT(*) FROM catalog_user_summary WHERE user_id=?",
+                (account["id"],),
+            )[0][0],
+            0,
+        )
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM user_item_state WHERE user_id=? AND favorite=0",
+                (account["id"],),
+            )[0][0],
+            0,
+        )
+        legacy = self.db.read_execute(
+            "SELECT favorite,played,play_count,played_leaf_count,position_seconds,duration_seconds,last_played_at FROM catalog_user_rollups WHERE user_id=? AND entity_id=?",
+            (account["id"], "movie"),
+        )[0]
+        self.assertEqual(legacy, (1, 0, 0, 0, 0.0, 0.0, None))
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM catalog_user_rollups WHERE user_id=? AND favorite=0",
                 (account["id"],),
             )[0][0],
             0,

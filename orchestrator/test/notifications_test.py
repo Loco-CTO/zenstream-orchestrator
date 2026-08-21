@@ -89,7 +89,11 @@ class FollowAndNotificationTest(unittest.TestCase):
         )
 
         notification_id = page["items"][0]["id"]
-        self.assertEqual(notifications.mark_read("user", notification_id, True)["readAt"] is not None, True)
+        self.assertEqual(
+            notifications.mark_read("user", notification_id, True)["readAt"]
+            is not None,
+            True,
+        )
         self.assertEqual(notifications.summary("user")["unreadCount"], 0)
         notifications.mark_read("user", notification_id, False)
         self.assertEqual(notifications.mark_all_read("user")["unreadCount"], 0)
@@ -117,7 +121,14 @@ class FollowAndNotificationTest(unittest.TestCase):
     def test_future_series_follow_merges_to_admitted_series(self):
         self.db.execute(
             "INSERT INTO calendar_events VALUES(?,?,?,?,?,?)",
-            ("episode-event", "library", "episode", "episode-tvdb", None, "series-tvdb"),
+            (
+                "episode-event",
+                "library",
+                "episode",
+                "episode-tvdb",
+                None,
+                "series-tvdb",
+            ),
         )
         follow = FollowService(self.db)
         self.assertTrue(follow.set_for_calendar_event("user", "episode-event", True))

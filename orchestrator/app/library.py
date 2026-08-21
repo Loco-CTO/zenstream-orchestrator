@@ -883,15 +883,19 @@ class LibraryScanner:
             total = context.get("total")
             self.store.update_job(
                 job_id,
-                message=stage
-                if current is None or total is None
-                else f"{stage} · {current}/{total}",
-                progress_phase="finalization"
-                if any(
-                    token in stage.casefold()
-                    for token in ("prun", "refresh", "queue", "reconcil")
-                )
-                else "processing",
+                message=(
+                    stage
+                    if current is None or total is None
+                    else f"{stage} · {current}/{total}"
+                ),
+                progress_phase=(
+                    "finalization"
+                    if any(
+                        token in stage.casefold()
+                        for token in ("prun", "refresh", "queue", "reconcil")
+                    )
+                    else "processing"
+                ),
                 progress_label=stage,
                 progress_stage_current=current,
                 progress_stage_total=total,
@@ -1112,9 +1116,8 @@ class LibraryScanner:
             try:
                 from app.notifications import NotificationService
 
-                admission_candidates = (
-                    set(self._scan_delta["added"])
-                    | set(self._scan_delta["content_changed"])
+                admission_candidates = set(self._scan_delta["added"]) | set(
+                    self._scan_delta["content_changed"]
                 )
                 NotificationService(self.db).record_admissions(admission_candidates)
             except Exception:
@@ -2017,9 +2020,7 @@ class LibraryScanner:
                 identifier_type = (
                     "movie"
                     if entity_type == "movie"
-                    else "series"
-                    if entity_type == "series"
-                    else entity_type
+                    else "series" if entity_type == "series" else entity_type
                 )
                 values.append((value["provider"], identifier_type, value["id"]))
             self._ids(entity_id, values)
@@ -3583,11 +3584,15 @@ class LibraryScanner:
             season_dirs.append(series_dir)
         season_dirs.sort(
             key=lambda path: (
-                0
-                if path.name.lower() == "specials"
-                else int(SEASON_RE.match(path.name).group(1))
-                if SEASON_RE.match(path.name)
-                else 1,
+                (
+                    0
+                    if path.name.lower() == "specials"
+                    else (
+                        int(SEASON_RE.match(path.name).group(1))
+                        if SEASON_RE.match(path.name)
+                        else 1
+                    )
+                ),
                 1 if path == series_dir else 0,
                 path.name.casefold(),
             )
@@ -4298,9 +4303,11 @@ class LibraryScanner:
                     key = (
                         ("movie", str(entity.get("movieId")))
                         if entity.get("movieId")
-                        else ("series", str(entity.get("seriesId")))
-                        if entity.get("seriesId")
-                        else None
+                        else (
+                            ("series", str(entity.get("seriesId")))
+                            if entity.get("seriesId")
+                            else None
+                        )
                     )
                     if key and key in by_id:
                         members.append(by_id[key])
@@ -4379,9 +4386,11 @@ class LibraryScanner:
                         if self._scan_seen_ids
                         else "SELECT NULL"
                     ),
-                    [library_id, *self._scan_seen_ids]
-                    if self._scan_seen_ids
-                    else [library_id],
+                    (
+                        [library_id, *self._scan_seen_ids]
+                        if self._scan_seen_ids
+                        else [library_id]
+                    ),
                 )
             ]
             if stale:

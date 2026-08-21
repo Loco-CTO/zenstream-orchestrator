@@ -332,9 +332,11 @@ class Catalog:
         generation_table = (
             "catalog_library_summary"
             if self._has_table("catalog_library_summary")
-            else "catalog_projection_status"
-            if self._has_table("catalog_projection_status")
-            else None
+            else (
+                "catalog_projection_status"
+                if self._has_table("catalog_projection_status")
+                else None
+            )
         )
         generation = (
             self.db.execute(
@@ -399,9 +401,11 @@ class Catalog:
         generation_table = (
             "catalog_library_summary"
             if self._has_table("catalog_library_summary")
-            else "catalog_projection_status"
-            if self._has_table("catalog_projection_status")
-            else None
+            else (
+                "catalog_projection_status"
+                if self._has_table("catalog_projection_status")
+                else None
+            )
         )
         if rows and generation_table:
             generations = {
@@ -504,9 +508,11 @@ class Catalog:
         projection_table = (
             "catalog_item_projection"
             if self._read_model_ready() and self._has_table("catalog_item_projection")
-            else "catalog_metadata_projection"
-            if self._has_table("catalog_metadata_projection")
-            else None
+            else (
+                "catalog_metadata_projection"
+                if self._has_table("catalog_metadata_projection")
+                else None
+            )
         )
         if projection_table and not projection_loaded:
             rows = self.db.execute(
@@ -1176,9 +1182,11 @@ class Catalog:
         table = (
             "catalog_item_projection"
             if self._read_model_ready() and self._has_table("catalog_item_projection")
-            else "catalog_metadata_projection"
-            if self._has_table("catalog_metadata_projection")
-            else None
+            else (
+                "catalog_metadata_projection"
+                if self._has_table("catalog_metadata_projection")
+                else None
+            )
         )
         if table is None:
             return
@@ -2257,9 +2265,11 @@ class Catalog:
                         play_count,
                         state["positionSeconds"],
                         state["durationSeconds"],
-                        now
-                        if state["positionSeconds"] or next_played
-                        else state.get("lastPlayedAt"),
+                        (
+                            now
+                            if state["positionSeconds"] or next_played
+                            else state.get("lastPlayedAt")
+                        ),
                         now,
                     ),
                 )
@@ -2568,9 +2578,11 @@ class Catalog:
         item_children = (
             [value[0] for value in season_rows]
             if row[0] == root_row[0] and root_row[3] == "series"
-            else [value[0] for value in collection_rows]
-            if row[3] == "collection"
-            else []
+            else (
+                [value[0] for value in collection_rows]
+                if row[3] == "collection"
+                else []
+            )
         )
         item = self._serialize(
             user_id, row, item_metadata, item_children, language=language

@@ -664,9 +664,7 @@ class ClientPreferenceRouteTest(unittest.TestCase):
         control.assert_awaited_once_with(preference.set_watch_history, False)
 
     def test_clear_watch_history_returns_no_content_through_the_control_lane(self):
-        request = _json_request(
-            {}, method="DELETE", path="/api/account/watch-history"
-        )
+        request = _json_request({}, method="DELETE", path="/api/account/watch-history")
         with (
             patch.object(
                 client_routes,

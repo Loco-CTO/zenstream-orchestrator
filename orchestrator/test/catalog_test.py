@@ -1714,9 +1714,7 @@ class CatalogTest(unittest.TestCase):
             (account["id"], "allowed", "now"),
         )
         self.seed_item()
-        self.db.execute(
-            "CREATE TABLE user_follow_targets(user_id TEXT,entity_id TEXT)"
-        )
+        self.db.execute("CREATE TABLE user_follow_targets(user_id TEXT,entity_id TEXT)")
         self.db.execute(
             "INSERT INTO user_follow_targets VALUES(?,?)", (account["id"], "movie")
         )

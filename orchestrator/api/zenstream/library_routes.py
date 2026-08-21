@@ -224,6 +224,7 @@ def _create_library_sync(values: dict):
         bool(values.get("watchEnabled", True)),
         int(values.get("scanIntervalMinutes") or 1440),
         values.get("sourceLibraryIds") or [],
+        values.get("sortOrder", 0),
     )
     scheduler.refresh_library_definition(library)
     runtime.refresh_watchers()
@@ -247,10 +248,11 @@ def _get_library_sync(library_id: str):
 
 def _update_library_sync(library_id: str, values: dict):
     library = store.update(library_id, values)
-    runtime.enqueue(
-        library_id,
-        "collection_rebuild" if library["type"] == "collection" else "scan",
-    )
+    if set(values) != {"sortOrder"}:
+        runtime.enqueue(
+            library_id,
+            "collection_rebuild" if library["type"] == "collection" else "scan",
+        )
     scheduler.refresh_library_definition(library)
     runtime.refresh_watchers()
     library["sourceLibraryIds"] = store.sources(library_id)

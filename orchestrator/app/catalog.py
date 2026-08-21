@@ -253,6 +253,18 @@ class Catalog:
     def _has_table(self, name: str) -> bool:
         return self._table_exists(name)
 
+    def _library_sort_order_sql(self, alias: str | None = None) -> str:
+        """Use the persisted order when available, with a legacy-schema fallback."""
+
+        cache_name = "_library_has_sort_order"
+        if not hasattr(self, cache_name):
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(libraries)")
+            }
+            setattr(self, cache_name, "sort_order" in columns)
+        column = f"{alias}.sort_order" if alias else "sort_order"
+        return column if getattr(self, cache_name) else "0"
+
     def _read_model_ready(self) -> bool:
         context = self._read_context.get()
         if context and context.read_model_ready is not None:
@@ -331,8 +343,9 @@ class Catalog:
     def require_library(self, user_id: str, library_id: str) -> dict:
         if library_id not in self.allowed_libraries(user_id):
             raise HTTPException(404, "Library not found.")
+        sort_order = self._library_sort_order_sql()
         rows = self.db.execute(
-            "SELECT id,name,type,scan_state,last_scan_finished_at FROM libraries WHERE id=?",
+            f"SELECT id,name,type,{sort_order} AS sort_order,scan_state,last_scan_finished_at FROM libraries WHERE id=?",
             (library_id,),
         )
         if not rows:
@@ -368,8 +381,9 @@ class Catalog:
             "id": row[0],
             "name": row[1],
             "type": row[2],
-            "scanState": row[3],
-            "lastScanFinishedAt": row[4],
+            "sortOrder": int(row[3] or 0),
+            "scanState": row[4],
+            "lastScanFinishedAt": row[5],
             "supportsLastAdded": library_id in supported,
             "catalogGeneration": int(generation[0][0]) if generation else 0,
         }
@@ -393,8 +407,9 @@ class Catalog:
         allowed = self.allowed_libraries(user_id)
         if not allowed:
             return []
+        sort_order = self._library_sort_order_sql()
         rows = self.db.execute(
-            f"SELECT id,name,type,scan_state,last_scan_finished_at FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) AND type IN ('movies','tv_series','collection') ORDER BY name COLLATE NOCASE",
+            f"SELECT id,name,type,{sort_order} AS sort_order,scan_state,last_scan_finished_at FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) AND type IN ('movies','tv_series','collection') ORDER BY COALESCE({sort_order},0) DESC,name COLLATE NOCASE,id",
             list(allowed),
         )
         context = self._context(user_id)
@@ -429,8 +444,9 @@ class Catalog:
                 "id": row[0],
                 "name": row[1],
                 "type": row[2],
-                "scanState": row[3],
-                "lastScanFinishedAt": row[4],
+                "sortOrder": int(row[3] or 0),
+                "scanState": row[4],
+                "lastScanFinishedAt": row[5],
                 "supportsLastAdded": row[0] in supported,
                 "catalogGeneration": generations.get(row[0], 0),
             }

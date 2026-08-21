@@ -527,6 +527,24 @@ class LibraryStore:
         self.db = Config().database
         self._progress: dict[str, WholeJobProgress] = {}
 
+    def _library_sort_order_sql(self) -> str:
+        """Return the sort-order column when the current schema supports it."""
+
+        if not hasattr(self, "_library_columns"):
+            self._library_columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(libraries)")
+            }
+        return "sort_order" if "sort_order" in self._library_columns else "0"
+
+    @staticmethod
+    def _normalize_sort_order(value, default: int = 0) -> int:
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError("sortOrder must be an integer.") from error
+
     def begin_progress(self, job_id: str, kind: str) -> None:
         if not hasattr(self, "_progress"):
             self._progress = {}
@@ -536,8 +554,9 @@ class LibraryStore:
         getattr(self, "_progress", {}).pop(job_id, None)
 
     def list(self) -> list[dict]:
+        sort_order = self._library_sort_order_sql()
         rows = self.db.execute(
-            "SELECT id,name,type,directory,watch_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries ORDER BY name COLLATE NOCASE"
+            f"SELECT id,name,type,{sort_order} AS sort_order,directory,watch_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries ORDER BY COALESCE({sort_order},0) DESC,name COLLATE NOCASE,id"
         )
         return [self._row(row) for row in rows]
 
@@ -547,20 +566,22 @@ class LibraryStore:
             "id": row[0],
             "name": row[1],
             "type": row[2],
-            "directory": row[3],
-            "watchEnabled": bool(row[4]),
-            "scanIntervalMinutes": row[5],
-            "scanState": row[6],
-            "scanError": row[7],
-            "lastScanStartedAt": row[8],
-            "lastScanFinishedAt": row[9],
-            "createdAt": row[10],
-            "updatedAt": row[11],
+            "sortOrder": int(row[3] or 0),
+            "directory": row[4],
+            "watchEnabled": bool(row[5]),
+            "scanIntervalMinutes": row[6],
+            "scanState": row[7],
+            "scanError": row[8],
+            "lastScanStartedAt": row[9],
+            "lastScanFinishedAt": row[10],
+            "createdAt": row[11],
+            "updatedAt": row[12],
         }
 
     def get(self, library_id: str) -> dict | None:
+        sort_order = self._library_sort_order_sql()
         rows = self.db.execute(
-            "SELECT id,name,type,directory,watch_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries WHERE id=?",
+            f"SELECT id,name,type,{sort_order} AS sort_order,directory,watch_enabled,scan_interval_minutes,scan_state,scan_error,last_scan_started_at,last_scan_finished_at,created_at,updated_at FROM libraries WHERE id=?",
             (library_id,),
         )
         return self._row(rows[0]) if rows else None
@@ -582,6 +603,7 @@ class LibraryStore:
         watch_enabled: bool = True,
         interval: int = 1440,
         source_ids: Iterable[str] = (),
+        sort_order: int = 0,
     ) -> dict:
         name = name.strip()
         if not name or library_type not in LIBRARY_TYPES:
@@ -598,6 +620,7 @@ class LibraryStore:
                 raise ValueError("A directory is required for physical libraries.")
             directory = normalized_path(directory)
         interval = max(15, min(43200, int(interval or 1440)))
+        sort_order = self._normalize_sort_order(sort_order)
         library_id = new_id()
         timestamp = now()
         with self.db.transaction() as cursor:
@@ -612,19 +635,35 @@ class LibraryStore:
                 )
                 if cursor.fetchone():
                     raise ValueError("A library already uses that directory.")
-            cursor.execute(
-                "INSERT INTO libraries(id,name,type,directory,watch_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    library_id,
-                    name,
-                    library_type,
-                    directory,
-                    int(watch_enabled),
-                    interval,
-                    timestamp,
-                    timestamp,
-                ),
-            )
+            if "sort_order" in self._library_columns:
+                cursor.execute(
+                    "INSERT INTO libraries(id,name,type,sort_order,directory,watch_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        library_id,
+                        name,
+                        library_type,
+                        sort_order,
+                        directory,
+                        int(watch_enabled),
+                        interval,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO libraries(id,name,type,directory,watch_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        library_id,
+                        name,
+                        library_type,
+                        directory,
+                        int(watch_enabled),
+                        interval,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
             for source_id in source_ids:
                 cursor.execute("SELECT type FROM libraries WHERE id=?", (source_id,))
                 source = cursor.fetchone()
@@ -642,6 +681,9 @@ class LibraryStore:
         current = self.get(library_id)
         if not current:
             raise KeyError("Library not found")
+        sort_order = self._normalize_sort_order(
+            values.get("sortOrder", current.get("sortOrder", 0))
+        )
         name = str(values.get("name", current["name"])).strip()
         interval = max(
             15,
@@ -657,10 +699,24 @@ class LibraryStore:
         if current["type"] != "collection" and "directory" in values:
             directory = normalized_path(str(values["directory"]))
         watch_enabled = int(bool(values.get("watchEnabled", current["watchEnabled"])))
-        self.db.execute(
-            "UPDATE libraries SET name=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
-            (name, directory, watch_enabled, interval, now(), library_id),
-        )
+        if "sort_order" in self._library_columns:
+            self.db.execute(
+                "UPDATE libraries SET name=?,sort_order=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
+                (
+                    name,
+                    sort_order,
+                    directory,
+                    watch_enabled,
+                    interval,
+                    now(),
+                    library_id,
+                ),
+            )
+        else:
+            self.db.execute(
+                "UPDATE libraries SET name=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
+                (name, directory, watch_enabled, interval, now(), library_id),
+            )
         if current["type"] == "collection" and "sourceLibraryIds" in values:
             source_ids = list(dict.fromkeys(values["sourceLibraryIds"]))
             with self.db.transaction() as cursor:

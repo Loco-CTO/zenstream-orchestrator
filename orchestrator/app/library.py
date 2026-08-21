@@ -621,6 +621,7 @@ class LibraryStore:
             directory = normalized_path(directory)
         interval = max(15, min(43200, int(interval or 1440)))
         sort_order = self._normalize_sort_order(sort_order)
+        supports_sort_order = self._library_sort_order_sql() == "sort_order"
         library_id = new_id()
         timestamp = now()
         with self.db.transaction() as cursor:
@@ -635,7 +636,7 @@ class LibraryStore:
                 )
                 if cursor.fetchone():
                     raise ValueError("A library already uses that directory.")
-            if "sort_order" in self._library_columns:
+            if supports_sort_order:
                 cursor.execute(
                     "INSERT INTO libraries(id,name,type,sort_order,directory,watch_enabled,scan_interval_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                     (

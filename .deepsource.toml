@@ -14,21 +14,12 @@ name = "sql"
 [[analyzers]]
 name = "python"
 
-  [analyzers.meta]
-  runtime_version = "3.x.x"
+[analyzers.meta]
+runtime_version = "3.x.x"
 
 [[analyzers]]
 name = "javascript"
 
-  [analyzers.meta]
-  plugins = ["react"]
-  environment = [
-    "nodejs",
-    "browser"
-  ]
-
-[[transformers]]
-name = "black"
-
-[[transformers]]
-name = "prettier"
+[analyzers.meta]
+plugins = ["react"]
+environment = ["nodejs", "browser"]

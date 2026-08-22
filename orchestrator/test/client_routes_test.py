@@ -592,6 +592,7 @@ class ClientPreferenceRouteTest(unittest.TestCase):
                 "/api/preferences/metadata-language",
             ),
             (client_routes.set_subtitles, "/api/preferences/subtitles"),
+            (client_routes.set_watch_history, "/api/preferences/watch-history"),
         )
         with patch.object(
             client_routes,
@@ -636,6 +637,82 @@ class ClientPreferenceRouteTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 413)
         preference.set_locale.assert_not_called()
+
+    def test_watch_history_preference_routes_use_the_control_lane(self):
+        preference = MagicMock()
+        request = _json_request(
+            {"enabled": False},
+            method="PATCH",
+            path="/api/preferences/watch-history",
+        )
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ),
+            patch.object(client_routes, "AccountPreference", return_value=preference),
+            patch.object(
+                client_routes,
+                "run_control",
+                new=AsyncMock(return_value={"enabled": False}),
+            ) as control,
+        ):
+            response = asyncio.run(client_routes.set_watch_history(request))
+
+        self.assertEqual(response, {"enabled": False})
+        control.assert_awaited_once_with(preference.set_watch_history, False)
+
+    def test_clear_watch_history_returns_no_content_through_the_control_lane(self):
+        request = _json_request({}, method="DELETE", path="/api/account/watch-history")
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ),
+            patch.object(
+                client_routes,
+                "run_control",
+                new=AsyncMock(),
+            ) as control,
+        ):
+            response = asyncio.run(client_routes.clear_watch_history(request))
+
+        self.assertIsNone(response)
+        control.assert_awaited_once_with(
+            client_routes.catalog.clear_watch_history, "user-1"
+        )
+
+    def test_progress_route_is_separate_from_explicit_state(self):
+        request = _json_request(
+            {"positionSeconds": 12, "durationSeconds": 100},
+            method="PATCH",
+            path="/api/catalog/items/item-1/progress",
+        )
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(return_value=({"id": "user-1"}, "token")),
+            ),
+            patch.object(
+                client_routes,
+                "run_control",
+                new=AsyncMock(return_value={"played": False}),
+            ) as control,
+        ):
+            response = asyncio.run(
+                client_routes.update_item_progress("item-1", request)
+            )
+
+        self.assertEqual(response, {"played": False})
+        control.assert_awaited_once_with(
+            client_routes.catalog.update_progress,
+            "user-1",
+            "item-1",
+            {"positionSeconds": 12, "durationSeconds": 100},
+        )
 
 
 if __name__ == "__main__":

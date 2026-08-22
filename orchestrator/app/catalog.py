@@ -80,6 +80,7 @@ class _CatalogReadContext:
         self.projected_metadata_loaded: set[tuple[str, str]] = set()
         self.playable_descendants: dict[str, list[str]] = {}
         self.resolved_states: dict[str, dict] = {}
+        self.following_states: dict[str, bool] = {}
         self.series_primary_images: dict[tuple[str, str], dict | None] = {}
         self.series_metadata: dict[tuple[str, str], dict | None] = {}
         self.metadata_service = MetadataReadService(catalog.db)
@@ -200,6 +201,15 @@ class Catalog:
                     if key[0] != user_id
                 }
 
+    def _watch_history_enabled(self, user_id: str) -> bool:
+        if not self._has_table("account_preferences"):
+            return True
+        rows = self.db.execute(
+            "SELECT watch_history_enabled FROM account_preferences WHERE user_id=?",
+            (user_id,),
+        )
+        return not rows or bool(rows[0][0])
+
     def _context(self, user_id: str) -> _CatalogReadContext | None:
         context = self._read_context.get()
         return context if context and context.user_id == user_id else None
@@ -242,6 +252,18 @@ class Catalog:
 
     def _has_table(self, name: str) -> bool:
         return self._table_exists(name)
+
+    def _library_sort_order_sql(self, alias: str | None = None) -> str:
+        """Use the persisted order when available, with a legacy-schema fallback."""
+
+        cache_name = "_library_has_sort_order"
+        if not hasattr(self, cache_name):
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(libraries)")
+            }
+            setattr(self, cache_name, "sort_order" in columns)
+        column = f"{alias}.sort_order" if alias else "sort_order"
+        return column if getattr(self, cache_name) else "0"
 
     def _read_model_ready(self) -> bool:
         context = self._read_context.get()
@@ -321,8 +343,9 @@ class Catalog:
     def require_library(self, user_id: str, library_id: str) -> dict:
         if library_id not in self.allowed_libraries(user_id):
             raise HTTPException(404, "Library not found.")
+        sort_order = self._library_sort_order_sql()
         rows = self.db.execute(
-            "SELECT id,name,type,scan_state,last_scan_finished_at FROM libraries WHERE id=?",
+            f"SELECT id,name,type,{sort_order} AS sort_order,scan_state,last_scan_finished_at FROM libraries WHERE id=?",
             (library_id,),
         )
         if not rows:
@@ -331,9 +354,11 @@ class Catalog:
         generation_table = (
             "catalog_library_summary"
             if self._has_table("catalog_library_summary")
-            else "catalog_projection_status"
-            if self._has_table("catalog_projection_status")
-            else None
+            else (
+                "catalog_projection_status"
+                if self._has_table("catalog_projection_status")
+                else None
+            )
         )
         generation = (
             self.db.execute(
@@ -356,8 +381,9 @@ class Catalog:
             "id": row[0],
             "name": row[1],
             "type": row[2],
-            "scanState": row[3],
-            "lastScanFinishedAt": row[4],
+            "sortOrder": int(row[3] or 0),
+            "scanState": row[4],
+            "lastScanFinishedAt": row[5],
             "supportsLastAdded": library_id in supported,
             "catalogGeneration": int(generation[0][0]) if generation else 0,
         }
@@ -381,8 +407,9 @@ class Catalog:
         allowed = self.allowed_libraries(user_id)
         if not allowed:
             return []
+        sort_order = self._library_sort_order_sql()
         rows = self.db.execute(
-            f"SELECT id,name,type,scan_state,last_scan_finished_at FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) AND type IN ('movies','tv_series','collection') ORDER BY name COLLATE NOCASE",
+            f"SELECT id,name,type,{sort_order} AS sort_order,scan_state,last_scan_finished_at FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) AND type IN ('movies','tv_series','collection') ORDER BY COALESCE({sort_order},0) DESC,name COLLATE NOCASE,id",
             list(allowed),
         )
         context = self._context(user_id)
@@ -398,9 +425,11 @@ class Catalog:
         generation_table = (
             "catalog_library_summary"
             if self._has_table("catalog_library_summary")
-            else "catalog_projection_status"
-            if self._has_table("catalog_projection_status")
-            else None
+            else (
+                "catalog_projection_status"
+                if self._has_table("catalog_projection_status")
+                else None
+            )
         )
         if rows and generation_table:
             generations = {
@@ -415,8 +444,9 @@ class Catalog:
                 "id": row[0],
                 "name": row[1],
                 "type": row[2],
-                "scanState": row[3],
-                "lastScanFinishedAt": row[4],
+                "sortOrder": int(row[3] or 0),
+                "scanState": row[4],
+                "lastScanFinishedAt": row[5],
                 "supportsLastAdded": row[0] in supported,
                 "catalogGeneration": generations.get(row[0], 0),
             }
@@ -503,9 +533,11 @@ class Catalog:
         projection_table = (
             "catalog_item_projection"
             if self._read_model_ready() and self._has_table("catalog_item_projection")
-            else "catalog_metadata_projection"
-            if self._has_table("catalog_metadata_projection")
-            else None
+            else (
+                "catalog_metadata_projection"
+                if self._has_table("catalog_metadata_projection")
+                else None
+            )
         )
         if projection_table and not projection_loaded:
             rows = self.db.execute(
@@ -915,6 +947,7 @@ class Catalog:
             return {
                 "favorite": False,
                 "played": False,
+                "following": False,
                 "playCount": 0,
                 "positionSeconds": 0,
                 "durationSeconds": 0,
@@ -930,12 +963,27 @@ class Catalog:
         return {
             "favorite": bool(row[0]),
             "played": bool(row[1]),
+            "following": False,
             "playCount": int(row[2] or 0),
             "positionSeconds": position,
             "durationSeconds": duration,
             "playedPercentage": percentage,
             "lastPlayedAt": row[5],
         }
+
+    def _following_for_entity(self, user_id: str, entity_id: str) -> bool:
+        context = self._context(user_id)
+        if context is not None and entity_id in context.following_states:
+            return context.following_states[entity_id]
+        from app.notifications import FollowService
+
+        try:
+            value = FollowService(self.db).following_for_entity(user_id, entity_id)
+        except HTTPException:
+            value = False
+        if context is not None:
+            context.following_states[entity_id] = value
+        return value
 
     def _state(self, user_id: str, entity_id: str) -> dict:
         context = self._context(user_id)
@@ -949,6 +997,7 @@ class Catalog:
             direct["played"] = bool(row[3]) and not bool(row[4])
             direct["playedPercentage"] = None
             direct["unplayedItemCount"] = int(row[4])
+            direct["following"] = self._following_for_entity(user_id, entity_id)
             context.resolved_states[entity_id] = dict(direct)
             return direct
         if context and entity_id in context.empty_state_counts:
@@ -956,6 +1005,7 @@ class Catalog:
             direct["played"] = False
             direct["playedPercentage"] = None
             direct["unplayedItemCount"] = context.empty_state_counts[entity_id]
+            direct["following"] = self._following_for_entity(user_id, entity_id)
             context.resolved_states[entity_id] = dict(direct)
             return direct
         entities, children, _ = self._relationship_graph(user_id)
@@ -965,6 +1015,7 @@ class Catalog:
             else self._state_row(user_id, entity_id)
         )
         direct = self._direct_state(row)
+        direct["following"] = self._following_for_entity(user_id, entity_id)
         leaves = self._playable_descendants(entity_id, entities, children)
         if not leaves or (len(leaves) == 1 and leaves[0] == entity_id):
             if entities.get(entity_id, (None, ""))[1] in {
@@ -1016,12 +1067,16 @@ class Catalog:
                         projected[7],
                     )
                 )
+                value["following"] = self._following_for_entity(user_id, entity_id)
                 context.resolved_states[entity_id] = dict(value)
                 return value
             value = self._direct_state(self._state_rows(user_id).get(entity_id))
+            value["following"] = self._following_for_entity(user_id, entity_id)
             context.resolved_states[entity_id] = dict(value)
             return value
-        return self._direct_state(self._state_row(user_id, entity_id))
+        value = self._direct_state(self._state_row(user_id, entity_id))
+        value["following"] = self._following_for_entity(user_id, entity_id)
+        return value
 
     def _preload_projected_states(self, user_id: str, entity_ids: list[str]) -> None:
         context = self._context(user_id)
@@ -1152,9 +1207,11 @@ class Catalog:
         table = (
             "catalog_item_projection"
             if self._read_model_ready() and self._has_table("catalog_item_projection")
-            else "catalog_metadata_projection"
-            if self._has_table("catalog_metadata_projection")
-            else None
+            else (
+                "catalog_metadata_projection"
+                if self._has_table("catalog_metadata_projection")
+                else None
+            )
         )
         if table is None:
             return
@@ -1435,6 +1492,13 @@ class Catalog:
             if row[3] == "episode" and series_id and language
             else None
         )
+        user_state = (
+            self._leaf_state(user_id, row[0])
+            if row[3] in {"movie", "episode", "track"}
+            else self._state(user_id, row[0])
+        )
+        if row[3] not in {"movie", "series"}:
+            user_state.pop("following", None)
         return {
             "id": row[0],
             "libraryId": row[1],
@@ -1454,11 +1518,7 @@ class Catalog:
             "lastAddedAt": (dates or {}).get("lastAddedAt", row[8]),
             "updatedAt": row[9],
             "metadata": metadata,
-            "userState": (
-                self._leaf_state(user_id, row[0])
-                if row[3] in {"movie", "episode", "track"}
-                else self._state(user_id, row[0])
-            ),
+            "userState": user_state,
             "childIds": children or [],
         }
 
@@ -2130,10 +2190,70 @@ class Catalog:
             "total": len(values),
         }
 
+    def update_progress(self, user_id: str, entity_id: str, changes: dict) -> dict:
+        self.require_entity(user_id, entity_id)
+        if not isinstance(changes, dict):
+            raise HTTPException(400, "Invalid playback progress.")
+        try:
+            position = float(changes.get("positionSeconds"))
+            duration_value = changes.get("durationSeconds")
+            duration = 0.0 if duration_value is None else float(duration_value)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, "Invalid playback position.") from error
+        if not math.isfinite(position) or not math.isfinite(duration):
+            raise HTTPException(400, "Invalid playback position.")
+        if not self._watch_history_enabled(user_id):
+            result = self._state(user_id, entity_id)
+            if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+                result.pop("following", None)
+            return result
+        return self.update_state(user_id, entity_id, changes)
+
+    def clear_watch_history(self, user_id: str) -> None:
+        has_user_summary = self._has_table("catalog_user_summary")
+        has_legacy_rollups = self._has_table("catalog_user_rollups")
+        now = _now()
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM user_item_state WHERE user_id=? AND favorite=0",
+                (user_id,),
+            )
+            cursor.execute(
+                "UPDATE user_item_state SET played=0,play_count=0,position_seconds=0,duration_seconds=0,last_played_at=NULL,updated_at=? WHERE user_id=? AND favorite=1",
+                (now, user_id),
+            )
+            if has_user_summary:
+                cursor.execute(
+                    "DELETE FROM catalog_user_summary WHERE user_id=?", (user_id,)
+                )
+            if has_legacy_rollups:
+                cursor.execute(
+                    "DELETE FROM catalog_user_rollups WHERE user_id=? AND favorite=0",
+                    (user_id,),
+                )
+                cursor.execute(
+                    "UPDATE catalog_user_rollups SET played=0,play_count=0,played_leaf_count=0,unplayed_leaf_count=unplayed_leaf_count+played_leaf_count,position_seconds=0,duration_seconds=0,last_played_at=NULL,updated_at=? WHERE user_id=? AND favorite=1",
+                    (now, user_id),
+                )
+        self._invalidate_home_cache(user_id)
+
     def update_state(self, user_id: str, entity_id: str, changes: dict) -> dict:
         self.require_entity(user_id, entity_id)
         if not isinstance(changes, dict):
             raise HTTPException(400, "Invalid item state.")
+        following_change = changes.get("following")
+        if following_change is not None and not isinstance(following_change, bool):
+            raise HTTPException(400, "Invalid follow state.")
+        if following_change is not None:
+            from app.notifications import FollowService
+
+            FollowService(self.db).set_for_entity(user_id, entity_id, following_change)
+            if set(changes) <= {"following"}:
+                self._invalidate_home_cache(user_id)
+                result = self._state(user_id, entity_id)
+                if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+                    result.pop("following", None)
+                return result
         entities, children, parents = self._relationship_graph(user_id)
         current_row = self._state_row(user_id, entity_id)
         current = self._direct_state(current_row)
@@ -2217,9 +2337,11 @@ class Catalog:
                         play_count,
                         state["positionSeconds"],
                         state["durationSeconds"],
-                        now
-                        if state["positionSeconds"] or next_played
-                        else state.get("lastPlayedAt"),
+                        (
+                            now
+                            if state["positionSeconds"] or next_played
+                            else state.get("lastPlayedAt")
+                        ),
                         now,
                     ),
                 )
@@ -2228,7 +2350,10 @@ class Catalog:
 
             CatalogReadModel(self.db).refresh_user_entities(user_id, affected)
         self._invalidate_home_cache(user_id)
-        return self._state(user_id, entity_id)
+        result = self._state(user_id, entity_id)
+        if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+            result.pop("following", None)
+        return result
 
     @_catalog_read
     def favorites(
@@ -2525,9 +2650,11 @@ class Catalog:
         item_children = (
             [value[0] for value in season_rows]
             if row[0] == root_row[0] and root_row[3] == "series"
-            else [value[0] for value in collection_rows]
-            if row[3] == "collection"
-            else []
+            else (
+                [value[0] for value in collection_rows]
+                if row[3] == "collection"
+                else []
+            )
         )
         item = self._serialize(
             user_id, row, item_metadata, item_children, language=language
@@ -3123,8 +3250,9 @@ class Catalog:
             generations: list[tuple] = []
             if allowed and self._has_table("catalog_library_summary"):
                 placeholders = ",".join("?" for _ in allowed)
+                sort_order = self._library_sort_order_sql("l")
                 generations = self.db.execute(
-                    f"SELECT library_id,generation FROM catalog_library_summary WHERE library_id IN ({placeholders}) ORDER BY library_id",
+                    f"SELECT l.id,COALESCE(p.generation,0),COALESCE({sort_order},0) FROM libraries l LEFT JOIN catalog_library_summary p ON p.library_id=l.id WHERE l.id IN ({placeholders}) ORDER BY l.id",
                     sorted(allowed),
                 )
             with self._home_cache_lock:

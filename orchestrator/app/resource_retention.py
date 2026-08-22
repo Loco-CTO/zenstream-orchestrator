@@ -61,6 +61,7 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
     from app.models.admin import Admin
     from app.models.playback_viewer import PlaybackViewerStore
     from app.models.syncplay import SyncplayGroup
+    from app.notifications import NotificationService
     from app.playback import PlaybackManager
     from app.providers import MetadataService
 
@@ -79,6 +80,7 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
             "syncplay_history", SyncplayGroup.cleanup_history, days
         ),
         "subtitle_cache": _run("subtitle_cache", _prune_subtitle_cache, db, days),
+        "notifications": _run("notifications", NotificationService(db).cleanup, days),
     }
     if job_store is not None:
         history = _run("job_history", job_store.cleanup_history, days)

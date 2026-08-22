@@ -215,6 +215,36 @@ class MetadataCache:
     def __init__(self):
         self.db = Config().database
 
+    def get_locales(
+        self, provider: str, entity_type: str, provider_id: str
+    ) -> dict[str, dict]:
+        """Return every usable cached locale for one provider identity.
+
+        Calendar reads need the same locale fallback behavior as catalog reads.
+        Expired documents are still returned and marked stale; callers can use
+        them as a display fallback while a background refresh repairs them.
+        """
+        rows = self.db.read_execute(
+            "SELECT locale,payload,expires_at FROM metadata_cache "
+            "WHERE provider=? AND entity_type=? AND provider_id=?",
+            (provider, entity_type, provider_id),
+        )
+        values: dict[str, dict] = {}
+        now = iso_now()
+        for locale, encoded, expires_at in rows:
+            try:
+                payload = json.loads(encoded)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if (
+                not isinstance(payload, dict)
+                or payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA
+            ):
+                continue
+            payload["_stale"] = bool(expires_at and expires_at <= now)
+            values[str(locale)] = payload
+        return values
+
     def get(
         self, provider: str, entity_type: str, provider_id: str, locale: str
     ) -> dict | None:

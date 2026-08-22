@@ -61,6 +61,16 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "PRAGMA table_info(playback_settings)"
                     )
                 }
+                preference_columns = {
+                    row[1]: row
+                    for row in connection.execute(
+                        "PRAGMA table_info(account_preferences)"
+                    )
+                }
+                self.assertEqual(
+                    str(preference_columns["watch_history_enabled"][4]).strip("'\""),
+                    "1",
+                )
                 intro_outro_columns = {
                     row[1]: row
                     for row in connection.execute(
@@ -91,8 +101,45 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "catalog_artwork_selection",
                         "catalog_collection_member_projection",
                         "intro_outro_comparison_state",
+                        "user_follow_targets",
+                        "catalog_admissions",
+                        "notifications",
                     }
                     <= tables
+                )
+                self.assertNotIn("notification_push_subscriptions", tables)
+                self.assertNotIn("notification_push_outbox", tables)
+                follow_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(user_follow_targets)"
+                    )
+                }
+                self.assertTrue(
+                    {
+                        "user_id",
+                        "library_id",
+                        "target_type",
+                        "provider",
+                        "provider_id",
+                        "entity_id",
+                    }
+                    <= follow_columns
+                )
+                notification_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(notifications)")
+                }
+                self.assertTrue(
+                    {
+                        "user_id",
+                        "kind",
+                        "entity_id",
+                        "series_id",
+                        "dedupe_key",
+                        "read_at",
+                    }
+                    <= notification_columns
                 )
                 genre_columns = {
                     row[1]
@@ -237,13 +284,11 @@ class PersistenceMigrationTest(unittest.TestCase):
             connection = sqlite3.connect(database_path)
             try:
                 self.assertEqual(
-                    connection.execute(
-                        """
+                    connection.execute("""
                         SELECT s.device_id,d.device_key,d.device_type
                           FROM user_sessions s JOIN user_devices d ON d.id=s.device_id
                          WHERE s.id='session-1'
-                        """
-                    ).fetchone()[1:],
+                        """).fetchone()[1:],
                     ("legacy", "unknown"),
                 )
             finally:
@@ -356,8 +401,7 @@ class PersistenceMigrationTest(unittest.TestCase):
             command.upgrade(config, "0004_catalog_read_model_progress")
             connection = sqlite3.connect(database_path)
             try:
-                connection.executescript(
-                    """
+                connection.executescript("""
                     DROP TABLE metadata_images;
                     CREATE TABLE metadata_images (
                         provider TEXT NOT NULL,entity_type TEXT NOT NULL,
@@ -372,8 +416,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                     INSERT INTO metadata_images VALUES(
                         'tmdb','movie','10',NULL,'Primary','poster','new','2026-01-02',NULL,NULL
                     );
-                    """
-                )
+                    """)
                 connection.commit()
             finally:
                 connection.close()

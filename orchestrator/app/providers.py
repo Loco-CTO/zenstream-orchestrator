@@ -703,9 +703,9 @@ class TMDBClient(ProviderClient):
                     continue
                 profile = person.get("profile_path")
                 entry = {
-                    "id": str(person.get("id"))
-                    if person.get("id") is not None
-                    else None,
+                    "id": (
+                        str(person.get("id")) if person.get("id") is not None else None
+                    ),
                     "name": person.get("name"),
                     "role": person.get("character")
                     or person.get("job")
@@ -741,11 +741,13 @@ class TMDBClient(ProviderClient):
             "originalCountry": (payload.get("origin_country") or [None])[0],
             "year": (dates or "")[:4] or None,
             "tags": _names(genres),
-            "originalLanguage": normalize_language(
-                payload.get("original_language"), allow_unsupported=True
-            )
-            if payload.get("original_language")
-            else None,
+            "originalLanguage": (
+                normalize_language(
+                    payload.get("original_language"), allow_unsupported=True
+                )
+                if payload.get("original_language")
+                else None
+            ),
             "communityRating": payload.get("vote_average"),
             "trailers": videos,
             "people": people,
@@ -1252,9 +1254,11 @@ class TVDBClient(ProviderClient):
             "date": dates or None,
             "firstAired": data.get("firstAired"),
             "lastAired": data.get("lastAired"),
-            "airTime": data.get("airs", {}).get("time")
-            if isinstance(data.get("airs"), dict)
-            else data.get("airTime"),
+            "airTime": (
+                data.get("airs", {}).get("time")
+                if isinstance(data.get("airs"), dict)
+                else data.get("airTime")
+            ),
             "status": _name(data.get("status")),
             "studios": _names(data.get("studios")),
             "networks": _names(data.get("networks") or data.get("network")),
@@ -1262,25 +1266,33 @@ class TVDBClient(ProviderClient):
                 data.get("productionCompanies") or data.get("companies")
             ),
             "runtimeMinutes": data.get("averageRuntime") or data.get("runtime"),
-            "seasonNumber": data.get("seasonNumber")
-            if data.get("seasonNumber") is not None
-            else data.get("number")
-            if entity_type == "season"
-            else data.get("season"),
-            "episodeNumber": data.get("number")
-            if entity_type == "episode"
-            else data.get("episodeNumber"),
+            "seasonNumber": (
+                data.get("seasonNumber")
+                if data.get("seasonNumber") is not None
+                else (
+                    data.get("number")
+                    if entity_type == "season"
+                    else data.get("season")
+                )
+            ),
+            "episodeNumber": (
+                data.get("number")
+                if entity_type == "episode"
+                else data.get("episodeNumber")
+            ),
             "originalCountry": _name(
                 data.get("originalCountry") or data.get("originalCountryName")
             ),
             "year": str(data.get("year") or dates or "")[:4] or None,
             "tags": _names(genres),
-            "originalLanguage": normalize_language(
-                _catalog_language_tag(str(data.get("originalLanguage") or "")),
-                allow_unsupported=True,
-            )
-            if data.get("originalLanguage")
-            else None,
+            "originalLanguage": (
+                normalize_language(
+                    _catalog_language_tag(str(data.get("originalLanguage") or "")),
+                    allow_unsupported=True,
+                )
+                if data.get("originalLanguage")
+                else None
+            ),
             "trailers": trailers,
             "people": people,
             "credits": normalized_credits,
@@ -1767,7 +1779,9 @@ class MetadataService:
         force: bool = False,
         *,
         project: bool = True,
+        cache=None,
     ) -> dict[str, dict]:
+        cache_store = cache or self.cache
         locales = list(dict.fromkeys(locales))
         if not locales:
             return {}
@@ -1781,7 +1795,7 @@ class MetadataService:
             values = {}
             missing = []
             for locale in locales:
-                cached = self.cache.get(provider, entity_type, provider_id, locale)
+                cached = cache_store.get(provider, entity_type, provider_id, locale)
                 if cached and not force and not cached.pop("_stale", False):
                     values[locale] = cached
                 else:
@@ -1829,11 +1843,11 @@ class MetadataService:
                     raise ProviderError(
                         f"{provider} {entity_type} {provider_id} {locale} normalization failed: {type(error).__name__}: {error}"
                     ) from error
-                self.cache.put(provider, entity_type, provider_id, locale, normalized)
+                cache_store.put(provider, entity_type, provider_id, locale, normalized)
                 if project:
                     from app.metadata_services import MetadataSearchProjection
 
-                    MetadataSearchProjection(self.cache.db).project(
+                    MetadataSearchProjection(cache_store.db).project(
                         provider, entity_type, provider_id, locale, normalized
                     )
                 logger.info(

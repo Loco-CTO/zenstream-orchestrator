@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import {
+	IconChevronDown,
+	IconChevronUp,
 	IconEye,
 	IconFolder,
 	IconPlus,
@@ -16,6 +18,7 @@ type Library = {
 	id: string;
 	name: string;
 	type: string;
+	sortOrder: number;
 	directory?: string | null;
 	watchEnabled: boolean;
 	scanIntervalMinutes: number;
@@ -91,6 +94,25 @@ export default function LibrariesPage() {
 			setAddModal(false);
 			void load();
 		}
+	}
+	async function moveLibrary(library: Library, direction: "up" | "down") {
+		if (!session) return;
+		const response = await adminFetch(
+			`/api/admin/libraries/${library.id}/move`,
+			session,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ direction }),
+			},
+		);
+		setMessage(
+			response.ok
+				? `${library.name} moved ${direction}.`
+				: (await response.json().catch(() => null))?.detail ||
+						"Could not move library.",
+		);
+		if (response.ok) void load();
 	}
 	async function rescan(library: Library) {
 		if (!session) return;
@@ -275,6 +297,42 @@ export default function LibrariesPage() {
 								</div>
 							</div>
 							<div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+								<button
+									type="button"
+									onClick={() => void moveLibrary(library, "up")}
+									disabled={index === 0}
+									aria-label={`Move ${library.name} up`}
+									title="Move up"
+									style={{
+										width: 32,
+										height: 32,
+										border: 0,
+										background: "none",
+										color: index === 0 ? "#222" : "#777",
+										cursor: index === 0 ? "default" : "pointer",
+										borderRadius: 8,
+									}}
+								>
+									<IconChevronUp size={15} />
+								</button>
+								<button
+									type="button"
+									onClick={() => void moveLibrary(library, "down")}
+									disabled={index === libraries.length - 1}
+									aria-label={`Move ${library.name} down`}
+									title="Move down"
+									style={{
+										width: 32,
+										height: 32,
+										border: 0,
+										background: "none",
+										color: index === libraries.length - 1 ? "#222" : "#777",
+										cursor: index === libraries.length - 1 ? "default" : "pointer",
+										borderRadius: 8,
+									}}
+								>
+									<IconChevronDown size={15} />
+								</button>
 								<Link
 									href={`/web/dashboard/libraries/view/?libraryId=${encodeURIComponent(library.id)}`}
 									aria-label={`Browse ${library.name}`}

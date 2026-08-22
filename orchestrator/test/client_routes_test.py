@@ -536,6 +536,47 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
             sessionId="session",
         )
 
+    def test_playback_access_refresh_uses_authenticated_foreground_work(self):
+        request = _json_request(
+            {"sourceId": "source-1", "sessionId": "playback-session-1"},
+            path="/api/playback/items/entity-1/access",
+        )
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(
+                    return_value=({"id": "user-1", "username": "viewer"}, "token")
+                ),
+            ),
+            patch.object(
+                client_routes,
+                "session_id_for_token",
+                return_value="auth-session-1",
+            ),
+            patch.object(
+                client_routes,
+                "run_foreground",
+                new=AsyncMock(return_value={"ticket": "renewed-ticket"}),
+            ) as foreground,
+        ):
+            response = asyncio.run(
+                client_routes.refresh_playback_access("entity-1", request)
+            )
+
+        self.assertEqual(response, {"ticket": "renewed-ticket"})
+        self.assertEqual(foreground.await_args.args[0], client_routes.media.refresh_access)
+        self.assertEqual(
+            foreground.await_args.args[1:],
+            (
+                "user-1",
+                "entity-1",
+                "source-1",
+                "playback-session-1",
+                "auth-session-1",
+            ),
+        )
+
     def test_versioned_cached_image_uses_stored_version_without_rehashing(self):
         request = _json_request(
             {},

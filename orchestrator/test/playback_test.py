@@ -459,6 +459,49 @@ class PlaybackTest(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 409)
         self.assertEqual(context.exception.detail["code"], "MEDIA_NOT_READY")
 
+    @patch("app.playback.issue_ticket", return_value="renewed-ticket")
+    def test_refresh_access_renews_a_direct_source_without_creating_a_session(
+        self, ticket_issuer
+    ):
+        manager = object.__new__(PlaybackManager)
+        manager.catalog = MagicMock()
+        manager.db = MagicMock()
+        manager.db.execute.return_value = [(1,)]
+
+        result = manager.refresh_access(
+            "user-1", "entity-1", "source-1", None, "auth-session-1"
+        )
+
+        self.assertEqual(result["ticket"], "renewed-ticket")
+        self.assertEqual(result["expiresIn"], 15 * 60)
+        ticket_issuer.assert_called_once_with(
+            "user-1",
+            "resource",
+            15 * 60,
+            entity="entity-1",
+            sessionId="auth-session-1",
+        )
+        manager.catalog.require_entity.assert_called_once_with("user-1", "entity-1")
+
+    @patch("app.playback.issue_ticket", return_value="renewed-ticket")
+    def test_refresh_access_validates_the_hls_session_source(self, ticket_issuer):
+        manager = object.__new__(PlaybackManager)
+        manager.catalog = MagicMock()
+        manager.db = MagicMock()
+        manager.db.execute.return_value = [("source-1", "ready")]
+
+        result = manager.refresh_access(
+            "user-1", "entity-1", "source-1", "session-1", "auth-session-1"
+        )
+
+        self.assertEqual(result["ticket"], "renewed-ticket")
+        self.assertIn("playback_sessions", manager.db.execute.call_args.args[0])
+        ticket_issuer.assert_called_once()
+
+    def test_playback_recovery_timeouts_allow_slow_live_workers(self):
+        self.assertEqual(PlaybackManager._startup_timeout_seconds, 30.0)
+        self.assertEqual(PlaybackManager._segment_wait_timeout_seconds, 45.0)
+
     @patch("app.playback.issue_ticket", return_value="ticket")
     def test_negotiate_selects_requested_source(self, _ticket):
         manager = object.__new__(PlaybackManager)

@@ -26,6 +26,7 @@ from app.models.playback_viewer import PlaybackViewerStore
 from fastapi import HTTPException
 
 logger = get_logger("playback")
+PLAYBACK_RESOURCE_TICKET_TTL_SECONDS = 15 * 60
 PLAYABLE_ROLE = "media"
 
 
@@ -76,6 +77,11 @@ class PlaybackManager:
     _session_workers: dict[str, dict] = {}
     _session_locks: dict[str, threading.RLock] = {}
     _segment_seconds = 4.0
+    # Startup and segment production are allowed to be slow while FFmpeg is
+    # still alive. The web client has a matching readiness deadline and can
+    # retry a segment request after the bounded wait expires.
+    _startup_timeout_seconds = 30.0
+    _segment_wait_timeout_seconds = 45.0
 
     @staticmethod
     def _idle_timeout_seconds() -> float:
@@ -553,6 +559,47 @@ class PlaybackManager:
             "streams": source.get("streams") or [],
         }
 
+    def refresh_access(
+        self,
+        user_id: str,
+        entity_id: str,
+        source_id: str | None,
+        session_id: str | None,
+        auth_session_id: str | None,
+    ) -> dict:
+        """Issue a new media ticket without creating another viewer/session."""
+        if not auth_session_id:
+            raise HTTPException(401, "Authentication required.")
+        self.catalog.require_entity(user_id, entity_id)
+        if not source_id:
+            raise HTTPException(400, "A playback source is required.")
+        if session_id:
+            rows = self.db.execute(
+                "SELECT source_id,state FROM playback_sessions WHERE id=? AND user_id=? AND entity_id=? AND expires_at>?",
+                (session_id, user_id, entity_id, _iso()),
+            )
+            if not rows or rows[0][0] != source_id:
+                raise HTTPException(404, "Playback session not found.")
+            if rows[0][1] in {"stopping", "failed", "expired"}:
+                raise HTTPException(409, "Playback session is no longer active.")
+        else:
+            rows = self.db.execute(
+                "SELECT 1 FROM media_sources WHERE id=? AND entity_id=?",
+                (source_id, entity_id),
+            )
+            if not rows:
+                raise HTTPException(404, "Media source not found.")
+        return {
+            "ticket": issue_ticket(
+                user_id,
+                "resource",
+                PLAYBACK_RESOURCE_TICKET_TTL_SECONDS,
+                entity=entity_id,
+                sessionId=auth_session_id,
+            ),
+            "expiresIn": PLAYBACK_RESOURCE_TICKET_TTL_SECONDS,
+        }
+
     @staticmethod
     def _profile_values(profile: dict, key: str, defaults: set[str]) -> set[str]:
         if key not in profile or profile[key] is None:
@@ -815,7 +862,12 @@ class PlaybackManager:
         ticket_claims = {"entity": entity_id}
         if auth_session_id:
             ticket_claims["sessionId"] = auth_session_id
-        access = issue_ticket(user_id, "resource", 15 * 60, **ticket_claims)
+        access = issue_ticket(
+            user_id,
+            "resource",
+            PLAYBACK_RESOURCE_TICKET_TTL_SECONDS,
+            **ticket_claims,
+        )
         start_time = max(0.0, float(profile.get("startPositionSeconds") or 0.0))
         duration_seconds = max(0.0, float(source.get("durationSeconds") or 0.0))
         if duration_seconds > 0:
@@ -1228,7 +1280,7 @@ class PlaybackManager:
         process: subprocess.Popen,
         generation: int,
     ) -> None:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + self._startup_timeout_seconds
         last_snapshot = None
         while time.monotonic() < deadline:
             with self._lock:
@@ -1613,9 +1665,17 @@ class PlaybackManager:
 
     def _ensure_segment(self, user_id: str, session_id: str, index: int) -> Path:
         lock = self._session_lock(session_id)
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + self._segment_wait_timeout_seconds
+        last_access_touch = 0.0
         with lock:
             while time.monotonic() < deadline:
+                now = time.monotonic()
+                if now - last_access_touch >= 5.0:
+                    self.db.execute(
+                        "UPDATE playback_sessions SET last_accessed_at=? WHERE id=? AND user_id=?",
+                        (_iso(), session_id, user_id),
+                    )
+                    last_access_touch = now
                 with self._lock:
                     spec = self._session_specs.get(session_id)
                     worker = self._session_workers.get(session_id)
@@ -1713,13 +1773,20 @@ class PlaybackManager:
         with self._lock:
             spec = self._session_specs.get(session_id)
         snapshot = self._playlist_snapshot(spec["output"]) if spec else {}
+        logger.warning(
+            "playback segment timeout user_id=%s session_id=%s index=%s snapshot=%s",
+            user_id,
+            session_id,
+            index,
+            snapshot,
+        )
         raise HTTPException(
             503,
             detail={
                 "sessionId": session_id,
                 "sessionState": "starting",
                 "errorCode": "HLS_SEGMENT_TIMEOUT",
-                "errorDetail": "The requested HLS segment was not produced before the bounded startup deadline.",
+                "errorDetail": "The requested HLS segment was not produced before the bounded segment wait deadline.",
                 **snapshot,
             },
             headers={"Retry-After": "1"},

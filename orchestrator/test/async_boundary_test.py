@@ -161,6 +161,7 @@ class AsyncRouteBlockingGuardTests(unittest.TestCase):
         "allowed_libraries",
         "update_state",
         "source_metadata",
+        "refresh_access",
         "direct_path",
         "session_file",
         "session_status",

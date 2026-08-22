@@ -1229,6 +1229,23 @@ async def negotiate_playback(entity_id: str, request: Request):
     )
 
 
+@router.post("/api/playback/items/{entity_id}/access")
+async def refresh_playback_access(entity_id: str, request: Request):
+    account, token = await _require_account(request)
+    auth_session_id = await run_auth(session_id_for_token, token)
+    if not auth_session_id:
+        raise HTTPException(401, "Authentication required.")
+    data = await _bounded_json_object(request)
+    return await run_foreground(
+        media.refresh_access,
+        account["id"],
+        entity_id,
+        data.get("sourceId"),
+        data.get("sessionId"),
+        auth_session_id,
+    )
+
+
 @router.post("/api/playback/viewers/{viewer_id}/heartbeat")
 async def playback_viewer_heartbeat(viewer_id: str, request: Request):
     account, token = await _require_account(request)

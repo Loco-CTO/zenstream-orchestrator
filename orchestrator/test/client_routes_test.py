@@ -565,7 +565,9 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
             )
 
         self.assertEqual(response, {"ticket": "renewed-ticket"})
-        self.assertEqual(foreground.await_args.args[0], client_routes.media.refresh_access)
+        self.assertEqual(
+            foreground.await_args.args[0], client_routes.media.refresh_access
+        )
         self.assertEqual(
             foreground.await_args.args[1:],
             (

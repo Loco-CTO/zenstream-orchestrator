@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.bazarr import (
     BazarrMatchError,
@@ -8,6 +9,7 @@ from app.bazarr import (
     _effective_bazarr_root,
     _find_episode,
     _path_key,
+    _search_candidates,
     mapped_path,
 )
 
@@ -26,6 +28,33 @@ class _BazarrClient:
             for episode in self._episodes
             if episode.get("seriesId") == series_id
         ]
+
+
+class _CachedBazarrClient(_BazarrClient):
+    cache_key = ("test", 6767, "", False)
+
+    def __init__(self, series, episodes):
+        super().__init__(series, episodes)
+        self.series_calls = 0
+        self.episode_calls = 0
+
+    def series(self):
+        self.series_calls += 1
+        return super().series()
+
+    def episodes(self, series_id):
+        self.episode_calls += 1
+        return super().episodes(series_id)
+
+
+class _SearchBazarrClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def search(self, episode_id):
+        self.calls += 1
+        return self.responses.pop(0)
 
 
 def _target(**values):
@@ -120,6 +149,47 @@ class BazarrMatchingTest(unittest.TestCase):
         result = _find_episode(client, _target())
         self.assertEqual(result["seriesId"], 9)
         self.assertEqual(result["episodeId"], 90)
+
+    def test_exact_resolution_is_reused_for_status_and_search(self):
+        client = _CachedBazarrClient(
+            [{"path": "/tv/Show", "sonarrSeriesId": 9, "tvdbId": "123"}],
+            [
+                {
+                    "seriesId": 9,
+                    "path": "/tv/Show/Season 1/Show - S01E02.mkv",
+                    "sonarrEpisodeId": 90,
+                    "season": 1,
+                    "episode": 2,
+                }
+            ],
+        )
+
+        _find_episode(client, _target())
+        _find_episode(client, _target())
+
+        self.assertEqual(client.series_calls, 1)
+        self.assertEqual(client.episode_calls, 1)
+
+    @patch("app.bazarr.BAZARR_EMPTY_SEARCH_RETRY_DELAY_SECONDS", 0)
+    def test_empty_provider_search_is_retried(self):
+        client = _SearchBazarrClient(
+            [
+                [],
+                [
+                    {
+                        "provider": "opensubtitles",
+                        "subtitle": "subtitle-1",
+                        "language": "en",
+                        "name": "English",
+                    }
+                ],
+            ]
+        )
+
+        matches = _search_candidates(client, 90)
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(matches[0]["subtitle"], "subtitle-1")
 
     def test_duplicate_exact_episode_entries_are_ambiguous(self):
         series = [{"path": "/tv/Show", "sonarrSeriesId": 9}]

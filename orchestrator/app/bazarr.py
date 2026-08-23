@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,7 +23,17 @@ from fastapi import HTTPException
 logger = get_logger("bazarr")
 
 BAZARR_MATCH_TTL_SECONDS = 15 * 60
+BAZARR_LOOKUP_CACHE_SECONDS = 20.0
+BAZARR_NEGATIVE_LOOKUP_CACHE_SECONDS = 3.0
+BAZARR_EMPTY_SEARCH_RETRY_DELAY_SECONDS = 0.25
 _ADDRESS_RE = re.compile(r"^[^\s/:]+$")
+
+_bazarr_cache_lock = threading.Lock()
+_bazarr_series_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_bazarr_episode_cache: dict[tuple, tuple[float, list[dict]]] = {}
+_bazarr_resolution_cache: dict[
+	tuple, tuple[float, dict | None, tuple[str, str] | None]
+] = {}
 
 
 class BazarrError(RuntimeError):
@@ -316,6 +328,28 @@ class BazarrClient:
         except ValueError:
             configured_timeout = 20.0
         self.timeout = max(3.0, min(90.0, configured_timeout))
+        self._http_client = httpx.Client(
+            timeout=self.timeout,
+            follow_redirects=False,
+            trust_env=False,
+            headers={
+                "Accept": "application/json",
+                "X-Api-Key": self.connection["apiKey"],
+                "User-Agent": "ZenStream/Bazarr",
+            },
+        )
+
+    @property
+    def cache_key(self) -> tuple[str, int, str, bool]:
+        return (
+            str(self.connection["address"]),
+            int(self.connection["port"]),
+            str(self.connection.get("baseUrl") or ""),
+            bool(self.connection.get("useSsl")),
+        )
+
+    def close(self) -> None:
+        self._http_client.close()
 
     @property
     def base_url(self) -> str:
@@ -325,18 +359,11 @@ class BazarrClient:
 
     def request(self, method: str, path: str, params=None, json_body=None):
         url = f"{self.base_url}/{path.lstrip('/')}"
+        response = None
         try:
-            with httpx.Client(
-                timeout=self.timeout,
-                follow_redirects=False,
-                trust_env=False,
-                headers={
-                    "Accept": "application/json",
-                    "X-Api-Key": self.connection["apiKey"],
-                    "User-Agent": "ZenStream/Bazarr",
-                },
-            ) as client:
-                response = client.request(method, url, params=params, json=json_body)
+            response = self._http_client.request(
+                method, url, params=params, json=json_body
+            )
             if response.status_code == 404:
                 raise BazarrError("Bazarr endpoint was not found")
             response.raise_for_status()
@@ -352,16 +379,37 @@ class BazarrClient:
             raise BazarrError(
                 f"Bazarr request failed: {type(error).__name__}"
             ) from error
+        finally:
+            if response is not None:
+                response.close()
 
     def series(self) -> list[dict]:
-        return _data_list(
+        key = self.cache_key
+        now = time.monotonic()
+        with _bazarr_cache_lock:
+            cached = _bazarr_series_cache.get(key)
+            if cached and cached[0] > now:
+                return cached[1]
+        value = _data_list(
             self.request("GET", "/series", params={"start": 0, "length": -1})
         )
+        with _bazarr_cache_lock:
+            _bazarr_series_cache[key] = (now + BAZARR_LOOKUP_CACHE_SECONDS, value)
+        return value
 
     def episodes(self, series_id: int) -> list[dict]:
-        return _data_list(
+        key = (*self.cache_key, series_id)
+        now = time.monotonic()
+        with _bazarr_cache_lock:
+            cached = _bazarr_episode_cache.get(key)
+            if cached and cached[0] > now:
+                return cached[1]
+        value = _data_list(
             self.request("GET", "/episodes", params=[("seriesid[]", str(series_id))])
         )
+        with _bazarr_cache_lock:
+            _bazarr_episode_cache[key] = (now + BAZARR_LOOKUP_CACHE_SECONDS, value)
+        return value
 
     def search(self, episode_id: int) -> list[dict]:
         return _data_list(
@@ -503,7 +551,55 @@ def _provider_conflict(target: BazarrTarget, series: dict) -> bool:
     return bool(target_tvdb and bazarr_tvdb and target_tvdb != bazarr_tvdb)
 
 
+def _resolution_cache_key(client: BazarrClient, target: BazarrTarget) -> tuple | None:
+    client_key = getattr(client, "cache_key", None)
+    if client_key is None:
+        return None
+    return (
+        client_key,
+        target.media_file_id,
+        target.target_path,
+        target.size,
+        target.modified_ns,
+        target.quick_fingerprint,
+    )
+
+
 def _find_episode(client: BazarrClient, target: BazarrTarget) -> dict:
+    cache_key = _resolution_cache_key(client, target)
+    now = time.monotonic()
+    if cache_key is not None:
+        with _bazarr_cache_lock:
+            cached = _bazarr_resolution_cache.get(cache_key)
+        if cached and cached[0] > now:
+            _, resolution, error = cached
+            if error:
+                raise BazarrMatchError(*error)
+            if resolution is not None:
+                return resolution
+
+    try:
+        resolution = _find_episode_uncached(client, target)
+    except BazarrMatchError as error:
+        if cache_key is not None:
+            with _bazarr_cache_lock:
+                _bazarr_resolution_cache[cache_key] = (
+                    now + BAZARR_NEGATIVE_LOOKUP_CACHE_SECONDS,
+                    None,
+                    (error.code, str(error)),
+                )
+        raise
+    if cache_key is not None:
+        with _bazarr_cache_lock:
+            _bazarr_resolution_cache[cache_key] = (
+                now + BAZARR_LOOKUP_CACHE_SECONDS,
+                resolution,
+                None,
+            )
+    return resolution
+
+
+def _find_episode_uncached(client: BazarrClient, target: BazarrTarget) -> dict:
     if not target.target_path or not target.bazarr_root_path:
         raise BazarrMatchError(
             "not_configured",
@@ -662,6 +758,22 @@ def _target_status(
     return value
 
 
+def _search_candidates(client: BazarrClient, episode_id: int) -> list[dict]:
+    """Retry one empty provider response while Bazarr finishes its lookup."""
+    values: list[dict] = []
+    for attempt in range(2):
+        raw_matches = client.search(episode_id)
+        values = [
+            value
+            for raw in raw_matches
+            if (value := _candidate(raw)) is not None
+        ]
+        if values or attempt == 1:
+            break
+        time.sleep(BAZARR_EMPTY_SEARCH_RETRY_DELAY_SECONDS)
+    return values
+
+
 class BazarrSubtitleService:
     def __init__(self):
         self.store = BazarrConnectionStore()
@@ -681,51 +793,57 @@ class BazarrSubtitleService:
 
     def status(self, user_id: str, entity_id: str, source_id: str | None) -> dict:
         target = _target(user_id, entity_id, source_id)
+        client: BazarrClient | None = None
         try:
-            resolution = _find_episode(self._client(target), target)
+            client = self._client(target)
+            resolution = _find_episode(client, target)
         except BazarrMatchError as error:
             return _target_status(target, None, error.code, str(error))
+        finally:
+            if client is not None:
+                client.close()
         return _target_status(target, resolution, "matched")
 
     def search(self, user_id: str, entity_id: str, source_id: str | None) -> dict:
         target = _target(user_id, entity_id, source_id)
         client = self._client(target)
-        resolution = _find_episode(client, target)
-        raw_matches = client.search(resolution["episodeId"])
-        matches = []
-        for raw in raw_matches:
-            value = _candidate(raw)
-            if value is None:
-                continue
-            match_id = issue_ticket(
-                user_id,
-                "resource",
-                BAZARR_MATCH_TTL_SECONDS,
-                entity=entity_id,
-                sourceId=target.source_id,
-                mediaFileId=target.media_file_id,
-                size=target.size,
-                modifiedNs=target.modified_ns,
-                fingerprint=target.quick_fingerprint,
-                seriesId=resolution["seriesId"],
-                episodeId=resolution["episodeId"],
-                candidateId=value["candidateId"],
-                provider=value["provider"],
-                subtitle=value["subtitle"],
-                hi=value["hearingImpaired"],
-                forced=value["forced"],
-                originalFormat=value["originalFormat"],
-            )
-            matches.append(
-                {key: item for key, item in value.items() if key != "subtitle"}
-                | {"matchId": match_id}
-            )
-        return {
-            "state": "matches" if matches else "no_matches",
-            "sourceId": target.source_id,
-            "relativePath": target.relative_path,
-            "matches": matches,
-        }
+        try:
+            resolution = _find_episode(client, target)
+            values = _search_candidates(client, resolution["episodeId"])
+
+            matches = []
+            for value in values:
+                match_id = issue_ticket(
+                    user_id,
+                    "resource",
+                    BAZARR_MATCH_TTL_SECONDS,
+                    entity=entity_id,
+                    sourceId=target.source_id,
+                    mediaFileId=target.media_file_id,
+                    size=target.size,
+                    modifiedNs=target.modified_ns,
+                    fingerprint=target.quick_fingerprint,
+                    seriesId=resolution["seriesId"],
+                    episodeId=resolution["episodeId"],
+                    candidateId=value["candidateId"],
+                    provider=value["provider"],
+                    subtitle=value["subtitle"],
+                    hi=value["hearingImpaired"],
+                    forced=value["forced"],
+                    originalFormat=value["originalFormat"],
+                )
+                matches.append(
+                    {key: item for key, item in value.items() if key != "subtitle"}
+                    | {"matchId": match_id}
+                )
+            return {
+                "state": "matches" if matches else "no_matches",
+                "sourceId": target.source_id,
+                "relativePath": target.relative_path,
+                "matches": matches,
+            }
+        finally:
+            client.close()
 
     def download(
         self, user_id: str, entity_id: str, source_id: str | None, match_id: str
@@ -746,26 +864,30 @@ class BazarrSubtitleService:
                 raise HTTPException(
                     409, "The media file changed; search for subtitles again."
                 )
-        resolution = _find_episode(self._client(target), target)
-        if (
-            payload.get("seriesId") != resolution["seriesId"]
-            or payload.get("episodeId") != resolution["episodeId"]
-        ):
-            raise HTTPException(
-                409,
-                "The subtitle downloader episode changed; search for subtitles again.",
+        client = self._client(target)
+        try:
+            resolution = _find_episode(client, target)
+            if (
+                payload.get("seriesId") != resolution["seriesId"]
+                or payload.get("episodeId") != resolution["episodeId"]
+            ):
+                raise HTTPException(
+                    409,
+                    "The subtitle downloader episode changed; search for subtitles again.",
+                )
+            client.download(
+                {
+                    "seriesId": resolution["seriesId"],
+                    "episodeId": resolution["episodeId"],
+                    "provider": payload.get("provider"),
+                    "subtitle": payload.get("subtitle"),
+                    "hi": bool(payload.get("hi")),
+                    "forced": bool(payload.get("forced")),
+                    "originalFormat": bool(payload.get("originalFormat")),
+                }
             )
-        self._client(target).download(
-            {
-                "seriesId": resolution["seriesId"],
-                "episodeId": resolution["episodeId"],
-                "provider": payload.get("provider"),
-                "subtitle": payload.get("subtitle"),
-                "hi": bool(payload.get("hi")),
-                "forced": bool(payload.get("forced")),
-                "originalFormat": bool(payload.get("originalFormat")),
-            }
-        )
+        finally:
+            client.close()
         from app.library import runtime
 
         runtime.request_reconcile(

@@ -132,7 +132,8 @@ class CalendarConnectionStore:
     def __init__(self):
         self.db = Config().database
 
-    def _public_row(self, row) -> dict:
+    @staticmethod
+    def _public_row(row) -> dict:
         (
             provider,
             address,

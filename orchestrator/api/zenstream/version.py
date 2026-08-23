@@ -5,7 +5,8 @@ from version import __version__
 
 
 class Version:
-    def get(self):
+    @staticmethod
+    def get():
         return {"version": __version__, "main": _main_version()}, 200
 
 

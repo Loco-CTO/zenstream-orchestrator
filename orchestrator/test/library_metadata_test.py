@@ -80,7 +80,8 @@ class LibraryMetadataTest(unittest.TestCase):
 
         self.assertLess(order.index("b1"), order.index("a3"))
 
-    def test_movie_resolution_publishes_root_after_metadata(self):
+    @staticmethod
+    def test_movie_resolution_publishes_root_after_metadata():
         scanner = LibraryScanner.__new__(LibraryScanner)
         scanner._resolve_movie_row = MagicMock()
         scanner._publish_root = MagicMock()
@@ -97,7 +98,8 @@ class LibraryMetadataTest(unittest.TestCase):
         scanner._resolve_movie_row.assert_called_once()
         scanner._publish_root.assert_called_once_with("movie-1")
 
-    def test_scanner_locale_ingest_materializes_assets_inline(self):
+    @staticmethod
+    def test_scanner_locale_ingest_materializes_assets_inline():
         service = MagicMock()
         ingest = MagicMock()
         ingest.locales.return_value = ["en", "ja"]
@@ -271,7 +273,8 @@ class LibraryMetadataTest(unittest.TestCase):
                 os.path.normcase(os.path.normpath(str(target))),
             )
 
-    def _scanner_db(self):
+    @staticmethod
+    def _scanner_db():
         db = DatabaseHandler("sqlite", {}, ":memory:")
         db.execute(
             "CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT NOT NULL, parent_id TEXT, entity_type TEXT NOT NULL, relative_path TEXT, season_number INTEGER, episode_number INTEGER, episode_end_number INTEGER, disc_number INTEGER, track_number INTEGER, created_at TEXT, updated_at TEXT, match_status TEXT DEFAULT 'unresolved', match_confidence REAL, match_method TEXT, UNIQUE(library_id, entity_type, relative_path))"
@@ -2774,7 +2777,8 @@ class LibraryMetadataTest(unittest.TestCase):
 
     def test_tvdb_series_aggregation_fetches_series_in_requested_locale(self):
         class FakeClient:
-            def series_hierarchy(self, provider_id):
+            @staticmethod
+            def series_hierarchy(provider_id):
                 return {"extended": {"data": {"seasons": []}}, "episodes": []}
 
         service = MetadataService.__new__(MetadataService)
@@ -2792,7 +2796,8 @@ class LibraryMetadataTest(unittest.TestCase):
 
     def test_tvdb_series_aggregation_maps_children_without_fetching_metadata(self):
         class FakeClient:
-            def series_hierarchy(self, provider_id):
+            @staticmethod
+            def series_hierarchy(provider_id):
                 return {
                     "extended": {
                         "data": {
@@ -2802,7 +2807,8 @@ class LibraryMetadataTest(unittest.TestCase):
                     "episodes": [{"id": 3, "seasonNumber": 1, "number": 4}],
                 }
 
-            def normalize(self, entity_type, provider_id, payload):
+            @staticmethod
+            def normalize(entity_type, provider_id, payload):
                 return {"title": "Default hierarchy title", "providerId": provider_id}
 
         service = MetadataService.__new__(MetadataService)
@@ -2848,7 +2854,8 @@ class LibraryMetadataTest(unittest.TestCase):
             def __init__(self):
                 self.resolve_called = False
 
-            def aggregate_series(self, provider, provider_id, locale):
+            @staticmethod
+            def aggregate_series(provider, provider_id, locale):
                 if provider == "tvdb":
                     return {
                         "seasons": [

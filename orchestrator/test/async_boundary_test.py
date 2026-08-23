@@ -17,7 +17,8 @@ class _FakeWebSocket:
         self.release = asyncio.Event()
         self.messages = []
 
-    async def accept(self):
+    @staticmethod
+    async def accept():
         return None
 
     async def send_json(self, payload):

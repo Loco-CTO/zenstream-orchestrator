@@ -43,7 +43,8 @@ class _HubWebSocket:
         self.messages = []
         self.closed = []
 
-    async def accept(self):
+    @staticmethod
+    async def accept():
         return None
 
     async def send_json(self, payload):

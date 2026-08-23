@@ -167,7 +167,8 @@ class TrickplayTest(unittest.TestCase):
             def __init__(self, root):
                 self.db_file = str(root / "orchestrator.db")
 
-            def execute(self, query, params=None):
+            @staticmethod
+            def execute(query, params=None):
                 return [("present",)]
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -186,7 +187,8 @@ class TrickplayTest(unittest.TestCase):
         class Database:
             db_file = "orchestrator.db"
 
-            def execute(self, query, params=None):
+            @staticmethod
+            def execute(query, params=None):
                 return []
 
         class Store:
@@ -196,7 +198,8 @@ class TrickplayTest(unittest.TestCase):
                 self.assets = [{"mediaFileId": f"media-{index}"} for index in range(4)]
                 self.processed = []
 
-            def recover_generating(self):
+            @staticmethod
+            def recover_generating():
                 return 0
 
             def queue_pending(self, settings=None):
@@ -206,7 +209,8 @@ class TrickplayTest(unittest.TestCase):
                 with self.lock:
                     return self.assets.pop(0) if self.assets else None
 
-            def mark_failed(self, asset, error):
+            @staticmethod
+            def mark_failed(asset, error):
                 raise AssertionError(error)
 
         class JobStore:

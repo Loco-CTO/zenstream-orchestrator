@@ -355,7 +355,8 @@ class WholeJobProgress:
             return "preparation", ProgressRange(0, 500)
         return "processing", ProgressRange(0, PROGRESS_TOTAL)
 
-    def _range_for_phase(self, phase: str | None) -> tuple[str, ProgressRange] | None:
+    @staticmethod
+    def _range_for_phase(phase: str | None) -> tuple[str, ProgressRange] | None:
         if not phase:
             return None
         ranges = {

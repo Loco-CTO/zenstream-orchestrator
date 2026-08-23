@@ -279,7 +279,8 @@ class CalendarReadTest(unittest.TestCase):
 
     def test_title_falls_back_to_configured_english(self):
         class Cache:
-            def get_locales(self, provider, entity_type, provider_id):
+            @staticmethod
+            def get_locales(provider, entity_type, provider_id):
                 return {
                     "en": {
                         "title": "English episode title",
@@ -299,7 +300,8 @@ class CalendarReadTest(unittest.TestCase):
 
     def test_title_skips_provider_placeholder_before_english_fallback(self):
         class Cache:
-            def get_locales(self, provider, entity_type, provider_id):
+            @staticmethod
+            def get_locales(provider, entity_type, provider_id):
                 return {
                     "ja": {"title": "TBA", "originalLanguage": "ja"},
                     "en": {"title": "Episode 16", "originalLanguage": "en"},
@@ -416,7 +418,8 @@ class CalendarFutureMetadataTest(unittest.TestCase):
                 self.updates.append((run_id, values))
 
         class Service:
-            def refetch(self, should_terminate, progress):
+            @staticmethod
+            def refetch(should_terminate, progress):
                 progress(0, 2, None, False)
                 progress(1, 2, "TVDB episode 1", False)
                 progress(2, 2, "TVDB episode 2", True)

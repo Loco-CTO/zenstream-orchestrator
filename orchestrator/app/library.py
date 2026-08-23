@@ -4388,10 +4388,7 @@ class LibraryScanner:
             discovered: dict[str, dict] = {}
             for list_id, base in lists.items():
                 self._check_termination(should_terminate)
-                try:
-                    payload = client.list_details(list_id)
-                except ProviderError:
-                    raise
+                payload = client.list_details(list_id)
                 data = payload.get("data", payload)
                 members = []
                 for entity in data.get("entities", []) or []:

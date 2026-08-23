@@ -43,7 +43,8 @@ class _HubWebSocket:
         self.messages = []
         self.closed = []
 
-    async def accept(self):
+    @staticmethod
+    async def accept():
         return None
 
     async def send_json(self, payload):
@@ -212,9 +213,11 @@ class SyncplayRouteAuthenticationTest(unittest.TestCase):
     def test_invalid_authentication_is_rejected(self):
         account_model = MagicMock()
         account_model.authenticate_token.return_value = None
-        with patch("app.client_auth.Account", return_value=account_model):
-            with self.assertRaises(HTTPException) as raised:
-                app_module._sync_identity(_request(cookie="invalid-session"))
+        with (
+            patch("app.client_auth.Account", return_value=account_model),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            app_module._sync_identity(_request(cookie="invalid-session"))
         self.assertEqual(raised.exception.status_code, 401)
 
     def test_missing_participant_is_rejected(self):
@@ -223,11 +226,13 @@ class SyncplayRouteAuthenticationTest(unittest.TestCase):
             "id": "user-1",
             "username": "Viewer",
         }
-        with patch("app.client_auth.Account", return_value=account_model):
-            with self.assertRaises(HTTPException) as raised:
-                app_module._sync_identity(
-                    _request(cookie="browser-session", participant=None)
-                )
+        with (
+            patch("app.client_auth.Account", return_value=account_model),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            app_module._sync_identity(
+                _request(cookie="browser-session", participant=None)
+            )
         self.assertEqual(raised.exception.status_code, 401)
 
 

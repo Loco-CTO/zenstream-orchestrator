@@ -1383,7 +1383,8 @@ class MusicBrainzClient(ProviderClient):
             if value.get("id")
         ]
 
-    def normalize(self, entity_type: str, provider_id: str, payload: dict) -> dict:
+    @staticmethod
+    def normalize(entity_type: str, provider_id: str, payload: dict) -> dict:
         images = []
         extra_images = []
         if entity_type in {"release", "release_group"}:
@@ -1662,7 +1663,8 @@ class MetadataService:
         self._clients = {}
         self._clients_lock = threading.Lock()
 
-    def language_options(self) -> list[dict[str, object]]:
+    @staticmethod
+    def language_options() -> list[dict[str, object]]:
         """Return the stable ZenStream language registry.
 
         Provider catalogs remain request-code adapters; they must not change

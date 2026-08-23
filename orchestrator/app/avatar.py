@@ -312,7 +312,6 @@ class UserAvatarStore:
     def save(
         self, user_id: str, content: bytes, content_type: str | None, crop: AvatarCrop
     ) -> str:
-        del content_type  # The bytes are authoritative; MIME is advisory only.
         if len(content) > AVATAR_MAX_BYTES:
             raise AvatarTooLargeError("Avatar file is too large.")
         if not content:

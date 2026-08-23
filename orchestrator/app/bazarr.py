@@ -32,7 +32,7 @@ _bazarr_cache_lock = threading.Lock()
 _bazarr_series_cache: dict[tuple, tuple[float, list[dict]]] = {}
 _bazarr_episode_cache: dict[tuple, tuple[float, list[dict]]] = {}
 _bazarr_resolution_cache: dict[
-	tuple, tuple[float, dict | None, tuple[str, str] | None]
+    tuple, tuple[float, dict | None, tuple[str, str] | None]
 ] = {}
 
 
@@ -764,9 +764,7 @@ def _search_candidates(client: BazarrClient, episode_id: int) -> list[dict]:
     for attempt in range(2):
         raw_matches = client.search(episode_id)
         values = [
-            value
-            for raw in raw_matches
-            if (value := _candidate(raw)) is not None
+            value for raw in raw_matches if (value := _candidate(raw)) is not None
         ]
         if values or attempt == 1:
             break

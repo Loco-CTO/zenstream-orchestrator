@@ -99,9 +99,12 @@ def _metadata_upgrade_needed(
     for field in TEXT_FIELDS | FACT_FIELDS:
         previous = before.get(field)
         current = fresh.get(field)
-        if _usable_metadata_value(previous) and _usable_metadata_value(current):
-            if previous != current:
-                return True
+        if (
+            _usable_metadata_value(previous)
+            and _usable_metadata_value(current)
+            and previous != current
+        ):
+            return True
 
     prefer_no_language_for_backdrop = _prefer_no_language_for_backdrop()
     for image_type in ARTWORK_TYPES:
@@ -1987,9 +1990,8 @@ class MetadataMissingJob:
                     f"Checked {completed} metadata documents; repaired {repaired}; "
                     f"{len(failures)} repair errors"
                 )
-            if incomplete_repairs:
-                if not is_upgrade:
-                    summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
+            if incomplete_repairs and not is_upgrade:
+                summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
             self.store.update_run(
                 run_id,
                 state="failed",

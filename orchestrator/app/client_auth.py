@@ -248,9 +248,12 @@ def account_from_access(
     )
     route_entity = request.path_params.get("entity_id")
     claimed_entity = payload.get("entity")
-    if claimed_entity is not None and route_entity is not None:
-        if claimed_entity != route_entity:
-            raise HTTPException(401, "Invalid or expired access ticket.")
+    if (
+        claimed_entity is not None
+        and route_entity is not None
+        and claimed_entity != route_entity
+    ):
+        raise HTTPException(401, "Invalid or expired access ticket.")
     account_model = Account()
     rows = account_model.db.read_execute(
         "SELECT id,username,password,password_scheme,COALESCE(disabled,0) FROM users WHERE id=?",

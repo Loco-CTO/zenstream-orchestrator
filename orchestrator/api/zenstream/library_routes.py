@@ -165,9 +165,11 @@ def authenticate_admin_request(
     # HttpOnly cookie boundary here.
     if not cookie_token:
         raise HTTPException(401, "Administrator cookie authentication is required.")
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-        if not administrator_origin_allowed(request):
-            raise HTTPException(403, "Cross-site administrator request rejected.")
+    if (
+        request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and not administrator_origin_allowed(request)
+    ):
+        raise HTTPException(403, "Cross-site administrator request rejected.")
     admin = Admin.from_token(cookie_token)
     if admin is None:
         raise HTTPException(401, "Invalid administrator credentials.")

@@ -11,6 +11,7 @@
     "build": "npm run typecheck && vite build && tsc -p tsconfig.electron.json",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "lint": "npm run typecheck && prettier --check .",
     "lint:fix": "prettier --write .",
     "pack:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/pack-windows.ps1"
@@ -24,6 +25,7 @@
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@vitest/coverage-v8": "^4.0.0",
     "@vitejs/plugin-react": "^6.0.0",
     "concurrently": "^10.0.5",
     "cross-env": "^10.1.0",

@@ -1,0 +1,68 @@
+name: Coverage
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: orchestrator-coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: orchestrator
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt coverage
+
+      - name: Run Python tests with coverage
+        run: |
+          python -m coverage run --branch --source=orchestrator -m unittest discover -s orchestrator/test -p '*_test.py'
+          python -m coverage run --append --branch --source=orchestrator -m unittest discover -s tests -p 'test*.py'
+          python -m coverage xml -o coverage.xml
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: launcher/package-lock.json
+
+      - name: Install launcher dependencies
+        working-directory: launcher
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run launcher tests with coverage
+        working-directory: launcher
+        run: npm run test:coverage
+
+      - name: Install DeepSource CLI
+        run: curl -fsSL https://cli.deepsource.com/install | BINDIR=./bin sh
+
+      - name: Upload Python coverage
+        run: ./bin/deepsource report --analyzer test-coverage --key python --value-file coverage.xml --use-oidc
+
+      - name: Upload launcher JavaScript coverage
+        run: ./bin/deepsource report --analyzer test-coverage --key javascript --value-file launcher/coverage/lcov.info --use-oidc

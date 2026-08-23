@@ -258,7 +258,8 @@ class CatalogTest(unittest.TestCase):
             )
         return account["id"]
 
-    def patch_catalog_metadata(self, catalog):
+    @staticmethod
+    def patch_catalog_metadata(catalog):
         catalog.metadata = lambda _user_id, entity_id, _language: {
             "metadata": {"title": entity_id.replace("-", " ")}
         }

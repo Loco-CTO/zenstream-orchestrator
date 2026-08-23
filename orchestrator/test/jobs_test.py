@@ -348,16 +348,19 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         }
 
         class Cache:
-            def get(self, *_args):
+            @staticmethod
+            def get(*_args):
                 return dict(document)
 
         class Ingest:
             metadata_service = type("MetadataService", (), {"cache": Cache()})()
 
-            def locales(self):
+            @staticmethod
+            def locales():
                 return ["en"]
 
-            def ingest_document(self, *_args):
+            @staticmethod
+            def ingest_document(*_args):
                 Path(backdrop_path).write_bytes(b"webp")
                 self_db.execute(
                     "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?)",
@@ -466,7 +469,8 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         }
 
         class Cache:
-            def get(self, _provider, entity_type, _provider_id, _locale):
+            @staticmethod
+            def get(_provider, entity_type, _provider_id, _locale):
                 return (
                     cached
                     if entity_type == "season"
@@ -482,7 +486,8 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             def __init__(self):
                 self.fetches = []
 
-            def locales(self):
+            @staticmethod
+            def locales():
                 return ["en"]
 
             def ingest_locales(
@@ -491,7 +496,8 @@ class MetadataMissingInspectionTest(unittest.TestCase):
                 self.fetches.append((provider, entity_type, provider_id, locales))
                 return {"en": fetched}
 
-            def ingest_document(self, *_args, **_kwargs):
+            @staticmethod
+            def ingest_document(*_args, **_kwargs):
                 return None
 
         ingest = Ingest()
@@ -514,16 +520,19 @@ class MetadataMissingInspectionTest(unittest.TestCase):
 
     def test_job_completes_when_metadata_is_legitimately_unavailable(self):
         class Cache:
-            def get(self, *_args):
+            @staticmethod
+            def get(*_args):
                 return None
 
         class Ingest:
             metadata_service = type("MetadataService", (), {"cache": Cache()})()
 
-            def locales(self):
+            @staticmethod
+            def locales():
                 return ["en"]
 
-            def ingest_locales(self, *_args, **_kwargs):
+            @staticmethod
+            def ingest_locales(*_args, **_kwargs):
                 return {}
 
         store = type(
@@ -548,16 +557,19 @@ class MetadataMissingInspectionTest(unittest.TestCase):
 
     def test_job_fails_when_provider_repair_raises_an_error(self):
         class Cache:
-            def get(self, *_args):
+            @staticmethod
+            def get(*_args):
                 return None
 
         class Ingest:
             metadata_service = type("MetadataService", (), {"cache": Cache()})()
 
-            def locales(self):
+            @staticmethod
+            def locales():
                 return ["en"]
 
-            def ingest_locales(self, *_args, **_kwargs):
+            @staticmethod
+            def ingest_locales(*_args, **_kwargs):
                 raise ValueError("provider response was invalid")
 
         store = type(
@@ -581,7 +593,8 @@ class MetadataMissingInspectionTest(unittest.TestCase):
 
     def test_forced_refresh_passes_asset_preservation_through_to_ingest(self):
         class Cache:
-            def get(self, *_args):
+            @staticmethod
+            def get(*_args):
                 return None
 
         class Ingest:
@@ -590,7 +603,8 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             def __init__(self):
                 self.kwargs = None
 
-            def locales(self):
+            @staticmethod
+            def locales():
                 return ["en"]
 
             def ingest_locales(self, *_args, **kwargs):
@@ -635,7 +649,8 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         fresh = {"title": "Example", "overview": "New overview", "images": []}
 
         class Cache:
-            def get(self, *_args):
+            @staticmethod
+            def get(*_args):
                 return dict(previous)
 
         class Service:
@@ -652,7 +667,8 @@ class MetadataMissingInspectionTest(unittest.TestCase):
                 self.metadata_service = Service()
                 self.materialized = []
 
-            def locales(self):
+            @staticmethod
+            def locales():
                 return ["en"]
 
             def ingest_document(
@@ -788,7 +804,8 @@ class MissingTvChildIdentityRepairTest(unittest.TestCase):
 
 
 class JobMappingTest(unittest.TestCase):
-    def _scheduler_store(self):
+    @staticmethod
+    def _scheduler_store():
         db = DatabaseHandler("sqlite", {}, ":memory:")
         db.execute(
             "CREATE TABLE job_definitions (id TEXT PRIMARY KEY, job_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, interval_minutes INTEGER NOT NULL DEFAULT 1440, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', next_run_at TEXT, last_run_at TEXT, last_run_id TEXT, last_state TEXT NOT NULL DEFAULT 'idle', last_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
@@ -1027,7 +1044,8 @@ class AnalysisCapacityTest(unittest.TestCase):
         errors = []
 
         class Worker:
-            def run(self, run_id, store, should_terminate):
+            @staticmethod
+            def run(run_id, store, should_terminate):
                 barrier.wait(timeout=2)
 
         def run(kind):
@@ -1055,7 +1073,8 @@ class AnalysisCapacityTest(unittest.TestCase):
         started = threading.Event()
 
         class Worker:
-            def run(self, run_id, store, should_terminate):
+            @staticmethod
+            def run(run_id, store, should_terminate):
                 started.set()
 
         with patch("app.jobs.active_requests", return_value=0):

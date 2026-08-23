@@ -623,7 +623,8 @@ class IntroOutroTest(unittest.TestCase):
                 ]
                 self.processed = []
 
-            def settings(self):
+            @staticmethod
+            def settings():
                 return {**DEFAULTS, "introOutroWorkers": 2}
 
             def queue_pending(self, settings=None):
@@ -637,10 +638,12 @@ class IntroOutroTest(unittest.TestCase):
                 with self.lock:
                     self.processed.append(asset["mediaFileId"])
 
-            def mark_failed(self, asset, error):
+            @staticmethod
+            def mark_failed(asset, error):
                 raise AssertionError(error)
 
-            def recompute_all(self, settings, progress=None):
+            @staticmethod
+            def recompute_all(settings, progress=None):
                 return 0
 
         class JobStore:
@@ -696,10 +699,12 @@ class IntroOutroTest(unittest.TestCase):
                 self.processed = []
                 self.comparisons = 0
 
-            def settings(self):
+            @staticmethod
+            def settings():
                 return {**DEFAULTS, "introOutroWorkers": 1}
 
-            def queue_pending(self, settings=None):
+            @staticmethod
+            def queue_pending(settings=None):
                 return 1
 
             def claim_next(self):
@@ -709,7 +714,8 @@ class IntroOutroTest(unittest.TestCase):
             def mark_fingerprinted(self, asset, intro, outro, warning=None):
                 self.processed.append((intro, outro, warning))
 
-            def mark_failed(self, asset, error):
+            @staticmethod
+            def mark_failed(asset, error):
                 raise AssertionError(error)
 
             def recompute_all(self, settings, progress=None):
@@ -760,17 +766,20 @@ class IntroOutroTest(unittest.TestCase):
                 self.failures = []
                 self.comparisons = 0
 
-            def settings(self):
+            @staticmethod
+            def settings():
                 return {**DEFAULTS, "introOutroWorkers": 1}
 
-            def queue_pending(self, settings=None):
+            @staticmethod
+            def queue_pending(settings=None):
                 return 1
 
             def claim_next(self):
                 asset, self.asset = self.asset, None
                 return asset
 
-            def mark_fingerprinted(self, asset, intro, outro, warning=None):
+            @staticmethod
+            def mark_fingerprinted(asset, intro, outro, warning=None):
                 raise AssertionError("a fully failed episode must not be scanned")
 
             def mark_failed(self, asset, error):

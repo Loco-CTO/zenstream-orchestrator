@@ -312,7 +312,8 @@ class SyncplayReadinessTests(unittest.TestCase):
 
 
 class SyncplayMigrationTests(unittest.TestCase):
-    def migrate(self, ddl, participant_column=False, unique_user=False):
+    @staticmethod
+    def migrate(ddl, participant_column=False, unique_user=False):
         db = sqlite3.connect(":memory:")
         db.execute(ddl)
         if participant_column:
@@ -331,7 +332,8 @@ class SyncplayMigrationTests(unittest.TestCase):
         class Database:
             db_type = "sqlite"
 
-            def execute(self, query, params):
+            @staticmethod
+            def execute(query, params):
                 return db.execute(query, params).fetchall()
 
             @contextmanager

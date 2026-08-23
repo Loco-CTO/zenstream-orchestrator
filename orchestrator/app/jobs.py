@@ -1015,8 +1015,9 @@ class JobStore:
             return {"type": "startup"}
         raise ValueError("Unsupported schedule trigger")
 
+    @staticmethod
     def _next_for_trigger(
-        self, trigger: dict, base: datetime | None = None
+        trigger: dict, base: datetime | None = None
     ) -> str | None:
         if trigger["type"] == "startup":
             return None

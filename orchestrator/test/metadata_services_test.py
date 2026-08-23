@@ -977,7 +977,8 @@ class MetadataServicesTest(unittest.TestCase):
         )
         self.assertEqual(result, {"ready": 1, "failed": 1, "skipped": 0})
 
-    def test_forced_ingest_redownloads_existing_artwork_and_portraits(self):
+    @staticmethod
+    def test_forced_ingest_redownloads_existing_artwork_and_portraits():
         fetcher = _BulkFetcher()
         image_ingest = MagicMock()
         credit_ingest = MagicMock()

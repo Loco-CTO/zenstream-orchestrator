@@ -2411,8 +2411,9 @@ class PersonCreditIngestService:
             )
             return None
 
+    @staticmethod
     def _person_id(
-        self, cursor, provider: str, identity: str, name: str, locale: str
+        cursor, provider: str, identity: str, name: str, locale: str
     ) -> str:
         rows = cursor.execute(
             "SELECT id FROM people WHERE provider=? AND provider_person_id=?",

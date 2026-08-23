@@ -1,6 +1,12 @@
 version = 1
 
-test_patterns = ["tests/**"]
+test_patterns = [
+  "tests/**",
+  "orchestrator/test/**",
+  "**/*.test.ts",
+  "**/*.test.tsx",
+  "**/*_test.py"
+]
 
 [[analyzers]]
 name = "secrets"
@@ -19,7 +25,16 @@ runtime_version = "3.x.x"
 
 [[analyzers]]
 name = "javascript"
+dependency_file_paths = ["frontend", "launcher"]
 
 [analyzers.meta]
 plugins = ["react"]
-environment = ["nodejs", "browser"]
+environment = ["nodejs", "browser", "vitest"]
+module_system = "es-modules"
+dialect = "typescript"
+
+[[analyzers]]
+name = "docker"
+
+[analyzers.meta]
+dockerfile_paths = ["Dockerfile"]

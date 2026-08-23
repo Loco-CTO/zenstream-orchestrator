@@ -135,7 +135,6 @@ logger = get_logger("library")
 
 def _path_key(value: str | os.PathLike[str]) -> str:
     """Return a platform-aware stable key for relative filesystem paths."""
-
     normalized = os.path.normcase(str(value).replace("\\", "/"))
     return normalized.replace("\\", "/").strip("/")
 
@@ -529,7 +528,6 @@ class LibraryStore:
 
     def _library_sort_order_sql(self) -> str:
         """Return the sort-order column when the current schema supports it."""
-
         if not hasattr(self, "_library_columns"):
             self._library_columns = {
                 row[1] for row in self.db.execute("PRAGMA table_info(libraries)")
@@ -3571,7 +3569,6 @@ class LibraryScanner:
     @staticmethod
     def _video_state(path: Path, file_stat: os.stat_result | None = None) -> str:
         """Classify a video candidate without mistaking access failure for absence."""
-
         if path.suffix.lower() not in VIDEO_EXTENSIONS:
             return "unsupported"
         try:
@@ -4814,7 +4811,6 @@ class LibraryRuntime:
 
     def has_active_inventory_jobs(self) -> bool:
         """Return whether inventory work is queued or running."""
-
         rows = self.store.db.execute(
             "SELECT 1 FROM library_jobs "
             "WHERE kind IN ('scan','reconcile','collection_rebuild') "

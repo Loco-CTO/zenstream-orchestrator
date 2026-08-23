@@ -934,8 +934,7 @@ async def home(
         if rows is None:
             raise HTTPException(404, "Library not found.")
         return _catalog_response({"libraryRows": rows}, view, limit)
-    else:
-        raise HTTPException(400, "Unsupported home section.")
+    raise HTTPException(400, "Unsupported home section.")
 
 
 def _preferred(account: dict, supplied: str | None) -> str:

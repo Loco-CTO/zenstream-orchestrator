@@ -1199,6 +1199,7 @@ class LibraryScanner:
                 from app.jobs import scheduler
 
                 scheduler.enqueue_intro_outro_detection()
+            self._refresh_calendar_links(library_id, job_id)
             finished = now()
             self.store.update_job(
                 job_id,
@@ -1549,6 +1550,29 @@ class LibraryScanner:
             model.refresh_roots(roots[offset : offset + 300])
         if len(roots) != 1 or self._scan_delta.get("removed"):
             model.refresh_roots([], affected_library_ids=[library_id])
+
+    def _refresh_calendar_links(self, library_id: str, job_id: str) -> None:
+        """Keep persisted calendar/catalog relationships in sync with a scan."""
+
+        try:
+            from app.calendar import CalendarSyncService
+
+            changed = CalendarSyncService().reconcile_catalog_links(library_id)
+            logger.info(
+                "calendar catalog links reconciled library_id=%s job_id=%s changed_events=%s",
+                library_id,
+                job_id,
+                changed,
+            )
+        except Exception:
+            # Calendar relationship maintenance must not turn a successful
+            # catalog admission into a failed library scan.
+            logger.warning(
+                "could not reconcile calendar catalog links library_id=%s job_id=%s",
+                library_id,
+                job_id,
+                exc_info=True,
+            )
 
     def _publish_root(self, root_id: str) -> None:
         with self._publication_lock:

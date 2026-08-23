@@ -15,6 +15,7 @@ from app.calendar import (
     calendar_window,
     parse_calendar_window,
 )
+from app.database import DatabaseHandler
 from app.models.calendar import FutureMetadataCache
 
 
@@ -220,6 +221,187 @@ class CalendarSyncTest(unittest.TestCase):
             },
         )
         self.assertEqual(result["metadata"], metadata_result)
+
+    def test_reconcile_catalog_links_matches_catalog_identities(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            db.execute(
+                "CREATE TABLE calendar_events (id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,tvdb_id TEXT,tmdb_id TEXT,series_tvdb_id TEXT,state TEXT,updated_at TEXT)"
+            )
+            db.execute(
+                "CREATE TABLE calendar_event_entities (event_id TEXT,entity_id TEXT,PRIMARY KEY(event_id,entity_id))"
+            )
+            db.execute(
+                "CREATE TABLE library_entities (id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT)"
+            )
+            db.execute(
+                "CREATE TABLE entity_provider_ids (entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,PRIMARY KEY(entity_id,provider,identifier_type))"
+            )
+            db.execute(
+                "CREATE TABLE media_files (entity_id TEXT,role TEXT)"
+            )
+            db.execute(
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "episode-event",
+                    "library",
+                    "episode",
+                    "episode-tvdb",
+                    None,
+                    "series-tvdb",
+                    "future",
+                    "before",
+                ),
+            )
+            db.execute(
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "movie-event",
+                    "library",
+                    "movie",
+                    None,
+                    "movie-tmdb",
+                    None,
+                    "future",
+                    "before",
+                ),
+            )
+            db.execute(
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "series-only-event",
+                    "library",
+                    "episode",
+                    "missing-episode",
+                    None,
+                    "series-tvdb",
+                    "future",
+                    "before",
+                ),
+            )
+            db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?)",
+                ("series-1", "library", "series"),
+            )
+            db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?)",
+                ("episode-1", "library", "episode"),
+            )
+            db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?)",
+                ("movie-1", "library", "movie"),
+            )
+            db.execute(
+                "INSERT INTO entity_provider_ids VALUES(?,?,?,?)",
+                ("series-1", "tvdb", "series", "series-tvdb"),
+            )
+            db.execute(
+                "INSERT INTO entity_provider_ids VALUES(?,?,?,?)",
+                ("episode-1", "tvdb", "episode", "episode-tvdb"),
+            )
+            db.execute(
+                "INSERT INTO entity_provider_ids VALUES(?,?,?,?)",
+                ("movie-1", "tmdb", "movie", "movie-tmdb"),
+            )
+            db.execute(
+                "INSERT INTO media_files VALUES(?,?)",
+                ("episode-1", "media"),
+            )
+            db.execute(
+                "INSERT INTO media_files VALUES(?,?)",
+                ("movie-1", "media"),
+            )
+
+            service = CalendarSyncService.__new__(CalendarSyncService)
+            service.db = db
+            service.future_cache = MagicMock()
+
+            self.assertEqual(service.reconcile_catalog_links("library"), 2)
+            self.assertEqual(
+                db.execute(
+                    "SELECT event_id,entity_id FROM calendar_event_entities ORDER BY event_id"
+                ),
+                [("episode-event", "episode-1"), ("movie-event", "movie-1")],
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT id,state FROM calendar_events ORDER BY id"
+                ),
+                [
+                    ("episode-event", "existing"),
+                    ("movie-event", "existing"),
+                    ("series-only-event", "future"),
+                ],
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM calendar_event_entities x JOIN media_files m ON m.entity_id=x.entity_id AND m.role='media'"
+                )[0][0],
+                2,
+            )
+            service.future_cache.promote_identity.assert_any_call(
+                "tvdb", "episode", "episode-tvdb"
+            )
+            service.future_cache.promote_identity.assert_any_call(
+                "tvdb", "series", "series-tvdb"
+            )
+            service.future_cache.promote_identity.assert_any_call(
+                "tmdb", "movie", "movie-tmdb"
+            )
+        finally:
+            db.close()
+
+    def test_reconcile_catalog_links_removes_stale_entity_links(self):
+        db = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            db.execute(
+                "CREATE TABLE calendar_events (id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,tvdb_id TEXT,tmdb_id TEXT,series_tvdb_id TEXT,state TEXT,updated_at TEXT)"
+            )
+            db.execute(
+                "CREATE TABLE calendar_event_entities (event_id TEXT,entity_id TEXT,PRIMARY KEY(event_id,entity_id))"
+            )
+            db.execute(
+                "CREATE TABLE library_entities (id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT)"
+            )
+            db.execute(
+                "CREATE TABLE entity_provider_ids (entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,PRIMARY KEY(entity_id,provider,identifier_type))"
+            )
+            db.execute(
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "event-1",
+                    "library",
+                    "episode",
+                    "episode-tvdb",
+                    None,
+                    "series-tvdb",
+                    "existing",
+                    "before",
+                ),
+            )
+            db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?)",
+                ("episode-1", "library", "episode"),
+            )
+            db.execute(
+                "INSERT INTO calendar_event_entities VALUES(?,?)",
+                ("event-1", "episode-1"),
+            )
+
+            service = CalendarSyncService.__new__(CalendarSyncService)
+            service.db = db
+            service.future_cache = MagicMock()
+
+            self.assertEqual(service.reconcile_catalog_links("library"), 1)
+            self.assertEqual(
+                db.execute("SELECT * FROM calendar_event_entities"), []
+            )
+            self.assertEqual(
+                db.execute("SELECT state FROM calendar_events WHERE id='event-1'"),
+                [("future",)],
+            )
+        finally:
+            db.close()
 
 
 class CalendarReadTest(unittest.TestCase):

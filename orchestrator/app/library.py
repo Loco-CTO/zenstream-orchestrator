@@ -468,13 +468,14 @@ def _sidecar_suffix_tokens(value: str) -> list[str]:
     return [token.strip() for token in value.split(".") if token.strip()]
 
 
-def sidecar_descriptor(
+def sidecar_media_path(
     sidecar_path: str | Path, media_paths: Iterable[str | Path]
-) -> str | None:
+) -> Path | None:
+    """Return the longest media path whose filename owns this sidecar."""
     sidecar = Path(sidecar_path)
     sidecar_stem = sidecar.stem
     normalized_sidecar = sidecar_stem.casefold()
-    matching_stem: str | None = None
+    matches: list[Path] = []
     for media_path_value in media_paths:
         media_path = Path(media_path_value)
         if media_path.parent != sidecar.parent:
@@ -485,10 +486,19 @@ def sidecar_descriptor(
         remainder = sidecar_stem[len(media_stem) :]
         if remainder and remainder[0] not in ".-_ \t":
             continue
-        if matching_stem is None or len(media_stem) > len(matching_stem):
-            matching_stem = media_stem
-    if matching_stem is None:
+        matches.append(media_path)
+    return max(matches, key=lambda path: len(path.stem)) if matches else None
+
+
+def sidecar_descriptor(
+    sidecar_path: str | Path, media_paths: Iterable[str | Path]
+) -> str | None:
+    sidecar = Path(sidecar_path)
+    sidecar_stem = sidecar.stem
+    matching_media = sidecar_media_path(sidecar, media_paths)
+    if matching_media is None:
         return None
+    matching_stem = matching_media.stem
 
     remainder = sidecar_stem[len(matching_stem) :].lstrip(" ._-\t")
     tokens = _sidecar_suffix_tokens(remainder)

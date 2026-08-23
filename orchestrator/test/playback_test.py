@@ -404,6 +404,54 @@ class PlaybackTest(unittest.TestCase):
             ["AI 音声認識 - Japanese (日本語)", "Japanese (日本語)"],
         )
 
+    def test_sources_do_not_attach_sidecars_from_another_media_file(self):
+        manager = object.__new__(PlaybackManager)
+        manager.catalog = MagicMock()
+        manager.db = MagicMock()
+        manager.db.execute.side_effect = [
+            [
+                (
+                    "source-1",
+                    "file-1",
+                    "mp4",
+                    120.0,
+                    1_000_000,
+                    1920,
+                    1080,
+                    "h264",
+                    "aac",
+                    json.dumps({"streams": []}),
+                ),
+                (
+                    "source-2",
+                    "file-2",
+                    "mp4",
+                    120.0,
+                    1_000_000,
+                    1920,
+                    1080,
+                    "h264",
+                    "aac",
+                    json.dumps({"streams": []}),
+                ),
+            ],
+            [
+                ("file-1", "Show/Episode.mkv", None, "media"),
+                ("file-2", "Show/Episode.alt.mkv", None, "media"),
+                ("subtitle-1", "Show/Episode.en.srt", "en", "subtitle"),
+                ("subtitle-2", "Show/Episode.alt.ja.srt", "ja", "subtitle"),
+            ],
+        ]
+
+        sources = manager.sources("user-1", "entity-1")
+
+        self.assertEqual(
+            [stream["fileId"] for stream in sources[0]["streams"]], ["subtitle-1"]
+        )
+        self.assertEqual(
+            [stream["fileId"] for stream in sources[1]["streams"]], ["subtitle-2"]
+        )
+
     @patch("app.playback.issue_ticket", return_value="ticket")
     def test_negotiate_returns_readiness_error_when_no_source(self, _ticket):
         manager = object.__new__(PlaybackManager)

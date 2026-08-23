@@ -16,7 +16,10 @@ class MetadataPathTest(unittest.TestCase):
             self.assertEqual(metadata_directory(), PROJECT_ROOT / "sqlite")
 
     def test_absolute_metadata_path_is_used_directly(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"METADATA_PATH": directory}):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"METADATA_PATH": directory}),
+        ):
             self.assertEqual(metadata_directory(), Path(directory))
             self.assertEqual(log_directory(), metadata_directory() / "logs")
 

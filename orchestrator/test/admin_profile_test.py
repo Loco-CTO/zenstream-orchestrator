@@ -69,7 +69,10 @@ class AdminProfileRouteTest(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 401)
 
     def test_invalid_library_admin_session_is_unauthorized(self):
-        with patch.object(library_module.Admin, "from_token", return_value=None), self.assertRaises(HTTPException) as raised:
+        with (
+            patch.object(library_module.Admin, "from_token", return_value=None),
+            self.assertRaises(HTTPException) as raised,
+        ):
             library_module.authenticate_admin_request(_request())
         self.assertEqual(raised.exception.status_code, 401)
 
@@ -103,7 +106,10 @@ class AdminProfileRouteTest(unittest.TestCase):
         self.assertEqual(username, "root")
 
     def test_invalid_admin_session_is_unauthorized(self):
-        with patch.object(app_module.Admin, "from_token", return_value=None), self.assertRaises(HTTPException) as raised:
+        with (
+            patch.object(app_module.Admin, "from_token", return_value=None),
+            self.assertRaises(HTTPException) as raised,
+        ):
             app_module._admin_request(_request())
         self.assertEqual(raised.exception.status_code, 401)
 
@@ -120,7 +126,8 @@ class AdminProfileRouteTest(unittest.TestCase):
                 "_admin_request",
                 return_value=("operator", "server-owned-session"),
             ),
-            patch.object(app_module, "Admin", return_value=admin),self.assertRaises(HTTPException) as raised
+            patch.object(app_module, "Admin", return_value=admin),
+            self.assertRaises(HTTPException) as raised,
         ):
             app_module._root_admin_request(_request())
         self.assertEqual(raised.exception.status_code, 403)
@@ -167,7 +174,8 @@ class AdminProfileRouteTest(unittest.TestCase):
         )
         with (
             patch.object(app_module, "_admin_headers", return_value=("root", "token")),
-            patch.object(app_module, "Admin", return_value=admin),self.assertRaises(HTTPException) as raised
+            patch.object(app_module, "Admin", return_value=admin),
+            self.assertRaises(HTTPException) as raised,
         ):
             asyncio.run(
                 app_module.admin_update_profile(

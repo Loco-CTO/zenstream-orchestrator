@@ -194,10 +194,14 @@ class AvatarStoreTests(unittest.TestCase):
 
     def test_failed_replacement_keeps_previous_avatar(self):
         previous = self._insert_avatar()
-        with patch("app.avatar._probe_image", return_value=_Probe(100, 100)), patch(
-            "app.avatar._encode_avatar",
-            side_effect=AvatarError("processing failed"),
-        ), self.assertRaises(AvatarError):
+        with (
+            patch("app.avatar._probe_image", return_value=_Probe(100, 100)),
+            patch(
+                "app.avatar._encode_avatar",
+                side_effect=AvatarError("processing failed"),
+            ),
+            self.assertRaises(AvatarError),
+        ):
             self.store.save(
                 "user-1", b"\x89PNG\r\n\x1a\n", None, AvatarCrop(0, 0, 100, 0)
             )

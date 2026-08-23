@@ -57,9 +57,8 @@ class ClientTicketTest(unittest.TestCase):
 
     def test_malformed_ticket_is_rejected(self):
         for value in ("", "no-dot", "a.b.c", "a." + "x" * 5000):
-            with self.subTest(value=value[:20]):
-                with self.assertRaises(HTTPException):
-                    read_ticket(value, "resource")
+            with self.subTest(value=value[:20]), self.assertRaises(HTTPException):
+                read_ticket(value, "resource")
 
 
 class ClientSessionCookieTest(unittest.TestCase):

@@ -237,9 +237,7 @@ class CalendarSyncTest(unittest.TestCase):
             db.execute(
                 "CREATE TABLE entity_provider_ids (entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,PRIMARY KEY(entity_id,provider,identifier_type))"
             )
-            db.execute(
-                "CREATE TABLE media_files (entity_id TEXT,role TEXT)"
-            )
+            db.execute("CREATE TABLE media_files (entity_id TEXT,role TEXT)")
             db.execute(
                 "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
                 (
@@ -324,9 +322,7 @@ class CalendarSyncTest(unittest.TestCase):
                 [("episode-event", "episode-1"), ("movie-event", "movie-1")],
             )
             self.assertEqual(
-                db.execute(
-                    "SELECT id,state FROM calendar_events ORDER BY id"
-                ),
+                db.execute("SELECT id,state FROM calendar_events ORDER BY id"),
                 [
                     ("episode-event", "existing"),
                     ("movie-event", "existing"),
@@ -393,9 +389,7 @@ class CalendarSyncTest(unittest.TestCase):
             service.future_cache = MagicMock()
 
             self.assertEqual(service.reconcile_catalog_links("library"), 1)
-            self.assertEqual(
-                db.execute("SELECT * FROM calendar_event_entities"), []
-            )
+            self.assertEqual(db.execute("SELECT * FROM calendar_event_entities"), [])
             self.assertEqual(
                 db.execute("SELECT state FROM calendar_events WHERE id='event-1'"),
                 [("future",)],

@@ -66,8 +66,8 @@ class LibraryMetadataTest(unittest.TestCase):
             )
 
         with patch("app.calendar.CalendarSyncService") as service_type:
-            service_type.return_value.reconcile_catalog_links.side_effect = RuntimeError(
-                "calendar unavailable"
+            service_type.return_value.reconcile_catalog_links.side_effect = (
+                RuntimeError("calendar unavailable")
             )
             scanner._refresh_calendar_links("library-1", "job-1")
 

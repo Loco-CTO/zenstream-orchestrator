@@ -527,11 +527,13 @@ class IntroOutroTest(unittest.TestCase):
     def test_empty_ffmpeg_output_is_a_window_level_fingerprint_warning(
         self, _ffmpeg, _run_ffmpeg
     ):
-        with tempfile.NamedTemporaryFile() as temporary:
-            with self.assertRaises(EmptyFingerprint):
-                IntroOutroDetector()._fingerprint(
-                    Path(temporary.name), 0, 30, lambda: False
-                )
+        with (
+            tempfile.NamedTemporaryFile() as temporary,
+            self.assertRaises(EmptyFingerprint),
+        ):
+            IntroOutroDetector()._fingerprint(
+                Path(temporary.name), 0, 30, lambda: False
+            )
 
     def test_downsamples_fingerprint_bit_density_for_dashboard_preview(self):
         preview = fingerprint_preview(

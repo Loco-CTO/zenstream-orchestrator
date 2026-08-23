@@ -402,11 +402,11 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         )()
         read_model = MagicMock()
 
-        with patch("app.jobs.MetadataIngestService", return_value=ingest) as factory:
-            with patch(
-                "app.catalog_read_model.CatalogReadModel", return_value=read_model
-            ):
-                MetadataMissingJob(store).run("run-1", {"config": {"batchSize": 1}})
+        with (
+            patch("app.jobs.MetadataIngestService", return_value=ingest) as factory,
+            patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
+        ):
+            MetadataMissingJob(store).run("run-1", {"config": {"batchSize": 1}})
 
         factory.assert_called_once_with(background_assets=False)
         read_model.refresh_roots.assert_called_once_with(["movie-1"])

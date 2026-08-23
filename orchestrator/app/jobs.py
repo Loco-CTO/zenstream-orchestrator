@@ -413,10 +413,12 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
             (child_id, entity_type, season_number, episode_number)
         )
 
-    existing = set(db.execute(
+    existing = set(
+        db.execute(
             "SELECT entity_id,provider,identifier_type FROM entity_provider_ids "
             "WHERE provider IN ('tmdb','tvdb')"
-        ))
+        )
+    )
     repaired = 0
     for series_id, provider, series_provider_id in series_rows:
         children = children_by_series.get(series_id, [])

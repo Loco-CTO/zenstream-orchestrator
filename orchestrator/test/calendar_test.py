@@ -324,8 +324,6 @@ class CalendarFutureMetadataTest(unittest.TestCase):
         service.db = MagicMock()
         service.db.execute.return_value = []
         with patch("app.calendar.calendar_window") as window:
-            from datetime import datetime, timezone
-
             window.return_value = (
                 datetime(2026, 8, 13, 18, 57, tzinfo=timezone.utc),
                 datetime(2026, 11, 18, 18, 57, tzinfo=timezone.utc),

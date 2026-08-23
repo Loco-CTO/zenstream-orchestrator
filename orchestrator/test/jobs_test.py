@@ -414,9 +414,12 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         factory.assert_called_once_with(background_assets=False)
         read_model.refresh_roots.assert_called_once_with(["movie-1"])
         self.assertEqual(
-            store.updates[0]["message"], "Processing 0/1 metadata documents"
+            store.updates[0]["message"], "Discovering metadata work · 0/1 documents"
         )
-        self.assertEqual(store.updates[-2]["message"], "Processing 1/1: movie tmdb:42")
+        self.assertEqual(
+            store.updates[-2]["message"],
+            "Refreshing metadata · movie tmdb:42 · 1/1 documents",
+        )
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 1", store.updates[-1]["message"])
 

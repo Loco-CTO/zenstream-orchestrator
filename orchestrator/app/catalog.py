@@ -974,12 +974,16 @@ class Catalog:
         context = self._context(user_id)
         if context is not None and entity_id in context.following_states:
             return context.following_states[entity_id]
-        from app.notifications import FollowService
-
-        try:
-            value = FollowService(self.db).following_for_entity(user_id, entity_id)
-        except HTTPException:
+        row = self._entity_row(entity_id)
+        if not row or row[3] not in {"movie", "series"}:
             value = False
+        else:
+            from app.notifications import FollowService
+
+            try:
+                value = FollowService(self.db).following_for_entity(user_id, entity_id)
+            except HTTPException:
+                value = False
         if context is not None:
             context.following_states[entity_id] = value
         return value
@@ -2436,6 +2440,8 @@ class Catalog:
             str(value).casefold()
             for value in (source.get("genres") or source.get("tags") or [])
         }
+        if not source_terms:
+            return {"items": []}
         allowed = self.allowed_libraries(user_id)
         if (
             self._read_model_ready()

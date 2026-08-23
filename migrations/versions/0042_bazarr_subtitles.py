@@ -19,9 +19,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.CheckConstraint("id = 1", name="ck_bazarr_settings_singleton"),
-        sa.CheckConstraint(
-            "port BETWEEN 1 AND 65535", name="ck_bazarr_settings_port"
-        ),
+        sa.CheckConstraint("port BETWEEN 1 AND 65535", name="ck_bazarr_settings_port"),
         sa.CheckConstraint("use_ssl IN (0,1)", name="ck_bazarr_settings_use_ssl"),
     )
     op.create_table(

@@ -15,8 +15,8 @@ from app.config import Config
 from app.library import sidecar_media_path
 from app.logging_config import get_logger
 from app.models.metadata import _fernet
-from fastapi import HTTPException
 from cryptography.fernet import InvalidToken
+from fastapi import HTTPException
 
 logger = get_logger("bazarr")
 
@@ -339,10 +339,14 @@ class BazarrClient:
         except BazarrError:
             raise
         except (httpx.HTTPError, ValueError) as error:
-            raise BazarrError(f"Bazarr request failed: {type(error).__name__}") from error
+            raise BazarrError(
+                f"Bazarr request failed: {type(error).__name__}"
+            ) from error
 
     def series(self) -> list[dict]:
-        return _data_list(self.request("GET", "/series", params={"start": 0, "length": -1}))
+        return _data_list(
+            self.request("GET", "/series", params={"start": 0, "length": -1})
+        )
 
     def episodes(self, series_id: int) -> list[dict]:
         return _data_list(
@@ -458,7 +462,9 @@ def _target(user_id: str, entity_id: str, source_id: str | None) -> BazarrTarget
         bazarr_root_path=str(bazarr_root) if bazarr_root else None,
         target_path=target_path,
         local_subtitles=local_subtitles,
-        series_provider_ids=tuple((str(value[0]), str(value[1])) for value in series_rows),
+        series_provider_ids=tuple(
+            (str(value[0]), str(value[1])) for value in series_rows
+        ),
     )
 
 
@@ -487,9 +493,12 @@ def _provider_conflict(target: BazarrTarget, series: dict) -> bool:
 def _find_episode(client: BazarrClient, target: BazarrTarget) -> dict:
     if not target.target_path or not target.bazarr_root_path:
         raise BazarrMatchError(
-            "not_configured", "This TV library is not mapped to the subtitle downloader."
+            "not_configured",
+            "This TV library is not mapped to the subtitle downloader.",
         )
-    expected_series_path = mapped_path(target.bazarr_root_path, target.series_relative_path)
+    expected_series_path = mapped_path(
+        target.bazarr_root_path, target.series_relative_path
+    )
     series_candidates = [
         series
         for series in client.series()
@@ -497,7 +506,8 @@ def _find_episode(client: BazarrClient, target: BazarrTarget) -> dict:
     ]
     if not series_candidates:
         raise BazarrMatchError(
-            "unmatched", "The subtitle downloader has no series entry for this library path."
+            "unmatched",
+            "The subtitle downloader has no series entry for this library path.",
         )
     if len(series_candidates) > 1:
         raise BazarrMatchError(
@@ -510,7 +520,9 @@ def _find_episode(client: BazarrClient, target: BazarrTarget) -> dict:
             "identity_conflict",
             "The subtitle downloader series identity conflicts with this catalog series.",
         )
-    series_id = _integer(_provider_id(series, "sonarrSeriesId", "sonarr_series_id", "id"))
+    series_id = _integer(
+        _provider_id(series, "sonarrSeriesId", "sonarr_series_id", "id")
+    )
     if series_id is None:
         raise BazarrMatchError(
             "unmatched", "The subtitle downloader did not return an internal series ID."
@@ -552,7 +564,8 @@ def _find_episode(client: BazarrClient, target: BazarrTarget) -> dict:
     )
     if episode_id is None:
         raise BazarrMatchError(
-            "unmatched", "The subtitle downloader did not return an internal episode ID."
+            "unmatched",
+            "The subtitle downloader did not return an internal episode ID.",
         )
     return {
         "series": series,
@@ -580,7 +593,9 @@ def _candidate(value: dict) -> dict | None:
         return None
     hi = _bool_value(value.get("hearing_impaired", value.get("hi")))
     forced = _bool_value(value.get("forced"))
-    original_format = _bool_value(value.get("original_format", value.get("originalFormat")))
+    original_format = _bool_value(
+        value.get("original_format", value.get("originalFormat"))
+    )
     candidate_id = hashlib.sha256(
         json.dumps(
             [provider, subtitle, hi, forced, original_format],
@@ -591,7 +606,8 @@ def _candidate(value: dict) -> dict | None:
         "candidateId": candidate_id,
         "provider": provider,
         "language": _provider_id(value, "language", "lang", "code"),
-        "name": _provider_id(value, "name", "release", "filename", "label", "provider") or provider,
+        "name": _provider_id(value, "name", "release", "filename", "label", "provider")
+        or provider,
         "hearingImpaired": hi,
         "forced": forced,
         "originalFormat": original_format,
@@ -601,7 +617,12 @@ def _candidate(value: dict) -> dict | None:
     }
 
 
-def _target_status(target: BazarrTarget, resolution: dict | None, state: str, message: str | None = None) -> dict:
+def _target_status(
+    target: BazarrTarget,
+    resolution: dict | None,
+    state: str,
+    message: str | None = None,
+) -> dict:
     value = {
         "state": state,
         "sourceId": target.source_id,
@@ -635,7 +656,9 @@ class BazarrSubtitleService:
     def _client(self, target: BazarrTarget) -> BazarrClient:
         connection = self.store.internal()
         if not connection:
-            raise BazarrMatchError("not_configured", "The subtitle downloader is not configured.")
+            raise BazarrMatchError(
+                "not_configured", "The subtitle downloader is not configured."
+            )
         if target.library_id not in connection["mappings"]:
             raise BazarrMatchError(
                 "not_configured",
@@ -680,7 +703,10 @@ class BazarrSubtitleService:
                 forced=value["forced"],
                 originalFormat=value["originalFormat"],
             )
-            matches.append({key: item for key, item in value.items() if key != "subtitle"} | {"matchId": match_id})
+            matches.append(
+                {key: item for key, item in value.items() if key != "subtitle"}
+                | {"matchId": match_id}
+            )
         return {
             "state": "matches" if matches else "no_matches",
             "sourceId": target.source_id,
@@ -688,7 +714,9 @@ class BazarrSubtitleService:
             "matches": matches,
         }
 
-    def download(self, user_id: str, entity_id: str, source_id: str | None, match_id: str) -> dict:
+    def download(
+        self, user_id: str, entity_id: str, source_id: str | None, match_id: str
+    ) -> dict:
         target = _target(user_id, entity_id, source_id)
         payload = read_ticket(
             match_id,
@@ -702,11 +730,17 @@ class BazarrSubtitleService:
             ("fingerprint", target.quick_fingerprint),
         ):
             if payload.get(key) != actual:
-                raise HTTPException(409, "The media file changed; search for subtitles again.")
+                raise HTTPException(
+                    409, "The media file changed; search for subtitles again."
+                )
         resolution = _find_episode(self._client(target), target)
-        if payload.get("seriesId") != resolution["seriesId"] or payload.get("episodeId") != resolution["episodeId"]:
+        if (
+            payload.get("seriesId") != resolution["seriesId"]
+            or payload.get("episodeId") != resolution["episodeId"]
+        ):
             raise HTTPException(
-                409, "The subtitle downloader episode changed; search for subtitles again."
+                409,
+                "The subtitle downloader episode changed; search for subtitles again.",
             )
         self._client(target).download(
             {

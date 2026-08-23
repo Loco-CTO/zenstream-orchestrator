@@ -20,7 +20,11 @@ class _BazarrClient:
         return self._series
 
     def episodes(self, series_id):
-        return [episode for episode in self._episodes if episode.get("seriesId") == series_id]
+        return [
+            episode
+            for episode in self._episodes
+            if episode.get("seriesId") == series_id
+        ]
 
 
 def _target(**values):

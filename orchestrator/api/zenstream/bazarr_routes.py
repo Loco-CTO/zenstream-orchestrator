@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from app.bazarr import (
+    BazarrConnectionStore,
     BazarrError,
     BazarrMatchError,
-    BazarrConnectionStore,
     BazarrSubtitleService,
 )
 from app.client_auth import require_account
@@ -40,9 +40,7 @@ def _search(user_id: str, entity_id: str, source_id: str) -> dict:
     return BazarrSubtitleService().search(user_id, entity_id, source_id)
 
 
-def _download(
-    user_id: str, entity_id: str, source_id: str, match_id: str
-) -> dict:
+def _download(user_id: str, entity_id: str, source_id: str, match_id: str) -> dict:
     return BazarrSubtitleService().download(user_id, entity_id, source_id, match_id)
 
 

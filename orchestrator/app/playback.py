@@ -503,9 +503,7 @@ class PlaybackManager:
             "SELECT id,relative_path,language,role FROM media_files WHERE entity_id=? AND role IN ('media','subtitle','lyrics') ORDER BY relative_path COLLATE NOCASE",
             (entity_id,),
         )
-        media_paths_by_id = {
-            row[0]: row[1] for row in file_rows if row[3] == "media"
-        }
+        media_paths_by_id = {row[0]: row[1] for row in file_rows if row[3] == "media"}
         media_paths = list(media_paths_by_id.values())
         sidecar_rows = [row for row in file_rows if row[3] in {"subtitle", "lyrics"}]
 

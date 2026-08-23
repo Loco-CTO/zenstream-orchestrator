@@ -1336,12 +1336,10 @@ class LibraryMetadataTest(unittest.TestCase):
                 self._prepare_incremental_scan(scanner)
                 scanner._scan_series("library-1", root, "job-1", lambda: False)
                 scanner._prune_missing_entities("library-1")
-                original = dict(
-                    (row[1], row[0])
+                original = {row[1]: row[0]
                     for row in db.execute(
                         "SELECT id,relative_path FROM library_entities"
-                    )
-                )
+                    )}
 
                 second = season / "Example - S01E02.mkv"
                 second.touch()

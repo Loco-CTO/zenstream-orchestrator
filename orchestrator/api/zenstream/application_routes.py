@@ -174,8 +174,6 @@ class WebSocketHub:
             while True:
                 payload = await connection.queue.get()
                 await websocket.send_json(payload)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             await self.remove(websocket)
 

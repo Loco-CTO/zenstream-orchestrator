@@ -612,7 +612,7 @@ class MetadataSearchProjection:
                 if choice:
                     provider = str(choice.get("provider") or "")
                     path = choice.get("localPath")
-                    if provider != "local" and provider != "screen_extractor":
+                    if provider not in ("local", "screen_extractor"):
                         provider_id = next(
                             (
                                 identity["id"]

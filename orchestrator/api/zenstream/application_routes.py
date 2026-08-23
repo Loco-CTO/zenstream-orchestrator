@@ -452,9 +452,13 @@ def _admin_headers(username: str | None, token: str | None):
 def _admin_request(
     request: Request, username: str | None = None, token: str | None = None
 ):
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-        if not administrator_origin_allowed(request):
-            raise HTTPException(403, "Cross-site administrator request rejected.")
+    if request.method in {
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+    } and not administrator_origin_allowed(request):
+        raise HTTPException(403, "Cross-site administrator request rejected.")
     cookie_name = (
         ADMIN_SESSION_COOKIE if cookie_secure(request) else "zenstream-admin-session"
     )

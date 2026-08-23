@@ -454,12 +454,9 @@ class IntroOutroTest(unittest.TestCase):
         ):
             store.recompute_season("season-1", DEFAULTS)
 
-        keys = []
-        keys.append(
-            db.execute(
+        keys = [db.execute(
                 "SELECT comparison_key FROM intro_outro_comparison_state WHERE season_id='season-1'"
-            )[0][0]
-        )
+            )[0][0]]
         db.connection.execute(
             "UPDATE media_sources SET duration_seconds=601 WHERE media_file_id='episode-1'"
         )

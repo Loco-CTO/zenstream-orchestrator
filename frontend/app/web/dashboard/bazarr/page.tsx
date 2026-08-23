@@ -32,6 +32,29 @@ const EMPTY: Settings = {
 	libraries: [],
 };
 
+function normalizeSettings(value: unknown): Settings {
+	const received =
+		value && typeof value === "object" ? (value as Partial<Settings>) : {};
+
+	return {
+		...EMPTY,
+		...received,
+		configured: received.configured === true,
+		address:
+			typeof received.address === "string" ? received.address : EMPTY.address,
+		port:
+			typeof received.port === "number" && Number.isFinite(received.port)
+				? received.port
+				: EMPTY.port,
+		baseUrl:
+			typeof received.baseUrl === "string" ? received.baseUrl : EMPTY.baseUrl,
+		useSsl: received.useSsl === true,
+		apiKeyConfigured: received.apiKeyConfigured === true,
+		mappings: Array.isArray(received.mappings) ? received.mappings : [],
+		libraries: Array.isArray(received.libraries) ? received.libraries : [],
+	};
+}
+
 export default function BazarrSettingsPage() {
 	const [session, setSession] = useState<Session | null>(null);
 	const [settings, setSettings] = useState<Settings>(EMPTY);
@@ -45,12 +68,7 @@ export default function BazarrSettingsPage() {
 		const response = await adminFetch("/api/admin/bazarr/settings", current);
 		const value = await response.json().catch(() => null);
 		if (response.ok) {
-			setSettings({
-				...EMPTY,
-				...(value || {}),
-				mappings: value?.mappings || [],
-				libraries: value?.libraries || [],
-			});
+			setSettings(normalizeSettings(value));
 			setMessage("");
 		} else {
 			setMessage(value?.detail || "Could not load Bazarr settings.");
@@ -104,12 +122,7 @@ export default function BazarrSettingsPage() {
 		});
 		const value = await response.json().catch(() => null);
 		if (response.ok) {
-			setSettings({
-				...EMPTY,
-				...(value || {}),
-				mappings: value?.mappings || [],
-				libraries: value?.libraries || [],
-			});
+			setSettings(normalizeSettings(value));
 			setApiKey("");
 			setMessage("Bazarr settings saved.");
 		} else {
@@ -128,12 +141,7 @@ export default function BazarrSettingsPage() {
 		});
 		const value = await response.json().catch(() => null);
 		if (response.ok) {
-			setSettings({
-				...EMPTY,
-				...(value || {}),
-				mappings: value?.mappings || [],
-				libraries: value?.libraries || [],
-			});
+			setSettings(normalizeSettings(value));
 			setApiKey("");
 			setMessage("Bazarr configuration removed.");
 		} else {

@@ -125,6 +125,16 @@ def mapped_path(root: str, relative_path: str) -> str:
     return f"{root_value}/{relative_value}"
 
 
+def _effective_bazarr_root(
+    mapping_root: object, library_directory: object
+) -> str | None:
+    for value in (mapping_root, library_directory):
+        root = str(value or "").strip()
+        if root:
+            return root
+    return None
+
+
 def path_is_under(path: str, root: str) -> bool:
     path_value = _path_key(path)
     root_value = _path_key(root)
@@ -420,7 +430,10 @@ def _target(user_id: str, entity_id: str, source_id: str | None) -> BazarrTarget
         "SELECT bazarr_root_path FROM bazarr_library_mappings WHERE library_id=?",
         (row[2],),
     )
-    bazarr_root = mapping_rows[0][0] if mapping_rows else None
+    bazarr_root = _effective_bazarr_root(
+        mapping_rows[0][0] if mapping_rows else None,
+        row[3],
+    )
     target_path = mapped_path(bazarr_root, row[4]) if bazarr_root else None
     file_rows = db.execute(
         "SELECT id,relative_path,role,language FROM media_files WHERE entity_id=? AND role IN ('media','subtitle','lyrics') ORDER BY relative_path COLLATE NOCASE",
@@ -659,10 +672,10 @@ class BazarrSubtitleService:
             raise BazarrMatchError(
                 "not_configured", "The subtitle downloader is not configured."
             )
-        if target.library_id not in connection["mappings"]:
+        if not target.bazarr_root_path:
             raise BazarrMatchError(
                 "not_configured",
-                "This TV library is not mapped to the subtitle downloader.",
+                "This TV library has no path available to the subtitle downloader.",
             )
         return BazarrClient(connection)
 

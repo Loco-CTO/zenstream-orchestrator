@@ -227,33 +227,43 @@ export default function BazarrSettingsPage() {
 							/>
 						</label>
 					</SurfaceCard>
-					<SurfaceCard className="space-y-4 p-6">
-						<div>
-							<h2 className="text-lg font-bold">Library path mappings</h2>
-							<p className="mt-1 text-xs console-muted">
+					<details
+						className="console-card space-y-4 p-6"
+						style={{ background: "#080808", borderRadius: 12, padding: "20px 22px" }}
+					>
+						<summary className="cursor-pointer">
+							<span className="text-lg font-bold">Library path mappings</span>
+							<span className="mt-1 block text-xs console-muted">
+								Optional overrides; blank fields use the library path stored by
+								ZenStream.
+							</span>
+						</summary>
+						<div className="space-y-4">
+							<p className="text-xs console-muted">
 								Enter the root path as Bazarr sees it. ZenStream appends each indexed
 								file’s relative path; provider IDs are never used to choose between
-								duplicate libraries.
+								duplicate libraries. Leave a field blank to use the same path ZenStream
+								uses for that library.
 							</p>
+							{settings.libraries.length === 0 ? (
+								<p className="text-sm console-muted">
+									Create a TV library before configuring Bazarr.
+								</p>
+							) : (
+								settings.libraries.map((library) => (
+									<label key={library.id} className="block">
+										<span className="text-sm font-semibold">{library.name}</span>
+										<input
+											value={mappingFor(library.id)}
+											onChange={(event) => updateMapping(library.id, event.target.value)}
+											placeholder="Leave blank for ZenStream path"
+											className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none"
+										/>
+									</label>
+								))
+							)}
 						</div>
-						{settings.libraries.length === 0 ? (
-							<p className="text-sm console-muted">
-								Create a TV library before configuring Bazarr.
-							</p>
-						) : (
-							settings.libraries.map((library) => (
-								<label key={library.id} className="block">
-									<span className="text-sm font-semibold">{library.name}</span>
-									<input
-										value={mappingFor(library.id)}
-										onChange={(event) => updateMapping(library.id, event.target.value)}
-										placeholder="/tv"
-										className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none"
-									/>
-								</label>
-							))
-						)}
-					</SurfaceCard>
+					</details>
 					<div className="flex items-center justify-between gap-3">
 						{settings.configured && (
 							<button

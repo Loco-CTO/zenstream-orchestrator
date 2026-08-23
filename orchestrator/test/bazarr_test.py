@@ -5,6 +5,7 @@ from app.bazarr import (
     BazarrMatchError,
     BazarrTarget,
     _associated_sidecar,
+    _effective_bazarr_root,
     _find_episode,
     _path_key,
     mapped_path,
@@ -52,6 +53,16 @@ def _target(**values):
 
 
 class BazarrMatchingTest(unittest.TestCase):
+    def test_unmapped_library_uses_zenstream_directory(self):
+        self.assertEqual(
+            _effective_bazarr_root(None, r"C:\\Media\\TV"),
+            r"C:\\Media\\TV",
+        )
+        self.assertEqual(
+            _effective_bazarr_root("/tv", r"C:\\Media\\TV"),
+            "/tv",
+        )
+
     def test_path_mapping_normalizes_container_and_windows_separators(self):
         self.assertEqual(
             _path_key(mapped_path(r"C:\\Bazarr\\TV", "Show/./Episode.mkv")),

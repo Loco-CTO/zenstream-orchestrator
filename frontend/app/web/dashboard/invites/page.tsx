@@ -95,7 +95,6 @@ export default function InvitesPage() {
 		setSession(current);
 		if (current) void load(current);
 		// The initial session is intentionally captured once on mount.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
 	function resetDraft() {

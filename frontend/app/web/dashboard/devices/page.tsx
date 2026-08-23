@@ -74,7 +74,6 @@ export default function DevicesPage() {
 		setSession(current);
 		if (current) void load(current, "");
 		// Initial authentication is intentionally read once; filter changes call load explicitly.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
 	async function removeDevice() {

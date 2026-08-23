@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { IconDeviceDesktop, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import {
@@ -47,7 +47,7 @@ export default function DevicesPage() {
 	const [deviceToRemove, setDeviceToRemove] = useState<Device | null>(null);
 	const [busy, setBusy] = useState(false);
 
-	async function load(current = session, filter = userId) {
+	const load = useCallback(async (current: Session | null, filter: string) => {
 		if (!current) return;
 		const query = filter ? `?userId=${encodeURIComponent(filter)}` : "";
 		try {
@@ -67,14 +67,13 @@ export default function DevicesPage() {
 				caught instanceof Error ? caught.message : "Devices could not be loaded.",
 			);
 		}
-	}
+	}, []);
 
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
 		if (current) void load(current, "");
-		// Initial authentication is intentionally read once; filter changes call load explicitly.
-	}, []);
+	}, [load]);
 
 	async function removeDevice() {
 		if (!session || !deviceToRemove) return;
@@ -115,7 +114,7 @@ export default function DevicesPage() {
 				actions={
 					<button
 						type="button"
-						onClick={() => void load()}
+						onClick={() => void load(session, userId)}
 						className="material-icon-button"
 						title="Refresh devices"
 						aria-label="Refresh devices"

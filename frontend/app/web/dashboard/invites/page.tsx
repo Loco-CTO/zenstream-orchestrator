@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { IconCopy, IconKey, IconPlus, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import {
@@ -64,7 +64,7 @@ export default function InvitesPage() {
 	const [expiryValue, setExpiryValue] = useState("7");
 	const [expiryUnit, setExpiryUnit] = useState<DurationUnit>("days");
 
-	async function load(current = session) {
+	const load = useCallback(async (current: Session) => {
 		if (!current) return;
 		setLoading(true);
 		const [inviteResponse, libraryResponse, publicWebResponse] =
@@ -88,14 +88,13 @@ export default function InvitesPage() {
 		if (!inviteResponse.ok || !libraryResponse.ok)
 			setMessage("Could not load invite information.");
 		setLoading(false);
-	}
+	}, []);
 
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
 		if (current) void load(current);
-		// The initial session is intentionally captured once on mount.
-	}, []);
+	}, [load]);
 
 	function resetDraft() {
 		setSelectedLibraries([]);

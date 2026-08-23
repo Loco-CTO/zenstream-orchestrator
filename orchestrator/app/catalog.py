@@ -255,7 +255,6 @@ class Catalog:
 
     def _library_sort_order_sql(self, alias: str | None = None) -> str:
         """Use the persisted order when available, with a legacy-schema fallback."""
-
         cache_name = "_library_has_sort_order"
         if not hasattr(self, cache_name):
             columns = {

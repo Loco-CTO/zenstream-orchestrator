@@ -56,6 +56,67 @@ class _JsonRequest:
 
 
 class LibraryMetadataTest(unittest.TestCase):
+    def test_calendar_link_maintenance_is_best_effort(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+
+        with patch("app.calendar.CalendarSyncService") as service_type:
+            service_type.return_value.reconcile_catalog_links.return_value = 1
+            scanner._refresh_calendar_links("library-1", "job-1")
+            service_type.return_value.reconcile_catalog_links.assert_called_once_with(
+                "library-1"
+            )
+
+        with patch("app.calendar.CalendarSyncService") as service_type:
+            service_type.return_value.reconcile_catalog_links.side_effect = (
+                RuntimeError("calendar unavailable")
+            )
+            scanner._refresh_calendar_links("library-1", "job-1")
+
+    def test_scan_only_reconciles_calendar_links_after_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MagicMock()
+            store.db.execute.return_value = []
+            store.get.return_value = {
+                "id": "library-1",
+                "name": "Movies",
+                "type": "movies",
+                "directory": directory,
+            }
+            scanner = LibraryScanner(store)
+            scanner._scan_movies = MagicMock(return_value=0)
+            scanner._reconcile_moved_entities = MagicMock()
+            scanner._prune_rejected_entities = MagicMock(return_value=set())
+            scanner._prune_missing_entities = MagicMock(return_value=set())
+            scanner._flush_publications = MagicMock()
+            scanner._refresh_catalog_after_cleanup = MagicMock()
+            scanner._refresh_calendar_links = MagicMock()
+            scanner._start_heartbeat = MagicMock()
+            scanner._stop_heartbeat = MagicMock()
+
+            with (
+                patch("app.library.LocalArtworkCache"),
+                patch("app.trickplay.TrickplayStore"),
+                patch("app.intro_outro.IntroOutroStore") as intro_outro_type,
+            ):
+                intro_outro_type.return_value.settings.return_value = {
+                    "scanOnAdded": False
+                }
+                scanner.scan("library-1", "job-1", lambda: False)
+                scanner._refresh_calendar_links.assert_called_once_with(
+                    "library-1", "job-1"
+                )
+
+                scanner._refresh_calendar_links.reset_mock()
+                scanner._scan_movies.side_effect = RuntimeError("scan failed")
+                with self.assertRaises(RuntimeError):
+                    scanner.scan("library-1", "job-2", lambda: False)
+                scanner._refresh_calendar_links.assert_not_called()
+
+                scanner._scan_movies.side_effect = None
+                scanner._refresh_calendar_links.reset_mock()
+                scanner.scan("library-1", "job-3", lambda: True)
+                scanner._refresh_calendar_links.assert_not_called()
+
     def test_fair_metadata_executor_bounds_head_of_line_work_per_library(self):
         executor = FairMetadataExecutor(max_workers=1)
         started = threading.Event()

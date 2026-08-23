@@ -11,6 +11,7 @@ from api.zenstream.application_routes import (
 from api.zenstream.application_routes import (
     router as application_router,
 )
+from api.zenstream.bazarr_routes import router as bazarr_router
 from api.zenstream.calendar_routes import router as calendar_router
 from api.zenstream.client_routes import prune_rate_limit_events
 from api.zenstream.client_routes import router as client_router
@@ -180,6 +181,7 @@ async def request_timing(request, call_next):
 
 
 app.include_router(client_router)
+app.include_router(bazarr_router)
 app.include_router(calendar_router)
 app.include_router(notification_router)
 app.include_router(library_router)

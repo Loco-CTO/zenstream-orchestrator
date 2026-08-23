@@ -19,7 +19,7 @@ from app.catalog import Catalog
 from app.client_auth import issue_ticket
 from app.config import Config
 from app.language_registry import normalize_track_language
-from app.library import language_name, sidecar_display_title
+from app.library import language_name, sidecar_display_title, sidecar_media_path
 from app.logging_config import get_logger
 from app.models.playback_settings import PlaybackSettings
 from app.models.playback_viewer import PlaybackViewerStore
@@ -503,25 +503,32 @@ class PlaybackManager:
             "SELECT id,relative_path,language,role FROM media_files WHERE entity_id=? AND role IN ('media','subtitle','lyrics') ORDER BY relative_path COLLATE NOCASE",
             (entity_id,),
         )
-        media_paths = [row[1] for row in file_rows if row[3] == "media"]
-        sidecars = [
-            {
-                "index": 1000 + index,
-                "codec_type": "subtitle",
-                "codec_name": Path(relative_path).suffix.lstrip("."),
-                "fileId": file_id,
-                "kind": role,
-                "tags": {
-                    **({"language": language} if language else {}),
-                    "title": sidecar_display_title(
-                        relative_path, language, role, media_paths
-                    ),
-                },
-            }
-            for index, (file_id, relative_path, language, role) in enumerate(
-                row for row in file_rows if row[3] in {"subtitle", "lyrics"}
-            )
-        ]
+        media_paths_by_id = {row[0]: row[1] for row in file_rows if row[3] == "media"}
+        media_paths = list(media_paths_by_id.values())
+        sidecar_rows = [row for row in file_rows if row[3] in {"subtitle", "lyrics"}]
+
+        def sidecars_for_media(media_path: str) -> list[dict]:
+            return [
+                {
+                    "index": 1000 + index,
+                    "codec_type": "subtitle",
+                    "codec_name": Path(relative_path).suffix.lstrip("."),
+                    "fileId": file_id,
+                    "kind": role,
+                    "tags": {
+                        **({"language": language} if language else {}),
+                        "title": sidecar_display_title(
+                            relative_path, language, role, [media_path]
+                        ),
+                    },
+                }
+                for index, (file_id, relative_path, language, role) in enumerate(
+                    row
+                    for row in sidecar_rows
+                    if self._sidecar_matches_media(row[1], media_path, media_paths)
+                )
+            ]
+
         return [
             {
                 "id": row[0],
@@ -537,10 +544,17 @@ class PlaybackManager:
                     normalize_stream(stream)
                     for stream in (json.loads(row[9]).get("streams") or [])
                 ]
-                + sidecars,
+                + sidecars_for_media(media_paths_by_id.get(row[1], "")),
             }
             for row in rows
         ]
+
+    @staticmethod
+    def _sidecar_matches_media(
+        sidecar_path: str, media_path: str, media_paths: list[str]
+    ) -> bool:
+        matching_media = sidecar_media_path(sidecar_path, media_paths)
+        return matching_media == Path(media_path)
 
     def source_metadata(self, user_id: str, entity_id: str) -> dict:
         sources = self.sources(user_id, entity_id)

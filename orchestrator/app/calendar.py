@@ -499,6 +499,26 @@ def _event_future_metadata_targets(
     )
 
 
+def _catalog_entity_identities(
+    kind: str,
+    *,
+    tvdb_id: str | None = None,
+    series_tvdb_id: str | None = None,
+    tmdb_id: str | None = None,
+) -> tuple[tuple[str, str, str], ...]:
+    """Return provider identities used to link a calendar event to catalog entities."""
+
+    values: list[tuple[str, str, str]] = []
+    if kind == "episode":
+        if tvdb_id:
+            values.append(("tvdb", str(tvdb_id), "episode"))
+        if series_tvdb_id:
+            values.append(("tvdb", str(series_tvdb_id), "series"))
+    elif tmdb_id:
+        values.append(("tmdb", str(tmdb_id), "movie"))
+    return tuple(dict.fromkeys(values))
+
+
 class CalendarSyncService:
     def __init__(self):
         self.db = Config().database
@@ -515,16 +535,13 @@ class CalendarSyncService:
         )
 
     def _matching_entities(self, event: CalendarEventValue) -> list[tuple[str, str]]:
-        identities = []
-        if event.kind == "episode":
-            if event.tvdb_id:
-                identities.append(("tvdb", event.tvdb_id, "episode"))
-            if event.series_tvdb_id:
-                identities.append(("tvdb", event.series_tvdb_id, "series"))
-        elif event.tmdb_id:
-            identities.append(("tmdb", event.tmdb_id, "movie"))
         matches = []
-        for provider, provider_id, entity_type in identities:
+        for provider, provider_id, entity_type in _catalog_entity_identities(
+            event.kind,
+            tvdb_id=event.tvdb_id,
+            series_tvdb_id=event.series_tvdb_id,
+            tmdb_id=event.tmdb_id,
+        ):
             rows = self.db.execute(
                 "SELECT e.id,e.entity_type FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
                 "WHERE e.library_id=? AND p.provider=? AND p.provider_id=? AND e.entity_type=?",
@@ -532,6 +549,105 @@ class CalendarSyncService:
             )
             matches.extend((row[0], row[1]) for row in rows)
         return list(dict.fromkeys(matches))
+
+    def reconcile_catalog_links(self, library_id: str) -> int:
+        """Relink stored calendar events after catalog admission or cleanup.
+
+        Calendar provider events can outlive the catalog entity they describe.
+        A full provider sync used to be the only path that rebuilt this
+        relationship, so newly admitted media remained marked as future until
+        that sync ran. Reconcile the complete library event set in one writer
+        transaction so links and event state cannot be observed half-updated.
+        """
+
+        required_tables = {
+            "calendar_events",
+            "calendar_event_entities",
+            "entity_provider_ids",
+            "library_entities",
+        }
+        available_tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?,?)",
+                tuple(sorted(required_tables)),
+            )
+        }
+        if not required_tables <= available_tables:
+            return 0
+
+        changed_events = 0
+        promoted_identities: set[tuple[str, str, str]] = set()
+        updated_at = iso_now()
+        with self.db.transaction() as cursor:
+            event_rows = cursor.execute(
+                "SELECT id,kind,tvdb_id,tmdb_id,series_tvdb_id,state FROM calendar_events WHERE library_id=? ORDER BY id",
+                (library_id,),
+            ).fetchall()
+            for (
+                event_id,
+                kind,
+                tvdb_id,
+                tmdb_id,
+                series_tvdb_id,
+                current_state,
+            ) in event_rows:
+                expected_entity_type = "movie" if kind == "movie" else "episode"
+                matches: list[str] = []
+                for provider, provider_id, entity_type in _catalog_entity_identities(
+                    kind,
+                    tvdb_id=tvdb_id,
+                    series_tvdb_id=series_tvdb_id,
+                    tmdb_id=tmdb_id,
+                ):
+                    rows = cursor.execute(
+                        "SELECT e.id,e.entity_type FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
+                        "WHERE e.library_id=? AND p.provider=? AND p.provider_id=? AND e.entity_type=?",
+                        (library_id, provider, provider_id, entity_type),
+                    ).fetchall()
+                    matches.extend(
+                        row[0] for row in rows if row[1] == expected_entity_type
+                    )
+                matched_ids = sorted(set(matches))
+                linked_ids = sorted(
+                    row[0]
+                    for row in cursor.execute(
+                        "SELECT entity_id FROM calendar_event_entities WHERE event_id=?",
+                        (event_id,),
+                    ).fetchall()
+                )
+                next_state = "existing" if matched_ids else "future"
+                if linked_ids != matched_ids:
+                    cursor.execute(
+                        "DELETE FROM calendar_event_entities WHERE event_id=?",
+                        (event_id,),
+                    )
+                    if matched_ids:
+                        cursor.executemany(
+                            "INSERT INTO calendar_event_entities(event_id,entity_id) VALUES(?,?)",
+                            [(event_id, entity_id) for entity_id in matched_ids],
+                        )
+                if linked_ids != matched_ids or current_state != next_state:
+                    cursor.execute(
+                        "UPDATE calendar_events SET state=?,updated_at=? WHERE id=?",
+                        (next_state, updated_at, event_id),
+                    )
+                    changed_events += 1
+                if matched_ids and (
+                    linked_ids != matched_ids or current_state != next_state
+                ):
+                    promoted_identities.update(
+                        _future_metadata_identity_targets(
+                            kind,
+                            tvdb_id=tvdb_id,
+                            series_tvdb_id=series_tvdb_id,
+                            tmdb_id=tmdb_id,
+                        )
+                    )
+
+        for provider, entity_type, provider_id in sorted(promoted_identities):
+            self.future_cache.promote_identity(provider, entity_type, provider_id)
+        return changed_events
 
     def _upsert(self, event: CalendarEventValue, seen_at: str) -> bool:
         event_id = self._event_id(event)

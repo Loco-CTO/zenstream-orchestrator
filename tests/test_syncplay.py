@@ -36,6 +36,17 @@ class MemoryDatabase:
         self.connection.commit()
         return cursor.fetchall() if query.lstrip().upper().startswith("SELECT") else []
 
+    def read_execute(self, query, params=()):
+        cursor = self.connection.execute(query, params)
+        try:
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+
+    @contextmanager
+    def read_session(self):
+        yield
+
     @contextmanager
     def transaction(self):
         cursor = self.connection.cursor()

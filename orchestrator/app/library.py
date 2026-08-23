@@ -3798,11 +3798,14 @@ class LibraryScanner:
             targets=sorted(targets) if targets else None,
         )
         enumeration_started = time.monotonic()
-        entries = [
-            path
-            for path in self._target_entries(root, targets)
-            if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS
-        ]
+        entries = sorted(
+            (
+                path
+                for path in self._target_entries(root, targets)
+                if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS
+            ),
+            key=lambda path: _path_key(relative(str(root), str(path))),
+        )
         logger.info(
             "library scan root enumeration complete library_id=%s job_id=%s type=movies root=%s entries=%s duration_seconds=%.1f",
             library_id,

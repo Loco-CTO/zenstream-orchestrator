@@ -18,6 +18,7 @@ from app.library import (
     LibraryStore,
     _quick_fingerprint,
     _SidecarStatWorker,
+    _top_level_key,
     guess_media,
     normalized_path,
     provider_ids,
@@ -547,7 +548,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 "subtitle",
                 ["Mr.Robot.mkv"],
             ),
-            "English (English)",
+            "English",
         )
 
     def test_sidecar_scan_is_stat_only_and_retains_inaccessible_existing_rows(self):
@@ -873,7 +874,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     ),
                     before,
                 )
-                self.assertIn("example", scanner._scan_deferred_roots)
+                self.assertIn(_top_level_key("Example"), scanner._scan_deferred_roots)
         finally:
             db.close()
 

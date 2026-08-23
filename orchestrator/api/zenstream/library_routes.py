@@ -509,7 +509,6 @@ def _image_entities(item: dict, image_type: str) -> list[dict]:
 def _metadata_for(
     item: dict, locale: str, fetch: bool = False, fallback: bool = True
 ) -> dict | None:
-    del fetch, fallback
     requested = normalize_metadata_locale(locale)
     if requested not in MetadataLanguageSettings().get():
         raise HTTPException(400, "Metadata language is not configured.")

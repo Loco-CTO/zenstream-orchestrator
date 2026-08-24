@@ -565,10 +565,13 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
         ):
             response = asyncio.run(client_routes.artwork_ticket(request))
 
-        self.assertEqual(response, {
-            "ticket": "artwork-ticket",
-            "expiresIn": client_routes.ARTWORK_TICKET_TTL_SECONDS,
-        })
+        self.assertEqual(
+            response,
+            {
+                "ticket": "artwork-ticket",
+                "expiresIn": client_routes.ARTWORK_TICKET_TTL_SECONDS,
+            },
+        )
         ticket_issuer.assert_called_once_with(
             "user-1",
             "artwork",

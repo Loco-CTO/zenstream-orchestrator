@@ -1073,6 +1073,45 @@ class BazarrTaskQueueTest(unittest.TestCase):
             definition, options=None
         )
 
+    def test_bazarr_task_dispatches_the_local_job_class(self):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = MagicMock()
+        scheduler.store.db.execute.side_effect = [
+            [(0, "name")],
+            [
+                (
+                    "bazarr-run",
+                    "bazarr-definition",
+                    "bazarr_sync",
+                    "{}",
+                    "Sync Bazarr mappings",
+                    None,
+                )
+            ],
+            [("bazarr-definition",)],
+        ]
+        scheduler.store.definition.return_value = {
+            "id": "bazarr-definition",
+            "kind": "bazarr_sync",
+            "config": {},
+            "name": "Sync Bazarr mappings",
+        }
+        scheduler.cancel_events = {"bazarr-run": threading.Event()}
+        scheduler.active = {"bazarr-run"}
+        scheduler.active_definitions = {"bazarr-definition"}
+        scheduler.worker_threads = {"bazarr-run": threading.current_thread()}
+        scheduler.active_lock = threading.RLock()
+        scheduler.stop_event = threading.Event()
+
+        with patch("app.jobs.BazarrSyncJob") as job_class:
+            scheduler._execute("bazarr-run")
+
+        job_class.assert_called_once_with(scheduler.store)
+        job_class.return_value.run.assert_called_once()
+        self.assertEqual(job_class.return_value.run.call_args.args[0], "bazarr-run")
+        self.assertTrue(callable(job_class.return_value.run.call_args.args[1]))
+        scheduler.store.update_run.assert_not_called()
+
 
 class AnalysisCapacityTest(unittest.TestCase):
     def test_intro_outro_and_trickplay_analysis_jobs_can_run_together(self):

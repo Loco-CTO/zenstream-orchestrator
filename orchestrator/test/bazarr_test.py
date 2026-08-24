@@ -3,7 +3,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from api.zenstream import bazarr_routes
-from app.database import DatabaseHandler
 from app.bazarr import (
     BazarrError,
     BazarrMappingStore,
@@ -20,6 +19,7 @@ from app.bazarr import (
     _search_candidates,
     mapped_path,
 )
+from app.database import DatabaseHandler
 
 
 class _BazarrClient:
@@ -128,7 +128,9 @@ def _mapping_db():
     return db
 
 
-def _seed_mapping_inventory(db, *, size=100, modified_ns=200, fingerprint="fingerprint"):
+def _seed_mapping_inventory(
+    db, *, size=100, modified_ns=200, fingerprint="fingerprint"
+):
     db.execute(
         "INSERT INTO libraries(id,directory,type) VALUES('library','/media','tv_series')"
     )

@@ -2251,9 +2251,7 @@ class JobScheduler:
         self.store.reconcile_library_definitions(self.library_runtime.store.list())
         try:
             has_bazarr_mappings = bool(
-                self.store.db.execute(
-                    "SELECT 1 FROM bazarr_episode_mappings LIMIT 1"
-                )
+                self.store.db.execute("SELECT 1 FROM bazarr_episode_mappings LIMIT 1")
             )
         except Exception:
             # Older databases can reach startup before the mapping migration is
@@ -2555,8 +2553,7 @@ class JobScheduler:
                 if run["state"] != "queued":
                     continue
                 if (
-                    run["kind"] in ANALYSIS_KINDS
-                    or run["kind"] == "bazarr_sync"
+                    run["kind"] in ANALYSIS_KINDS or run["kind"] == "bazarr_sync"
                 ) and self._library_work_active():
                     continue
                 with self.active_lock:
@@ -2658,9 +2655,7 @@ class JobScheduler:
             elif kind == "bazarr_sync":
                 from app.bazarr import BazarrSyncJob
 
-                BazarrSyncJob(self.store).run(
-                    run_id, self.cancel_events[run_id].is_set
-                )
+                BazarrSyncJob(self.store).run(run_id, self.cancel_events[run_id].is_set)
             elif kind == "calendar_sync":
                 from app.calendar import CalendarSyncJob
 

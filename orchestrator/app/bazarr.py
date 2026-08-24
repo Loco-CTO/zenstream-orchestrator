@@ -673,7 +673,8 @@ def _resolve_episode_values(
     )
     if episode_id is None:
         raise BazarrMatchError(
-            "unmatched", "The subtitle downloader did not return an internal episode ID."
+            "unmatched",
+            "The subtitle downloader did not return an internal episode ID.",
         )
     return {
         "series": series,
@@ -704,8 +705,7 @@ class BazarrMappingStore:
             or _path_key(row[2]) != _path_key(target.target_path)
             or _integer(row[3]) != target.size
             or _integer(row[4]) != target.modified_ns
-            or (str(row[5]) if row[5] is not None else None)
-            != target.quick_fingerprint
+            or (str(row[5]) if row[5] is not None else None) != target.quick_fingerprint
         ):
             raise BazarrMatchError("sync_pending", BAZARR_SYNC_PENDING_MESSAGE)
         state = str(row[8] or "sync_pending")
@@ -958,9 +958,7 @@ class BazarrSyncService:
                 "relative_path": str(row[4]),
                 "size": _integer(row[5]),
                 "modified_ns": _integer(row[6]),
-                "quick_fingerprint": (
-                    str(row[7]) if row[7] is not None else None
-                ),
+                "quick_fingerprint": (str(row[7]) if row[7] is not None else None),
                 "season_number": _integer(row[8]),
                 "episode_number": _integer(row[9]),
                 "series_entity_id": str(row[10]),
@@ -1028,9 +1026,7 @@ class BazarrSyncService:
         matched = 0
         for value in values:
             if episodes is None or series is None:
-                episode_results.append(
-                    (value, series_state, series_message, None)
-                )
+                episode_results.append((value, series_state, series_message, None))
                 continue
             try:
                 resolution = _resolve_episode_values(
@@ -1111,7 +1107,9 @@ class BazarrSyncService:
                         ),
                         _integer(episode.get("season")) if episode else None,
                         _integer(episode.get("episode")) if episode else None,
-                        json.dumps(subtitles, ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(
+                            subtitles, ensure_ascii=False, separators=(",", ":")
+                        ),
                         message or None,
                         synced_at,
                         synced_at,

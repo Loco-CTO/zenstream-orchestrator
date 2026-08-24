@@ -1215,10 +1215,7 @@ class LibraryScanner:
                 ),
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
-            if (
-                library["type"] in {"tv_series", "movies"}
-                and bazarr_mapping_changed
-            ):
+            if library["type"] in {"tv_series", "movies"} and bazarr_mapping_changed:
                 try:
                     from app.jobs import scheduler
 

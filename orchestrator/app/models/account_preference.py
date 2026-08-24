@@ -8,7 +8,6 @@ from app.language_registry import (
 )
 from app.models.metadata import MetadataLanguageSettings
 
-
 SUPPORTED_LOCALES = frozenset({"en", "ja"})
 
 

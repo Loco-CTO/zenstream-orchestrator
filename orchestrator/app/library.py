@@ -1172,6 +1172,9 @@ class LibraryScanner:
             )
             self._set_stage(job_id, "Refreshing catalog read model")
             removed = rejected | missing
+            bazarr_mapping_changed = bool(
+                self._scan_delta["content_changed"] or removed
+            )
             self._flush_publications()
             self._refresh_catalog_after_cleanup(library_id)
             self._set_stage(job_id, "Pruning local artwork cache")
@@ -1212,7 +1215,10 @@ class LibraryScanner:
                 ),
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
-            if library["type"] in {"tv_series", "movies"}:
+            if (
+                library["type"] in {"tv_series", "movies"}
+                and bazarr_mapping_changed
+            ):
                 try:
                     from app.jobs import scheduler
 

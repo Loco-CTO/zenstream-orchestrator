@@ -128,7 +128,12 @@ class LibraryMetadataTest(unittest.TestCase):
                 "directory": directory,
             }
             scanner = LibraryScanner(store)
-            scanner._scan_series = MagicMock(return_value=0)
+
+            def scan_series(*_args, **_kwargs):
+                scanner._scan_delta["content_changed"].add("episode-1")
+                return 0
+
+            scanner._scan_series = MagicMock(side_effect=scan_series)
             scanner._reconcile_moved_entities = MagicMock()
             scanner._prune_rejected_entities = MagicMock(return_value=set())
             scanner._prune_missing_entities = MagicMock(return_value=set())
@@ -162,10 +167,122 @@ class LibraryMetadataTest(unittest.TestCase):
                 "directory": directory,
             }
             scanner = LibraryScanner(store)
+
+            def scan_movies(*_args, **_kwargs):
+                scanner._scan_delta["content_changed"].add("movie-1")
+                return 0
+
+            scanner._scan_movies = MagicMock(side_effect=scan_movies)
+            scanner._reconcile_moved_entities = MagicMock()
+            scanner._prune_rejected_entities = MagicMock(return_value=set())
+            scanner._prune_missing_entities = MagicMock(return_value=set())
+            scanner._flush_publications = MagicMock()
+            scanner._refresh_catalog_after_cleanup = MagicMock()
+            scanner._refresh_calendar_links = MagicMock()
+            scanner._start_heartbeat = MagicMock()
+            scanner._stop_heartbeat = MagicMock()
+
+            with (
+                patch("app.library.LocalArtworkCache"),
+                patch("app.trickplay.TrickplayStore"),
+                patch("app.intro_outro.IntroOutroStore") as intro_outro_type,
+                patch("app.jobs.scheduler") as scheduler,
+            ):
+                intro_outro_type.return_value.settings.return_value = {
+                    "scanOnAdded": False
+                }
+                scanner.scan("library-1", "job-1", lambda: False)
+
+            scheduler.enqueue_bazarr_sync.assert_called_once_with()
+
+    def test_unchanged_scan_does_not_queue_bazarr_mapping_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MagicMock()
+            store.db.execute.return_value = []
+            store.get.return_value = {
+                "id": "library-1",
+                "name": "Movies",
+                "type": "movies",
+                "directory": directory,
+            }
+            scanner = LibraryScanner(store)
             scanner._scan_movies = MagicMock(return_value=0)
             scanner._reconcile_moved_entities = MagicMock()
             scanner._prune_rejected_entities = MagicMock(return_value=set())
             scanner._prune_missing_entities = MagicMock(return_value=set())
+            scanner._flush_publications = MagicMock()
+            scanner._refresh_catalog_after_cleanup = MagicMock()
+            scanner._refresh_calendar_links = MagicMock()
+            scanner._start_heartbeat = MagicMock()
+            scanner._stop_heartbeat = MagicMock()
+
+            with (
+                patch("app.library.LocalArtworkCache"),
+                patch("app.trickplay.TrickplayStore"),
+                patch("app.intro_outro.IntroOutroStore") as intro_outro_type,
+                patch("app.jobs.scheduler") as scheduler,
+            ):
+                intro_outro_type.return_value.settings.return_value = {
+                    "scanOnAdded": False
+                }
+                scanner.scan("library-1", "job-1", lambda: False)
+
+            scheduler.enqueue_bazarr_sync.assert_not_called()
+
+    def test_subtitle_only_scan_does_not_queue_bazarr_mapping_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MagicMock()
+            store.db.execute.return_value = []
+            store.get.return_value = {
+                "id": "library-1",
+                "name": "TV",
+                "type": "tv_series",
+                "directory": directory,
+            }
+            scanner = LibraryScanner(store)
+
+            def scan_series(*_args, **_kwargs):
+                scanner._scan_delta["changed"].add("episode-1")
+                return 0
+
+            scanner._scan_series = MagicMock(side_effect=scan_series)
+            scanner._reconcile_moved_entities = MagicMock()
+            scanner._prune_rejected_entities = MagicMock(return_value=set())
+            scanner._prune_missing_entities = MagicMock(return_value=set())
+            scanner._flush_publications = MagicMock()
+            scanner._refresh_catalog_after_cleanup = MagicMock()
+            scanner._refresh_calendar_links = MagicMock()
+            scanner._start_heartbeat = MagicMock()
+            scanner._stop_heartbeat = MagicMock()
+
+            with (
+                patch("app.library.LocalArtworkCache"),
+                patch("app.trickplay.TrickplayStore"),
+                patch("app.intro_outro.IntroOutroStore") as intro_outro_type,
+                patch("app.jobs.scheduler") as scheduler,
+            ):
+                intro_outro_type.return_value.settings.return_value = {
+                    "scanOnAdded": False
+                }
+                scanner.scan("library-1", "job-1", lambda: False)
+
+            scheduler.enqueue_bazarr_sync.assert_not_called()
+
+    def test_removed_media_queues_bazarr_mapping_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MagicMock()
+            store.db.execute.return_value = []
+            store.get.return_value = {
+                "id": "library-1",
+                "name": "Movies",
+                "type": "movies",
+                "directory": directory,
+            }
+            scanner = LibraryScanner(store)
+            scanner._scan_movies = MagicMock(return_value=0)
+            scanner._reconcile_moved_entities = MagicMock()
+            scanner._prune_rejected_entities = MagicMock(return_value=set())
+            scanner._prune_missing_entities = MagicMock(return_value={"movie-1"})
             scanner._flush_publications = MagicMock()
             scanner._refresh_catalog_after_cleanup = MagicMock()
             scanner._refresh_calendar_links = MagicMock()

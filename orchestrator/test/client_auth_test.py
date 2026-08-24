@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app import client_auth
-from app.client_auth import issue_ticket, read_ticket
+from app.client_auth import ARTWORK_TICKET_TTL_SECONDS, issue_ticket, read_ticket
 from fastapi import HTTPException
 from starlette.requests import Request
 
@@ -48,6 +48,18 @@ class ClientTicketTest(unittest.TestCase):
         )
         with self.assertRaises(HTTPException):
             read_ticket(ticket, "resource", {"entity": "item-2"})
+
+    def test_artwork_ticket_uses_the_session_bound_lifetime(self):
+        ticket = issue_ticket(
+            "user-1",
+            "artwork",
+            ARTWORK_TICKET_TTL_SECONDS,
+            sessionId="session-1",
+        )
+
+        payload = read_ticket(ticket, "artwork")
+        self.assertEqual(payload["uid"], "user-1")
+        self.assertEqual(payload["sessionId"], "session-1")
 
     def test_reserved_claims_and_excessive_ttl_are_rejected(self):
         with self.assertRaises(ValueError):

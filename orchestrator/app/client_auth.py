@@ -13,7 +13,12 @@ from urllib.parse import urlsplit
 from app.models.account import Account
 from fastapi import HTTPException, Request, WebSocket
 
-_TICKET_TTL_LIMITS = {"resource": 15 * 60, "socket": 60}
+ARTWORK_TICKET_TTL_SECONDS = 7 * 24 * 60 * 60
+_TICKET_TTL_LIMITS = {
+    "resource": 15 * 60,
+    "socket": 60,
+    "artwork": ARTWORK_TICKET_TTL_SECONDS,
+}
 _RESERVED_TICKET_CLAIMS = {"uid", "kind", "iat", "exp"}
 CLIENT_SESSION_COOKIE = "__Host-zenstream-session"
 DEV_CLIENT_SESSION_COOKIE = "zenstream-session"

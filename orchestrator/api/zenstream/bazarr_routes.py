@@ -8,11 +8,13 @@ from app.bazarr import (
 )
 from app.client_auth import require_account
 from app.foreground import run_auth, run_control, run_foreground
+from app.logging_config import get_logger
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from api.zenstream.library_routes import authenticate_admin_request
 
 router = APIRouter()
+logger = get_logger("bazarr_routes")
 
 
 async def _require_account(request: Request) -> tuple[dict, str]:
@@ -49,7 +51,17 @@ def _public_settings() -> dict:
 
 
 def _save_settings(data: dict) -> dict:
-    return BazarrConnectionStore().save(data)
+    saved = BazarrConnectionStore().save(data)
+    try:
+        from app.jobs import scheduler
+
+        scheduler.enqueue_bazarr_sync()
+    except Exception:
+        logger.warning(
+            "could not queue Bazarr mapping sync after settings save",
+            exc_info=True,
+        )
+    return saved
 
 
 @router.get("/api/catalog/items/{entity_id}/bazarr/status")

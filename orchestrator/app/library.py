@@ -1212,6 +1212,17 @@ class LibraryScanner:
                 ),
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
+            if library["type"] == "tv_series":
+                try:
+                    from app.jobs import scheduler
+
+                    scheduler.enqueue_bazarr_sync()
+                except Exception:
+                    logger.warning(
+                        "could not queue Bazarr mapping sync library_id=%s",
+                        library_id,
+                        exc_info=True,
+                    )
             if removed:
                 self._refresh_dependent_collections(library_id)
             self.db.schedule_maintenance(scan_complete=True)

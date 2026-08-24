@@ -26,6 +26,7 @@ BAZARR_MATCH_TTL_SECONDS = 15 * 60
 BAZARR_LOOKUP_CACHE_SECONDS = 20.0
 BAZARR_NEGATIVE_LOOKUP_CACHE_SECONDS = 3.0
 BAZARR_EMPTY_SEARCH_RETRY_DELAY_SECONDS = 0.25
+BAZARR_SYNC_PENDING_MESSAGE = "The subtitle downloader mapping is being refreshed."
 _ADDRESS_RE = re.compile(r"^[^\s/:]+$")
 
 _bazarr_cache_lock = threading.Lock()
@@ -303,6 +304,8 @@ class BazarrConnectionStore:
                 (address, port, base_url, int(use_ssl), ciphertext, updated_at),
             )
             cursor.execute("DELETE FROM bazarr_library_mappings")
+            cursor.execute("DELETE FROM bazarr_episode_mappings")
+            cursor.execute("DELETE FROM bazarr_series_mappings")
             cursor.executemany(
                 "INSERT INTO bazarr_library_mappings(library_id,bazarr_root_path,updated_at) VALUES(?,?,?)",
                 [
@@ -315,6 +318,8 @@ class BazarrConnectionStore:
     def clear(self) -> None:
         with self.db.transaction() as cursor:
             cursor.execute("DELETE FROM bazarr_library_mappings")
+            cursor.execute("DELETE FROM bazarr_episode_mappings")
+            cursor.execute("DELETE FROM bazarr_series_mappings")
             cursor.execute("DELETE FROM bazarr_settings WHERE id=1")
 
 
@@ -439,6 +444,7 @@ class BazarrTarget:
     source_id: str
     media_file_id: str
     library_id: str
+    series_entity_id: str
     library_directory: str
     relative_path: str
     series_relative_path: str
@@ -463,7 +469,7 @@ def _target(user_id: str, entity_id: str, source_id: str | None) -> BazarrTarget
     db = catalog.db
     rows = db.execute(
         "SELECT ms.id,mf.id,e.library_id,l.directory,mf.relative_path,mf.size,mf.modified_ns,"
-        "mf.quick_fingerprint,e.season_number,e.episode_number,series.relative_path "
+        "mf.quick_fingerprint,e.season_number,e.episode_number,series.id,series.relative_path "
         "FROM media_sources ms JOIN media_files mf ON mf.id=ms.media_file_id "
         "JOIN library_entities e ON e.id=ms.entity_id JOIN libraries l ON l.id=e.library_id "
         "JOIN library_entities season ON season.id=e.parent_id "
@@ -512,9 +518,10 @@ def _target(user_id: str, entity_id: str, source_id: str | None) -> BazarrTarget
         source_id=str(row[0]),
         media_file_id=str(row[1]),
         library_id=str(row[2]),
+        series_entity_id=str(row[10]),
         library_directory=str(row[3]),
         relative_path=str(row[4]),
-        series_relative_path=str(row[10]),
+        series_relative_path=str(row[11]),
         season_number=_integer(row[8]),
         episode_number=_integer(row[9]),
         size=_integer(row[5]),
@@ -549,6 +556,203 @@ def _provider_conflict(target: BazarrTarget, series: dict) -> bool:
     target_tvdb = dict(target.series_provider_ids).get("tvdb")
     bazarr_tvdb = _provider_id(series, "tvdbId", "tvdbid", "tvdb_id")
     return bool(target_tvdb and bazarr_tvdb and target_tvdb != bazarr_tvdb)
+
+
+def _resolve_series_values(
+    bazarr_root_path: str | None,
+    series_relative_path: str,
+    series_provider_ids: tuple[tuple[str, str], ...],
+    series_values: list[dict],
+) -> dict:
+    if not bazarr_root_path or not series_relative_path:
+        raise BazarrMatchError(
+            "not_configured",
+            "This TV library is not mapped to the subtitle downloader.",
+        )
+    expected_series_path = mapped_path(bazarr_root_path, series_relative_path)
+    series_candidates = [
+        series
+        for series in series_values
+        if _path_key(series.get("path")) == _path_key(expected_series_path)
+    ]
+    if not series_candidates:
+        raise BazarrMatchError(
+            "unmatched",
+            "The subtitle downloader has no series entry for this library path.",
+        )
+    if len(series_candidates) > 1:
+        raise BazarrMatchError(
+            "ambiguous",
+            "The subtitle downloader has multiple series entries for this library path.",
+        )
+    series = series_candidates[0]
+    target_tvdb = dict(series_provider_ids).get("tvdb")
+    bazarr_tvdb = _provider_id(series, "tvdbId", "tvdbid", "tvdb_id")
+    if target_tvdb and bazarr_tvdb and target_tvdb != bazarr_tvdb:
+        raise BazarrMatchError(
+            "identity_conflict",
+            "The subtitle downloader series identity conflicts with this catalog series.",
+        )
+    series_id = _integer(
+        _provider_id(series, "sonarrSeriesId", "sonarr_series_id", "id")
+    )
+    if series_id is None:
+        raise BazarrMatchError(
+            "unmatched", "The subtitle downloader did not return an internal series ID."
+        )
+    return series
+
+
+def _resolve_episode_values(
+    target_path: str | None,
+    season_number: int | None,
+    episode_number: int | None,
+    series: dict,
+    episode_values: list[dict],
+) -> dict:
+    if not target_path:
+        raise BazarrMatchError(
+            "not_configured",
+            "This TV library has no path available to the subtitle downloader.",
+        )
+    series_id = _integer(
+        _provider_id(series, "sonarrSeriesId", "sonarr_series_id", "id")
+    )
+    if series_id is None:
+        raise BazarrMatchError(
+            "unmatched", "The subtitle downloader did not return an internal series ID."
+        )
+    expected_episode_path = _path_key(target_path)
+    episode_candidates = [
+        episode
+        for episode in episode_values
+        if _path_key(episode.get("path")) == expected_episode_path
+    ]
+    if not episode_candidates:
+        raise BazarrMatchError(
+            "unmatched",
+            "The subtitle downloader has no episode entry for this exact file path.",
+        )
+    if len(episode_candidates) > 1:
+        raise BazarrMatchError(
+            "ambiguous",
+            "The subtitle downloader has multiple episode entries for this exact file path.",
+        )
+    episode = episode_candidates[0]
+    episode_series_id = _integer(
+        _provider_id(
+            episode,
+            "seriesId",
+            "series_id",
+            "sonarrSeriesId",
+            "sonarr_series_id",
+        )
+    )
+    if episode_series_id is not None and episode_series_id != series_id:
+        raise BazarrMatchError(
+            "identity_conflict",
+            "The subtitle downloader episode belongs to a different series.",
+        )
+    bazarr_season = _integer(episode.get("season"))
+    bazarr_episode = _integer(episode.get("episode"))
+    if (
+        season_number is not None
+        and bazarr_season is not None
+        and season_number != bazarr_season
+    ) or (
+        episode_number is not None
+        and bazarr_episode is not None
+        and episode_number != bazarr_episode
+    ):
+        raise BazarrMatchError(
+            "identity_conflict",
+            "The subtitle downloader episode numbering conflicts with this catalog episode.",
+        )
+    episode_id = _integer(
+        _provider_id(episode, "sonarrEpisodeId", "sonarr_episode_id", "id")
+    )
+    if episode_id is None:
+        raise BazarrMatchError(
+            "unmatched",
+            "The subtitle downloader did not return an internal episode ID.",
+        )
+    return {
+        "series": series,
+        "episode": episode,
+        "seriesId": series_id,
+        "episodeId": episode_id,
+    }
+
+
+class BazarrMappingStore:
+    def __init__(self, db=None):
+        self.db = db or Config().database
+
+    def resolve(self, target: BazarrTarget) -> dict:
+        rows = self.db.execute(
+            "SELECT entity_id,series_entity_id,target_path,size,modified_ns,"
+            "quick_fingerprint,bazarr_series_id,bazarr_episode_id,state,title,"
+            "season_number,episode_number,subtitles_json,message "
+            "FROM bazarr_episode_mappings WHERE media_file_id=?",
+            (target.media_file_id,),
+        )
+        if not rows:
+            raise BazarrMatchError("sync_pending", BAZARR_SYNC_PENDING_MESSAGE)
+        row = rows[0]
+        if (
+            str(row[0]) != target.entity_id
+            or str(row[1]) != target.series_entity_id
+            or _path_key(row[2]) != _path_key(target.target_path)
+            or _integer(row[3]) != target.size
+            or _integer(row[4]) != target.modified_ns
+            or (str(row[5]) if row[5] is not None else None) != target.quick_fingerprint
+        ):
+            raise BazarrMatchError("sync_pending", BAZARR_SYNC_PENDING_MESSAGE)
+        state = str(row[8] or "sync_pending")
+        if state != "matched":
+            raise BazarrMatchError(
+                state,
+                str(row[13] or BAZARR_SYNC_PENDING_MESSAGE),
+            )
+        series_id = _integer(row[6])
+        episode_id = _integer(row[7])
+        if series_id is None or episode_id is None:
+            raise BazarrMatchError("sync_pending", BAZARR_SYNC_PENDING_MESSAGE)
+        try:
+            subtitles = json.loads(row[12] or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            subtitles = []
+        if not isinstance(subtitles, list):
+            subtitles = []
+        return {
+            "series": {
+                "path": (
+                    mapped_path(target.bazarr_root_path, target.series_relative_path)
+                    if target.bazarr_root_path
+                    else None
+                ),
+                "sonarrSeriesId": series_id,
+            },
+            "episode": {
+                "path": target.target_path,
+                "sonarrEpisodeId": episode_id,
+                "title": row[9],
+                "season": _integer(row[10]),
+                "episode": _integer(row[11]),
+                "subtitles": [item for item in subtitles if isinstance(item, dict)],
+            },
+            "seriesId": series_id,
+            "episodeId": episode_id,
+        }
+
+
+def _find_mapped_episode(target: BazarrTarget) -> dict:
+    if not target.target_path or not target.bazarr_root_path:
+        raise BazarrMatchError(
+            "not_configured",
+            "This TV library is not mapped to the subtitle downloader.",
+        )
+    return BazarrMappingStore().resolve(target)
 
 
 def _resolution_cache_key(client: BazarrClient, target: BazarrTarget) -> tuple | None:
@@ -600,35 +804,12 @@ def _find_episode(client: BazarrClient, target: BazarrTarget) -> dict:
 
 
 def _find_episode_uncached(client: BazarrClient, target: BazarrTarget) -> dict:
-    if not target.target_path or not target.bazarr_root_path:
-        raise BazarrMatchError(
-            "not_configured",
-            "This TV library is not mapped to the subtitle downloader.",
-        )
-    expected_series_path = mapped_path(
-        target.bazarr_root_path, target.series_relative_path
+    series = _resolve_series_values(
+        target.bazarr_root_path,
+        target.series_relative_path,
+        target.series_provider_ids,
+        client.series(),
     )
-    series_candidates = [
-        series
-        for series in client.series()
-        if _path_key(series.get("path")) == _path_key(expected_series_path)
-    ]
-    if not series_candidates:
-        raise BazarrMatchError(
-            "unmatched",
-            "The subtitle downloader has no series entry for this library path.",
-        )
-    if len(series_candidates) > 1:
-        raise BazarrMatchError(
-            "ambiguous",
-            "The subtitle downloader has multiple series entries for this library path.",
-        )
-    series = series_candidates[0]
-    if _provider_conflict(target, series):
-        raise BazarrMatchError(
-            "identity_conflict",
-            "The subtitle downloader series identity conflicts with this catalog series.",
-        )
     series_id = _integer(
         _provider_id(series, "sonarrSeriesId", "sonarr_series_id", "id")
     )
@@ -636,52 +817,13 @@ def _find_episode_uncached(client: BazarrClient, target: BazarrTarget) -> dict:
         raise BazarrMatchError(
             "unmatched", "The subtitle downloader did not return an internal series ID."
         )
-    expected_episode_path = _path_key(target.target_path)
-    episode_candidates = [
-        episode
-        for episode in client.episodes(series_id)
-        if _path_key(episode.get("path")) == expected_episode_path
-    ]
-    if not episode_candidates:
-        raise BazarrMatchError(
-            "unmatched",
-            "The subtitle downloader has no episode entry for this exact file path.",
-        )
-    if len(episode_candidates) > 1:
-        raise BazarrMatchError(
-            "ambiguous",
-            "The subtitle downloader has multiple episode entries for this exact file path.",
-        )
-    episode = episode_candidates[0]
-    bazarr_season = _integer(episode.get("season"))
-    bazarr_episode = _integer(episode.get("episode"))
-    if (
-        target.season_number is not None
-        and bazarr_season is not None
-        and target.season_number != bazarr_season
-    ) or (
-        target.episode_number is not None
-        and bazarr_episode is not None
-        and target.episode_number != bazarr_episode
-    ):
-        raise BazarrMatchError(
-            "identity_conflict",
-            "The subtitle downloader episode numbering conflicts with this catalog episode.",
-        )
-    episode_id = _integer(
-        _provider_id(episode, "sonarrEpisodeId", "sonarr_episode_id", "id")
+    return _resolve_episode_values(
+        target.target_path,
+        target.season_number,
+        target.episode_number,
+        series,
+        client.episodes(series_id),
     )
-    if episode_id is None:
-        raise BazarrMatchError(
-            "unmatched",
-            "The subtitle downloader did not return an internal episode ID.",
-        )
-    return {
-        "series": series,
-        "episode": episode,
-        "seriesId": series_id,
-        "episodeId": episode_id,
-    }
 
 
 def _subtitle_summary(value: dict) -> dict:
@@ -689,7 +831,12 @@ def _subtitle_summary(value: dict) -> dict:
         "language": _provider_id(value, "language", "lang", "code"),
         "name": _provider_id(value, "name", "language_name", "label", "provider"),
         "provider": _provider_id(value, "provider", "provider_name"),
-        "hearingImpaired": _bool_value(value.get("hearing_impaired", value.get("hi"))),
+        "hearingImpaired": _bool_value(
+            value.get(
+                "hearing_impaired",
+                value.get("hearingImpaired", value.get("hi")),
+            )
+        ),
         "forced": _bool_value(value.get("forced")),
         "format": _provider_id(value, "format", "extension", "codec"),
     }
@@ -772,6 +919,286 @@ def _search_candidates(client: BazarrClient, episode_id: int) -> list[dict]:
     return values
 
 
+class BazarrSyncService:
+    def __init__(self, db=None):
+        self.db = db or Config().database
+
+    @staticmethod
+    def _series_target_path(row: dict) -> str | None:
+        root = row.get("bazarr_root_path")
+        relative_path = str(row.get("series_relative_path") or "").strip()
+        if not root or not relative_path:
+            return None
+        try:
+            return mapped_path(str(root), relative_path)
+        except ValueError:
+            return None
+
+    def _inventory(self) -> dict[str, list[dict]]:
+        rows = self.db.execute(
+            "SELECT mf.id,e.id,e.library_id,l.directory,mf.relative_path,mf.size,"
+            "mf.modified_ns,mf.quick_fingerprint,e.season_number,e.episode_number,"
+            "series.id,series.relative_path,bm.bazarr_root_path "
+            "FROM media_files mf "
+            "JOIN library_entities e ON e.id=mf.entity_id "
+            "JOIN libraries l ON l.id=e.library_id AND l.type='tv_series' "
+            "JOIN library_entities season ON season.id=e.parent_id "
+            "JOIN library_entities series ON series.id=season.parent_id "
+            "LEFT JOIN bazarr_library_mappings bm ON bm.library_id=e.library_id "
+            "WHERE mf.role='media' AND e.entity_type='episode' "
+            "ORDER BY e.library_id,series.id,mf.relative_path COLLATE NOCASE"
+        )
+        groups: dict[str, list[dict]] = {}
+        for row in rows:
+            value = {
+                "media_file_id": str(row[0]),
+                "entity_id": str(row[1]),
+                "library_id": str(row[2]),
+                "library_directory": str(row[3] or ""),
+                "relative_path": str(row[4]),
+                "size": _integer(row[5]),
+                "modified_ns": _integer(row[6]),
+                "quick_fingerprint": (str(row[7]) if row[7] is not None else None),
+                "season_number": _integer(row[8]),
+                "episode_number": _integer(row[9]),
+                "series_entity_id": str(row[10]),
+                "series_relative_path": str(row[11] or ""),
+                "bazarr_root_path": _effective_bazarr_root(row[12], row[3]),
+            }
+            root = value["bazarr_root_path"]
+            value["target_path"] = (
+                mapped_path(root, value["relative_path"]) if root else None
+            )
+            groups.setdefault(value["series_entity_id"], []).append(value)
+
+        series_ids = list(groups)
+        provider_ids: dict[str, list[tuple[str, str]]] = {
+            series_id: [] for series_id in series_ids
+        }
+        if series_ids:
+            placeholders = ",".join("?" for _ in series_ids)
+            provider_rows = self.db.execute(
+                "SELECT entity_id,provider,provider_id FROM entity_provider_ids "
+                "WHERE identifier_type='series' AND entity_id IN ("
+                + placeholders
+                + ") ORDER BY entity_id,provider",
+                series_ids,
+            )
+            for entity_id, provider, provider_id in provider_rows:
+                provider_ids.setdefault(str(entity_id), []).append(
+                    (str(provider), str(provider_id))
+                )
+        for series_id, values in groups.items():
+            identities = tuple(provider_ids.get(series_id, []))
+            for value in values:
+                value["series_provider_ids"] = identities
+        return groups
+
+    def _prune_deleted_inventory(self) -> None:
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM bazarr_episode_mappings WHERE media_file_id NOT IN "
+                "(SELECT id FROM media_files WHERE role='media')"
+            )
+            cursor.execute(
+                "DELETE FROM bazarr_series_mappings WHERE series_entity_id NOT IN "
+                "(SELECT id FROM library_entities WHERE entity_type='series')"
+            )
+
+    def _write_group(
+        self,
+        values: list[dict],
+        *,
+        series_state: str,
+        series_message: str,
+        series: dict | None,
+        episodes: list[dict] | None,
+        synced_at: str,
+    ) -> tuple[int, int]:
+        first = values[0]
+        series_id = (
+            _integer(_provider_id(series, "sonarrSeriesId", "sonarr_series_id", "id"))
+            if series
+            else None
+        )
+        series_target_path = self._series_target_path(first)
+        episode_results: list[tuple[dict, str, str, dict | None]] = []
+        matched = 0
+        for value in values:
+            if episodes is None or series is None:
+                episode_results.append((value, series_state, series_message, None))
+                continue
+            try:
+                resolution = _resolve_episode_values(
+                    value["target_path"],
+                    value["season_number"],
+                    value["episode_number"],
+                    series,
+                    episodes,
+                )
+            except BazarrMatchError as error:
+                episode_results.append((value, error.code, str(error), None))
+            else:
+                matched += 1
+                episode_results.append((value, "matched", "", resolution))
+
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "INSERT INTO bazarr_series_mappings("
+                "series_entity_id,library_id,target_path,bazarr_series_id,state,"
+                "message,updated_at,synced_at) VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(series_entity_id) DO UPDATE SET "
+                "library_id=excluded.library_id,target_path=excluded.target_path,"
+                "bazarr_series_id=excluded.bazarr_series_id,state=excluded.state,"
+                "message=excluded.message,updated_at=excluded.updated_at,"
+                "synced_at=excluded.synced_at",
+                (
+                    first["series_entity_id"],
+                    first["library_id"],
+                    series_target_path,
+                    series_id,
+                    series_state,
+                    series_message or None,
+                    synced_at,
+                    synced_at,
+                ),
+            )
+            for value, state, message, resolution in episode_results:
+                episode = resolution["episode"] if resolution else None
+                episode_id = resolution["episodeId"] if resolution else None
+                episode_series_id = resolution["seriesId"] if resolution else series_id
+                subtitles = [
+                    _subtitle_summary(item)
+                    for item in (episode.get("subtitles") or [] if episode else [])
+                    if isinstance(item, dict)
+                ]
+                cursor.execute(
+                    "INSERT INTO bazarr_episode_mappings("
+                    "media_file_id,entity_id,series_entity_id,target_path,size,"
+                    "modified_ns,quick_fingerprint,bazarr_series_id,"
+                    "bazarr_episode_id,state,title,season_number,episode_number,"
+                    "subtitles_json,message,updated_at,synced_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(media_file_id) DO UPDATE SET "
+                    "entity_id=excluded.entity_id,series_entity_id=excluded.series_entity_id,"
+                    "target_path=excluded.target_path,size=excluded.size,"
+                    "modified_ns=excluded.modified_ns,quick_fingerprint=excluded.quick_fingerprint,"
+                    "bazarr_series_id=excluded.bazarr_series_id,"
+                    "bazarr_episode_id=excluded.bazarr_episode_id,state=excluded.state,"
+                    "title=excluded.title,season_number=excluded.season_number,"
+                    "episode_number=excluded.episode_number,subtitles_json=excluded.subtitles_json,"
+                    "message=excluded.message,updated_at=excluded.updated_at,"
+                    "synced_at=excluded.synced_at",
+                    (
+                        value["media_file_id"],
+                        value["entity_id"],
+                        value["series_entity_id"],
+                        value["target_path"],
+                        value["size"],
+                        value["modified_ns"],
+                        value["quick_fingerprint"],
+                        episode_series_id,
+                        episode_id,
+                        state,
+                        (
+                            _provider_id(episode, "title", "sceneName")
+                            if episode
+                            else None
+                        ),
+                        _integer(episode.get("season")) if episode else None,
+                        _integer(episode.get("episode")) if episode else None,
+                        json.dumps(
+                            subtitles, ensure_ascii=False, separators=(",", ":")
+                        ),
+                        message or None,
+                        synced_at,
+                        synced_at,
+                    ),
+                )
+        return matched, len(episode_results)
+
+    def sync(self, should_terminate=None, progress=None) -> dict:
+        should_terminate = should_terminate or (lambda: False)
+        connection = BazarrConnectionStore().internal()
+        if not connection:
+            return {"skipped": True, "series": 0, "episodes": 0, "matched": 0}
+
+        groups = self._inventory()
+        self._prune_deleted_inventory()
+        if not groups:
+            return {"skipped": False, "series": 0, "episodes": 0, "matched": 0}
+        series_total = len(groups)
+        if progress:
+            progress(0, series_total)
+        client = BazarrClient(connection)
+        matched_series = 0
+        matched_episodes = 0
+        episode_total = 0
+        deferred_series = 0
+        try:
+            series_values = client.series()
+            for index, values in enumerate(groups.values(), start=1):
+                if should_terminate():
+                    from app.library import JobTerminated
+
+                    raise JobTerminated()
+                episode_total += len(values)
+                first = values[0]
+                try:
+                    series = _resolve_series_values(
+                        first["bazarr_root_path"],
+                        first["series_relative_path"],
+                        first["series_provider_ids"],
+                        series_values,
+                    )
+                except BazarrMatchError as error:
+                    matched, _ = self._write_group(
+                        values,
+                        series_state=error.code,
+                        series_message=str(error),
+                        series=None,
+                        episodes=None,
+                        synced_at=_timestamp(),
+                    )
+                    matched_episodes += matched
+                else:
+                    matched_series += 1
+                    series_id = _integer(
+                        _provider_id(series, "sonarrSeriesId", "sonarr_series_id", "id")
+                    )
+                    try:
+                        episodes = client.episodes(series_id)
+                    except BazarrError:
+                        deferred_series += 1
+                        logger.warning(
+                            "could not refresh Bazarr episode mapping series_entity_id=%s",
+                            first["series_entity_id"],
+                            exc_info=True,
+                        )
+                    else:
+                        matched, _ = self._write_group(
+                            values,
+                            series_state="matched",
+                            series_message="",
+                            series=series,
+                            episodes=episodes,
+                            synced_at=_timestamp(),
+                        )
+                        matched_episodes += matched
+                if progress:
+                    progress(index, series_total)
+        finally:
+            client.close()
+        return {
+            "skipped": False,
+            "series": series_total,
+            "matched_series": matched_series,
+            "episodes": episode_total,
+            "matched": matched_episodes,
+            "deferred_series": deferred_series,
+        }
+
+
 class BazarrSubtitleService:
     def __init__(self):
         self.store = BazarrConnectionStore()
@@ -791,22 +1218,21 @@ class BazarrSubtitleService:
 
     def status(self, user_id: str, entity_id: str, source_id: str | None) -> dict:
         target = _target(user_id, entity_id, source_id)
-        client: BazarrClient | None = None
         try:
-            client = self._client(target)
-            resolution = _find_episode(client, target)
+            if not self.store.internal():
+                raise BazarrMatchError(
+                    "not_configured", "The subtitle downloader is not configured."
+                )
+            resolution = _find_mapped_episode(target)
         except BazarrMatchError as error:
             return _target_status(target, None, error.code, str(error))
-        finally:
-            if client is not None:
-                client.close()
         return _target_status(target, resolution, "matched")
 
     def search(self, user_id: str, entity_id: str, source_id: str | None) -> dict:
         target = _target(user_id, entity_id, source_id)
+        resolution = _find_mapped_episode(target)
         client = self._client(target)
         try:
-            resolution = _find_episode(client, target)
             values = _search_candidates(client, resolution["episodeId"])
 
             matches = []
@@ -864,7 +1290,7 @@ class BazarrSubtitleService:
                 )
         client = self._client(target)
         try:
-            resolution = _find_episode(client, target)
+            resolution = _find_mapped_episode(target)
             if (
                 payload.get("seriesId") != resolution["seriesId"]
                 or payload.get("episodeId") != resolution["episodeId"]

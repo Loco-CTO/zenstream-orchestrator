@@ -591,10 +591,9 @@ async def auth_bootstrap(request: Request):
     if not session_id:
         raise HTTPException(401, "Authentication required.")
     preference = AccountPreference(account["id"])
-    locale, metadata_language, subtitles, languages = await asyncio.gather(
+    locale, metadata_language, languages = await asyncio.gather(
         run_control(preference.locale),
         run_control(preference.metadata_language),
-        run_control(preference.subtitle_style),
         run_control(MetadataLanguageSettings().get),
     )
     return {
@@ -608,7 +607,6 @@ async def auth_bootstrap(request: Request):
         "resourceTicketExpiresIn": RESOURCE_TICKET_TTL_SECONDS,
         "locale": locale,
         "metadataLanguage": metadata_language,
-        "subtitleStyle": subtitles,
         "languages": languages,
         "languageOptions": language_options(locale),
     }
@@ -783,24 +781,6 @@ async def set_metadata_language(request: Request):
         return await run_control(
             AccountPreference(account["id"]).set_metadata_language,
             (await _bounded_json_object(request)).get("language"),
-        )
-    except ValueError as error:
-        raise HTTPException(400, str(error)) from error
-
-
-@router.get("/api/preferences/subtitles")
-async def get_subtitles(request: Request):
-    account, _ = await _require_account(request)
-    return await run_control(AccountPreference(account["id"]).subtitle_style)
-
-
-@router.patch("/api/preferences/subtitles")
-async def set_subtitles(request: Request):
-    account, _ = await _require_account(request)
-    try:
-        return await run_control(
-            AccountPreference(account["id"]).set_subtitle_style,
-            await _bounded_json_object(request),
         )
     except ValueError as error:
         raise HTTPException(400, str(error)) from error

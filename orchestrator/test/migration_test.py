@@ -379,7 +379,7 @@ class PersistenceMigrationTest(unittest.TestCase):
             finally:
                 connection.close()
 
-    def test_subtitle_outline_default_preserves_existing_values(self):
+    def test_subtitle_style_columns_are_removed_but_account_preferences_remain(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "orchestrator.db"
             config = self._config(database_path)
@@ -391,16 +391,22 @@ class PersistenceMigrationTest(unittest.TestCase):
                     ("user-1", "viewer", "hash"),
                 )
                 connection.execute(
-                    "INSERT INTO account_preferences(user_id,subtitle_border_size) VALUES(?,?)",
-                    ("user-1", 0),
+                    "INSERT INTO account_preferences(user_id,subtitle_border_size,subtitle_language) VALUES(?,?,?)",
+                    ("user-1", 0, "ja"),
                 )
                 connection.commit()
             finally:
                 connection.close()
 
-            command.upgrade(config, "head")
+            command.upgrade(config, "0035_subtitle_outline_default")
             connection = sqlite3.connect(database_path)
             try:
+                before_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(account_preferences)"
+                    )
+                }
                 column = next(
                     row
                     for row in connection.execute(
@@ -416,6 +422,42 @@ class PersistenceMigrationTest(unittest.TestCase):
                     ).fetchone()[0],
                     0.0,
                 )
+            finally:
+                connection.close()
+
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(account_preferences)"
+                    )
+                }
+                self.assertEqual(
+                    before_columns - columns,
+                    {
+                        "subtitle_font_family",
+                        "subtitle_bold",
+                        "subtitle_text_scale",
+                        "subtitle_font_color",
+                        "subtitle_border_size",
+                        "subtitle_border_color",
+                        "subtitle_background_color",
+                        "subtitle_background_opacity",
+                        "subtitle_renderer",
+                    },
+                )
+                self.assertIn("subtitle_language", columns)
+                self.assertIn("locale", columns)
+                self.assertIn("watch_history_enabled", columns)
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT subtitle_language FROM account_preferences WHERE user_id=?",
+                        ("user-1",),
+                    ).fetchone()[0],
+                    "ja",
+                )
                 connection.execute(
                     "INSERT INTO users(id,username,password) VALUES(?,?,?)",
                     ("user-2", "new-viewer", "hash"),
@@ -426,10 +468,43 @@ class PersistenceMigrationTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     connection.execute(
-                        "SELECT subtitle_border_size FROM account_preferences WHERE user_id=?",
+                        "SELECT watch_history_enabled FROM account_preferences WHERE user_id=?",
                         ("user-2",),
                     ).fetchone()[0],
-                    2.0,
+                    1,
+                )
+            finally:
+                connection.close()
+
+            command.downgrade(config, "0044_bazarr_movie_mapping_cache")
+            connection = sqlite3.connect(database_path)
+            try:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(account_preferences)"
+                    )
+                }
+                self.assertTrue(
+                    {
+                        "subtitle_font_family",
+                        "subtitle_bold",
+                        "subtitle_text_scale",
+                        "subtitle_font_color",
+                        "subtitle_border_size",
+                        "subtitle_border_color",
+                        "subtitle_background_color",
+                        "subtitle_background_opacity",
+                        "subtitle_renderer",
+                    }
+                    <= columns
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT subtitle_border_size,subtitle_renderer FROM account_preferences WHERE user_id=?",
+                        ("user-1",),
+                    ).fetchone(),
+                    (2.0, "native"),
                 )
             finally:
                 connection.close()

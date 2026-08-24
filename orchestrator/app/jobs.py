@@ -2657,8 +2657,6 @@ class JobScheduler:
                     self.cancel_events[run_id].is_set,
                 )
             elif kind == "bazarr_sync":
-                from app.bazarr import BazarrSyncJob
-
                 BazarrSyncJob(self.store).run(run_id, self.cancel_events[run_id].is_set)
             elif kind == "calendar_sync":
                 from app.calendar import CalendarSyncJob

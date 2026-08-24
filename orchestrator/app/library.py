@@ -1212,7 +1212,7 @@ class LibraryScanner:
                 ),
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
-            if library["type"] == "tv_series":
+            if library["type"] in {"tv_series", "movies"}:
                 try:
                     from app.jobs import scheduler
 

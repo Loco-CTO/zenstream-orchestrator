@@ -3,7 +3,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from api.zenstream import bazarr_routes
+from fastapi import HTTPException
 from app.bazarr import (
+    BazarrClient,
     BazarrError,
     BazarrMappingStore,
     BazarrMatchError,
@@ -13,8 +15,10 @@ from app.bazarr import (
     _associated_sidecar,
     _effective_bazarr_root,
     _find_episode,
+    _find_movie,
     _path_key,
     _resolve_episode_values,
+    _resolve_movie_values,
     _resolve_series_values,
     _search_candidates,
     mapped_path,
@@ -64,14 +68,45 @@ class _SearchBazarrClient:
         self.calls += 1
         return self.responses.pop(0)
 
+    def search_movie(self, movie_id):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+class _MovieSubtitleClient:
+    def __init__(self):
+        self.search_calls = []
+        self.download_values = None
+        self.closed = False
+
+    def search_movie(self, movie_id):
+        self.search_calls.append(movie_id)
+        return []
+
+    def download_movie(self, values):
+        self.download_values = values
+
+    def close(self):
+        self.closed = True
+
 
 class _SyncBazarrClient:
-    def __init__(self, series_values, episode_values=None, episode_error=None):
+    def __init__(
+        self,
+        series_values,
+        episode_values=None,
+        episode_error=None,
+        movie_values=None,
+        movie_error=None,
+    ):
         self.series_values = series_values
         self.episode_values = episode_values or []
         self.episode_error = episode_error
+        self.movie_values = movie_values or []
+        self.movie_error = movie_error
         self.series_calls = 0
         self.episode_calls = []
+        self.movie_calls = 0
         self.closed = False
 
     def series(self):
@@ -83,6 +118,12 @@ class _SyncBazarrClient:
         if self.episode_error:
             raise self.episode_error
         return self.episode_values
+
+    def movies(self):
+        self.movie_calls += 1
+        if self.movie_error:
+            raise self.movie_error
+        return self.movie_values
 
     def close(self):
         self.closed = True
@@ -113,6 +154,29 @@ def _target(**values):
     return BazarrTarget(**defaults)
 
 
+def _movie_target(**values):
+    defaults = {
+        "entity_id": "movie",
+        "media_file_id": "movie-media",
+        "library_id": "movie-library",
+        "series_entity_id": "",
+        "library_directory": "/media",
+        "relative_path": "Film/Film.mkv",
+        "series_relative_path": "",
+        "season_number": None,
+        "episode_number": None,
+        "size": 300,
+        "modified_ns": 400,
+        "quick_fingerprint": "movie-fingerprint",
+        "bazarr_root_path": "/movies",
+        "target_path": "/movies/Film/Film.mkv",
+        "movie_provider_ids": (("tmdb", "42"), ("imdb", "tt0042")),
+        "media_type": "movie",
+    }
+    defaults.update(values)
+    return _target(**defaults)
+
+
 def _mapping_db():
     db = DatabaseHandler("sqlite", {}, ":memory:")
     for statement in (
@@ -123,6 +187,7 @@ def _mapping_db():
         "CREATE TABLE bazarr_library_mappings(library_id TEXT PRIMARY KEY,bazarr_root_path TEXT)",
         "CREATE TABLE bazarr_series_mappings(series_entity_id TEXT PRIMARY KEY,library_id TEXT,target_path TEXT,bazarr_series_id INTEGER,state TEXT,message TEXT,updated_at TEXT,synced_at TEXT)",
         "CREATE TABLE bazarr_episode_mappings(media_file_id TEXT PRIMARY KEY,entity_id TEXT,series_entity_id TEXT,target_path TEXT,size INTEGER,modified_ns INTEGER,quick_fingerprint TEXT,bazarr_series_id INTEGER,bazarr_episode_id INTEGER,state TEXT,title TEXT,season_number INTEGER,episode_number INTEGER,subtitles_json TEXT,message TEXT,updated_at TEXT,synced_at TEXT)",
+        "CREATE TABLE bazarr_movie_mappings(media_file_id TEXT PRIMARY KEY,entity_id TEXT,library_id TEXT,target_path TEXT,size INTEGER,modified_ns INTEGER,quick_fingerprint TEXT,bazarr_movie_id INTEGER,state TEXT,title TEXT,subtitles_json TEXT,message TEXT,updated_at TEXT,synced_at TEXT)",
     ):
         db.execute(statement)
     return db
@@ -155,7 +220,83 @@ def _seed_mapping_inventory(
     )
 
 
+def _seed_movie_inventory(
+    db, *, size=300, modified_ns=400, fingerprint="movie-fingerprint"
+):
+    db.execute(
+        "INSERT INTO libraries(id,directory,type) VALUES('movie-library','/media','movies')"
+    )
+    db.execute(
+        "INSERT INTO bazarr_library_mappings(library_id,bazarr_root_path) VALUES('movie-library','/movies')"
+    )
+    db.execute(
+        "INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path) VALUES('movie','movie-library',NULL,'movie','Film/Film.mkv')"
+    )
+    db.execute(
+        "INSERT INTO media_files(id,entity_id,relative_path,role,size,modified_ns,quick_fingerprint) VALUES('movie-media','movie','Film/Film.mkv','media',?,?,?)",
+        (size, modified_ns, fingerprint),
+    )
+    db.execute(
+        "INSERT INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id) VALUES('movie','tmdb','movie','42')"
+    )
+    db.execute(
+        "INSERT INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id) VALUES('movie','imdb','imdb','tt0042')"
+    )
+
+
 class BazarrMatchingTest(unittest.TestCase):
+    def test_movie_client_uses_bazarr_movie_inventory_and_provider_endpoints(self):
+        client = BazarrClient(
+            {
+                "address": "bazarr-test",
+                "port": 6767,
+                "baseUrl": "",
+                "useSsl": False,
+                "apiKey": "key",
+            }
+        )
+        try:
+            with patch.object(
+                client,
+                "request",
+                return_value={"data": [{"path": "/movies/Film/Film.mkv", "radarrId": 42}]},
+            ) as request:
+                self.assertEqual(client.movies()[0]["radarrId"], 42)
+                request.assert_called_once_with(
+                    "GET", "/movies", params={"start": 0, "length": -1}
+                )
+            with patch.object(client, "request", return_value={}) as request:
+                request.return_value = {"data": [{"provider": "opensubtitles"}]}
+                self.assertEqual(client.search_movie(42)[0]["provider"], "opensubtitles")
+                request.assert_called_once_with(
+                    "GET", "/providers/movies", params={"radarrid": 42}
+                )
+            with patch.object(client, "request", return_value={}) as request:
+                client.download_movie(
+                    {
+                        "movieId": 42,
+                        "provider": "opensubtitles",
+                        "subtitle": "subtitle-1",
+                        "hi": False,
+                        "forced": True,
+                        "originalFormat": False,
+                    }
+                )
+                request.assert_called_once_with(
+                    "POST",
+                    "/providers/movies",
+                    params={
+                        "radarrid": 42,
+                        "hi": "False",
+                        "forced": "True",
+                        "original_format": "False",
+                        "provider": "opensubtitles",
+                        "subtitle": "subtitle-1",
+                    },
+                )
+        finally:
+            client.close()
+
     def test_unmapped_library_uses_zenstream_directory(self):
         self.assertEqual(
             _effective_bazarr_root(None, r"C:\\Media\\TV"),
@@ -343,6 +484,75 @@ class BazarrMatchingTest(unittest.TestCase):
             _find_episode(_BazarrClient(series, episodes), _target())
         self.assertEqual(error.exception.code, "ambiguous")
 
+    def test_movie_requires_exact_full_media_path(self):
+        result = _resolve_movie_values(
+            r"C:\movies",
+            r"C:\movies\Film\Film.mkv",
+            (("tmdb", "42"), ("imdb", "tt0042")),
+            [
+                {
+                    "path": "c:/movies/Film/./Film.mkv",
+                    "radarrId": 42,
+                    "tmdbId": 42,
+                    "imdbId": "tt0042",
+                }
+            ],
+        )
+        self.assertEqual(result["movieId"], 42)
+
+        with self.assertRaises(BazarrMatchError) as error:
+            _resolve_movie_values(
+                "/movies",
+                "/movies/Film/Film.mkv",
+                (),
+                [{"path": "/movies/Film/Film-other.mkv", "radarrId": 42}],
+            )
+        self.assertEqual(error.exception.code, "unmatched")
+
+    def test_duplicate_movie_paths_are_ambiguous(self):
+        with self.assertRaises(BazarrMatchError) as error:
+            _resolve_movie_values(
+                "/movies",
+                "/movies/Film/Film.mkv",
+                (),
+                [
+                    {"path": "/movies/Film/Film.mkv", "radarrId": 42},
+                    {"path": "/movies/Film/./Film.mkv", "radarrId": 43},
+                ],
+            )
+        self.assertEqual(error.exception.code, "ambiguous")
+
+    def test_movie_tmdb_and_imdb_identity_conflicts_are_rejected(self):
+        for provider_ids, movie in (
+            ((("tmdb", "42"),), {"tmdbId": 43}),
+            ((("imdb", "tt0042"),), {"imdbId": "tt0043"}),
+        ):
+            with self.subTest(provider_ids=provider_ids):
+                with self.assertRaises(BazarrMatchError) as error:
+                    _resolve_movie_values(
+                        "/movies",
+                        "/movies/Film/Film.mkv",
+                        provider_ids,
+                        [{"path": "/movies/Film/Film.mkv", "radarrId": 42, **movie}],
+                    )
+                self.assertEqual(error.exception.code, "identity_conflict")
+
+    def test_movie_resolution_cache_reuses_inventory(self):
+        class CachedMovieClient:
+            cache_key = ("test", 6767, "", False)
+
+            def __init__(self):
+                self.calls = 0
+
+            def movies(self):
+                self.calls += 1
+                return [{"path": "/movies/Film/Film.mkv", "radarrId": 42}]
+
+        client = CachedMovieClient()
+        _find_movie(client, _movie_target(movie_provider_ids=()))
+        _find_movie(client, _movie_target(movie_provider_ids=()))
+        self.assertEqual(client.calls, 1)
+
 
 class BazarrMappingCacheTest(unittest.TestCase):
     def setUp(self):
@@ -373,6 +583,30 @@ class BazarrMappingCacheTest(unittest.TestCase):
                 "Episode 2",
                 1,
                 2,
+                '[{"language":"en"}]',
+                None,
+                "now",
+                "now",
+            ),
+        )
+
+    def _insert_movie_mapping(
+        self, *, size=300, modified_ns=400, fingerprint="movie-fingerprint"
+    ):
+        _seed_movie_inventory(self.db, size=size, modified_ns=modified_ns, fingerprint=fingerprint)
+        self.db.execute(
+            "INSERT INTO bazarr_movie_mappings(media_file_id,entity_id,library_id,target_path,size,modified_ns,quick_fingerprint,bazarr_movie_id,state,title,subtitles_json,message,updated_at,synced_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "movie-media",
+                "movie",
+                "movie-library",
+                "/movies/Film/Film.mkv",
+                size,
+                modified_ns,
+                fingerprint,
+                42,
+                "matched",
+                "Film",
                 '[{"language":"en"}]',
                 None,
                 "now",
@@ -426,6 +660,99 @@ class BazarrMappingCacheTest(unittest.TestCase):
         self.assertTrue(result["episode"]["subtitles"][0]["hearingImpaired"])
         client.assert_not_called()
 
+    def test_movie_mapping_resolves_without_bazarr_lookup_and_rejects_stale_signature(self):
+        self._insert_movie_mapping()
+        resolution = BazarrMappingStore(self.db).resolve(_movie_target())
+        self.assertEqual(resolution["movieId"], 42)
+        self.assertEqual(resolution["movie"]["subtitles"][0]["language"], "en")
+        with self.assertRaises(BazarrMatchError) as error:
+            BazarrMappingStore(self.db).resolve(_movie_target(size=301))
+        self.assertEqual(error.exception.code, "sync_pending")
+
+    def test_movie_search_uses_radarr_id_and_binds_movie_ticket(self):
+        target = _movie_target()
+        resolution = {"movieId": 42, "movie": {"title": "Film"}}
+        client = _MovieSubtitleClient()
+        candidate = {
+            "candidateId": "candidate",
+            "provider": "opensubtitles",
+            "subtitle": "subtitle-1",
+            "hearingImpaired": False,
+            "forced": False,
+            "originalFormat": False,
+            "name": "English",
+        }
+        with (
+            patch("app.bazarr._target", return_value=target),
+            patch("app.bazarr._find_mapped_target", return_value=resolution),
+            patch.object(BazarrSubtitleService, "_client", return_value=client),
+            patch("app.bazarr._search_candidates", return_value=[candidate]),
+            patch("app.bazarr.issue_ticket", return_value="movie-ticket") as issue,
+        ):
+            result = BazarrSubtitleService().search("user", "movie", "source")
+        self.assertEqual(result["matches"][0]["matchId"], "movie-ticket")
+        self.assertEqual(issue.call_args.kwargs["mediaType"], "movie")
+        self.assertEqual(issue.call_args.kwargs["movieId"], 42)
+        client.close()
+
+    def test_movie_download_validates_movie_ticket_and_uses_movie_endpoint(self):
+        target = _movie_target()
+        resolution = {"movieId": 42, "movie": {"title": "Film"}}
+        client = _MovieSubtitleClient()
+        payload = {
+            "uid": "user",
+            "entity": "movie",
+            "sourceId": "source",
+            "mediaFileId": "movie-media",
+            "size": 300,
+            "modifiedNs": 400,
+            "fingerprint": "movie-fingerprint",
+            "mediaType": "movie",
+            "movieId": 42,
+            "provider": "opensubtitles",
+            "subtitle": "subtitle-1",
+            "hi": False,
+            "forced": False,
+            "originalFormat": False,
+        }
+        with (
+            patch("app.bazarr._target", return_value=target),
+            patch("app.bazarr.read_ticket", return_value=payload),
+            patch("app.bazarr._find_mapped_target", return_value=resolution),
+            patch.object(BazarrSubtitleService, "_client", return_value=client),
+            patch("app.library.runtime.request_reconcile"),
+        ):
+            result = BazarrSubtitleService().download(
+                "user", "movie", "source", "movie-ticket"
+            )
+        self.assertEqual(result["state"], "download_started")
+        self.assertEqual(client.download_values["movieId"], 42)
+        client.close()
+
+    def test_movie_download_rejects_a_ticket_for_a_different_movie(self):
+        target = _movie_target()
+        payload = {
+            "uid": "user",
+            "entity": "movie",
+            "sourceId": "source",
+            "mediaFileId": "movie-media",
+            "size": 300,
+            "modifiedNs": 400,
+            "fingerprint": "movie-fingerprint",
+            "mediaType": "movie",
+            "movieId": 41,
+        }
+        with (
+            patch("app.bazarr._target", return_value=target),
+            patch("app.bazarr.read_ticket", return_value=payload),
+            patch("app.bazarr._find_mapped_target", return_value={"movieId": 42}),
+        ):
+            with self.assertRaises(HTTPException) as error:
+                BazarrSubtitleService().download(
+                    "user", "movie", "source", "movie-ticket"
+                )
+        self.assertEqual(error.exception.status_code, 409)
+
     def test_settings_save_queues_mapping_sync(self):
         with (
             patch.object(
@@ -477,6 +804,68 @@ class BazarrMappingCacheTest(unittest.TestCase):
                 "SELECT bazarr_episode_id,state FROM bazarr_episode_mappings"
             ),
             [(90, "matched")],
+        )
+
+    def test_sync_maps_movie_by_path_and_persists_subtitles(self):
+        _seed_movie_inventory(self.db)
+        client = _SyncBazarrClient(
+            [{"path": "/tv/Show", "sonarrSeriesId": 9, "tvdbId": "123"}],
+            [
+                {
+                    "seriesId": 9,
+                    "path": "/tv/Show/Season 1/Show - S01E02.mkv",
+                    "sonarrEpisodeId": 90,
+                    "season": 1,
+                    "episode": 2,
+                }
+            ],
+            movie_values=[
+                {
+                    "path": "/movies/Film/Film.mkv",
+                    "radarrId": 42,
+                    "tmdbId": 42,
+                    "imdbId": "tt0042",
+                    "title": "Film",
+                    "subtitles": [{"language": "en", "provider": "embedded"}],
+                }
+            ],
+        )
+        with (
+            patch(
+                "app.bazarr.BazarrConnectionStore.internal",
+                return_value={"address": "bazarr"},
+            ),
+            patch("app.bazarr.BazarrClient", return_value=client),
+        ):
+            result = BazarrSyncService(self.db).sync()
+        self.assertEqual(result["matched_movies"], 1)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT bazarr_movie_id,state,subtitles_json FROM bazarr_movie_mappings"
+            ),
+            [(42, "matched", '[{"language":"en","name":"embedded","provider":"embedded","hearingImpaired":false,"forced":false,"format":null}]')],
+        )
+
+    def test_movie_inventory_failure_preserves_existing_mapping(self):
+        self._insert_movie_mapping()
+        client = _SyncBazarrClient(
+            [{"path": "/tv/Show", "sonarrSeriesId": 9, "tvdbId": "123"}],
+            movie_error=BazarrError("temporary failure"),
+        )
+        with (
+            patch(
+                "app.bazarr.BazarrConnectionStore.internal",
+                return_value={"address": "bazarr"},
+            ),
+            patch("app.bazarr.BazarrClient", return_value=client),
+        ):
+            result = BazarrSyncService(self.db).sync()
+        self.assertEqual(result["deferred_movies"], 1)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT bazarr_movie_id,state FROM bazarr_movie_mappings"
+            ),
+            [(42, "matched")],
         )
 
     def test_episode_inventory_failure_preserves_existing_mapping(self):

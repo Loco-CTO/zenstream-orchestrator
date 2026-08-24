@@ -848,9 +848,7 @@ def _candidate(value: dict) -> dict | None:
     if not provider or not subtitle:
         return None
     name = _provider_id(value, "name", "filename", "label", "provider") or provider
-    release_name = (
-        _provider_id(value, "release", "releaseName", "release_name") or name
-    )
+    release_name = _provider_id(value, "release", "releaseName", "release_name") or name
     hi = _bool_value(value.get("hearing_impaired", value.get("hi")))
     forced = _bool_value(value.get("forced"))
     original_format = _bool_value(

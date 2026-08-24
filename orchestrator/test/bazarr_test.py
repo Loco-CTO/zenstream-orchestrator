@@ -334,9 +334,7 @@ class BazarrMatchingTest(unittest.TestCase):
 
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["name"], "English")
-        self.assertEqual(
-            candidate["releaseName"], "[SubsPlease] Show - 01 [1080p].srt"
-        )
+        self.assertEqual(candidate["releaseName"], "[SubsPlease] Show - 01 [1080p].srt")
 
     def test_duplicate_exact_episode_entries_are_ambiguous(self):
         series = [{"path": "/tv/Show", "sonarrSeriesId": 9}]

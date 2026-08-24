@@ -22,6 +22,7 @@ from app.avatar import (
 from app.catalog import LOCAL_ARTWORK_NAMES, Catalog
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import (
+    ARTWORK_TICKET_TTL_SECONDS,
     CLIENT_SESSION_COOKIE,
     DEV_CLIENT_SESSION_COOKIE,
     account_from_access,
@@ -87,6 +88,15 @@ async def _require_account(request: Request) -> tuple[dict, str]:
 
 async def _require_access(request: Request, kind: str = "resource", **claims):
     return await run_auth(account_from_access, request, kind, **claims)
+
+
+async def _require_image_access(request: Request):
+    try:
+        return await _require_access(request)
+    except HTTPException as error:
+        if error.status_code != 401:
+            raise
+        return await _require_access(request, "artwork")
 
 
 def _save_avatar(
@@ -606,6 +616,13 @@ async def auth_bootstrap(request: Request):
             sessionId=session_id,
         ),
         "resourceTicketExpiresIn": RESOURCE_TICKET_TTL_SECONDS,
+        "artworkTicket": issue_ticket(
+            account["id"],
+            "artwork",
+            ARTWORK_TICKET_TTL_SECONDS,
+            sessionId=session_id,
+        ),
+        "artworkTicketExpiresIn": ARTWORK_TICKET_TTL_SECONDS,
         "locale": locale,
         "metadataLanguage": metadata_language,
         "subtitleStyle": subtitles,
@@ -674,6 +691,23 @@ async def resource_ticket(request: Request):
             sessionId=session_id,
         ),
         "expiresIn": RESOURCE_TICKET_TTL_SECONDS,
+    }
+
+
+@router.get("/api/auth/artwork-ticket")
+async def artwork_ticket(request: Request):
+    account, token = await _require_account(request)
+    session_id = await run_auth(session_id_for_token, token)
+    if not session_id:
+        raise HTTPException(401, "Authentication required.")
+    return {
+        "ticket": issue_ticket(
+            account["id"],
+            "artwork",
+            ARTWORK_TICKET_TTL_SECONDS,
+            sessionId=session_id,
+        ),
+        "expiresIn": ARTWORK_TICKET_TTL_SECONDS,
     }
 
 
@@ -1063,7 +1097,7 @@ async def item_image(
     entity_id: str, image_type: str, request: Request, language: str = Query(...)
 ):
     requested_version = request.query_params.get("v")
-    account = await _require_access(request)
+    account = await _require_image_access(request)
 
     def resolve_cached_image() -> Path | None:
         row = catalog.require_entity(account["id"], entity_id)
@@ -1153,7 +1187,7 @@ async def item_image(
 
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
-    account = await _require_access(request)
+    account = await _require_image_access(request)
     image = await run_control(catalog.person_image, account["id"], entity_id, person_id)
     if image is None:
         raise HTTPException(404, "Person image not found.")

@@ -506,7 +506,6 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
         preference = MagicMock()
         preference.locale.return_value = "en-GB"
         preference.metadata_language.return_value = {"language": "ja"}
-        preference.subtitle_style.return_value = {"fontSize": 32}
         languages = MagicMock()
         languages.get.return_value = ["en", "ja"]
         with (
@@ -532,6 +531,7 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
         self.assertEqual(response["artworkTicket"], "artwork-ticket")
         self.assertEqual(response["metadataLanguage"], {"language": "ja"})
         self.assertEqual(response["languages"], ["en", "ja"])
+        self.assertNotIn("subtitleStyle", response)
         self.assertEqual(ticket_issuer.call_count, 2)
         self.assertEqual(
             ticket_issuer.call_args_list[0].args,
@@ -670,6 +670,12 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
 
 
 class ClientPreferenceRouteTest(unittest.TestCase):
+    def test_subtitle_style_routes_are_not_registered(self):
+        self.assertNotIn(
+            "/api/preferences/subtitles",
+            {route.path for route in client_routes.router.routes},
+        )
+
     def test_patch_routes_reject_non_object_json(self):
         routes = (
             (client_routes.set_locale, "/api/preferences/locale"),
@@ -677,7 +683,6 @@ class ClientPreferenceRouteTest(unittest.TestCase):
                 client_routes.set_metadata_language,
                 "/api/preferences/metadata-language",
             ),
-            (client_routes.set_subtitles, "/api/preferences/subtitles"),
             (client_routes.set_watch_history, "/api/preferences/watch-history"),
         )
         with patch.object(

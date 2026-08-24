@@ -473,13 +473,35 @@ class BazarrMatchingTest(unittest.TestCase):
                 "provider": "opensubtitles",
                 "subtitle": "subtitle-1",
                 "name": "English",
-                "release": "[SubsPlease] Show - 01 [1080p].srt",
+                "release_info": ["[SubsPlease] Show - 01 [1080p].srt"],
+                "score": 86,
+                "uploader": "excaliburrr",
             }
         )
 
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["name"], "English")
         self.assertEqual(candidate["releaseName"], "[SubsPlease] Show - 01 [1080p].srt")
+        self.assertEqual(candidate["score"], 86)
+        self.assertEqual(candidate["uploader"], "excaliburrr")
+
+    def test_candidate_joins_release_info_and_does_not_use_provider_as_release(self):
+        candidate = _candidate(
+            {
+                "provider": "opensubtitles",
+                "subtitle": "subtitle-1",
+                "release_info": ["Release group", "1080p"],
+            }
+        )
+        missing_release = _candidate(
+            {
+                "provider": "opensubtitles",
+                "subtitle": "subtitle-2",
+            }
+        )
+
+        self.assertEqual(candidate["releaseName"], "Release group, 1080p")
+        self.assertIsNone(missing_release["releaseName"])
 
     def test_duplicate_exact_episode_entries_are_ambiguous(self):
         series = [{"path": "/tv/Show", "sonarrSeriesId": 9}]
@@ -704,6 +726,9 @@ class BazarrMappingCacheTest(unittest.TestCase):
             "forced": False,
             "originalFormat": False,
             "name": "English",
+            "releaseName": "The Eminence in Shadow S01E03",
+            "score": 86,
+            "uploader": "privateer",
         }
         with (
             patch("app.bazarr._target", return_value=target),
@@ -714,6 +739,11 @@ class BazarrMappingCacheTest(unittest.TestCase):
         ):
             result = BazarrSubtitleService().search("user", "movie", "source")
         self.assertEqual(result["matches"][0]["matchId"], "movie-ticket")
+        self.assertEqual(
+            result["matches"][0]["releaseName"], "The Eminence in Shadow S01E03"
+        )
+        self.assertEqual(result["matches"][0]["score"], 86)
+        self.assertEqual(result["matches"][0]["uploader"], "privateer")
         self.assertEqual(issue.call_args.kwargs["mediaType"], "movie")
         self.assertEqual(issue.call_args.kwargs["movieId"], 42)
         client.close()

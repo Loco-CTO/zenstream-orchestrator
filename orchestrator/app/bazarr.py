@@ -607,6 +607,21 @@ def _provider_id(item: dict, *keys: str) -> str | None:
     return None
 
 
+def _release_name(item: dict) -> str | None:
+    release_info = item.get("release_info")
+    if isinstance(release_info, (list, tuple)):
+        values = [
+            str(value).strip()
+            for value in release_info
+            if value is not None and str(value).strip()
+        ]
+        if values:
+            return ", ".join(values)
+    elif release_info is not None and str(release_info).strip():
+        return str(release_info).strip()
+    return _provider_id(item, "releaseName", "release_name", "release")
+
+
 def _provider_conflict(target: BazarrTarget, series: dict) -> bool:
     target_tvdb = dict(target.series_provider_ids).get("tvdb")
     bazarr_tvdb = _provider_id(series, "tvdbId", "tvdbid", "tvdb_id")
@@ -1062,7 +1077,7 @@ def _candidate(value: dict) -> dict | None:
     if not provider or not subtitle:
         return None
     name = _provider_id(value, "name", "filename", "label", "provider") or provider
-    release_name = _provider_id(value, "release", "releaseName", "release_name") or name
+    release_name = _release_name(value)
     hi = _bool_value(value.get("hearing_impaired", value.get("hi")))
     forced = _bool_value(value.get("forced"))
     original_format = _bool_value(
@@ -1085,6 +1100,7 @@ def _candidate(value: dict) -> dict | None:
         "originalFormat": original_format,
         "format": _provider_id(value, "format", "extension", "codec"),
         "score": value.get("score"),
+        "uploader": _provider_id(value, "uploader", "uploader_name"),
         "subtitle": subtitle,
     }
 

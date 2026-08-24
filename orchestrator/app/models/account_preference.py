@@ -7,11 +7,8 @@ from app.language_registry import (
     normalize_track_language,
 )
 from app.models.metadata import MetadataLanguageSettings
-from app.models.subtitle_style import (
-    DEFAULT_SUBTITLE_STYLE,
-    SUPPORTED_LOCALES,
-    validate_subtitle_style,
-)
+
+SUPPORTED_LOCALES = frozenset({"en", "ja"})
 
 
 class AccountPreference:
@@ -99,46 +96,6 @@ class AccountPreference:
             (normalized, self.user_id),
         )
         return self.metadata_language()
-
-    def subtitle_style(self) -> dict:
-        rows = self.db.read_execute(
-            "SELECT subtitle_renderer,subtitle_font_family,subtitle_bold,subtitle_text_scale,subtitle_font_color,subtitle_border_size,subtitle_border_color,subtitle_background_color,subtitle_background_opacity FROM account_preferences WHERE user_id=?",
-            (self.user_id,),
-        )
-        if not rows:
-            return dict(DEFAULT_SUBTITLE_STYLE)
-        row = rows[0]
-        return {
-            "renderer": row[0],
-            "fontFamily": row[1],
-            "bold": bool(row[2]),
-            "textScale": row[3],
-            "fontColor": row[4],
-            "borderSize": row[5],
-            "borderColor": row[6],
-            "backgroundColor": row[7],
-            "backgroundOpacity": row[8],
-        }
-
-    def set_subtitle_style(self, value: dict) -> dict:
-        style = validate_subtitle_style(value)
-        self._ensure()
-        self.db.execute(
-            "UPDATE account_preferences SET subtitle_renderer=?,subtitle_font_family=?,subtitle_bold=?,subtitle_text_scale=?,subtitle_font_color=?,subtitle_border_size=?,subtitle_border_color=?,subtitle_background_color=?,subtitle_background_opacity=? WHERE user_id=?",
-            (
-                style["renderer"],
-                style["fontFamily"],
-                int(style["bold"]),
-                style["textScale"],
-                style["fontColor"],
-                style["borderSize"],
-                style["borderColor"],
-                style["backgroundColor"],
-                style["backgroundOpacity"],
-                self.user_id,
-            ),
-        )
-        return style
 
     def _track_language_sets(self) -> tuple[set[str], set[str]]:
         rows = self.db.read_execute(

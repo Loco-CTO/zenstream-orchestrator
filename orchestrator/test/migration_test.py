@@ -104,8 +104,38 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "user_follow_targets",
                         "catalog_admissions",
                         "notifications",
+                        "bazarr_series_mappings",
+                        "bazarr_episode_mappings",
                     }
                     <= tables
+                )
+                series_mapping_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(bazarr_series_mappings)"
+                    )
+                }
+                episode_mapping_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(bazarr_episode_mappings)"
+                    )
+                }
+                self.assertTrue(
+                    {"series_entity_id", "bazarr_series_id", "state"}
+                    <= series_mapping_columns
+                )
+                self.assertTrue(
+                    {
+                        "media_file_id",
+                        "target_path",
+                        "size",
+                        "modified_ns",
+                        "quick_fingerprint",
+                        "bazarr_episode_id",
+                        "subtitles_json",
+                    }
+                    <= episode_mapping_columns
                 )
                 self.assertNotIn("notification_push_subscriptions", tables)
                 self.assertNotIn("notification_push_outbox", tables)

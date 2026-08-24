@@ -117,6 +117,40 @@ class LibraryMetadataTest(unittest.TestCase):
                 scanner.scan("library-1", "job-3", lambda: True)
                 scanner._refresh_calendar_links.assert_not_called()
 
+    def test_successful_tv_scan_queues_bazarr_mapping_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MagicMock()
+            store.db.execute.return_value = []
+            store.get.return_value = {
+                "id": "library-1",
+                "name": "TV",
+                "type": "tv_series",
+                "directory": directory,
+            }
+            scanner = LibraryScanner(store)
+            scanner._scan_series = MagicMock(return_value=0)
+            scanner._reconcile_moved_entities = MagicMock()
+            scanner._prune_rejected_entities = MagicMock(return_value=set())
+            scanner._prune_missing_entities = MagicMock(return_value=set())
+            scanner._flush_publications = MagicMock()
+            scanner._refresh_catalog_after_cleanup = MagicMock()
+            scanner._refresh_calendar_links = MagicMock()
+            scanner._start_heartbeat = MagicMock()
+            scanner._stop_heartbeat = MagicMock()
+
+            with (
+                patch("app.library.LocalArtworkCache"),
+                patch("app.trickplay.TrickplayStore"),
+                patch("app.intro_outro.IntroOutroStore") as intro_outro_type,
+                patch("app.jobs.scheduler") as scheduler,
+            ):
+                intro_outro_type.return_value.settings.return_value = {
+                    "scanOnAdded": False
+                }
+                scanner.scan("library-1", "job-1", lambda: False)
+
+            scheduler.enqueue_bazarr_sync.assert_called_once_with()
+
     def test_fair_metadata_executor_bounds_head_of_line_work_per_library(self):
         executor = FairMetadataExecutor(max_workers=1)
         started = threading.Event()

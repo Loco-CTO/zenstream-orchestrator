@@ -923,6 +923,21 @@ class JobMappingTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_default_bazarr_sync_runs_daily_at_two(self):
+        db, store = self._scheduler_store()
+        try:
+            store.ensure_defaults()
+
+            sync = store.by_key("bazarr_sync")
+            self.assertIsNotNone(sync)
+            self.assertEqual(sync["kind"], "bazarr_sync")
+            self.assertEqual(
+                [(item["type"], item.get("time")) for item in sync["triggers"]],
+                [("daily", "02:00")],
+            )
+        finally:
+            db.close()
+
     def test_removes_legacy_library_definition_by_configured_owner(self):
         db, store = self._scheduler_store()
         try:
@@ -1035,6 +1050,28 @@ class JobLockingTest(unittest.TestCase):
         self.assertTrue(second_created)
         self.assertNotEqual(second_run["id"], first_run["id"])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM job_runs")[0][0], 2)
+
+
+class BazarrTaskQueueTest(unittest.TestCase):
+    def test_manual_bazarr_task_creates_active_run(self):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = MagicMock()
+        scheduler.condition = threading.Condition()
+        definition = {
+            "id": "bazarr-definition",
+            "kind": "bazarr_sync",
+            "config": {},
+        }
+        run = {"id": "bazarr-run", "state": "queued"}
+        scheduler.store.definition.return_value = definition
+        scheduler.store.create_or_get_active_run.return_value = (run, True)
+
+        result = scheduler.run_now("bazarr-definition")
+
+        self.assertEqual(result, run)
+        scheduler.store.create_or_get_active_run.assert_called_once_with(
+            definition, options=None
+        )
 
 
 class AnalysisCapacityTest(unittest.TestCase):

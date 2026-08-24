@@ -835,6 +835,22 @@ class JobStore:
                 "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
                 (now(), now(), intro_outro["id"]),
             )
+        bazarr_sync = self.ensure(
+            "bazarr_sync",
+            "Sync Bazarr mappings",
+            "Refresh cached Bazarr series and episode mappings for indexed TV media.",
+            "bazarr_sync",
+            1440,
+            {},
+        )
+        if not bazarr_sync.get("triggers") or (
+            len(bazarr_sync["triggers"]) == 1
+            and bazarr_sync["triggers"][0].get("type") == "interval"
+            and bazarr_sync["triggers"][0].get("intervalSeconds") == 86400
+        ):
+            self._replace_triggers(
+                bazarr_sync["id"], [{"type": "daily", "time": "02:00"}]
+            )
         calendar_sync = self.ensure(
             "calendar_sync",
             "Sync calendar data",
@@ -2133,6 +2149,68 @@ class MetadataCleanupJob:
         )
 
 
+class BazarrSyncJob:
+    def __init__(self, store: JobStore):
+        self.store = store
+
+    def run(self, run_id: str, should_terminate=None) -> None:
+        should_terminate = should_terminate or (lambda: False)
+        self.store.update_run(
+            run_id,
+            state="running",
+            started_at=now(),
+            progress_current=0,
+            progress_total=1,
+            progress_phase="preparation",
+            progress_label="Preparing Bazarr mapping",
+            progress_stage_current=0,
+            progress_stage_total=1,
+            progress_stage_unit="stages",
+            message="Preparing Bazarr mapping",
+            thread_name=threading.current_thread().name,
+        )
+
+        def progress(current: int, total: int) -> None:
+            total = max(1, int(total))
+            self.store.update_run(
+                run_id,
+                progress_current=current,
+                progress_total=total,
+                progress_phase="mapping",
+                progress_label="Synchronizing Bazarr mappings",
+                progress_stage_current=current,
+                progress_stage_total=total,
+                progress_stage_unit="series",
+                message=f"Synchronizing Bazarr mappings · {current}/{total} series",
+            )
+
+        from app.bazarr import BazarrSyncService
+
+        result = BazarrSyncService(self.store.db).sync(
+            should_terminate=should_terminate,
+            progress=progress,
+        )
+        if result.get("skipped"):
+            message = "Bazarr is not configured"
+        else:
+            message = (
+                f"Mapped {result.get('matched', 0)}/{result.get('episodes', 0)} "
+                f"episodes across {result.get('matched_series', 0)}/"
+                f"{result.get('series', 0)} series"
+            )
+            deferred = int(result.get("deferred_series", 0) or 0)
+            if deferred:
+                message += f"; deferred {deferred} series"
+        self.store.update_run(
+            run_id,
+            state="completed",
+            progress_current=1,
+            progress_total=1,
+            finished_at=now(),
+            message=message,
+        )
+
+
 class JobScheduler:
     """Dispatches every scheduled run on its own worker thread."""
 
@@ -2171,6 +2249,19 @@ class JobScheduler:
                 "DELETE FROM job_definitions WHERE id=?", (definition_id,)
             )
         self.store.reconcile_library_definitions(self.library_runtime.store.list())
+        try:
+            has_bazarr_mappings = bool(
+                self.store.db.execute(
+                    "SELECT 1 FROM bazarr_episode_mappings LIMIT 1"
+                )
+            )
+        except Exception:
+            # Older databases can reach startup before the mapping migration is
+            # applied. The normal migration path will make the next startup
+            # eligible for the initial sync.
+            has_bazarr_mappings = True
+        if not has_bazarr_mappings:
+            self.enqueue_bazarr_sync()
         # Startup triggers are intentionally armed on every process start and
         # remain manual-only afterward until their next explicit update.
         try:
@@ -2359,6 +2450,20 @@ class JobScheduler:
             self.condition.notify_all()
         return run
 
+    def enqueue_bazarr_sync(self) -> dict | None:
+        from app.bazarr import BazarrConnectionStore
+
+        if BazarrConnectionStore().internal() is None:
+            return None
+        definition = self.store.by_key("bazarr_sync")
+        if not definition:
+            self.store.ensure_defaults()
+            definition = self.store.by_key("bazarr_sync")
+        run, _ = self.store.create_or_get_active_run(definition)
+        with self.condition:
+            self.condition.notify_all()
+        return run
+
     def terminate(self, definition_id: str, run_id: str) -> dict | None:
         runs = [
             run for run in self.store.runs(definition_id, 100) if run["id"] == run_id
@@ -2449,7 +2554,10 @@ class JobScheduler:
             for run in queued:
                 if run["state"] != "queued":
                     continue
-                if run["kind"] in ANALYSIS_KINDS and self._library_work_active():
+                if (
+                    run["kind"] in ANALYSIS_KINDS
+                    or run["kind"] == "bazarr_sync"
+                ) and self._library_work_active():
                     continue
                 with self.active_lock:
                     if (
@@ -2546,6 +2654,12 @@ class JobScheduler:
                     kind,
                     IntroOutroDetector(),
                     self.cancel_events[run_id].is_set,
+                )
+            elif kind == "bazarr_sync":
+                from app.bazarr import BazarrSyncJob
+
+                BazarrSyncJob(self.store).run(
+                    run_id, self.cancel_events[run_id].is_set
                 )
             elif kind == "calendar_sync":
                 from app.calendar import CalendarSyncJob

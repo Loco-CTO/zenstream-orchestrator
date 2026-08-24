@@ -2180,8 +2180,8 @@ class BazarrSyncJob:
                 progress_label="Synchronizing Bazarr mappings",
                 progress_stage_current=current,
                 progress_stage_total=total,
-                progress_stage_unit="series",
-                message=f"Synchronizing Bazarr mappings · {current}/{total} series",
+                progress_stage_unit="entries",
+                message=f"Synchronizing Bazarr mappings · {current}/{total} entries",
             )
 
         from app.bazarr import BazarrSyncService
@@ -2196,11 +2196,15 @@ class BazarrSyncJob:
             message = (
                 f"Mapped {result.get('matched', 0)}/{result.get('episodes', 0)} "
                 f"episodes across {result.get('matched_series', 0)}/"
-                f"{result.get('series', 0)} series"
+                f"{result.get('series', 0)} series; "
+                f"{result.get('matched_movies', 0)}/{result.get('movies', 0)} movies"
             )
             deferred = int(result.get("deferred_series", 0) or 0)
             if deferred:
                 message += f"; deferred {deferred} series"
+            deferred_movies = int(result.get("deferred_movies", 0) or 0)
+            if deferred_movies:
+                message += f"; deferred {deferred_movies} movies"
         self.store.update_run(
             run_id,
             state="completed",

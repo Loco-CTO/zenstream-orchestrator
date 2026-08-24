@@ -154,7 +154,7 @@ export default function BazarrSettingsPage() {
 		<div className="max-w-4xl">
 			<PageHeader
 				title="Bazarr"
-				description="Find subtitles for the exact episode file selected in ZenStream. Each TV library maps to its Bazarr-visible root path."
+				description="Find subtitles for the exact movie or episode file selected in ZenStream. Each TV or movie library maps to its Bazarr-visible root path."
 			/>
 			{message && <StatusMessage>{message}</StatusMessage>}
 			{loading ? (
@@ -243,11 +243,12 @@ export default function BazarrSettingsPage() {
 								Enter the root path as Bazarr sees it. ZenStream appends each indexed
 								file’s relative path; provider IDs are never used to choose between
 								duplicate libraries. Leave a field blank to use the same path ZenStream
-								uses for that library.
+								uses for that library. Movies and TV episodes must be visible to Bazarr
+								at the resulting full path.
 							</p>
 							{settings.libraries.length === 0 ? (
 								<p className="text-sm console-muted">
-									Create a TV library before configuring Bazarr.
+									Create a TV or movie library before configuring Bazarr.
 								</p>
 							) : (
 								settings.libraries.map((library) => (

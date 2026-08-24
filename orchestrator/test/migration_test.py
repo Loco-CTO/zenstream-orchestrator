@@ -106,6 +106,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "notifications",
                         "bazarr_series_mappings",
                         "bazarr_episode_mappings",
+                        "bazarr_movie_mappings",
                     }
                     <= tables
                 )
@@ -119,6 +120,12 @@ class PersistenceMigrationTest(unittest.TestCase):
                     row[1]
                     for row in connection.execute(
                         "PRAGMA table_info(bazarr_episode_mappings)"
+                    )
+                }
+                movie_mapping_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(bazarr_movie_mappings)"
                     )
                 }
                 self.assertTrue(
@@ -136,6 +143,22 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "subtitles_json",
                     }
                     <= episode_mapping_columns
+                )
+                self.assertTrue(
+                    {
+                        "media_file_id",
+                        "entity_id",
+                        "library_id",
+                        "target_path",
+                        "size",
+                        "modified_ns",
+                        "quick_fingerprint",
+                        "bazarr_movie_id",
+                        "state",
+                        "title",
+                        "subtitles_json",
+                    }
+                    <= movie_mapping_columns
                 )
                 self.assertNotIn("notification_push_subscriptions", tables)
                 self.assertNotIn("notification_push_outbox", tables)
@@ -206,6 +229,38 @@ class PersistenceMigrationTest(unittest.TestCase):
                 self.assertIn(
                     "invite_library_access",
                     tables,
+                )
+            finally:
+                connection.close()
+
+    def test_bazarr_movie_mapping_migration_has_a_reversible_downgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "head")
+            command.downgrade(config, "0043_bazarr_mapping_cache")
+
+            connection = sqlite3.connect(database_path)
+            try:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                self.assertNotIn("bazarr_movie_mappings", tables)
+            finally:
+                connection.close()
+
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+                        ("bazarr_movie_mappings",),
+                    ).fetchone()[0],
+                    1,
                 )
             finally:
                 connection.close()

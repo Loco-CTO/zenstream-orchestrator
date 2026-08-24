@@ -875,8 +875,7 @@ class BazarrMappingStore:
             or _path_key(row[1]) != _path_key(target.target_path)
             or _integer(row[2]) != target.size
             or _integer(row[3]) != target.modified_ns
-            or (str(row[4]) if row[4] is not None else None)
-            != target.quick_fingerprint
+            or (str(row[4]) if row[4] is not None else None) != target.quick_fingerprint
         ):
             raise BazarrMatchError("sync_pending", BAZARR_SYNC_PENDING_MESSAGE)
         state = str(row[6] or "sync_pending")
@@ -900,9 +899,7 @@ class BazarrMappingStore:
                 "radarrId": movie_id,
                 "movieId": movie_id,
                 "title": row[7],
-                "subtitles": [
-                    item for item in subtitles if isinstance(item, dict)
-                ],
+                "subtitles": [item for item in subtitles if isinstance(item, dict)],
             },
             "movieId": movie_id,
         }
@@ -1279,7 +1276,9 @@ class BazarrSyncService:
                     (str(provider), str(provider_id))
                 )
         for value in values:
-            value["movie_provider_ids"] = tuple(provider_ids.get(value["entity_id"], []))
+            value["movie_provider_ids"] = tuple(
+                provider_ids.get(value["entity_id"], [])
+            )
         return values
 
     def _prune_deleted_inventory(self) -> None:
@@ -1425,9 +1424,7 @@ class BazarrSyncService:
             for item in (movie.get("subtitles") or [] if movie else [])
             if isinstance(item, dict)
         ]
-        title = (
-            _provider_id(movie, "title", "sceneName", "name") if movie else None
-        )
+        title = _provider_id(movie, "title", "sceneName", "name") if movie else None
         with self.db.transaction() as cursor:
             cursor.execute(
                 "INSERT INTO bazarr_movie_mappings("
@@ -1548,7 +1545,9 @@ class BazarrSyncService:
                     else:
                         matched_series += 1
                         series_id = _integer(
-                            _provider_id(series, "sonarrSeriesId", "sonarr_series_id", "id")
+                            _provider_id(
+                                series, "sonarrSeriesId", "sonarr_series_id", "id"
+                            )
                         )
                         try:
                             episodes = client.episodes(series_id)

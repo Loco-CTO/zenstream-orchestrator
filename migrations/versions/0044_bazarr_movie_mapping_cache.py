@@ -51,9 +51,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "idx_bazarr_movie_mappings_state", table_name="bazarr_movie_mappings"
-    )
+    op.drop_index("idx_bazarr_movie_mappings_state", table_name="bazarr_movie_mappings")
     op.drop_index(
         "idx_bazarr_movie_mappings_library", table_name="bazarr_movie_mappings"
     )

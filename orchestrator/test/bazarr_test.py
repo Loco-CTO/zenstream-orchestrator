@@ -3,7 +3,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from api.zenstream import bazarr_routes
-from fastapi import HTTPException
 from app.bazarr import (
     BazarrClient,
     BazarrError,
@@ -24,6 +23,7 @@ from app.bazarr import (
     mapped_path,
 )
 from app.database import DatabaseHandler
+from fastapi import HTTPException
 
 
 class _BazarrClient:
@@ -259,7 +259,9 @@ class BazarrMatchingTest(unittest.TestCase):
             with patch.object(
                 client,
                 "request",
-                return_value={"data": [{"path": "/movies/Film/Film.mkv", "radarrId": 42}]},
+                return_value={
+                    "data": [{"path": "/movies/Film/Film.mkv", "radarrId": 42}]
+                },
             ) as request:
                 self.assertEqual(client.movies()[0]["radarrId"], 42)
                 request.assert_called_once_with(
@@ -267,7 +269,9 @@ class BazarrMatchingTest(unittest.TestCase):
                 )
             with patch.object(client, "request", return_value={}) as request:
                 request.return_value = {"data": [{"provider": "opensubtitles"}]}
-                self.assertEqual(client.search_movie(42)[0]["provider"], "opensubtitles")
+                self.assertEqual(
+                    client.search_movie(42)[0]["provider"], "opensubtitles"
+                )
                 request.assert_called_once_with(
                     "GET", "/providers/movies", params={"radarrid": 42}
                 )
@@ -593,7 +597,9 @@ class BazarrMappingCacheTest(unittest.TestCase):
     def _insert_movie_mapping(
         self, *, size=300, modified_ns=400, fingerprint="movie-fingerprint"
     ):
-        _seed_movie_inventory(self.db, size=size, modified_ns=modified_ns, fingerprint=fingerprint)
+        _seed_movie_inventory(
+            self.db, size=size, modified_ns=modified_ns, fingerprint=fingerprint
+        )
         self.db.execute(
             "INSERT INTO bazarr_movie_mappings(media_file_id,entity_id,library_id,target_path,size,modified_ns,quick_fingerprint,bazarr_movie_id,state,title,subtitles_json,message,updated_at,synced_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
@@ -660,7 +666,9 @@ class BazarrMappingCacheTest(unittest.TestCase):
         self.assertTrue(result["episode"]["subtitles"][0]["hearingImpaired"])
         client.assert_not_called()
 
-    def test_movie_mapping_resolves_without_bazarr_lookup_and_rejects_stale_signature(self):
+    def test_movie_mapping_resolves_without_bazarr_lookup_and_rejects_stale_signature(
+        self,
+    ):
         self._insert_movie_mapping()
         resolution = BazarrMappingStore(self.db).resolve(_movie_target())
         self.assertEqual(resolution["movieId"], 42)
@@ -843,7 +851,13 @@ class BazarrMappingCacheTest(unittest.TestCase):
             self.db.execute(
                 "SELECT bazarr_movie_id,state,subtitles_json FROM bazarr_movie_mappings"
             ),
-            [(42, "matched", '[{"language":"en","name":"embedded","provider":"embedded","hearingImpaired":false,"forced":false,"format":null}]')],
+            [
+                (
+                    42,
+                    "matched",
+                    '[{"language":"en","name":"embedded","provider":"embedded","hearingImpaired":false,"forced":false,"format":null}]',
+                )
+            ],
         )
 
     def test_movie_inventory_failure_preserves_existing_mapping(self):
@@ -862,9 +876,7 @@ class BazarrMappingCacheTest(unittest.TestCase):
             result = BazarrSyncService(self.db).sync()
         self.assertEqual(result["deferred_movies"], 1)
         self.assertEqual(
-            self.db.execute(
-                "SELECT bazarr_movie_id,state FROM bazarr_movie_mappings"
-            ),
+            self.db.execute("SELECT bazarr_movie_id,state FROM bazarr_movie_mappings"),
             [(42, "matched")],
         )
 

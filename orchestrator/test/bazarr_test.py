@@ -11,6 +11,7 @@ from app.bazarr import (
     BazarrSyncService,
     BazarrTarget,
     _associated_sidecar,
+    _candidate,
     _effective_bazarr_root,
     _find_episode,
     _path_key,
@@ -320,6 +321,22 @@ class BazarrMatchingTest(unittest.TestCase):
 
         self.assertEqual(client.calls, 2)
         self.assertEqual(matches[0]["subtitle"], "subtitle-1")
+
+    def test_candidate_exposes_bazarr_release_name_before_generic_name(self):
+        candidate = _candidate(
+            {
+                "provider": "opensubtitles",
+                "subtitle": "subtitle-1",
+                "name": "English",
+                "release": "[SubsPlease] Show - 01 [1080p].srt",
+            }
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["name"], "English")
+        self.assertEqual(
+            candidate["releaseName"], "[SubsPlease] Show - 01 [1080p].srt"
+        )
 
     def test_duplicate_exact_episode_entries_are_ambiguous(self):
         series = [{"path": "/tv/Show", "sonarrSeriesId": 9}]

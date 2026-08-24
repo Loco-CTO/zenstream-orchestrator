@@ -521,18 +521,61 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
                 client_routes, "MetadataLanguageSettings", return_value=languages
             ),
             patch.object(
-                client_routes, "issue_ticket", return_value="resource-ticket"
+                client_routes,
+                "issue_ticket",
+                side_effect=["resource-ticket", "artwork-ticket"],
             ) as ticket_issuer,
         ):
             response = asyncio.run(client_routes.auth_bootstrap(request))
 
         self.assertEqual(response["resourceTicket"], "resource-ticket")
+        self.assertEqual(response["artworkTicket"], "artwork-ticket")
         self.assertEqual(response["metadataLanguage"], {"language": "ja"})
         self.assertEqual(response["languages"], ["en", "ja"])
+        self.assertEqual(ticket_issuer.call_count, 2)
+        self.assertEqual(
+            ticket_issuer.call_args_list[0].args,
+            ("user-1", "resource", client_routes.RESOURCE_TICKET_TTL_SECONDS),
+        )
+        self.assertEqual(
+            ticket_issuer.call_args_list[0].kwargs, {"sessionId": "session"}
+        )
+        self.assertEqual(
+            ticket_issuer.call_args_list[1].args,
+            ("user-1", "artwork", client_routes.ARTWORK_TICKET_TTL_SECONDS),
+        )
+        self.assertEqual(
+            ticket_issuer.call_args_list[1].kwargs, {"sessionId": "session"}
+        )
+
+    def test_artwork_ticket_route_returns_a_session_bound_ticket(self):
+        request = _json_request({}, method="GET", path="/api/auth/artwork-ticket")
+        with (
+            patch.object(
+                client_routes,
+                "_require_account",
+                new=AsyncMock(
+                    return_value=({"id": "user-1", "username": "viewer"}, "token")
+                ),
+            ),
+            patch.object(client_routes, "session_id_for_token", return_value="session"),
+            patch.object(
+                client_routes, "issue_ticket", return_value="artwork-ticket"
+            ) as ticket_issuer,
+        ):
+            response = asyncio.run(client_routes.artwork_ticket(request))
+
+        self.assertEqual(
+            response,
+            {
+                "ticket": "artwork-ticket",
+                "expiresIn": client_routes.ARTWORK_TICKET_TTL_SECONDS,
+            },
+        )
         ticket_issuer.assert_called_once_with(
             "user-1",
-            "resource",
-            client_routes.RESOURCE_TICKET_TTL_SECONDS,
+            "artwork",
+            client_routes.ARTWORK_TICKET_TTL_SECONDS,
             sessionId="session",
         )
 

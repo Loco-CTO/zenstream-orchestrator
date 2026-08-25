@@ -1,6 +1,6 @@
 {
   "name": "zenstream-orchestrator-launcher",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "description": "Windows launcher for ZenStream Orchestrator",
   "author": "Rystal Team",

@@ -44,6 +44,9 @@ def browser_origins() -> list[str]:
         for value in os.getenv("CORS_ORIGINS", "").split(",")
         if value.strip()
     ]
+    public_web_url = os.getenv("ZENSTREAM_PUBLIC_WEB_URL", "").strip()
+    if public_web_url:
+        values.append(public_web_url)
     values.extend(_DEFAULT_BROWSER_ORIGINS)
     return list(dict.fromkeys(filter(None, map(_normalized_origin, values))))
 

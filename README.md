@@ -166,8 +166,8 @@ When the public `zenstream` web client is deployed separately from the
 administrator dashboard, set the launcher's **Public web URL** setting to the
 public web origin (for example `http://localhost:9086`). Invite links then
 target `/register` on that origin; they never target the dashboard's `/web`
-routes. Add the public web origin to `CORS_ORIGINS` so registration can submit
-credentials and receive its secure session cookie.
+routes. The configured public web origin is automatically allowed to call the
+API; use `CORS_ORIGINS` for additional browser origins.
 
 Please see [`DEVELOPER`](/DEVELOPER.md) for more information.
 

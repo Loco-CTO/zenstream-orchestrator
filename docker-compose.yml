@@ -13,6 +13,7 @@ services:
       FFPROBE_PATH: "${FFPROBE_PATH:-}"
       MAX_TRANSCODES: "${MAX_TRANSCODES:-0}"
       MAX_TRANSCODES_PER_USER: "${MAX_TRANSCODES_PER_USER:-0}"
+      ZENSTREAM_PUBLIC_WEB_URL: "${ZENSTREAM_PUBLIC_WEB_URL:-}"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000,http://localhost:8000}"
       # The host METADATA_PATH is mounted here; application paths must use the
       # writable in-container destination rather than the host source path.

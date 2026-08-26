@@ -111,5 +111,22 @@ class ClientSessionCookieTest(unittest.TestCase):
         account_model.authenticate_token.assert_called_once_with("legacy-token")
 
 
+class BrowserOriginTest(unittest.TestCase):
+    def test_public_web_url_is_an_additive_normalized_origin(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CORS_ORIGINS": "https://extra.example, https://zenstream.example/",
+                "ZENSTREAM_PUBLIC_WEB_URL": "HTTPS://ZenStream.Example/",
+            },
+        ):
+            origins = client_auth.browser_origins()
+
+        self.assertIn("https://extra.example", origins)
+        self.assertIn("https://zenstream.example", origins)
+        self.assertEqual(origins.count("https://zenstream.example"), 1)
+        self.assertIn("http://localhost:3000", origins)
+
+
 if __name__ == "__main__":
     unittest.main()

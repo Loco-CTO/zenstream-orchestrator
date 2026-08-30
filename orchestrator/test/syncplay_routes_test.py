@@ -236,5 +236,71 @@ class SyncplayRouteAuthenticationTest(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 401)
 
 
+class SyncplayCommandRouteTest(unittest.TestCase):
+    def test_stale_item_command_is_rejected_without_changing_readiness(self):
+        state = {
+            "id": "group-1",
+            "itemId": "episode-2",
+            "revision": 8,
+            "mediaGeneration": 2,
+            "resumeWhenReady": True,
+            "pauseReason": "readiness",
+            "members": [
+                {
+                    "userId": "user-1",
+                    "participantId": "browser-tab",
+                    "viewing": True,
+                    "loading": True,
+                    "readyGeneration": -1,
+                }
+            ],
+        }
+        cursor = MagicMock()
+        group = MagicMock()
+
+        def mutate(user, expected_revision, operation_id, apply):
+            apply(cursor, state)
+            return state
+
+        group.mutate.side_effect = mutate
+
+        async def run_control_inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with (
+            patch.object(
+                app_module,
+                "_sync_group_context",
+                new=AsyncMock(
+                    return_value=(
+                        "user-1",
+                        "browser-tab",
+                        group,
+                        {
+                            "position": 0,
+                            "action": "pause",
+                            "itemId": "episode-1",
+                            "playing": False,
+                        },
+                    )
+                ),
+            ),
+            patch.object(
+                app_module, "run_control", new=AsyncMock(side_effect=run_control_inline)
+            ),
+            patch.object(app_module.hub, "broadcast", new=AsyncMock()) as broadcast,
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(app_module.syncplay_command("group-1", _request("POST")))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["group"], state)
+        self.assertEqual(state["itemId"], "episode-2")
+        self.assertTrue(state["resumeWhenReady"])
+        self.assertEqual(state["pauseReason"], "readiness")
+        cursor.execute.assert_not_called()
+        broadcast.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

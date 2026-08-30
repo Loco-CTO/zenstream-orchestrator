@@ -1316,6 +1316,8 @@ async def syncplay_command(group_id: str, request: Request):
                 pause_reason="readiness",
             )
             return
+        if "itemId" in data and item != state["itemId"]:
+            raise StaleSyncplayState(state)
         if action == "seek":
             cursor.execute(
                 "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 AND viewing=1 THEN 1 ELSE 0 END,ready_generation=-1 WHERE group_id=?",

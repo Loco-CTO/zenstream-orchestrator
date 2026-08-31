@@ -154,6 +154,7 @@ class ProgressReporter:
         self.unit = unit
         self.min_interval = min_interval
         self.lock = threading.RLock()
+        self.claimed = 0
         self.settled = 0
         self.failed = 0
         self.total: int | None = None
@@ -168,8 +169,20 @@ class ProgressReporter:
         with self.lock:
             self.phase, self.label = phase, label
             if total is not None:
-                self.total = max(self.settled, int(total))
+                self.total = max(self.total or 0, self.settled, int(total))
             self._publish_locked(force=force)
+
+    def claim(self) -> None:
+        """Register one claimed item, including work admitted after staging.
+
+        The initial stage total is a queue snapshot.  A producer may add more
+        work while workers are draining it, so the denominator must expand when
+        the number of claims exceeds that snapshot.
+        """
+        with self.lock:
+            self.claimed += 1
+            if self.total is None or self.claimed > self.total:
+                self.total = self.claimed
 
     def start(self, item: Any) -> None:
         with self.lock:
@@ -186,6 +199,8 @@ class ProgressReporter:
             if safe:
                 self.active = [value for value in self.active if value != safe]
             self.settled += 1
+            if self.total is not None:
+                self.total = max(self.total, self.settled)
             if failed:
                 self.failed += 1
             self._publish_locked(force=force)

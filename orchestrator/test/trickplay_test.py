@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -113,6 +114,103 @@ class TrickplayTest(unittest.TestCase):
             self.assertEqual(states["failed"], "queued")
             self.assertEqual(states["generating"], "generating")
             self.assertEqual(states["missing"], "queued")
+            db.connection.close()
+
+    def test_claim_next_only_claims_playable_sources_with_a_video_codec(self):
+        class Database:
+            def __init__(self, root):
+                self.db_file = str(root / "orchestrator.db")
+                self.connection = sqlite3.connect(self.db_file)
+
+            def execute(self, query, params=None):
+                cursor = self.connection.execute(query, params or ())
+                rows = cursor.fetchall()
+                self.connection.commit()
+                return rows
+
+            @contextmanager
+            def transaction(self):
+                cursor = self.connection.cursor()
+                try:
+                    yield cursor
+                    self.connection.commit()
+                except Exception:
+                    self.connection.rollback()
+                    raise
+                finally:
+                    cursor.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            db = Database(root)
+            db.connection.executescript(
+                """
+                CREATE TABLE media_files (
+                    id TEXT PRIMARY KEY, entity_id TEXT, relative_path TEXT, role TEXT
+                );
+                CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT);
+                CREATE TABLE libraries (id TEXT PRIMARY KEY, directory TEXT);
+                CREATE TABLE media_sources (
+                    id TEXT PRIMARY KEY, media_file_id TEXT,
+                    duration_seconds REAL, video_codec TEXT
+                );
+                CREATE TABLE trickplay_assets (
+                    media_file_id TEXT PRIMARY KEY, entity_id TEXT,
+                    source_fingerprint TEXT, frame_width INTEGER, frame_height INTEGER,
+                    interval_seconds INTEGER, state TEXT, error TEXT, updated_at TEXT
+                );
+                """
+            )
+            db.connection.execute(
+                "INSERT INTO libraries VALUES(?,?)", ("library", "D:/media")
+            )
+            candidates = [
+                ("valid", "media", "h264", "1"),
+                ("no-codec", "media", "", "2"),
+                ("non-playable", "image", "h264", "3"),
+            ]
+            for media_file_id, role, video_codec, updated_at in candidates:
+                entity_id = f"entity-{media_file_id}"
+                db.connection.execute(
+                    "INSERT INTO library_entities VALUES(?,?)",
+                    (entity_id, "library"),
+                )
+                db.connection.execute(
+                    "INSERT INTO media_files VALUES(?,?,?,?)",
+                    (media_file_id, entity_id, f"{media_file_id}.mkv", role),
+                )
+                db.connection.execute(
+                    "INSERT INTO media_sources VALUES(?,?,?,?)",
+                    (f"source-{media_file_id}", media_file_id, 10, video_codec),
+                )
+                db.connection.execute(
+                    "INSERT INTO trickplay_assets VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        media_file_id,
+                        entity_id,
+                        "fingerprint",
+                        320,
+                        180,
+                        10,
+                        "queued",
+                        None,
+                        updated_at,
+                    ),
+                )
+            db.connection.commit()
+
+            store = TrickplayStore(db)
+            claimed = store.claim_next()
+
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed["mediaFileId"], "valid")
+            self.assertIsNone(store.claim_next())
+            states = dict(
+                db.execute("SELECT media_file_id,state FROM trickplay_assets")
+            )
+            self.assertEqual(states["valid"], "generating")
+            self.assertEqual(states["no-codec"], "queued")
+            self.assertEqual(states["non-playable"], "queued")
             db.connection.close()
 
     @patch("app.trickplay.ffmpeg_path", return_value="ffmpeg")
@@ -256,3 +354,74 @@ class TrickplayTest(unittest.TestCase):
         self.assertIn(
             "completed", {values.get("state") for _, values in job_store.updates}
         )
+
+    def test_extraction_progress_expands_for_assets_claimed_after_initial_snapshot(
+        self,
+    ):
+        class Database:
+            db_file = "orchestrator.db"
+
+            @staticmethod
+            def execute(query, params=None):
+                return []
+
+        class Store:
+            def __init__(self):
+                self.db = Database()
+                self.lock = threading.Lock()
+                self.assets = [
+                    {
+                        "mediaFileId": f"media-{index}",
+                        "entityId": f"entity-{index}",
+                    }
+                    for index in range(2)
+                ]
+
+            @staticmethod
+            def recover_generating():
+                return 0
+
+            def queue_pending(self, settings=None):
+                return 1
+
+            def claim_next(self):
+                with self.lock:
+                    return self.assets.pop(0) if self.assets else None
+
+            @staticmethod
+            def mark_failed(asset, error):
+                raise AssertionError(error)
+
+        class JobStore:
+            def __init__(self):
+                self.updates = []
+
+            def update_run(self, run_id, **values):
+                self.updates.append((run_id, values))
+
+        store = Store()
+        job_store = JobStore()
+        extractor = TrickplayExtractor(store)
+        extractor.remove_orphan_cache = lambda: None
+        extractor.extract = lambda asset: None
+
+        with patch(
+            "app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 1}
+        ):
+            extractor.run("run", job_store)
+
+        progress_updates = [
+            values
+            for _, values in job_store.updates
+            if values.get("progress_stage_unit") == "videos"
+            and values.get("progress_stage_total") is not None
+        ]
+        self.assertTrue(progress_updates)
+        self.assertTrue(
+            all(
+                values["progress_stage_current"] <= values["progress_stage_total"]
+                for values in progress_updates
+            )
+        )
+        self.assertEqual(progress_updates[-1]["progress_stage_current"], 2)
+        self.assertEqual(progress_updates[-1]["progress_stage_total"], 2)

@@ -236,8 +236,10 @@ class TrickplayStore:
                 "JOIN media_sources s ON s.media_file_id=f.id "
                 "JOIN library_entities e ON e.id=a.entity_id "
                 "JOIN libraries l ON l.id=e.library_id "
-                "WHERE a.state='queued' AND s.video_codec IS NOT NULL "
-                "ORDER BY a.updated_at,a.media_file_id LIMIT 1"
+                "WHERE a.state='queued' AND f.role=? "
+                "AND s.video_codec IS NOT NULL AND s.video_codec<>'' "
+                "ORDER BY a.updated_at,a.media_file_id LIMIT 1",
+                (PLAYABLE_ROLE,),
             )
             row = cursor.fetchone()
             if not row:
@@ -527,6 +529,7 @@ class TrickplayExtractor:
                 asset = self.store.claim_next()
                 if not asset:
                     return
+                reporter.claim()
                 try:
                     item_label = resolve_progress_item(
                         self.db, asset.get("entityId"), asset.get("path")

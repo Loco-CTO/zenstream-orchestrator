@@ -755,6 +755,68 @@ class IntroOutroTest(unittest.TestCase):
         self.assertEqual(terminal[-1]["state"], "completed_with_warnings")
         self.assertIn("1 partial", terminal[-1]["message"])
 
+    def test_known_audio_end_skips_empty_outro_tail(self):
+        class Store:
+            def __init__(self):
+                self.asset = {
+                    "mediaFileId": "episode-1",
+                    "entityId": "entity-1",
+                    "durationSeconds": 600,
+                    "audioEndSeconds": 100,
+                    "path": Path("episode-1.mkv"),
+                }
+                self.processed = []
+
+            @staticmethod
+            def settings():
+                return {**DEFAULTS, "introOutroWorkers": 1}
+
+            @staticmethod
+            def queue_pending(settings=None):
+                return 1
+
+            def claim_next(self):
+                asset, self.asset = self.asset, None
+                return asset
+
+            def mark_fingerprinted(self, asset, intro, outro, warning=None):
+                self.processed.append((intro, outro, warning))
+
+            @staticmethod
+            def mark_failed(asset, error):
+                raise AssertionError(error)
+
+            @staticmethod
+            def recompute_all(settings, progress=None):
+                return 0
+
+        class JobStore:
+            def __init__(self):
+                self.updates = []
+
+            def update_run(self, run_id, **values):
+                self.updates.append((run_id, values))
+
+        store = Store()
+        detector = IntroOutroDetector(store)
+        calls = []
+
+        def fingerprint(path, start, duration, should_terminate):
+            calls.append((start, duration))
+            return b"intro"
+
+        detector._fingerprint = fingerprint
+        job_store = JobStore()
+        detector.run("run", job_store)
+
+        self.assertEqual(calls, [(0.0, 100.0)])
+        self.assertEqual(store.processed, [(b"intro", None, None)])
+        terminal = [
+            values for _, values in job_store.updates if values.get("finished_at")
+        ]
+        self.assertEqual(terminal[-1]["state"], "completed")
+        self.assertNotIn("partial", terminal[-1]["message"])
+
     def test_fingerprint_failures_do_not_skip_existing_fingerprint_comparison(self):
         class Store:
             def __init__(self):

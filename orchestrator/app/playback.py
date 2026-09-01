@@ -21,6 +21,7 @@ from app.config import Config
 from app.language_registry import normalize_track_language
 from app.library import language_name, sidecar_display_title, sidecar_media_path
 from app.logging_config import get_logger
+from app.media_probe import first_audio_stream, select_usable_video_stream
 from app.models.playback_settings import PlaybackSettings
 from app.models.playback_viewer import PlaybackViewerStore
 from fastapi import HTTPException
@@ -395,20 +396,17 @@ class PlaybackManager:
                 )
                 continue
             streams = payload.get("streams") or []
-            video = next(
-                (value for value in streams if value.get("codec_type") == "video"), {}
-            )
-            audio = next(
-                (value for value in streams if value.get("codec_type") == "audio"), {}
-            )
             format_value = payload.get("format") or {}
+            duration_seconds = float(format_value.get("duration") or 0)
+            video = select_usable_video_stream(streams, duration_seconds) or {}
+            audio = first_audio_stream(streams) or {}
             source_id = str(
                 uuid.uuid5(uuid.NAMESPACE_URL, f"zenstream:{media_file_id}")
             )
             value = {
                 "id": source_id,
                 "container": format_value.get("format_name"),
-                "durationSeconds": float(format_value.get("duration") or 0),
+                "durationSeconds": duration_seconds,
                 "bitrate": int(float(format_value.get("bit_rate") or 0)),
                 "width": video.get("width"),
                 "height": video.get("height"),

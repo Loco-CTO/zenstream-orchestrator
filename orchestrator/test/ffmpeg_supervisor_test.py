@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from app.ffmpeg_supervisor import (
+    DEFAULT_FFMPEG_TIMEOUT_SECONDS,
     FFmpegCancelled,
     FFmpegTimedOut,
     run_ffmpeg,
@@ -55,6 +56,9 @@ class DelayedTextStream(io.StringIO):
 
 
 class FFmpegSupervisorTest(unittest.TestCase):
+    def test_analysis_timeout_allows_long_media(self):
+        self.assertEqual(DEFAULT_FFMPEG_TIMEOUT_SECONDS, 3600.0)
+
     @patch("app.ffmpeg_supervisor.subprocess.Popen")
     def test_binary_stdout_is_preserved_and_stdin_is_detached(self, popen):
         process = FakeProcess(stdout=b"\x00\xff\n\x01", stderr=b"")

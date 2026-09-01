@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+from app.media_probe import select_usable_video_stream, stream_index
 from app.trickplay import FRAMES_PER_SHEET, TrickplayExtractor, TrickplayStore
 
 
@@ -205,9 +206,43 @@ class TrickplayTest(unittest.TestCase):
             self.assertIsNone(store.claim_next())
             states = dict(db.execute("SELECT media_file_id,state FROM trickplay_assets"))
             self.assertEqual(states["valid"], "generating")
-            self.assertEqual(states["no-codec"], "queued")
+            self.assertEqual(states["no-codec"], "skipped")
             self.assertEqual(states["non-playable"], "queued")
             db.connection.close()
+
+    def test_video_stream_selection_ignores_attached_and_zero_duration_video(self):
+        streams = [
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "mjpeg",
+                "width": 640,
+                "height": 360,
+                "disposition": {"attached_pic": 0},
+                "tags": {
+                    "FILENAME": "cover.jpg",
+                    "MIMETYPE": "image/jpeg",
+                    "DURATION": "00:00:00.021000000",
+                },
+            },
+            {
+                "index": 2,
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "width": 1920,
+                "height": 1080,
+                "duration": "1200",
+                "disposition": {"attached_pic": 0},
+            },
+        ]
+
+        selected = select_usable_video_stream(streams, 1200)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(stream_index(selected), 2)
+        self.assertIsNone(
+            select_usable_video_stream(streams[:1], 1200)
+        )
 
     @patch("app.trickplay.ffmpeg_path", return_value="ffmpeg")
     def test_command_letterboxes_every_frame_before_tiling(self, _ffmpeg):
@@ -223,8 +258,10 @@ class TrickplayTest(unittest.TestCase):
         graph = command[command.index("-vf") + 1]
         self.assertEqual(
             graph,
-            "fps=1/10,scale=320:180:force_original_aspect_ratio=decrease,"
+            "fps=1/10,format=yuv420p,"
+            "scale=320:180:force_original_aspect_ratio=decrease,"
             "setsar=1,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,"
+            "tpad=stop_mode=clone:stop_duration=1000,"
             "tile=10x10:padding=0:margin=0",
         )
         self.assertEqual(FRAMES_PER_SHEET, 100)
@@ -245,6 +282,27 @@ class TrickplayTest(unittest.TestCase):
             0,
         )
         self.assertEqual(automatic[automatic.index("-threads") + 1], "0")
+
+        hdr = TrickplayExtractor.command(
+            {
+                "path": Path("movie.mkv"),
+                "width": 320,
+                "height": 180,
+                "intervalSeconds": 10,
+                "durationSeconds": 1001,
+                "videoStreamIndex": 3,
+                "videoColorSpace": "bt2020c",
+                "videoColorTransfer": "bt2020-10",
+                "videoColorPrimaries": "bt2020",
+            },
+            Path("sheet-%05d.webp"),
+        )
+        hdr_graph = hdr[hdr.index("-vf") + 1]
+        self.assertIn("zscale=matrixin=bt2020c", hdr_graph)
+        self.assertIn("format=yuv420p", hdr_graph)
+        self.assertIn("tpad=stop_mode=clone", hdr_graph)
+        self.assertEqual(hdr[hdr.index("-map") + 1], "0:3")
+        self.assertEqual(hdr[hdr.index("-frames:v") + 1], "2")
 
     def test_output_keys_change_for_source_or_extraction_settings(self):
         self.assertNotEqual(

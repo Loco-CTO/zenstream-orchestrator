@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 
-DEFAULT_FFMPEG_TIMEOUT_SECONDS = 900.0
+DEFAULT_FFMPEG_TIMEOUT_SECONDS = 3600.0
 MAX_STDERR_BYTES = 1_048_576
 
 

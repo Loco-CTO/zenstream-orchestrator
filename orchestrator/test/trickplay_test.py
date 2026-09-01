@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.media_probe import select_usable_video_stream, stream_index
 from app.trickplay import (
     FRAMES_PER_SHEET,
     TrickplayExtractor,
@@ -173,7 +174,8 @@ class TrickplayTest(unittest.TestCase):
                     (media_file_id, entity_id, fingerprint, 100, 1, "media"),
                 )
                 db.connection.execute(
-                    "INSERT INTO library_entities VALUES(?,?)", (entity_id, library_id)
+                    "INSERT INTO library_entities VALUES(?,?)",
+                    (entity_id, library_id),
                 )
                 db.connection.execute(
                     "INSERT INTO media_sources VALUES(?,?,?)",
@@ -230,11 +232,17 @@ class TrickplayTest(unittest.TestCase):
 
         short_rows = _build_sheet_rows("media", "key", expected_frames, 7)
         self.assertEqual(len(short_rows), 7)
-        self.assertEqual([row["frameCount"] for row in short_rows], [100] * 7)
+        self.assertEqual(
+            [row["frameCount"] for row in short_rows],
+            [100] * 7,
+        )
 
         partial_rows = _build_sheet_rows("media", "key", expected_frames, 8)
         self.assertEqual(len(partial_rows), 8)
-        self.assertEqual([row["frameCount"] for row in partial_rows], [100] * 7 + [1])
+        self.assertEqual(
+            [row["frameCount"] for row in partial_rows],
+            [100] * 7 + [1],
+        )
 
     def test_ready_validation_accepts_full_and_single_frame_final_sheets(self):
         for frame_counts in ([100] * 7, [100] * 7 + [1]):
@@ -248,7 +256,10 @@ class TrickplayTest(unittest.TestCase):
 
                 self.assertTrue(
                     TrickplayStore(db)._ready_output_valid(
-                        "media", "output-key", 7002.015, 10
+                        "media",
+                        "output-key",
+                        7002.015,
+                        10,
                     )
                 )
                 db.connection.close()
@@ -276,7 +287,9 @@ class TrickplayTest(unittest.TestCase):
             )
             db.connection.close()
 
-    def test_ready_validation_rejects_structurally_invalid_or_truncated_output(self):
+    def test_ready_validation_rejects_structurally_invalid_or_truncated_output(
+        self,
+    ):
         cases = {
             "missing full sheet": [100] * 6,
             "partial non-final sheet": [99] + [100] * 6,
@@ -286,14 +299,20 @@ class TrickplayTest(unittest.TestCase):
             "zero frame sheet": [100] * 6 + [0],
         }
         for label, frame_counts in cases.items():
-            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(label=label),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 db = _Database(Path(temporary))
                 _create_trickplay_schema(db)
                 _insert_ready_asset(db, frame_counts)
 
                 self.assertFalse(
                     TrickplayStore(db)._ready_output_valid(
-                        "media", "output-key", 7002.015, 10
+                        "media",
+                        "output-key",
+                        7002.015,
+                        10,
                     )
                 )
                 db.connection.close()
@@ -303,14 +322,18 @@ class TrickplayTest(unittest.TestCase):
             _create_trickplay_schema(db)
             _insert_ready_asset(db, [100] * 7)
             db.connection.execute(
-                "UPDATE trickplay_sheets SET sheet_index=2 WHERE media_file_id=? AND sheet_index=1",
+                "UPDATE trickplay_sheets SET sheet_index=2 "
+                "WHERE media_file_id=? AND sheet_index=1",
                 ("media",),
             )
             db.connection.commit()
 
             self.assertFalse(
                 TrickplayStore(db)._ready_output_valid(
-                    "media", "output-key", 7002.015, 10
+                    "media",
+                    "output-key",
+                    7002.015,
+                    10,
                 )
             )
             db.connection.close()
@@ -331,7 +354,10 @@ class TrickplayTest(unittest.TestCase):
 
             self.assertFalse(
                 TrickplayStore(db)._ready_output_valid(
-                    "media", "output-key", 7002.015, 10
+                    "media",
+                    "output-key",
+                    7002.015,
+                    10,
                 )
             )
             db.connection.close()
@@ -349,7 +375,10 @@ class TrickplayTest(unittest.TestCase):
 
             self.assertFalse(
                 TrickplayStore(db)._ready_output_valid(
-                    "media", "output-key", 7002.015, 10
+                    "media",
+                    "output-key",
+                    7002.015,
+                    10,
                 )
             )
             db.connection.close()
@@ -366,7 +395,12 @@ class TrickplayTest(unittest.TestCase):
                     self.sheets = None
 
                 @staticmethod
-                def output_key(_fingerprint, _width, _height, _interval):
+                def output_key(
+                    _fingerprint,
+                    _width,
+                    _height,
+                    _interval,
+                ):
                     return "output-key"
 
                 def mark_ready(self, _asset, sheets):
@@ -391,12 +425,18 @@ class TrickplayTest(unittest.TestCase):
                 "durationSeconds": 7002.015,
                 "path": source,
             }
-            with patch("app.trickplay.run_ffmpeg", side_effect=emit_sheets):
+            with patch(
+                "app.trickplay.run_ffmpeg",
+                side_effect=emit_sheets,
+            ):
                 extractor.extract(asset)
 
             self.assertIsNotNone(store.sheets)
             self.assertEqual(len(store.sheets), 7)
-            self.assertEqual([sheet["frameCount"] for sheet in store.sheets], [100] * 7)
+            self.assertEqual(
+                [sheet["frameCount"] for sheet in store.sheets],
+                [100] * 7,
+            )
             self.assertTrue(all(sheet["frameCount"] > 0 for sheet in store.sheets))
 
     def test_manifest_reports_actual_frame_total(self):
@@ -405,14 +445,18 @@ class TrickplayTest(unittest.TestCase):
             _create_trickplay_schema(db)
             _insert_ready_asset(db, [100] * 7)
 
-            with patch("app.trickplay.issue_ticket", return_value="ticket"):
+            with patch(
+                "app.trickplay.issue_ticket",
+                return_value="ticket",
+            ):
                 manifest = TrickplayExtractor(TrickplayStore(db)).manifest(
                     "user", "entity"
                 )
 
             self.assertEqual(manifest["frameCount"], 700)
             self.assertEqual(
-                [sheet["frameCount"] for sheet in manifest["sheets"]], [100] * 7
+                [sheet["frameCount"] for sheet in manifest["sheets"]],
+                [100] * 7,
             )
             db.connection.close()
 
@@ -462,7 +506,8 @@ class TrickplayTest(unittest.TestCase):
                 """
             )
             db.connection.execute(
-                "INSERT INTO libraries VALUES(?,?)", ("library", "D:/media")
+                "INSERT INTO libraries VALUES(?,?)",
+                ("library", "D:/media"),
             )
             candidates = [
                 ("valid", "media", "h264", "1"),
@@ -477,11 +522,21 @@ class TrickplayTest(unittest.TestCase):
                 )
                 db.connection.execute(
                     "INSERT INTO media_files VALUES(?,?,?,?)",
-                    (media_file_id, entity_id, f"{media_file_id}.mkv", role),
+                    (
+                        media_file_id,
+                        entity_id,
+                        f"{media_file_id}.mkv",
+                        role,
+                    ),
                 )
                 db.connection.execute(
                     "INSERT INTO media_sources VALUES(?,?,?,?)",
-                    (f"source-{media_file_id}", media_file_id, 10, video_codec),
+                    (
+                        f"source-{media_file_id}",
+                        media_file_id,
+                        10,
+                        video_codec,
+                    ),
                 )
                 db.connection.execute(
                     "INSERT INTO trickplay_assets VALUES(?,?,?,?,?,?,?,?,?)",
@@ -509,9 +564,43 @@ class TrickplayTest(unittest.TestCase):
                 db.execute("SELECT media_file_id,state FROM trickplay_assets")
             )
             self.assertEqual(states["valid"], "generating")
-            self.assertEqual(states["no-codec"], "queued")
+            self.assertEqual(states["no-codec"], "skipped")
             self.assertEqual(states["non-playable"], "queued")
             db.connection.close()
+
+    def test_video_stream_selection_ignores_attached_and_zero_duration_video(
+        self,
+    ):
+        streams = [
+            {
+                "index": 0,
+                "codec_type": "video",
+                "codec_name": "mjpeg",
+                "width": 640,
+                "height": 360,
+                "disposition": {"attached_pic": 0},
+                "tags": {
+                    "FILENAME": "cover.jpg",
+                    "MIMETYPE": "image/jpeg",
+                    "DURATION": "00:00:00.021000000",
+                },
+            },
+            {
+                "index": 2,
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "width": 1920,
+                "height": 1080,
+                "duration": "1200",
+                "disposition": {"attached_pic": 0},
+            },
+        ]
+
+        selected = select_usable_video_stream(streams, 1200)
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(stream_index(selected), 2)
+        self.assertIsNone(select_usable_video_stream(streams[:1], 1200))
 
     @patch("app.trickplay.ffmpeg_path", return_value="ffmpeg")
     def test_command_letterboxes_every_frame_before_tiling(self, _ffmpeg):
@@ -527,16 +616,30 @@ class TrickplayTest(unittest.TestCase):
         graph = command[command.index("-vf") + 1]
         self.assertEqual(
             graph,
-            "fps=1/10,scale=320:180:force_original_aspect_ratio=decrease,"
+            "fps=1/10,format=yuv420p,"
+            "scale=320:180:force_original_aspect_ratio=decrease,"
             "setsar=1,pad=320:180:(ow-iw)/2:(oh-ih)/2:black,"
+            "tpad=stop_mode=clone:stop_duration=1000,"
             "tile=10x10:padding=0:margin=0",
         )
         self.assertEqual(FRAMES_PER_SHEET, 100)
-        self.assertEqual(command[command.index("-c:v") + 1], "libwebp")
-        self.assertEqual(command[command.index("-quality") + 1], "85")
-        self.assertEqual(command[command.index("-threads") + 1], "4")
+        self.assertEqual(
+            command[command.index("-c:v") + 1],
+            "libwebp",
+        )
+        self.assertEqual(
+            command[command.index("-quality") + 1],
+            "85",
+        )
+        self.assertEqual(
+            command[command.index("-threads") + 1],
+            "4",
+        )
         self.assertIn("-nostdin", command)
-        self.assertEqual(command[command.index("-compression_level") + 1], "5")
+        self.assertEqual(
+            command[command.index("-compression_level") + 1],
+            "5",
+        )
         self.assertIn("-progress", command)
         automatic = TrickplayExtractor.command(
             {
@@ -548,7 +651,37 @@ class TrickplayTest(unittest.TestCase):
             Path("sheet-%05d.webp"),
             0,
         )
-        self.assertEqual(automatic[automatic.index("-threads") + 1], "0")
+        self.assertEqual(
+            automatic[automatic.index("-threads") + 1],
+            "0",
+        )
+
+        hdr = TrickplayExtractor.command(
+            {
+                "path": Path("movie.mkv"),
+                "width": 320,
+                "height": 180,
+                "intervalSeconds": 10,
+                "durationSeconds": 1001,
+                "videoStreamIndex": 3,
+                "videoColorSpace": "bt2020c",
+                "videoColorTransfer": "bt2020-10",
+                "videoColorPrimaries": "bt2020",
+            },
+            Path("sheet-%05d.webp"),
+        )
+        hdr_graph = hdr[hdr.index("-vf") + 1]
+        self.assertIn("zscale=matrixin=bt2020c", hdr_graph)
+        self.assertIn("format=yuv420p", hdr_graph)
+        self.assertIn("tpad=stop_mode=clone", hdr_graph)
+        self.assertEqual(
+            hdr[hdr.index("-map") + 1],
+            "0:3",
+        )
+        self.assertEqual(
+            hdr[hdr.index("-frames:v") + 1],
+            "2",
+        )
 
     def test_output_keys_change_for_source_or_extraction_settings(self):
         self.assertNotEqual(
@@ -581,7 +714,9 @@ class TrickplayTest(unittest.TestCase):
             self.assertTrue((cache / "present").is_dir())
             self.assertFalse((cache / "missing").exists())
 
-    def test_extraction_uses_configured_workers_and_claims_each_asset_once(self):
+    def test_extraction_uses_configured_workers_and_claims_each_asset_once(
+        self,
+    ):
         class Database:
             db_file = "orchestrator.db"
 
@@ -639,10 +774,14 @@ class TrickplayTest(unittest.TestCase):
 
         extractor.extract = extract
         with patch(
-            "app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 2}
+            "app.trickplay.PlaybackSettings.get",
+            return_value={"trickplayWorkers": 2},
         ):
             extractor.run("run", job_store)
-        self.assertEqual(set(store.processed), {f"media-{index}" for index in range(4)})
+        self.assertEqual(
+            set(store.processed),
+            {f"media-{index}" for index in range(4)},
+        )
         self.assertEqual(len(store.processed), 4)
         self.assertEqual(maximum, 2)
         self.assertTrue(job_store.updates)
@@ -652,7 +791,8 @@ class TrickplayTest(unittest.TestCase):
             {values.get("progress_phase") for _, values in job_store.updates},
         )
         self.assertIn(
-            "completed", {values.get("state") for _, values in job_store.updates}
+            "completed",
+            {values.get("state") for _, values in job_store.updates},
         )
 
     def test_extraction_progress_expands_for_assets_claimed_after_initial_snapshot(
@@ -706,7 +846,8 @@ class TrickplayTest(unittest.TestCase):
         extractor.extract = lambda asset: None
 
         with patch(
-            "app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 1}
+            "app.trickplay.PlaybackSettings.get",
+            return_value={"trickplayWorkers": 1},
         ):
             extractor.run("run", job_store)
 
@@ -723,5 +864,11 @@ class TrickplayTest(unittest.TestCase):
                 for values in progress_updates
             )
         )
-        self.assertEqual(progress_updates[-1]["progress_stage_current"], 2)
-        self.assertEqual(progress_updates[-1]["progress_stage_total"], 2)
+        self.assertEqual(
+            progress_updates[-1]["progress_stage_current"],
+            2,
+        )
+        self.assertEqual(
+            progress_updates[-1]["progress_stage_total"],
+            2,
+        )

@@ -13,6 +13,7 @@ from threading import Lock
 from app.config import Config
 from app.ffmpeg_supervisor import run_ffmpeg
 from app.logging_config import get_logger
+from app.media_probe import first_audio_stream, probe_streams, stream_end_seconds
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
 from app.progress import (
     ProgressReporter,
@@ -25,6 +26,7 @@ logger = get_logger("intro_outro")
 DEFAULT_INTRO_OUTRO_FFMPEG_THREADS = 4
 SAMPLE_SECONDS = 4096.0 / 11025.0 / 3.0
 MIN_MATCH_DENSITY = 0.55
+MIN_FINGERPRINT_WINDOW_SECONDS = 1.0
 
 
 class EmptyFingerprint(RuntimeError):
@@ -362,14 +364,23 @@ class IntroOutroStore:
         return queued
 
     def claim_next(self) -> dict | None:
+        source_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(media_sources)")
+        }
+        probe_payload_select = (
+            ",source.probe_payload" if "probe_payload" in source_columns else ""
+        )
+        query = (
+            "SELECT a.media_file_id,a.entity_id,a.season_id,a.source_fingerprint,source.duration_seconds,"
+            "library.directory,f.relative_path"
+            + probe_payload_select
+            + " FROM intro_outro_assets a JOIN media_files f ON f.id=a.media_file_id "
+            + "JOIN media_sources source ON source.media_file_id=f.id "
+            + "JOIN library_entities entity ON entity.id=a.entity_id JOIN libraries library ON library.id=entity.library_id "
+            + "WHERE a.state='queued' ORDER BY a.updated_at,a.media_file_id LIMIT 1"
+        )
         with self.db.transaction() as cursor:
-            cursor.execute(
-                "SELECT a.media_file_id,a.entity_id,a.season_id,a.source_fingerprint,source.duration_seconds,library.directory,f.relative_path "
-                "FROM intro_outro_assets a JOIN media_files f ON f.id=a.media_file_id "
-                "JOIN media_sources source ON source.media_file_id=f.id "
-                "JOIN library_entities entity ON entity.id=a.entity_id JOIN libraries library ON library.id=entity.library_id "
-                "WHERE a.state='queued' ORDER BY a.updated_at,a.media_file_id LIMIT 1"
-            )
+            cursor.execute(query)
             row = cursor.fetchone()
             if not row:
                 return None
@@ -379,12 +390,22 @@ class IntroOutroStore:
             )
             if cursor.rowcount != 1:
                 return None
+        duration_seconds = float(row[4] or 0)
+        probe_payload = row[7] if probe_payload_select else None
+        streams = probe_streams(probe_payload)
+        audio_stream = first_audio_stream(streams) if streams is not None else None
+        audio_end = (
+            stream_end_seconds(audio_stream, duration_seconds)
+            if audio_stream is not None
+            else (0.0 if streams is not None else None)
+        )
         return {
             "mediaFileId": row[0],
             "entityId": row[1],
             "seasonId": row[2],
             "sourceFingerprint": row[3],
-            "durationSeconds": float(row[4] or 0),
+            "durationSeconds": duration_seconds,
+            "audioEndSeconds": audio_end,
             "path": Path(row[5]) / row[6],
         }
 
@@ -1008,14 +1029,27 @@ class IntroOutroDetector:
                     )
                     reporter.start(item_label)
                     duration = asset["durationSeconds"]
+                    audio_end = asset.get("audioEndSeconds")
+                    try:
+                        audio_end = float(audio_end) if audio_end is not None else None
+                    except (TypeError, ValueError):
+                        audio_end = None
+                    if audio_end is not None:
+                        audio_end = max(0.0, min(duration, audio_end))
                     intro_duration = min(
                         duration * settings["analysisPercent"] / 100.0,
                         settings["analysisLengthLimitMinutes"] * 60.0,
                     )
+                    if audio_end is not None:
+                        intro_duration = min(intro_duration, audio_end)
                     outro_duration = min(
                         duration, float(settings["maximumCreditsAnalysisSeconds"])
                     )
                     outro_start = max(0.0, duration - outro_duration)
+                    if audio_end is not None:
+                        outro_duration = max(
+                            0.0, min(duration, audio_end) - outro_start
+                        )
                     window_errors: list[str] = []
 
                     def fingerprint_window(
@@ -1034,11 +1068,13 @@ class IntroOutroDetector:
                     intro = (
                         fingerprint_window("intro", 0.0, intro_duration)
                         if settings["scanIntroduction"]
+                        and intro_duration >= MIN_FINGERPRINT_WINDOW_SECONDS
                         else None
                     )
                     outro = (
                         fingerprint_window("outro", outro_start, outro_duration)
                         if settings["scanCredits"]
+                        and outro_duration >= MIN_FINGERPRINT_WINDOW_SECONDS
                         else None
                     )
                     if window_errors and intro is None and outro is None:

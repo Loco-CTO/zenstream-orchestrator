@@ -16,6 +16,12 @@ from app.config import Config
 from app.ffmpeg_supervisor import run_ffmpeg
 from app.images import WEBP_QUALITY
 from app.logging_config import get_logger
+from app.media_probe import (
+    MIN_EFFECTIVE_VIDEO_DURATION_SECONDS,
+    probe_streams,
+    select_usable_video_stream,
+    stream_index,
+)
 from app.models.playback_settings import PlaybackSettings
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
 from app.progress import (
@@ -31,10 +37,52 @@ FRAMES_PER_SHEET = SHEET_COLUMNS * SHEET_ROWS
 MAX_FINAL_FRAME_DEFICIT = 1
 logger = get_logger("trickplay")
 DEFAULT_TRICKPLAY_FFMPEG_THREADS = 4
+INELIGIBLE_VIDEO_MESSAGE = "No usable video stream is available for trickplay."
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _duration_value(value: object) -> float:
+    try:
+        duration = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return duration if math.isfinite(duration) else 0.0
+
+
+def expected_frame_count(duration_seconds: object, interval_seconds: object) -> int:
+    duration = max(0.0, _duration_value(duration_seconds))
+    try:
+        interval = max(1.0, float(interval_seconds or 1))
+    except (TypeError, ValueError):
+        interval = 1.0
+    return max(1, int(math.ceil(duration / interval)))
+
+
+def expected_sheet_count(duration_seconds: object, interval_seconds: object) -> int:
+    return max(
+        1,
+        int(
+            math.ceil(
+                expected_frame_count(duration_seconds, interval_seconds)
+                / FRAMES_PER_SHEET
+            )
+        ),
+    )
+
+
+def _probe_video_stream(
+    probe_payload: object, video_codec: object, duration_seconds: object
+) -> dict | None:
+    streams = probe_streams(probe_payload)
+    if streams is None:
+        duration = _duration_value(duration_seconds)
+        if video_codec and duration > MIN_EFFECTIVE_VIDEO_DURATION_SECONDS:
+            return {"index": 0}
+        return None
+    return select_usable_video_stream(streams, _duration_value(duration_seconds))
 
 
 def _expected_frame_count(duration_seconds: float | None, interval_seconds: int) -> int:
@@ -59,7 +107,7 @@ def _build_sheet_rows(
     """Build rows for the sheets FFmpeg actually emitted.
 
     Container duration can round one sample beyond the final timestamp that
-    FFmpeg emits.  Treat that as an end-of-stream discrepancy, but reject
+    FFmpeg emits. Treat that as an end-of-stream discrepancy, but reject
     larger shortfalls and unreferenced extra sheets before publishing output.
     """
     if image_count < 1:
@@ -196,24 +244,34 @@ class TrickplayStore:
         if library_id:
             scope = " AND e.library_id=?"
             params.append(library_id)
+        source_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(media_sources)")
+        }
+        probe_payload_select = (
+            ",s.probe_payload" if "probe_payload" in source_columns else ""
+        )
         rows = self.db.execute(
-            "SELECT f.id,f.entity_id,f.quick_fingerprint,f.size,f.modified_ns,s.duration_seconds "
-            "FROM media_files f "
-            "JOIN library_entities e ON e.id=f.entity_id "
-            "JOIN media_sources s ON s.media_file_id=f.id "
-            "WHERE f.role=? AND s.video_codec IS NOT NULL AND s.video_codec<>''"
+            "SELECT f.id,f.entity_id,f.quick_fingerprint,f.size,f.modified_ns,s.duration_seconds,s.video_codec"
+            + probe_payload_select
+            + " FROM media_files f "
+            + "JOIN library_entities e ON e.id=f.entity_id "
+            + "JOIN media_sources s ON s.media_file_id=f.id "
+            + "WHERE f.role=?"
             + scope,
             params,
         )
         queued = 0
-        for (
-            media_file_id,
-            entity_id,
-            quick_fingerprint,
-            size,
-            modified_ns,
-            duration_seconds,
-        ) in rows:
+        for row in rows:
+            (
+                media_file_id,
+                entity_id,
+                quick_fingerprint,
+                size,
+                modified_ns,
+                duration_seconds,
+                video_codec,
+            ) = row[:7]
+            probe_payload = row[7] if probe_payload_select else None
             fingerprint = self.fingerprint(quick_fingerprint, size, modified_ns)
             existing = self.db.execute(
                 "SELECT source_fingerprint,frame_width,frame_height,interval_seconds,state,output_key "
@@ -221,6 +279,28 @@ class TrickplayStore:
                 (media_file_id,),
             )
             timestamp = now()
+            video_stream = _probe_video_stream(
+                probe_payload, video_codec, duration_seconds
+            )
+            if video_stream is None:
+                if existing:
+                    old_state = existing[0][4]
+                    if old_state != "skipped" or existing[0][5]:
+                        self.db.execute(
+                            "UPDATE trickplay_assets SET entity_id=?,state='skipped',output_key=NULL,error=?,updated_at=? "
+                            "WHERE media_file_id=?",
+                            (
+                                entity_id,
+                                INELIGIBLE_VIDEO_MESSAGE,
+                                timestamp,
+                                media_file_id,
+                            ),
+                        )
+                        self.db.execute(
+                            "DELETE FROM trickplay_sheets WHERE media_file_id=?",
+                            (media_file_id,),
+                        )
+                continue
             if not existing:
                 self.db.execute(
                     "INSERT INTO trickplay_assets(media_file_id,entity_id,source_fingerprint,frame_width,frame_height,interval_seconds,state,created_at,updated_at) "
@@ -303,23 +383,55 @@ class TrickplayStore:
         return queued
 
     def claim_next(self) -> dict | None:
-        with self.db.transaction() as cursor:
-            cursor.execute(
-                "SELECT a.media_file_id,a.entity_id,a.source_fingerprint,a.frame_width,a.frame_height,a.interval_seconds,"
-                "s.duration_seconds,l.directory,f.relative_path "
-                "FROM trickplay_assets a "
-                "JOIN media_files f ON f.id=a.media_file_id "
-                "JOIN media_sources s ON s.media_file_id=f.id "
-                "JOIN library_entities e ON e.id=a.entity_id "
-                "JOIN libraries l ON l.id=e.library_id "
-                "WHERE a.state='queued' AND f.role=? "
-                "AND s.video_codec IS NOT NULL AND s.video_codec<>'' "
-                "ORDER BY a.updated_at,a.media_file_id LIMIT 1",
-                (PLAYABLE_ROLE,),
+        source_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(media_sources)")
+        }
+        asset_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(trickplay_assets)")
+        }
+        has_sheets = bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trickplay_sheets'"
             )
-            row = cursor.fetchone()
-            if not row:
-                return None
+        )
+        probe_payload_select = (
+            ",s.probe_payload" if "probe_payload" in source_columns else ""
+        )
+        query = (
+            "SELECT a.media_file_id,a.entity_id,a.source_fingerprint,a.frame_width,a.frame_height,a.interval_seconds,"
+            "s.duration_seconds,s.video_codec,l.directory,f.relative_path"
+            + probe_payload_select
+            + " FROM trickplay_assets a "
+            + "JOIN media_files f ON f.id=a.media_file_id "
+            + "JOIN media_sources s ON s.media_file_id=f.id "
+            + "JOIN library_entities e ON e.id=a.entity_id "
+            + "JOIN libraries l ON l.id=e.library_id "
+            + "WHERE a.state='queued' AND f.role=? "
+            + "ORDER BY a.updated_at,a.media_file_id LIMIT 1"
+        )
+        output_key_clear = ",output_key=NULL" if "output_key" in asset_columns else ""
+        with self.db.transaction() as cursor:
+            while True:
+                cursor.execute(query, (PLAYABLE_ROLE,))
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                probe_payload = row[10] if probe_payload_select else None
+                video_stream = _probe_video_stream(probe_payload, row[7], row[6])
+                if video_stream is not None:
+                    break
+                cursor.execute(
+                    "UPDATE trickplay_assets SET state='skipped'"
+                    + output_key_clear
+                    + ",error=?,updated_at=? "
+                    "WHERE media_file_id=? AND state='queued'",
+                    (INELIGIBLE_VIDEO_MESSAGE, now(), row[0]),
+                )
+                if has_sheets:
+                    cursor.execute(
+                        "DELETE FROM trickplay_sheets WHERE media_file_id=?",
+                        (row[0],),
+                    )
             cursor.execute(
                 "UPDATE trickplay_assets SET state='generating',error=NULL,updated_at=? "
                 "WHERE media_file_id=? AND state='queued'",
@@ -335,7 +447,12 @@ class TrickplayStore:
             "height": int(row[4]),
             "intervalSeconds": int(row[5]),
             "durationSeconds": float(row[6] or 0),
-            "path": Path(row[7]) / row[8],
+            "videoStreamIndex": stream_index(video_stream),
+            "videoColorSpace": video_stream.get("color_space"),
+            "videoColorTransfer": video_stream.get("color_transfer"),
+            "videoColorPrimaries": video_stream.get("color_primaries"),
+            "videoPixelFormat": video_stream.get("pix_fmt"),
+            "path": Path(row[8]) / row[9],
         }
 
     def mark_ready(self, asset: dict, sheets: list[dict]) -> str | None:
@@ -424,11 +541,49 @@ class TrickplayExtractor:
             raise RuntimeError("FFmpeg is not available.")
         width = asset["width"]
         height = asset["height"]
-        interval = asset["intervalSeconds"]
+        interval = max(1, int(asset["intervalSeconds"]))
+        if any(
+            "bt2020" in str(asset.get(key) or "").lower()
+            for key in (
+                "videoColorSpace",
+                "videoColorPrimaries",
+                "videoColorTransfer",
+            )
+        ):
+            matrix = (
+                "bt2020c"
+                if str(asset.get("videoColorSpace") or "").lower() == "bt2020c"
+                else "bt2020nc"
+            )
+            transfer = str(asset.get("videoColorTransfer") or "bt2020-10").lower()
+            if transfer not in {
+                "bt2020-10",
+                "bt2020-12",
+                "smpte2084",
+                "arib-std-b67",
+            }:
+                transfer = "bt2020-10"
+            color_filter = (
+                f"zscale=matrixin={matrix}:"
+                f"transferin={transfer}:primariesin=bt2020:"
+                "matrix=bt709:transfer=bt709:primaries=bt709,format=yuv420p"
+            )
+        else:
+            color_filter = "format=yuv420p"
+        padding_seconds = interval * FRAMES_PER_SHEET
+        output_sheets = expected_sheet_count(asset.get("durationSeconds"), interval)
+        stream_index_value = asset.get("videoStreamIndex")
+        map_value = (
+            f"0:{int(stream_index_value)}"
+            if isinstance(stream_index_value, int) and stream_index_value >= 0
+            else "0:v:0"
+        )
         filter_graph = (
             f"fps=1/{interval},"
+            f"{color_filter},"
             f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"setsar=1,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,"
+            f"tpad=stop_mode=clone:stop_duration={padding_seconds},"
             f"tile={SHEET_COLUMNS}x{SHEET_ROWS}:padding=0:margin=0"
         )
         return [
@@ -445,10 +600,12 @@ class TrickplayExtractor:
             "-i",
             str(asset["path"]),
             "-map",
-            "0:v:0",
+            map_value,
             "-an",
             "-vf",
             filter_graph,
+            "-frames:v",
+            str(output_sheets),
             "-c:v",
             "libwebp",
             "-quality",
@@ -479,13 +636,20 @@ class TrickplayExtractor:
                     seconds = float(raw) / 1_000_000.0
                 except (TypeError, ValueError):
                     return
-                on_progress(max(0.0, seconds), max(0.0, asset["durationSeconds"]))
+                on_progress(
+                    max(0.0, seconds),
+                    max(0.0, asset["durationSeconds"]),
+                )
 
             run_ffmpeg(
                 self.command(
                     asset,
                     temporary_root / "sheet-%05d.webp",
-                    getattr(self, "ffmpeg_threads", DEFAULT_TRICKPLAY_FFMPEG_THREADS),
+                    getattr(
+                        self,
+                        "ffmpeg_threads",
+                        DEFAULT_TRICKPLAY_FFMPEG_THREADS,
+                    ),
                 ),
                 should_terminate=should_terminate,
                 progress=progress,
@@ -503,7 +667,8 @@ class TrickplayExtractor:
             )
             media_root = root / asset["mediaFileId"]
             expected_frames = _expected_frame_count(
-                asset["durationSeconds"], asset["intervalSeconds"]
+                asset["durationSeconds"],
+                asset["intervalSeconds"],
             )
             sheets = _build_sheet_rows(
                 asset["mediaFileId"],
@@ -573,7 +738,8 @@ class TrickplayExtractor:
         self.store.recover_generating()
         settings = PlaybackSettings(self.store.db).get()
         self.ffmpeg_threads = settings.get(
-            "trickplayFfmpegThreads", DEFAULT_TRICKPLAY_FFMPEG_THREADS
+            "trickplayFfmpegThreads",
+            DEFAULT_TRICKPLAY_FFMPEG_THREADS,
         )
         discovered = self.store.queue_pending(settings=settings)
         workers = settings["trickplayWorkers"]
@@ -582,7 +748,8 @@ class TrickplayExtractor:
             state="running",
             started_at=now(),
             message=format_progress_message(
-                "Preparing trickplay", detail=f"{discovered} videos queued"
+                "Preparing trickplay",
+                detail=f"{discovered} videos queued",
             ),
             progress_phase="preparation",
             progress_label="Preparing trickplay",
@@ -594,9 +761,14 @@ class TrickplayExtractor:
         failures = []
         progress_lock = Lock()
         reporter = ProgressReporter(
-            partial(job_store.update_run, run_id), unit="videos"
+            partial(job_store.update_run, run_id),
+            unit="videos",
         )
-        reporter.stage("extraction", "Extracting trickplay", total=discovered)
+        reporter.stage(
+            "extraction",
+            "Extracting trickplay",
+            total=discovered,
+        )
 
         def process_assets():
             nonlocal completed
@@ -607,7 +779,9 @@ class TrickplayExtractor:
                 reporter.claim()
                 try:
                     item_label = resolve_progress_item(
-                        self.db, asset.get("entityId"), asset.get("path")
+                        self.db,
+                        asset.get("entityId"),
+                        asset.get("path"),
                     )
                     reporter.start(item_label)
                     extractor = self.extract
@@ -616,7 +790,9 @@ class TrickplayExtractor:
                             asset,
                             should_terminate,
                             lambda current, total: reporter.item_progress(
-                                item_label, current, total
+                                item_label,
+                                current,
+                                total,
                             ),
                         )
                     elif len(inspect.signature(extractor).parameters) >= 2:
@@ -636,7 +812,9 @@ class TrickplayExtractor:
                         failures.append(asset["mediaFileId"])
                     reporter.settle(
                         resolve_progress_item(
-                            self.db, asset.get("entityId"), asset.get("path")
+                            self.db,
+                            asset.get("entityId"),
+                            asset.get("path"),
                         ),
                         failed=True,
                     )
@@ -648,7 +826,8 @@ class TrickplayExtractor:
                     )
 
         with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="trickplay"
+            max_workers=workers,
+            thread_name_prefix="trickplay",
         ) as executor:
             futures = [executor.submit(process_assets) for _ in range(workers)]
             for future in futures:
@@ -680,9 +859,11 @@ class TrickplayExtractor:
                 progress_current=completed,
                 progress_total=max(completed, discovered),
                 finished_at=now(),
-                message=f"Extracted {completed} trickplay assets"
-                if completed
-                else "Trickplay sheets are current",
+                message=(
+                    f"Extracted {completed} trickplay assets"
+                    if completed
+                    else "Trickplay sheets are current"
+                ),
             )
 
     def manifest(
@@ -705,7 +886,8 @@ class TrickplayExtractor:
             raise HTTPException(404, "Trickplay source not found.")
         selected_source_id, media_file_id, duration_seconds = rows[0]
         asset_rows = self.db.execute(
-            "SELECT frame_width,frame_height,interval_seconds,state,output_key,error FROM trickplay_assets WHERE media_file_id=?",
+            "SELECT frame_width,frame_height,interval_seconds,state,output_key,error "
+            "FROM trickplay_assets WHERE media_file_id=?",
             (media_file_id,),
         )
         if not asset_rows:
@@ -725,7 +907,11 @@ class TrickplayExtractor:
         if state != "ready" or not output_key:
             if state == "failed":
                 raise HTTPException(
-                    422, {**base, "detail": error or "Trickplay extraction failed."}
+                    422,
+                    {
+                        **base,
+                        "detail": error or "Trickplay extraction failed.",
+                    },
                 )
             return base
         rows = self.db.execute(
@@ -746,7 +932,10 @@ class TrickplayExtractor:
                     "index": index,
                     "firstFrame": first_frame,
                     "frameCount": frame_count,
-                    "url": f"/api/playback/items/{entity_id}/trickplay/{output_key}/{index}.webp?access={ticket}",
+                    "url": (
+                        f"/api/playback/items/{entity_id}/trickplay/"
+                        f"{output_key}/{index}.webp?access={ticket}"
+                    ),
                 }
                 for index, first_frame, frame_count in rows
             ],
@@ -758,8 +947,10 @@ class TrickplayExtractor:
         ):
             raise HTTPException(404, "Trickplay sheet not found.")
         rows = self.db.execute(
-            "SELECT s.relative_path FROM trickplay_sheets s JOIN trickplay_assets a ON a.media_file_id=s.media_file_id "
-            "WHERE a.entity_id=? AND a.state='ready' AND s.output_key=? AND s.sheet_index=?",
+            "SELECT s.relative_path FROM trickplay_sheets s "
+            "JOIN trickplay_assets a ON a.media_file_id=s.media_file_id "
+            "WHERE a.entity_id=? AND a.state='ready' "
+            "AND s.output_key=? AND s.sheet_index=?",
             (entity_id, generation, index),
         )
         if not rows:

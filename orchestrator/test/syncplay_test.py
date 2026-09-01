@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 
 from app.config import Config
@@ -83,6 +84,208 @@ class SyncplayModelTests(unittest.TestCase):
         state = group.remove_disconnected_member("viewer", "viewer-tab")
         self.assertEqual([member["userId"] for member in state["members"]], ["host"])
         self.assertFalse(state["ended"])
+
+    def test_stale_lifecycle_release_clears_current_member_barrier(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+
+        def prepare(cursor, state):
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=1,ready_generation=-1 WHERE group_id=?",
+                (group.id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                item_id="movie",
+                media_generation=1,
+                playing=1,
+                anchor_position=10,
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="playing",
+            )
+
+        before = group.mutate("host", None, None, prepare)
+
+        def release(cursor, state):
+            self.assertTrue(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "host",
+                    "host-tab",
+                    generation=0,
+                    timeline_revision=0,
+                    sequence=1,
+                    viewing=False,
+                    loading=False,
+                )
+            )
+
+        released = group.mutate("host", None, None, release)
+        member = released["members"][0]
+        self.assertFalse(member["viewing"])
+        self.assertFalse(member["loading"])
+        self.assertEqual(released["timelineRevision"], before["timelineRevision"])
+        self.assertTrue(released["playing"])
+
+    def test_background_presence_pauses_until_host_resumes_after_member_returns(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        group.mutate(
+            "viewer",
+            None,
+            None,
+            lambda cursor, state: cursor.execute(
+                "INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)",
+                (group.id, "viewer", "viewer-tab", "Viewer"),
+            ),
+        )
+
+        def prepare(cursor, state):
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE group_id=?",
+                (group.id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                item_id="movie",
+                media_generation=1,
+                playing=1,
+                anchor_position=10,
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="playing",
+            )
+
+        group.mutate("host", None, None, prepare)
+
+        def background(cursor, state):
+            self.assertTrue(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "viewer",
+                    "viewer-tab",
+                    generation=0,
+                    timeline_revision=0,
+                    sequence=1,
+                    viewing=False,
+                    loading=False,
+                    pause_room=True,
+                )
+            )
+
+        paused = group.mutate("viewer", None, None, background)
+        viewer = next(
+            member for member in paused["members"] if member["userId"] == "viewer"
+        )
+        self.assertFalse(paused["playing"])
+        self.assertFalse(paused["resumeWhenReady"])
+        self.assertEqual(paused["pauseReason"], "background")
+        self.assertFalse(viewer["viewing"])
+        self.assertTrue(viewer["loading"])
+
+        def return_ready(cursor, state):
+            self.assertTrue(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "viewer",
+                    "viewer-tab",
+                    generation=state["mediaGeneration"],
+                    timeline_revision=state["timelineRevision"],
+                    sequence=2,
+                    viewing=True,
+                    loading=False,
+                )
+            )
+
+        ready = group.mutate("viewer", None, None, return_ready)
+        self.assertFalse(ready["playing"])
+        self.assertFalse(ready["resumeWhenReady"])
+
+        def host_resume(cursor, state):
+            self.assertFalse(
+                group.waiting_for_members(cursor, state["mediaGeneration"])
+            )
+            schedule(group, cursor, state, state["anchorPosition"])
+
+        resumed = group.mutate("host", None, None, host_resume)
+        self.assertTrue(resumed["playing"])
+
+    def test_disconnected_watching_member_gets_background_barrier(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        group.mutate(
+            "viewer",
+            None,
+            None,
+            lambda cursor, state: cursor.execute(
+                "INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)",
+                (group.id, "viewer", "viewer-tab", "Viewer"),
+            ),
+        )
+
+        def prepare(cursor, state):
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE group_id=?",
+                (group.id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                item_id="movie",
+                media_generation=1,
+                playing=1,
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="playing",
+            )
+
+        group.mutate("host", None, None, prepare)
+        state = group.mark_member_backgrounded("viewer", "viewer-tab")
+        viewer = next(
+            member for member in state["members"] if member["userId"] == "viewer"
+        )
+        self.assertFalse(state["playing"])
+        self.assertEqual(state["pauseReason"], "background")
+        self.assertTrue(viewer["loading"])
+
+    def test_backgrounding_non_watching_member_does_not_pause_room(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        group.mutate(
+            "viewer",
+            None,
+            None,
+            lambda cursor, state: cursor.execute(
+                "INSERT INTO syncplay_members (group_id,user_id,participant_id,username,watching_together) VALUES (?,?,?,?,0)",
+                (group.id, "viewer", "viewer-tab", "Viewer"),
+            ),
+        )
+
+        def prepare(cursor, state):
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE participant_id='host-tab'"
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                item_id="movie",
+                media_generation=1,
+                playing=1,
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="playing",
+            )
+
+        group.mutate("host", None, None, prepare)
+        state = group.mark_member_backgrounded("viewer", "viewer-tab")
+        self.assertTrue(state["playing"])
+        self.assertNotEqual(state["pauseReason"], "background")
 
     def test_members_default_to_watching_together(self):
         group = SyncplayGroup.create("host", "host-tab", "Host")

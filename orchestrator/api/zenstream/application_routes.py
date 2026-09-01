@@ -401,7 +401,7 @@ def _mark_disconnected_sync(user, participant):
         if state and state["hostUserId"] == user:
             state = group.mark_host_disconnected()
         elif state:
-            state = group.deactivate_member(user, participant)
+            state = group.mark_member_backgrounded(user, participant)
         if state:
             states.append(state)
     return states
@@ -1297,7 +1297,7 @@ async def syncplay_command(group_id: str, request: Request):
                 (group_id, participant),
             )
             cursor.execute(
-                "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 AND viewing=1 THEN 1 ELSE 0 END,ready_generation=-1,presence_sequence=0 WHERE group_id=?",
+                "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 AND (viewing=1 OR loading=1) THEN 1 ELSE 0 END,ready_generation=-1,presence_sequence=0 WHERE group_id=?",
                 (group_id,),
             )
             group.transition(
@@ -1320,7 +1320,7 @@ async def syncplay_command(group_id: str, request: Request):
             raise StaleSyncplayState(state)
         if action == "seek":
             cursor.execute(
-                "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 AND viewing=1 THEN 1 ELSE 0 END,ready_generation=-1 WHERE group_id=?",
+                "UPDATE syncplay_members SET loading=CASE WHEN watching_together=1 AND (viewing=1 OR loading=1) THEN 1 ELSE 0 END,ready_generation=-1 WHERE group_id=?",
                 (group_id,),
             )
             group.transition(
@@ -1398,6 +1398,7 @@ async def syncplay_presence(group_id: str, request: Request):
     generation = data.get("mediaGeneration")
     timeline_revision = data.get("timelineRevision")
     sequence = data.get("presenceSequence")
+    pause_room = data.get("pauseRoom", False)
     if (
         not isinstance(generation, int)
         or not isinstance(timeline_revision, int)
@@ -1407,6 +1408,8 @@ async def syncplay_presence(group_id: str, request: Request):
             400,
             "mediaGeneration, timelineRevision, and presenceSequence are required.",
         )
+    if not isinstance(pause_room, bool):
+        raise HTTPException(400, "pauseRoom must be boolean.")
 
     def apply(cursor, state):
         # A presence request can spend longer in the network than the seek or
@@ -1423,6 +1426,7 @@ async def syncplay_presence(group_id: str, request: Request):
             sequence,
             bool(data.get("viewing")),
             bool(data.get("loading")),
+            pause_room,
         )
 
     state = await run_control(group.mutate, user, None, data.get("operationId"), apply)

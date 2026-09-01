@@ -179,7 +179,9 @@ class SyncplayModelTests(unittest.TestCase):
             )
 
         paused = group.mutate("viewer", None, None, background)
-        viewer = next(member for member in paused["members"] if member["userId"] == "viewer")
+        viewer = next(
+            member for member in paused["members"] if member["userId"] == "viewer"
+        )
         self.assertFalse(paused["playing"])
         self.assertFalse(paused["resumeWhenReady"])
         self.assertEqual(paused["pauseReason"], "background")
@@ -206,7 +208,9 @@ class SyncplayModelTests(unittest.TestCase):
         self.assertFalse(ready["resumeWhenReady"])
 
         def host_resume(cursor, state):
-            self.assertFalse(group.waiting_for_members(cursor, state["mediaGeneration"]))
+            self.assertFalse(
+                group.waiting_for_members(cursor, state["mediaGeneration"])
+            )
             schedule(group, cursor, state, state["anchorPosition"])
 
         resumed = group.mutate("host", None, None, host_resume)
@@ -243,7 +247,9 @@ class SyncplayModelTests(unittest.TestCase):
 
         group.mutate("host", None, None, prepare)
         state = group.mark_member_backgrounded("viewer", "viewer-tab")
-        viewer = next(member for member in state["members"] if member["userId"] == "viewer")
+        viewer = next(
+            member for member in state["members"] if member["userId"] == "viewer"
+        )
         self.assertFalse(state["playing"])
         self.assertEqual(state["pauseReason"], "background")
         self.assertTrue(viewer["loading"])

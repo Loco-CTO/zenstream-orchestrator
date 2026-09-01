@@ -387,6 +387,147 @@ class SyncplayModelTests(unittest.TestCase):
         self.assertTrue(state["playing"])
         self.assertFalse(state["resumeWhenReady"])
 
+    def test_seek_resumes_after_every_watching_member_is_ready(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        group.mutate(
+            "viewer",
+            None,
+            None,
+            lambda cursor, state: cursor.execute(
+                "INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)",
+                (group.id, "viewer", "viewer-tab", "Viewer"),
+            ),
+        )
+
+        def prepare(cursor, state):
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE group_id=?",
+                (group.id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                item_id="movie",
+                media_generation=1,
+                playing=1,
+                anchor_position=10,
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="playing",
+            )
+
+        group.mutate("host", None, None, prepare)
+
+        def seek(cursor, state):
+            cursor.execute(
+                "UPDATE syncplay_members SET loading=1,ready_generation=-1,presence_sequence=0 WHERE group_id=?",
+                (group.id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                position=35,
+                playing=0,
+                resume=1,
+                anchor_position=35,
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="paused",
+                pause_reason="seek",
+            )
+
+        sought = group.mutate("host", None, None, seek)
+        self.assertFalse(sought["playing"])
+        self.assertTrue(sought["resumeWhenReady"])
+        self.assertEqual(sought["pauseReason"], "seek")
+
+        def host_ready(cursor, state):
+            self.assertTrue(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "host",
+                    "host-tab",
+                    state["mediaGeneration"],
+                    state["timelineRevision"],
+                    1,
+                    True,
+                    False,
+                )
+            )
+
+        waiting = group.mutate("host", None, None, host_ready)
+        self.assertFalse(waiting["playing"])
+        self.assertTrue(waiting["resumeWhenReady"])
+
+        def viewer_ready(cursor, state):
+            self.assertTrue(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "viewer",
+                    "viewer-tab",
+                    state["mediaGeneration"],
+                    state["timelineRevision"],
+                    1,
+                    True,
+                    False,
+                )
+            )
+
+        resumed = group.mutate("viewer", None, None, viewer_ready)
+        self.assertTrue(resumed["playing"])
+        self.assertFalse(resumed["resumeWhenReady"])
+        self.assertEqual(resumed["playbackState"], "playing")
+        self.assertEqual(resumed["anchorPosition"], 35)
+
+    def test_paused_seek_remains_paused_after_readiness(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+
+        def prepare(cursor, state):
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=1,ready_generation=-1 WHERE group_id=?",
+                (group.id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                item_id="movie",
+                media_generation=1,
+                playing=0,
+                resume=0,
+                anchor_position=35,
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="paused",
+                pause_reason="seek",
+            )
+
+        group.mutate("host", None, None, prepare)
+
+        def ready(cursor, state):
+            self.assertTrue(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "host",
+                    "host-tab",
+                    state["mediaGeneration"],
+                    state["timelineRevision"],
+                    1,
+                    True,
+                    False,
+                )
+            )
+
+        state = group.mutate("host", None, None, ready)
+        self.assertFalse(state["playing"])
+        self.assertFalse(state["resumeWhenReady"])
+        self.assertEqual(state["pauseReason"], "seek")
+
     def test_explicit_pause_is_not_released_by_readiness(self):
         group = SyncplayGroup.create("host", "host-tab", "Host")
 

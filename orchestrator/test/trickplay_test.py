@@ -182,9 +182,7 @@ class TrickplayTest(unittest.TestCase):
                     (media_file_id, "h264", 10),
                 )
             for state, entity_id, fingerprint, _library_id in media[:-1]:
-                output_key = (
-                    f"{state}-key" if state in {"ready", "invalid"} else None
-                )
+                output_key = f"{state}-key" if state in {"ready", "invalid"} else None
                 db.connection.execute(
                     "INSERT INTO trickplay_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (
@@ -202,9 +200,7 @@ class TrickplayTest(unittest.TestCase):
                     ),
                 )
                 if output_key:
-                    relative_path = (
-                        f"{state}/{output_key}/sheet-00000.webp"
-                    )
+                    relative_path = f"{state}/{output_key}/sheet-00000.webp"
                     db.connection.execute(
                         "INSERT INTO trickplay_sheets VALUES(?,?,?,?,?,?)",
                         (state, output_key, 0, 0, 1, relative_path),
@@ -219,9 +215,7 @@ class TrickplayTest(unittest.TestCase):
 
             self.assertEqual(queued, 4)
             states = dict(
-                db.execute(
-                    "SELECT media_file_id,state FROM trickplay_assets"
-                )
+                db.execute("SELECT media_file_id,state FROM trickplay_assets")
             )
             self.assertEqual(states["ready"], "ready")
             self.assertEqual(states["invalid"], "queued")
@@ -397,9 +391,7 @@ class TrickplayTest(unittest.TestCase):
 
             class Store:
                 def __init__(self):
-                    self.db = SimpleNamespace(
-                        db_file=str(root / "orchestrator.db")
-                    )
+                    self.db = SimpleNamespace(db_file=str(root / "orchestrator.db"))
                     self.sheets = None
 
                 @staticmethod
@@ -418,10 +410,9 @@ class TrickplayTest(unittest.TestCase):
                 output_pattern = Path(command[-1])
                 output_pattern.parent.mkdir(parents=True, exist_ok=True)
                 for index in range(7):
-                    (
-                        output_pattern.parent
-                        / f"sheet-{index:05d}.webp"
-                    ).write_bytes(b"webp")
+                    (output_pattern.parent / f"sheet-{index:05d}.webp").write_bytes(
+                        b"webp"
+                    )
 
             store = Store()
             extractor = TrickplayExtractor(store)
@@ -446,12 +437,7 @@ class TrickplayTest(unittest.TestCase):
                 [sheet["frameCount"] for sheet in store.sheets],
                 [100] * 7,
             )
-            self.assertTrue(
-                all(
-                    sheet["frameCount"] > 0
-                    for sheet in store.sheets
-                )
-            )
+            self.assertTrue(all(sheet["frameCount"] > 0 for sheet in store.sheets))
 
     def test_manifest_reports_actual_frame_total(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -463,16 +449,13 @@ class TrickplayTest(unittest.TestCase):
                 "app.trickplay.issue_ticket",
                 return_value="ticket",
             ):
-                manifest = TrickplayExtractor(
-                    TrickplayStore(db)
-                ).manifest("user", "entity")
+                manifest = TrickplayExtractor(TrickplayStore(db)).manifest(
+                    "user", "entity"
+                )
 
             self.assertEqual(manifest["frameCount"], 700)
             self.assertEqual(
-                [
-                    sheet["frameCount"]
-                    for sheet in manifest["sheets"]
-                ],
+                [sheet["frameCount"] for sheet in manifest["sheets"]],
                 [100] * 7,
             )
             db.connection.close()
@@ -578,9 +561,7 @@ class TrickplayTest(unittest.TestCase):
             self.assertEqual(claimed["mediaFileId"], "valid")
             self.assertIsNone(store.claim_next())
             states = dict(
-                db.execute(
-                    "SELECT media_file_id,state FROM trickplay_assets"
-                )
+                db.execute("SELECT media_file_id,state FROM trickplay_assets")
             )
             self.assertEqual(states["valid"], "generating")
             self.assertEqual(states["no-codec"], "skipped")
@@ -619,9 +600,7 @@ class TrickplayTest(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         self.assertEqual(stream_index(selected), 2)
-        self.assertIsNone(
-            select_usable_video_stream(streams[:1], 1200)
-        )
+        self.assertIsNone(select_usable_video_stream(streams[:1], 1200))
 
     @patch("app.trickplay.ffmpeg_path", return_value="ffmpeg")
     def test_command_letterboxes_every_frame_before_tiling(self, _ffmpeg):
@@ -749,10 +728,7 @@ class TrickplayTest(unittest.TestCase):
             def __init__(self):
                 self.db = Database()
                 self.lock = threading.Lock()
-                self.assets = [
-                    {"mediaFileId": f"media-{index}"}
-                    for index in range(4)
-                ]
+                self.assets = [{"mediaFileId": f"media-{index}"} for index in range(4)]
                 self.processed = []
 
             @staticmethod
@@ -764,11 +740,7 @@ class TrickplayTest(unittest.TestCase):
 
             def claim_next(self):
                 with self.lock:
-                    return (
-                        self.assets.pop(0)
-                        if self.assets
-                        else None
-                    )
+                    return self.assets.pop(0) if self.assets else None
 
             @staticmethod
             def mark_failed(asset, error):
@@ -813,15 +785,10 @@ class TrickplayTest(unittest.TestCase):
         self.assertEqual(len(store.processed), 4)
         self.assertEqual(maximum, 2)
         self.assertTrue(job_store.updates)
-        self.assertTrue(
-            all(run_id == "run" for run_id, _ in job_store.updates)
-        )
+        self.assertTrue(all(run_id == "run" for run_id, _ in job_store.updates))
         self.assertIn(
             "extraction",
-            {
-                values.get("progress_phase")
-                for _, values in job_store.updates
-            },
+            {values.get("progress_phase") for _, values in job_store.updates},
         )
         self.assertIn(
             "completed",
@@ -859,11 +826,7 @@ class TrickplayTest(unittest.TestCase):
 
             def claim_next(self):
                 with self.lock:
-                    return (
-                        self.assets.pop(0)
-                        if self.assets
-                        else None
-                    )
+                    return self.assets.pop(0) if self.assets else None
 
             @staticmethod
             def mark_failed(asset, error):
@@ -897,8 +860,7 @@ class TrickplayTest(unittest.TestCase):
         self.assertTrue(progress_updates)
         self.assertTrue(
             all(
-                values["progress_stage_current"]
-                <= values["progress_stage_total"]
+                values["progress_stage_current"] <= values["progress_stage_total"]
                 for values in progress_updates
             )
         )

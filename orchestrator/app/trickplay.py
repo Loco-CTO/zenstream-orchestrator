@@ -187,10 +187,7 @@ class TrickplayStore:
                 sheet_index != expected_index
                 or first_frame != expected_index * FRAMES_PER_SHEET
                 or not 0 < frame_count <= FRAMES_PER_SHEET
-                or (
-                    expected_index < len(rows) - 1
-                    and frame_count != FRAMES_PER_SHEET
-                )
+                or (expected_index < len(rows) - 1 and frame_count != FRAMES_PER_SHEET)
             ):
                 return False
             if not isinstance(relative_path, str) or not relative_path:
@@ -558,9 +555,7 @@ class TrickplayExtractor:
                 if str(asset.get("videoColorSpace") or "").lower() == "bt2020c"
                 else "bt2020nc"
             )
-            transfer = str(
-                asset.get("videoColorTransfer") or "bt2020-10"
-            ).lower()
+            transfer = str(asset.get("videoColorTransfer") or "bt2020-10").lower()
             if transfer not in {
                 "bt2020-10",
                 "bt2020-12",
@@ -576,9 +571,7 @@ class TrickplayExtractor:
         else:
             color_filter = "format=yuv420p"
         padding_seconds = interval * FRAMES_PER_SHEET
-        output_sheets = expected_sheet_count(
-            asset.get("durationSeconds"), interval
-        )
+        output_sheets = expected_sheet_count(asset.get("durationSeconds"), interval)
         stream_index_value = asset.get("videoStreamIndex")
         map_value = (
             f"0:{int(stream_index_value)}"
@@ -683,13 +676,9 @@ class TrickplayExtractor:
                 expected_frames,
                 len(images),
             )
-            expected_names = [
-                f"sheet-{index:05d}.webp" for index in range(len(images))
-            ]
+            expected_names = [f"sheet-{index:05d}.webp" for index in range(len(images))]
             if [image.name for image in images] != expected_names:
-                raise RuntimeError(
-                    "FFmpeg produced non-contiguous trickplay sheets."
-                )
+                raise RuntimeError("FFmpeg produced non-contiguous trickplay sheets.")
             destination = media_root / output_key
             destination.parent.mkdir(parents=True, exist_ok=True)
             staging = media_root / f".{output_key}.tmp"
@@ -840,10 +829,7 @@ class TrickplayExtractor:
             max_workers=workers,
             thread_name_prefix="trickplay",
         ) as executor:
-            futures = [
-                executor.submit(process_assets)
-                for _ in range(workers)
-            ]
+            futures = [executor.submit(process_assets) for _ in range(workers)]
             for future in futures:
                 future.result()
         if should_terminate():
@@ -855,10 +841,7 @@ class TrickplayExtractor:
             )
         elif failures:
             reporter.finish(failed=True)
-            summary = (
-                f"Extracted {completed} trickplay assets; "
-                f"{len(failures)} failed"
-            )
+            summary = f"Extracted {completed} trickplay assets; {len(failures)} failed"
             job_store.update_run(
                 run_id,
                 state="failed",

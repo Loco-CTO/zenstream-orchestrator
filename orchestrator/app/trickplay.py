@@ -28,12 +28,61 @@ from fastapi import HTTPException
 SHEET_COLUMNS = 10
 SHEET_ROWS = 10
 FRAMES_PER_SHEET = SHEET_COLUMNS * SHEET_ROWS
+MAX_FINAL_FRAME_DEFICIT = 1
 logger = get_logger("trickplay")
 DEFAULT_TRICKPLAY_FFMPEG_THREADS = 4
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _expected_frame_count(duration_seconds: float | None, interval_seconds: int) -> int:
+    return max(
+        1,
+        int(
+            math.ceil(float(duration_seconds or 0) / max(1, int(interval_seconds or 0)))
+        ),
+    )
+
+
+def _expected_sheet_count(frame_count: int) -> int:
+    return max(1, int(math.ceil(frame_count / FRAMES_PER_SHEET)))
+
+
+def _build_sheet_rows(
+    media_file_id: str,
+    output_key: str,
+    expected_frames: int,
+    image_count: int,
+) -> list[dict]:
+    """Build rows for the sheets FFmpeg actually emitted.
+
+    Container duration can round one sample beyond the final timestamp that
+    FFmpeg emits.  Treat that as an end-of-stream discrepancy, but reject
+    larger shortfalls and unreferenced extra sheets before publishing output.
+    """
+    if image_count < 1:
+        raise RuntimeError("FFmpeg did not produce trickplay sheets.")
+    if image_count > _expected_sheet_count(expected_frames):
+        raise RuntimeError("FFmpeg produced more trickplay sheets than expected.")
+    actual_frames = min(expected_frames, image_count * FRAMES_PER_SHEET)
+    if expected_frames - actual_frames > MAX_FINAL_FRAME_DEFICIT:
+        raise RuntimeError(
+            "FFmpeg produced materially fewer trickplay frames than expected."
+        )
+    return [
+        {
+            "index": index,
+            "firstFrame": index * FRAMES_PER_SHEET,
+            "frameCount": min(
+                FRAMES_PER_SHEET,
+                actual_frames - index * FRAMES_PER_SHEET,
+            ),
+            "relativePath": f"{media_file_id}/{output_key}/sheet-{index:05d}.webp",
+        }
+        for index in range(_expected_sheet_count(actual_frames))
+    ]
 
 
 class TrickplayStore:
@@ -60,31 +109,48 @@ class TrickplayStore:
         duration_seconds: float | None,
         interval_seconds: int,
     ) -> bool:
-        """Verify that a ready asset still has its complete, safe cache output."""
+        """Verify that a ready asset still has a complete, safe cache output."""
         if not output_key:
             return False
-        expected_frames = max(
-            1, int(math.ceil(float(duration_seconds or 0) / max(1, interval_seconds)))
-        )
-        expected_sheets = max(1, int(math.ceil(expected_frames / FRAMES_PER_SHEET)))
+        expected_frames = _expected_frame_count(duration_seconds, interval_seconds)
         rows = self.db.execute(
-            "SELECT sheet_index,frame_count,relative_path FROM trickplay_sheets "
+            "SELECT sheet_index,first_frame,frame_count,relative_path FROM trickplay_sheets "
             "WHERE media_file_id=? AND output_key=? ORDER BY sheet_index",
             (media_file_id, output_key),
         )
-        if len(rows) != expected_sheets:
+        if not rows:
             return False
         cache_root = self.cache_root().resolve()
-        for expected_index, (sheet_index, frame_count, relative_path) in enumerate(
-            rows
-        ):
+        actual_frames = 0
+        seen_paths = set()
+        for expected_index, (
+            sheet_index,
+            first_frame,
+            frame_count,
+            relative_path,
+        ) in enumerate(rows):
+            try:
+                sheet_index = int(sheet_index)
+                first_frame = int(first_frame)
+                frame_count = int(frame_count)
+            except (TypeError, ValueError):
+                return False
             if (
                 sheet_index != expected_index
-                or not 0 < int(frame_count) <= FRAMES_PER_SHEET
+                or first_frame != expected_index * FRAMES_PER_SHEET
+                or not 0 < frame_count <= FRAMES_PER_SHEET
+                or (expected_index < len(rows) - 1 and frame_count != FRAMES_PER_SHEET)
             ):
                 return False
-            relative = Path(str(relative_path))
-            if relative.is_absolute() or ".." in relative.parts:
+            if not isinstance(relative_path, str) or not relative_path:
+                return False
+            relative = Path(relative_path)
+            if (
+                relative.is_absolute()
+                or relative.drive
+                or relative.root
+                or ".." in relative.parts
+            ):
                 return False
             try:
                 resolved = (cache_root / relative).resolve()
@@ -93,6 +159,16 @@ class TrickplayStore:
                 return False
             if not resolved.is_file():
                 return False
+            if resolved in seen_paths:
+                return False
+            seen_paths.add(resolved)
+            actual_frames += frame_count
+        if (
+            actual_frames > expected_frames
+            or expected_frames - actual_frames > MAX_FINAL_FRAME_DEFICIT
+            or len(rows) != _expected_sheet_count(actual_frames)
+        ):
+            return False
         return True
 
     def queue_pending(
@@ -417,6 +493,8 @@ class TrickplayExtractor:
             images = sorted(temporary_root.glob("sheet-*.webp"))
             if not images:
                 raise RuntimeError("FFmpeg did not produce trickplay sheets.")
+            if any(not image.is_file() for image in images):
+                raise RuntimeError("FFmpeg produced invalid trickplay sheets.")
             output_key = self.store.output_key(
                 asset["fingerprint"],
                 asset["width"],
@@ -424,6 +502,18 @@ class TrickplayExtractor:
                 asset["intervalSeconds"],
             )
             media_root = root / asset["mediaFileId"]
+            expected_frames = _expected_frame_count(
+                asset["durationSeconds"], asset["intervalSeconds"]
+            )
+            sheets = _build_sheet_rows(
+                asset["mediaFileId"],
+                output_key,
+                expected_frames,
+                len(images),
+            )
+            expected_names = [f"sheet-{index:05d}.webp" for index in range(len(images))]
+            if [image.name for image in images] != expected_names:
+                raise RuntimeError("FFmpeg produced non-contiguous trickplay sheets.")
             destination = media_root / output_key
             destination.parent.mkdir(parents=True, exist_ok=True)
             staging = media_root / f".{output_key}.tmp"
@@ -431,21 +521,6 @@ class TrickplayExtractor:
             shutil.copytree(temporary_root, staging)
             shutil.rmtree(destination, ignore_errors=True)
             staging.replace(destination)
-            expected_frames = max(
-                1, int(math.ceil(asset["durationSeconds"] / asset["intervalSeconds"]))
-            )
-            sheets = [
-                {
-                    "index": index,
-                    "firstFrame": index * FRAMES_PER_SHEET,
-                    "frameCount": min(
-                        FRAMES_PER_SHEET,
-                        max(0, expected_frames - index * FRAMES_PER_SHEET),
-                    ),
-                    "relativePath": f"{asset['mediaFileId']}/{output_key}/{image.name}",
-                }
-                for index, image in enumerate(images)
-            ]
             if self.store.mark_ready(asset, sheets):
                 self._remove_old_outputs(media_root, output_key)
 

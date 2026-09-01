@@ -299,6 +299,9 @@ class SyncplayGroup:
         )
 
     def waiting_for_members(self, cursor, generation):
+        # A hidden member with loading=1 is an explicit background return
+        # barrier. A hidden member with loading=0 has released playback and
+        # must not block the room.
         cursor.execute(
             "SELECT viewing,loading,ready_generation FROM syncplay_members "
             "WHERE group_id=? AND watching_together=1 AND (viewing=1 OR loading=1)",
@@ -349,9 +352,11 @@ class SyncplayGroup:
         sequence,
         viewing,
         loading,
+        pause_room=False,
     ):
-        """Apply presence only if it belongs to the current playback timeline."""
-        if (
+        """Apply readiness presence or a lifecycle transition for this member."""
+        lifecycle = pause_room or not viewing
+        if not lifecycle and (
             generation != state["mediaGeneration"]
             or timeline_revision != state["timelineRevision"]
         ):
@@ -363,7 +368,7 @@ class SyncplayGroup:
         row = cursor.fetchone()
         if not row or sequence <= row[0] or not row[1]:
             return False
-        loading = bool(viewing and loading)
+        loading = bool(state["itemId"] is not None) if pause_room else bool(viewing and loading)
         cursor.execute(
             "UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND user_id=? AND participant_id=?",
             (
@@ -376,7 +381,10 @@ class SyncplayGroup:
                 participant_id,
             ),
         )
-        self.reconcile_readiness(cursor, state)
+        if pause_room and state["itemId"] is not None:
+            pause(self, cursor, state, "background")
+        else:
+            self.reconcile_readiness(cursor, state)
         return True
 
     def set_participation(self, user_id, participant_id, watching, operation_id=None):
@@ -399,6 +407,10 @@ class SyncplayGroup:
             state = self._state(cursor)
             if not state or state["hostDisconnectedAt"] is not None:
                 return state
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=0,loading=CASE WHEN watching_together=1 AND ? IS NOT NULL THEN 1 ELSE 0 END,ready_generation=-1 WHERE group_id=? AND user_id=?",
+                (state["itemId"], self.id, state["hostUserId"]),
+            )
             now = time.time()
             position = projected_position(state, now)
             self.transition(
@@ -503,4 +515,28 @@ class SyncplayGroup:
                 (self.id, user_id, participant_id),
             )
             self.reconcile_readiness(cursor, state)
+            return self._state(cursor, include_ended=True)
+
+    def mark_member_backgrounded(self, user_id, participant_id="legacy"):
+        """Pause for a disconnected watching member until they return."""
+        with self.db.transaction() as cursor:
+            state = self._state(cursor)
+            if not state:
+                return None
+            cursor.execute(
+                "SELECT watching_together FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+                (self.id, user_id, participant_id),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            loading = int(bool(row[0] and state["itemId"] is not None))
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=0,loading=?,ready_generation=-1 WHERE group_id=? AND user_id=? AND participant_id=?",
+                (loading, self.id, user_id, participant_id),
+            )
+            if loading:
+                pause(self, cursor, state, "background")
+            else:
+                self.reconcile_readiness(cursor, state)
             return self._state(cursor, include_ended=True)

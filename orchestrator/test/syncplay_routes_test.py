@@ -240,6 +240,8 @@ class SyncplayCommandRouteTest(unittest.TestCase):
     def test_stale_item_command_is_rejected_without_changing_readiness(self):
         state = {
             "id": "group-1",
+            "hostUserId": "user-1",
+            "allowViewerControls": False,
             "itemId": "episode-2",
             "revision": 8,
             "mediaGeneration": 2,
@@ -300,6 +302,93 @@ class SyncplayCommandRouteTest(unittest.TestCase):
         self.assertEqual(state["pauseReason"], "readiness")
         cursor.execute.assert_not_called()
         broadcast.assert_not_awaited()
+
+
+class SyncplayPresenceRouteTest(unittest.TestCase):
+    def test_pause_room_is_forwarded_as_a_boolean_presence_option(self):
+        state = {"id": "group-1", "revision": 4, "members": []}
+        cursor = MagicMock()
+        group = MagicMock()
+
+        def mutate(user, expected_revision, operation_id, apply):
+            apply(cursor, state)
+            return state
+
+        group.mutate.side_effect = mutate
+
+        async def run_control_inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with (
+            patch.object(
+                app_module,
+                "_sync_group_context",
+                new=AsyncMock(
+                    return_value=(
+                        "user-1",
+                        "browser-tab",
+                        group,
+                        {
+                            "mediaGeneration": 2,
+                            "timelineRevision": 8,
+                            "presenceSequence": 3,
+                            "viewing": False,
+                            "loading": False,
+                            "pauseRoom": True,
+                        },
+                    )
+                ),
+            ),
+            patch.object(
+                app_module, "run_control", new=AsyncMock(side_effect=run_control_inline)
+            ),
+            patch.object(app_module.hub, "broadcast", new=AsyncMock()) as broadcast,
+        ):
+            response = asyncio.run(
+                app_module.syncplay_presence("group-1", _request("POST"))
+            )
+
+        self.assertIs(response, state)
+        group.apply_presence.assert_called_once_with(
+            cursor,
+            state,
+            "user-1",
+            "browser-tab",
+            2,
+            8,
+            3,
+            False,
+            False,
+            True,
+        )
+        broadcast.assert_awaited_once()
+
+    def test_pause_room_must_be_boolean(self):
+        group = MagicMock()
+        with (
+            patch.object(
+                app_module,
+                "_sync_group_context",
+                new=AsyncMock(
+                    return_value=(
+                        "user-1",
+                        "browser-tab",
+                        group,
+                        {
+                            "mediaGeneration": 2,
+                            "timelineRevision": 8,
+                            "presenceSequence": 3,
+                            "pauseRoom": "true",
+                        },
+                    )
+                ),
+            ),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            asyncio.run(app_module.syncplay_presence("group-1", _request("POST")))
+
+        self.assertEqual(raised.exception.status_code, 400)
+        group.mutate.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -37,15 +37,11 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _expected_frame_count(
-    duration_seconds: float | int | None, interval_seconds: int
-) -> int:
+def _expected_frame_count(duration_seconds: float | None, interval_seconds: int) -> int:
     return max(
         1,
         int(
-            math.ceil(
-                float(duration_seconds or 0) / max(1, int(interval_seconds or 0))
-            )
+            math.ceil(float(duration_seconds or 0) / max(1, int(interval_seconds or 0)))
         ),
     )
 
@@ -143,10 +139,7 @@ class TrickplayStore:
                 sheet_index != expected_index
                 or first_frame != expected_index * FRAMES_PER_SHEET
                 or not 0 < frame_count <= FRAMES_PER_SHEET
-                or (
-                    expected_index < len(rows) - 1
-                    and frame_count != FRAMES_PER_SHEET
-                )
+                or (expected_index < len(rows) - 1 and frame_count != FRAMES_PER_SHEET)
             ):
                 return False
             if not isinstance(relative_path, str) or not relative_path:
@@ -518,9 +511,7 @@ class TrickplayExtractor:
                 expected_frames,
                 len(images),
             )
-            expected_names = [
-                f"sheet-{index:05d}.webp" for index in range(len(images))
-            ]
+            expected_names = [f"sheet-{index:05d}.webp" for index in range(len(images))]
             if [image.name for image in images] != expected_names:
                 raise RuntimeError("FFmpeg produced non-contiguous trickplay sheets.")
             destination = media_root / output_key

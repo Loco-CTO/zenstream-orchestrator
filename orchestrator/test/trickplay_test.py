@@ -98,9 +98,7 @@ def _insert_ready_asset(db, rows, duration_seconds=7002.015):
         ),
     )
     for index, frame_count in enumerate(rows):
-        relative_path = (
-            f"{media_file_id}/{output_key}/sheet-{index:05d}.webp"
-        )
+        relative_path = f"{media_file_id}/{output_key}/sheet-{index:05d}.webp"
         db.connection.execute(
             "INSERT INTO trickplay_sheets VALUES(?,?,?,?,?,?)",
             (
@@ -236,13 +234,14 @@ class TrickplayTest(unittest.TestCase):
 
         partial_rows = _build_sheet_rows("media", "key", expected_frames, 8)
         self.assertEqual(len(partial_rows), 8)
-        self.assertEqual(
-            [row["frameCount"] for row in partial_rows], [100] * 7 + [1]
-        )
+        self.assertEqual([row["frameCount"] for row in partial_rows], [100] * 7 + [1])
 
     def test_ready_validation_accepts_full_and_single_frame_final_sheets(self):
         for frame_counts in ([100] * 7, [100] * 7 + [1]):
-            with self.subTest(frame_counts=frame_counts), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(frame_counts=frame_counts),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 db = _Database(Path(temporary))
                 _create_trickplay_schema(db)
                 _insert_ready_asset(db, frame_counts)
@@ -372,7 +371,6 @@ class TrickplayTest(unittest.TestCase):
 
                 def mark_ready(self, _asset, sheets):
                     self.sheets = sheets
-                    return None
 
             def emit_sheets(command, **_kwargs):
                 output_pattern = Path(command[-1])
@@ -398,9 +396,7 @@ class TrickplayTest(unittest.TestCase):
 
             self.assertIsNotNone(store.sheets)
             self.assertEqual(len(store.sheets), 7)
-            self.assertEqual(
-                [sheet["frameCount"] for sheet in store.sheets], [100] * 7
-            )
+            self.assertEqual([sheet["frameCount"] for sheet in store.sheets], [100] * 7)
             self.assertTrue(all(sheet["frameCount"] > 0 for sheet in store.sheets))
 
     def test_manifest_reports_actual_frame_total(self):
@@ -465,7 +461,9 @@ class TrickplayTest(unittest.TestCase):
                 );
                 """
             )
-            db.connection.execute("INSERT INTO libraries VALUES(?,?)", ("library", "D:/media"))
+            db.connection.execute(
+                "INSERT INTO libraries VALUES(?,?)", ("library", "D:/media")
+            )
             candidates = [
                 ("valid", "media", "h264", "1"),
                 ("no-codec", "media", "", "2"),
@@ -507,7 +505,9 @@ class TrickplayTest(unittest.TestCase):
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed["mediaFileId"], "valid")
             self.assertIsNone(store.claim_next())
-            states = dict(db.execute("SELECT media_file_id,state FROM trickplay_assets"))
+            states = dict(
+                db.execute("SELECT media_file_id,state FROM trickplay_assets")
+            )
             self.assertEqual(states["valid"], "generating")
             self.assertEqual(states["no-codec"], "queued")
             self.assertEqual(states["non-playable"], "queued")
@@ -655,7 +655,9 @@ class TrickplayTest(unittest.TestCase):
             "completed", {values.get("state") for _, values in job_store.updates}
         )
 
-    def test_extraction_progress_expands_for_assets_claimed_after_initial_snapshot(self):
+    def test_extraction_progress_expands_for_assets_claimed_after_initial_snapshot(
+        self,
+    ):
         class Database:
             db_file = "orchestrator.db"
 
@@ -717,8 +719,7 @@ class TrickplayTest(unittest.TestCase):
         self.assertTrue(progress_updates)
         self.assertTrue(
             all(
-                values["progress_stage_current"]
-                <= values["progress_stage_total"]
+                values["progress_stage_current"] <= values["progress_stage_total"]
                 for values in progress_updates
             )
         )

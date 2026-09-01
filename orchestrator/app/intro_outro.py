@@ -365,8 +365,7 @@ class IntroOutroStore:
 
     def claim_next(self) -> dict | None:
         source_columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(media_sources)")
+            row[1] for row in self.db.execute("PRAGMA table_info(media_sources)")
         }
         probe_payload_select = (
             ",source.probe_payload" if "probe_payload" in source_columns else ""
@@ -1048,7 +1047,9 @@ class IntroOutroDetector:
                     )
                     outro_start = max(0.0, duration - outro_duration)
                     if audio_end is not None:
-                        outro_duration = max(0.0, min(duration, audio_end) - outro_start)
+                        outro_duration = max(
+                            0.0, min(duration, audio_end) - outro_start
+                        )
                     window_errors: list[str] = []
 
                     def fingerprint_window(

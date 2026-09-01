@@ -4,7 +4,6 @@ import json
 import math
 from fractions import Fraction
 
-
 MIN_EFFECTIVE_VIDEO_DURATION_SECONDS = 0.1
 
 
@@ -63,9 +62,7 @@ def stream_duration_seconds(
             return max(0.0, duration)
     tags = stream.get("tags")
     if isinstance(tags, dict):
-        duration = _tag_duration_seconds(
-            tags.get("DURATION") or tags.get("duration")
-        )
+        duration = _tag_duration_seconds(tags.get("DURATION") or tags.get("duration"))
         if duration is not None:
             return max(0.0, duration)
     return fallback
@@ -92,9 +89,7 @@ def _is_enabled(value: object) -> bool:
 
 def is_attached_picture(stream: dict) -> bool:
     disposition = stream.get("disposition")
-    if isinstance(disposition, dict) and _is_enabled(
-        disposition.get("attached_pic")
-    ):
+    if isinstance(disposition, dict) and _is_enabled(disposition.get("attached_pic")):
         return True
     tags = stream.get("tags")
     if not isinstance(tags, dict):
@@ -115,9 +110,7 @@ def is_usable_video_stream(
         return False
     width = _finite_float(stream.get("width"))
     height = _finite_float(stream.get("height"))
-    if (width is not None and width <= 0) or (
-        height is not None and height <= 0
-    ):
+    if (width is not None and width <= 0) or (height is not None and height <= 0):
         return False
     duration = stream_duration_seconds(stream, container_duration_seconds)
     return duration is None or duration > MIN_EFFECTIVE_VIDEO_DURATION_SECONDS

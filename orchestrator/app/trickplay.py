@@ -167,8 +167,7 @@ class TrickplayStore:
             scope = " AND e.library_id=?"
             params.append(library_id)
         source_columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(media_sources)")
+            row[1] for row in self.db.execute("PRAGMA table_info(media_sources)")
         }
         probe_payload_select = (
             ",s.probe_payload" if "probe_payload" in source_columns else ""
@@ -307,12 +306,10 @@ class TrickplayStore:
 
     def claim_next(self) -> dict | None:
         source_columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(media_sources)")
+            row[1] for row in self.db.execute("PRAGMA table_info(media_sources)")
         }
         asset_columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(trickplay_assets)")
+            row[1] for row in self.db.execute("PRAGMA table_info(trickplay_assets)")
         }
         has_sheets = bool(
             self.db.execute(
@@ -342,9 +339,7 @@ class TrickplayStore:
                 if not row:
                     return None
                 probe_payload = row[10] if probe_payload_select else None
-                video_stream = _probe_video_stream(
-                    probe_payload, row[7], row[6]
-                )
+                video_stream = _probe_video_stream(probe_payload, row[7], row[6])
                 if video_stream is not None:
                     break
                 cursor.execute(
@@ -489,9 +484,7 @@ class TrickplayExtractor:
         else:
             color_filter = "format=yuv420p"
         padding_seconds = interval * FRAMES_PER_SHEET
-        output_sheets = expected_sheet_count(
-            asset.get("durationSeconds"), interval
-        )
+        output_sheets = expected_sheet_count(asset.get("durationSeconds"), interval)
         stream_index_value = asset.get("videoStreamIndex")
         map_value = (
             f"0:{int(stream_index_value)}"

@@ -162,7 +162,9 @@ class TrickplayTest(unittest.TestCase):
                 );
                 """
             )
-            db.connection.execute("INSERT INTO libraries VALUES(?,?)", ("library", "D:/media"))
+            db.connection.execute(
+                "INSERT INTO libraries VALUES(?,?)", ("library", "D:/media")
+            )
             candidates = [
                 ("valid", "media", "h264", "1"),
                 ("no-codec", "media", "", "2"),
@@ -204,7 +206,9 @@ class TrickplayTest(unittest.TestCase):
             self.assertIsNotNone(claimed)
             self.assertEqual(claimed["mediaFileId"], "valid")
             self.assertIsNone(store.claim_next())
-            states = dict(db.execute("SELECT media_file_id,state FROM trickplay_assets"))
+            states = dict(
+                db.execute("SELECT media_file_id,state FROM trickplay_assets")
+            )
             self.assertEqual(states["valid"], "generating")
             self.assertEqual(states["no-codec"], "skipped")
             self.assertEqual(states["non-playable"], "queued")
@@ -240,9 +244,7 @@ class TrickplayTest(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         self.assertEqual(stream_index(selected), 2)
-        self.assertIsNone(
-            select_usable_video_stream(streams[:1], 1200)
-        )
+        self.assertIsNone(select_usable_video_stream(streams[:1], 1200))
 
     @patch("app.trickplay.ffmpeg_path", return_value="ffmpeg")
     def test_command_letterboxes_every_frame_before_tiling(self, _ffmpeg):
@@ -409,7 +411,9 @@ class TrickplayTest(unittest.TestCase):
             "completed", {values.get("state") for _, values in job_store.updates}
         )
 
-    def test_extraction_progress_expands_for_assets_claimed_after_initial_snapshot(self):
+    def test_extraction_progress_expands_for_assets_claimed_after_initial_snapshot(
+        self,
+    ):
         class Database:
             db_file = "orchestrator.db"
 
@@ -471,8 +475,7 @@ class TrickplayTest(unittest.TestCase):
         self.assertTrue(progress_updates)
         self.assertTrue(
             all(
-                values["progress_stage_current"]
-                <= values["progress_stage_total"]
+                values["progress_stage_current"] <= values["progress_stage_total"]
                 for values in progress_updates
             )
         )

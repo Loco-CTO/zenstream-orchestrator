@@ -368,7 +368,11 @@ class SyncplayGroup:
         row = cursor.fetchone()
         if not row or sequence <= row[0] or not row[1]:
             return False
-        loading = bool(state["itemId"] is not None) if pause_room else bool(viewing and loading)
+        loading = (
+            bool(state["itemId"] is not None)
+            if pause_room
+            else bool(viewing and loading)
+        )
         cursor.execute(
             "UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND user_id=? AND participant_id=?",
             (

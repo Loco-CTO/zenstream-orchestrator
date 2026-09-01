@@ -5,10 +5,117 @@ import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.media_probe import select_usable_video_stream, stream_index
-from app.trickplay import FRAMES_PER_SHEET, TrickplayExtractor, TrickplayStore
+from app.trickplay import (
+    FRAMES_PER_SHEET,
+    TrickplayExtractor,
+    TrickplayStore,
+    _build_sheet_rows,
+    _expected_frame_count,
+)
+
+
+class _Database:
+    def __init__(self, root):
+        self.db_file = str(root / "orchestrator.db")
+        self.connection = sqlite3.connect(self.db_file)
+
+    def execute(self, query, params=None):
+        cursor = self.connection.execute(query, params or ())
+        rows = cursor.fetchall()
+        self.connection.commit()
+        return rows
+
+    @contextmanager
+    def transaction(self):
+        cursor = self.connection.cursor()
+        try:
+            yield cursor
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
+def _create_trickplay_schema(db):
+    db.connection.executescript(
+        """
+        CREATE TABLE media_files (
+            id TEXT PRIMARY KEY, entity_id TEXT, quick_fingerprint TEXT,
+            size INTEGER, modified_ns INTEGER, role TEXT
+        );
+        CREATE TABLE library_entities (id TEXT PRIMARY KEY, library_id TEXT);
+        CREATE TABLE media_sources (
+            id TEXT PRIMARY KEY, entity_id TEXT, media_file_id TEXT,
+            video_codec TEXT, duration_seconds REAL
+        );
+        CREATE TABLE trickplay_assets (
+            media_file_id TEXT PRIMARY KEY, entity_id TEXT, source_fingerprint TEXT,
+            frame_width INTEGER, frame_height INTEGER, interval_seconds INTEGER,
+            state TEXT, output_key TEXT, error TEXT, created_at TEXT, updated_at TEXT
+        );
+        CREATE TABLE trickplay_sheets (
+            media_file_id TEXT, output_key TEXT, sheet_index INTEGER,
+            first_frame INTEGER, frame_count INTEGER, relative_path TEXT
+        );
+        """
+    )
+
+
+def _insert_ready_asset(db, rows, duration_seconds=7002.015):
+    media_file_id = "media"
+    entity_id = "entity"
+    output_key = "output-key"
+    db.connection.execute(
+        "INSERT INTO media_files VALUES(?,?,?,?,?,?)",
+        (media_file_id, entity_id, "fingerprint", 100, 1, "media"),
+    )
+    db.connection.execute(
+        "INSERT INTO library_entities VALUES(?,?)", (entity_id, "library")
+    )
+    db.connection.execute(
+        "INSERT INTO media_sources VALUES(?,?,?,?,?)",
+        ("source", entity_id, media_file_id, "h264", duration_seconds),
+    )
+    db.connection.execute(
+        "INSERT INTO trickplay_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            media_file_id,
+            entity_id,
+            "fingerprint",
+            320,
+            180,
+            10,
+            "ready",
+            output_key,
+            None,
+            "created",
+            "updated",
+        ),
+    )
+    for index, frame_count in enumerate(rows):
+        relative_path = f"{media_file_id}/{output_key}/sheet-{index:05d}.webp"
+        db.connection.execute(
+            "INSERT INTO trickplay_sheets VALUES(?,?,?,?,?,?)",
+            (
+                media_file_id,
+                output_key,
+                index,
+                index * FRAMES_PER_SHEET,
+                frame_count,
+                relative_path,
+            ),
+        )
+        path = Path(db.db_file).parent / "trickplay-cache" / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"webp")
+    db.connection.commit()
+    return media_file_id, entity_id, output_key
 
 
 class TrickplayTest(unittest.TestCase):
@@ -67,14 +174,17 @@ class TrickplayTest(unittest.TestCase):
                     (media_file_id, entity_id, fingerprint, 100, 1, "media"),
                 )
                 db.connection.execute(
-                    "INSERT INTO library_entities VALUES(?,?)", (entity_id, library_id)
+                    "INSERT INTO library_entities VALUES(?,?)",
+                    (entity_id, library_id),
                 )
                 db.connection.execute(
                     "INSERT INTO media_sources VALUES(?,?,?)",
                     (media_file_id, "h264", 10),
                 )
             for state, entity_id, fingerprint, _library_id in media[:-1]:
-                output_key = f"{state}-key" if state in {"ready", "invalid"} else None
+                output_key = (
+                    f"{state}-key" if state in {"ready", "invalid"} else None
+                )
                 db.connection.execute(
                     "INSERT INTO trickplay_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (
@@ -92,7 +202,9 @@ class TrickplayTest(unittest.TestCase):
                     ),
                 )
                 if output_key:
-                    relative_path = f"{state}/{output_key}/sheet-00000.webp"
+                    relative_path = (
+                        f"{state}/{output_key}/sheet-00000.webp"
+                    )
                     db.connection.execute(
                         "INSERT INTO trickplay_sheets VALUES(?,?,?,?,?,?)",
                         (state, output_key, 0, 0, 1, relative_path),
@@ -107,7 +219,9 @@ class TrickplayTest(unittest.TestCase):
 
             self.assertEqual(queued, 4)
             states = dict(
-                db.execute("SELECT media_file_id,state FROM trickplay_assets")
+                db.execute(
+                    "SELECT media_file_id,state FROM trickplay_assets"
+                )
             )
             self.assertEqual(states["ready"], "ready")
             self.assertEqual(states["invalid"], "queued")
@@ -115,6 +229,252 @@ class TrickplayTest(unittest.TestCase):
             self.assertEqual(states["failed"], "queued")
             self.assertEqual(states["generating"], "generating")
             self.assertEqual(states["missing"], "queued")
+            db.connection.close()
+
+    def test_sheet_rows_allow_a_single_duration_rounding_sample(self):
+        expected_frames = _expected_frame_count(7002.015, 10)
+
+        self.assertEqual(expected_frames, 701)
+
+        short_rows = _build_sheet_rows("media", "key", expected_frames, 7)
+        self.assertEqual(len(short_rows), 7)
+        self.assertEqual(
+            [row["frameCount"] for row in short_rows],
+            [100] * 7,
+        )
+
+        partial_rows = _build_sheet_rows("media", "key", expected_frames, 8)
+        self.assertEqual(len(partial_rows), 8)
+        self.assertEqual(
+            [row["frameCount"] for row in partial_rows],
+            [100] * 7 + [1],
+        )
+
+    def test_ready_validation_accepts_full_and_single_frame_final_sheets(self):
+        for frame_counts in ([100] * 7, [100] * 7 + [1]):
+            with (
+                self.subTest(frame_counts=frame_counts),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                db = _Database(Path(temporary))
+                _create_trickplay_schema(db)
+                _insert_ready_asset(db, frame_counts)
+
+                self.assertTrue(
+                    TrickplayStore(db)._ready_output_valid(
+                        "media",
+                        "output-key",
+                        7002.015,
+                        10,
+                    )
+                )
+                db.connection.close()
+
+    def test_queue_pending_preserves_ready_cache_short_by_one_frame(self):
+        settings = {
+            "trickplayFrameWidth": 320,
+            "trickplayFrameHeight": 180,
+            "trickplayIntervalSeconds": 10,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            db = _Database(Path(temporary))
+            _create_trickplay_schema(db)
+            media_file_id, _, _ = _insert_ready_asset(db, [100] * 7)
+
+            queued = TrickplayStore(db).queue_pending(settings=settings)
+
+            self.assertEqual(queued, 0)
+            self.assertEqual(
+                db.execute(
+                    "SELECT state FROM trickplay_assets WHERE media_file_id=?",
+                    (media_file_id,),
+                ),
+                [("ready",)],
+            )
+            db.connection.close()
+
+    def test_ready_validation_rejects_structurally_invalid_or_truncated_output(
+        self,
+    ):
+        cases = {
+            "missing full sheet": [100] * 6,
+            "partial non-final sheet": [99] + [100] * 6,
+            "deficit greater than one": [100] * 6 + [99],
+            "negative frame count": [100] * 6 + [-1],
+            "too many frames": [100] * 6 + [101],
+            "zero frame sheet": [100] * 6 + [0],
+        }
+        for label, frame_counts in cases.items():
+            with (
+                self.subTest(label=label),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                db = _Database(Path(temporary))
+                _create_trickplay_schema(db)
+                _insert_ready_asset(db, frame_counts)
+
+                self.assertFalse(
+                    TrickplayStore(db)._ready_output_valid(
+                        "media",
+                        "output-key",
+                        7002.015,
+                        10,
+                    )
+                )
+                db.connection.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            db = _Database(Path(temporary))
+            _create_trickplay_schema(db)
+            _insert_ready_asset(db, [100] * 7)
+            db.connection.execute(
+                "UPDATE trickplay_sheets SET sheet_index=2 "
+                "WHERE media_file_id=? AND sheet_index=1",
+                ("media",),
+            )
+            db.connection.commit()
+
+            self.assertFalse(
+                TrickplayStore(db)._ready_output_valid(
+                    "media",
+                    "output-key",
+                    7002.015,
+                    10,
+                )
+            )
+            db.connection.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            db = _Database(root)
+            _create_trickplay_schema(db)
+            _insert_ready_asset(db, [100] * 7)
+            outside = root / "outside.webp"
+            outside.write_bytes(b"webp")
+            db.connection.execute(
+                "UPDATE trickplay_sheets SET relative_path='../outside.webp' "
+                "WHERE media_file_id=? AND sheet_index=0",
+                ("media",),
+            )
+            db.connection.commit()
+
+            self.assertFalse(
+                TrickplayStore(db)._ready_output_valid(
+                    "media",
+                    "output-key",
+                    7002.015,
+                    10,
+                )
+            )
+            db.connection.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            db = _Database(Path(temporary))
+            _create_trickplay_schema(db)
+            _insert_ready_asset(db, [100] * 7)
+            missing = (
+                Path(db.db_file).parent
+                / "trickplay-cache"
+                / "media/output-key/sheet-00006.webp"
+            )
+            missing.unlink()
+
+            self.assertFalse(
+                TrickplayStore(db)._ready_output_valid(
+                    "media",
+                    "output-key",
+                    7002.015,
+                    10,
+                )
+            )
+            db.connection.close()
+
+    def test_extraction_persists_emitted_sheet_capacity_without_zero_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "media.mkv"
+            source.write_bytes(b"media")
+
+            class Store:
+                def __init__(self):
+                    self.db = SimpleNamespace(
+                        db_file=str(root / "orchestrator.db")
+                    )
+                    self.sheets = None
+
+                @staticmethod
+                def output_key(
+                    _fingerprint,
+                    _width,
+                    _height,
+                    _interval,
+                ):
+                    return "output-key"
+
+                def mark_ready(self, _asset, sheets):
+                    self.sheets = sheets
+
+            def emit_sheets(command, **_kwargs):
+                output_pattern = Path(command[-1])
+                output_pattern.parent.mkdir(parents=True, exist_ok=True)
+                for index in range(7):
+                    (
+                        output_pattern.parent
+                        / f"sheet-{index:05d}.webp"
+                    ).write_bytes(b"webp")
+
+            store = Store()
+            extractor = TrickplayExtractor(store)
+            asset = {
+                "mediaFileId": "media",
+                "fingerprint": "fingerprint",
+                "width": 320,
+                "height": 180,
+                "intervalSeconds": 10,
+                "durationSeconds": 7002.015,
+                "path": source,
+            }
+            with patch(
+                "app.trickplay.run_ffmpeg",
+                side_effect=emit_sheets,
+            ):
+                extractor.extract(asset)
+
+            self.assertIsNotNone(store.sheets)
+            self.assertEqual(len(store.sheets), 7)
+            self.assertEqual(
+                [sheet["frameCount"] for sheet in store.sheets],
+                [100] * 7,
+            )
+            self.assertTrue(
+                all(
+                    sheet["frameCount"] > 0
+                    for sheet in store.sheets
+                )
+            )
+
+    def test_manifest_reports_actual_frame_total(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            db = _Database(Path(temporary))
+            _create_trickplay_schema(db)
+            _insert_ready_asset(db, [100] * 7)
+
+            with patch(
+                "app.trickplay.issue_ticket",
+                return_value="ticket",
+            ):
+                manifest = TrickplayExtractor(
+                    TrickplayStore(db)
+                ).manifest("user", "entity")
+
+            self.assertEqual(manifest["frameCount"], 700)
+            self.assertEqual(
+                [
+                    sheet["frameCount"]
+                    for sheet in manifest["sheets"]
+                ],
+                [100] * 7,
+            )
             db.connection.close()
 
     def test_claim_next_only_claims_playable_sources_with_a_video_codec(self):
@@ -163,7 +523,8 @@ class TrickplayTest(unittest.TestCase):
                 """
             )
             db.connection.execute(
-                "INSERT INTO libraries VALUES(?,?)", ("library", "D:/media")
+                "INSERT INTO libraries VALUES(?,?)",
+                ("library", "D:/media"),
             )
             candidates = [
                 ("valid", "media", "h264", "1"),
@@ -178,11 +539,21 @@ class TrickplayTest(unittest.TestCase):
                 )
                 db.connection.execute(
                     "INSERT INTO media_files VALUES(?,?,?,?)",
-                    (media_file_id, entity_id, f"{media_file_id}.mkv", role),
+                    (
+                        media_file_id,
+                        entity_id,
+                        f"{media_file_id}.mkv",
+                        role,
+                    ),
                 )
                 db.connection.execute(
                     "INSERT INTO media_sources VALUES(?,?,?,?)",
-                    (f"source-{media_file_id}", media_file_id, 10, video_codec),
+                    (
+                        f"source-{media_file_id}",
+                        media_file_id,
+                        10,
+                        video_codec,
+                    ),
                 )
                 db.connection.execute(
                     "INSERT INTO trickplay_assets VALUES(?,?,?,?,?,?,?,?,?)",
@@ -207,14 +578,18 @@ class TrickplayTest(unittest.TestCase):
             self.assertEqual(claimed["mediaFileId"], "valid")
             self.assertIsNone(store.claim_next())
             states = dict(
-                db.execute("SELECT media_file_id,state FROM trickplay_assets")
+                db.execute(
+                    "SELECT media_file_id,state FROM trickplay_assets"
+                )
             )
             self.assertEqual(states["valid"], "generating")
             self.assertEqual(states["no-codec"], "skipped")
             self.assertEqual(states["non-playable"], "queued")
             db.connection.close()
 
-    def test_video_stream_selection_ignores_attached_and_zero_duration_video(self):
+    def test_video_stream_selection_ignores_attached_and_zero_duration_video(
+        self,
+    ):
         streams = [
             {
                 "index": 0,
@@ -244,7 +619,9 @@ class TrickplayTest(unittest.TestCase):
 
         self.assertIsNotNone(selected)
         self.assertEqual(stream_index(selected), 2)
-        self.assertIsNone(select_usable_video_stream(streams[:1], 1200))
+        self.assertIsNone(
+            select_usable_video_stream(streams[:1], 1200)
+        )
 
     @patch("app.trickplay.ffmpeg_path", return_value="ffmpeg")
     def test_command_letterboxes_every_frame_before_tiling(self, _ffmpeg):
@@ -267,11 +644,23 @@ class TrickplayTest(unittest.TestCase):
             "tile=10x10:padding=0:margin=0",
         )
         self.assertEqual(FRAMES_PER_SHEET, 100)
-        self.assertEqual(command[command.index("-c:v") + 1], "libwebp")
-        self.assertEqual(command[command.index("-quality") + 1], "85")
-        self.assertEqual(command[command.index("-threads") + 1], "4")
+        self.assertEqual(
+            command[command.index("-c:v") + 1],
+            "libwebp",
+        )
+        self.assertEqual(
+            command[command.index("-quality") + 1],
+            "85",
+        )
+        self.assertEqual(
+            command[command.index("-threads") + 1],
+            "4",
+        )
         self.assertIn("-nostdin", command)
-        self.assertEqual(command[command.index("-compression_level") + 1], "5")
+        self.assertEqual(
+            command[command.index("-compression_level") + 1],
+            "5",
+        )
         self.assertIn("-progress", command)
         automatic = TrickplayExtractor.command(
             {
@@ -283,7 +672,10 @@ class TrickplayTest(unittest.TestCase):
             Path("sheet-%05d.webp"),
             0,
         )
-        self.assertEqual(automatic[automatic.index("-threads") + 1], "0")
+        self.assertEqual(
+            automatic[automatic.index("-threads") + 1],
+            "0",
+        )
 
         hdr = TrickplayExtractor.command(
             {
@@ -303,8 +695,14 @@ class TrickplayTest(unittest.TestCase):
         self.assertIn("zscale=matrixin=bt2020c", hdr_graph)
         self.assertIn("format=yuv420p", hdr_graph)
         self.assertIn("tpad=stop_mode=clone", hdr_graph)
-        self.assertEqual(hdr[hdr.index("-map") + 1], "0:3")
-        self.assertEqual(hdr[hdr.index("-frames:v") + 1], "2")
+        self.assertEqual(
+            hdr[hdr.index("-map") + 1],
+            "0:3",
+        )
+        self.assertEqual(
+            hdr[hdr.index("-frames:v") + 1],
+            "2",
+        )
 
     def test_output_keys_change_for_source_or_extraction_settings(self):
         self.assertNotEqual(
@@ -337,7 +735,9 @@ class TrickplayTest(unittest.TestCase):
             self.assertTrue((cache / "present").is_dir())
             self.assertFalse((cache / "missing").exists())
 
-    def test_extraction_uses_configured_workers_and_claims_each_asset_once(self):
+    def test_extraction_uses_configured_workers_and_claims_each_asset_once(
+        self,
+    ):
         class Database:
             db_file = "orchestrator.db"
 
@@ -349,7 +749,10 @@ class TrickplayTest(unittest.TestCase):
             def __init__(self):
                 self.db = Database()
                 self.lock = threading.Lock()
-                self.assets = [{"mediaFileId": f"media-{index}"} for index in range(4)]
+                self.assets = [
+                    {"mediaFileId": f"media-{index}"}
+                    for index in range(4)
+                ]
                 self.processed = []
 
             @staticmethod
@@ -361,7 +764,11 @@ class TrickplayTest(unittest.TestCase):
 
             def claim_next(self):
                 with self.lock:
-                    return self.assets.pop(0) if self.assets else None
+                    return (
+                        self.assets.pop(0)
+                        if self.assets
+                        else None
+                    )
 
             @staticmethod
             def mark_failed(asset, error):
@@ -395,20 +802,30 @@ class TrickplayTest(unittest.TestCase):
 
         extractor.extract = extract
         with patch(
-            "app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 2}
+            "app.trickplay.PlaybackSettings.get",
+            return_value={"trickplayWorkers": 2},
         ):
             extractor.run("run", job_store)
-        self.assertEqual(set(store.processed), {f"media-{index}" for index in range(4)})
+        self.assertEqual(
+            set(store.processed),
+            {f"media-{index}" for index in range(4)},
+        )
         self.assertEqual(len(store.processed), 4)
         self.assertEqual(maximum, 2)
         self.assertTrue(job_store.updates)
-        self.assertTrue(all(run_id == "run" for run_id, _ in job_store.updates))
-        self.assertIn(
-            "extraction",
-            {values.get("progress_phase") for _, values in job_store.updates},
+        self.assertTrue(
+            all(run_id == "run" for run_id, _ in job_store.updates)
         )
         self.assertIn(
-            "completed", {values.get("state") for _, values in job_store.updates}
+            "extraction",
+            {
+                values.get("progress_phase")
+                for _, values in job_store.updates
+            },
+        )
+        self.assertIn(
+            "completed",
+            {values.get("state") for _, values in job_store.updates},
         )
 
     def test_extraction_progress_expands_for_assets_claimed_after_initial_snapshot(
@@ -442,7 +859,11 @@ class TrickplayTest(unittest.TestCase):
 
             def claim_next(self):
                 with self.lock:
-                    return self.assets.pop(0) if self.assets else None
+                    return (
+                        self.assets.pop(0)
+                        if self.assets
+                        else None
+                    )
 
             @staticmethod
             def mark_failed(asset, error):
@@ -462,7 +883,8 @@ class TrickplayTest(unittest.TestCase):
         extractor.extract = lambda asset: None
 
         with patch(
-            "app.trickplay.PlaybackSettings.get", return_value={"trickplayWorkers": 1}
+            "app.trickplay.PlaybackSettings.get",
+            return_value={"trickplayWorkers": 1},
         ):
             extractor.run("run", job_store)
 
@@ -475,9 +897,16 @@ class TrickplayTest(unittest.TestCase):
         self.assertTrue(progress_updates)
         self.assertTrue(
             all(
-                values["progress_stage_current"] <= values["progress_stage_total"]
+                values["progress_stage_current"]
+                <= values["progress_stage_total"]
                 for values in progress_updates
             )
         )
-        self.assertEqual(progress_updates[-1]["progress_stage_current"], 2)
-        self.assertEqual(progress_updates[-1]["progress_stage_total"], 2)
+        self.assertEqual(
+            progress_updates[-1]["progress_stage_current"],
+            2,
+        )
+        self.assertEqual(
+            progress_updates[-1]["progress_stage_total"],
+            2,
+        )

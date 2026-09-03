@@ -184,16 +184,19 @@ class TrickplayStore:
                 "WHERE entity.library_id=? AND library.type IN ('movies','tv_series')"
             )
             params.append(library_id)
-        if "trickplay_sheets" in tables and "trickplay_assets" in tables:
-            if library_tables.issubset(tables):
-                queries.append(
-                    "SELECT sheet.media_file_id FROM trickplay_sheets sheet "
-                    "JOIN trickplay_assets asset ON asset.media_file_id=sheet.media_file_id "
-                    "JOIN library_entities entity ON entity.id=asset.entity_id "
-                    "JOIN libraries library ON library.id=entity.library_id "
-                    "WHERE entity.library_id=? AND library.type IN ('movies','tv_series')"
-                )
-                params.append(library_id)
+        if (
+            "trickplay_sheets" in tables
+            and "trickplay_assets" in tables
+            and library_tables.issubset(tables)
+        ):
+            queries.append(
+                "SELECT sheet.media_file_id FROM trickplay_sheets sheet "
+                "JOIN trickplay_assets asset ON asset.media_file_id=sheet.media_file_id "
+                "JOIN library_entities entity ON entity.id=asset.entity_id "
+                "JOIN libraries library ON library.id=entity.library_id "
+                "WHERE entity.library_id=? AND library.type IN ('movies','tv_series')"
+            )
+            params.append(library_id)
         if not queries:
             return []
         return sorted(

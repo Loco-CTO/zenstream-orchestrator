@@ -175,11 +175,14 @@ class TrickplayTest(unittest.TestCase):
             extractor = TrickplayExtractor(TrickplayStore(db))
             result = extractor.clear_data("lib-a")
 
-            self.assertEqual(result, {
-                "removedAssets": 1,
-                "removedSheets": 1,
-                "removedCacheDirectories": 1,
-            })
+            self.assertEqual(
+                result,
+                {
+                    "removedAssets": 1,
+                    "removedSheets": 1,
+                    "removedCacheDirectories": 1,
+                },
+            )
             self.assertFalse((root / "trickplay-cache" / media_file_id).exists())
             self.assertTrue((root / "trickplay-cache" / "media-b").is_dir())
             self.assertEqual(
@@ -188,11 +191,14 @@ class TrickplayTest(unittest.TestCase):
             )
 
             result = extractor.clear_data()
-            self.assertEqual(result, {
-                "removedAssets": 1,
-                "removedSheets": 1,
-                "removedCacheDirectories": 1,
-            })
+            self.assertEqual(
+                result,
+                {
+                    "removedAssets": 1,
+                    "removedSheets": 1,
+                    "removedCacheDirectories": 1,
+                },
+            )
             self.assertEqual(db.execute("SELECT * FROM trickplay_assets"), [])
             self.assertEqual(db.execute("SELECT * FROM trickplay_sheets"), [])
             self.assertFalse((root / "trickplay-cache" / "media-b").exists())

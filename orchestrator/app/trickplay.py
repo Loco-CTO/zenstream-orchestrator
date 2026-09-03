@@ -157,7 +157,9 @@ class TrickplayStore:
         if not rows:
             raise LookupError("Library not found.")
         if rows[0][0] not in {"movies", "tv_series"}:
-            raise ValueError("Trickplay cleanup is only available for movie or TV libraries.")
+            raise ValueError(
+                "Trickplay cleanup is only available for movie or TV libraries."
+            )
 
     def media_file_ids(self, library_id: str) -> list[str]:
         """Return media IDs whose cached trickplay output belongs to a library."""
@@ -194,7 +196,9 @@ class TrickplayStore:
                 params.append(library_id)
         if not queries:
             return []
-        return sorted({str(row[0]) for row in self.db.execute(" UNION ".join(queries), params)})
+        return sorted(
+            {str(row[0]) for row in self.db.execute(" UNION ".join(queries), params)}
+        )
 
     @staticmethod
     def _id_batches(values: list[str], batch_size: int = 500):
@@ -210,7 +214,9 @@ class TrickplayStore:
         if not has_assets and not has_sheets:
             return {"removedAssets": 0, "removedSheets": 0}
 
-        media_file_ids = self.media_file_ids(library_id) if library_id is not None else []
+        media_file_ids = (
+            self.media_file_ids(library_id) if library_id is not None else []
+        )
         removed_assets = 0
         removed_sheets = 0
         with self.db.transaction() as cursor:

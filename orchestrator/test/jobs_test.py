@@ -1181,7 +1181,7 @@ class AnalysisMaintenanceTest(unittest.TestCase):
     def test_maintenance_terminates_runs_before_cleanup(self):
         scheduler = self._scheduler()
         scheduler._active_analysis_runs = MagicMock(
-            side_effect=[[('run-1', 'definition-1')], []]
+            side_effect=[[("run-1", "definition-1")], []]
         )
         scheduler.terminate = MagicMock()
         cleanup = MagicMock(return_value={"removed": 1})

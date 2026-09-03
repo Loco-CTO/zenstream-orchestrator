@@ -293,9 +293,7 @@ class IntroOutroStore:
             "queuedEpisodes": 0,
         }
 
-    def _asset_scope(
-        self, library_id: str | None
-    ) -> tuple[str, list[object]]:
+    def _asset_scope(self, library_id: str | None) -> tuple[str, list[object]]:
         if library_id is None:
             return "", []
         return (
@@ -347,7 +345,9 @@ class IntroOutroStore:
             update_values.append("error=NULL")
         if "updated_at" in asset_columns:
             update_values.append("updated_at=?")
-        update_params = ([now()] if "updated_at" in asset_columns else []) + asset_params
+        update_params = (
+            [now()] if "updated_at" in asset_columns else []
+        ) + asset_params
 
         with self.db.transaction() as cursor:
             fingerprint_row = cursor.execute(
@@ -357,11 +357,12 @@ class IntroOutroStore:
                 asset_params,
             ).fetchone()
             segment_row = cursor.execute(
-                "SELECT COUNT(*) FROM intro_outro_segments"
-                + asset_where,
+                "SELECT COUNT(*) FROM intro_outro_segments" + asset_where,
                 asset_params,
             ).fetchone()
-            removed_fingerprints = int(fingerprint_row[0] or 0) if fingerprint_row else 0
+            removed_fingerprints = (
+                int(fingerprint_row[0] or 0) if fingerprint_row else 0
+            )
             removed_segments = int(segment_row[0] or 0) if segment_row else 0
 
             invalidated_seasons = 0

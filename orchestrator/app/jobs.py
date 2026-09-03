@@ -2361,9 +2361,7 @@ class JobScheduler:
         )
         return [(str(row[0]), str(row[1])) for row in rows]
 
-    def run_analysis_maintenance(
-        self, kind: str, operation, timeout: float = 30.0
-    ):
+    def run_analysis_maintenance(self, kind: str, operation, timeout: float = 30.0):
         """Quiesce one analysis kind, run cleanup, and reopen scheduling."""
         if kind not in ANALYSIS_KINDS:
             raise ValueError("Unsupported analysis maintenance kind.")

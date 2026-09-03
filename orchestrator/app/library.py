@@ -1563,7 +1563,8 @@ class LibraryScanner:
         if len(roots) != 1 or self._scan_delta.get("removed"):
             model.refresh_roots([], affected_library_ids=[library_id])
 
-    def _refresh_calendar_links(self, library_id: str, job_id: str) -> None:
+    @staticmethod
+    def _refresh_calendar_links(library_id: str, job_id: str) -> None:
         """Keep persisted calendar/catalog relationships in sync with a scan."""
 
         try:

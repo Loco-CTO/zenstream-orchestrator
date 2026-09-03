@@ -1566,7 +1566,6 @@ class LibraryScanner:
     @staticmethod
     def _refresh_calendar_links(library_id: str, job_id: str) -> None:
         """Keep persisted calendar/catalog relationships in sync with a scan."""
-
         try:
             from app.calendar import CalendarSyncService
 

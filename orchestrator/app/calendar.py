@@ -507,7 +507,6 @@ def _catalog_entity_identities(
     tmdb_id: str | None = None,
 ) -> tuple[tuple[str, str, str], ...]:
     """Return provider identities used to link a calendar event to catalog entities."""
-
     values: list[tuple[str, str, str]] = []
     if kind == "episode":
         if tvdb_id:
@@ -559,7 +558,6 @@ class CalendarSyncService:
         that sync ran. Reconcile the complete library event set in one writer
         transaction so links and event state cannot be observed half-updated.
         """
-
         required_tables = {
             "calendar_events",
             "calendar_event_entities",

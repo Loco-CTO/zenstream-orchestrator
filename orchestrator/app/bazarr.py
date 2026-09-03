@@ -381,8 +381,6 @@ class BazarrClient:
                 return response.json()
             except ValueError as error:
                 raise BazarrError("Bazarr returned invalid JSON") from error
-        except BazarrError:
-            raise
         except (httpx.HTTPError, ValueError) as error:
             raise BazarrError(
                 f"Bazarr request failed: {type(error).__name__}"

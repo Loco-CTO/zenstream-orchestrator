@@ -290,7 +290,8 @@ class SyncplayCommandRouteTest(unittest.TestCase):
             patch.object(
                 app_module, "run_control", new=AsyncMock(side_effect=run_control_inline)
             ),
-            patch.object(app_module.hub, "broadcast", new=AsyncMock()) as broadcast,self.assertRaises(HTTPException) as raised
+            patch.object(app_module.hub, "broadcast", new=AsyncMock()) as broadcast,
+            self.assertRaises(HTTPException) as raised,
         ):
             asyncio.run(app_module.syncplay_command("group-1", _request("POST")))
 

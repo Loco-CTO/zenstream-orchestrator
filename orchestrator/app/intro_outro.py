@@ -293,7 +293,8 @@ class IntroOutroStore:
             "queuedEpisodes": 0,
         }
 
-    def _asset_scope(self, library_id: str | None) -> tuple[str, list[object]]:
+    @staticmethod
+    def _asset_scope(library_id: str | None) -> tuple[str, list[object]]:
         if library_id is None:
             return "", []
         return (

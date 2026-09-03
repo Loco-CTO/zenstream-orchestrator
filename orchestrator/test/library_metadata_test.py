@@ -56,7 +56,8 @@ class _JsonRequest:
 
 
 class LibraryMetadataTest(unittest.TestCase):
-    def test_calendar_link_maintenance_is_best_effort(self):
+    @staticmethod
+    def test_calendar_link_maintenance_is_best_effort():
         scanner = LibraryScanner.__new__(LibraryScanner)
 
         with patch("app.calendar.CalendarSyncService") as service_type:
@@ -117,7 +118,8 @@ class LibraryMetadataTest(unittest.TestCase):
                 scanner.scan("library-1", "job-3", lambda: True)
                 scanner._refresh_calendar_links.assert_not_called()
 
-    def test_successful_tv_scan_queues_bazarr_mapping_sync(self):
+    @staticmethod
+    def test_successful_tv_scan_queues_bazarr_mapping_sync():
         with tempfile.TemporaryDirectory() as directory:
             store = MagicMock()
             store.db.execute.return_value = []
@@ -156,7 +158,8 @@ class LibraryMetadataTest(unittest.TestCase):
 
             scheduler.enqueue_bazarr_sync.assert_called_once_with()
 
-    def test_successful_movie_scan_queues_bazarr_mapping_sync(self):
+    @staticmethod
+    def test_successful_movie_scan_queues_bazarr_mapping_sync():
         with tempfile.TemporaryDirectory() as directory:
             store = MagicMock()
             store.db.execute.return_value = []
@@ -195,7 +198,8 @@ class LibraryMetadataTest(unittest.TestCase):
 
             scheduler.enqueue_bazarr_sync.assert_called_once_with()
 
-    def test_unchanged_scan_does_not_queue_bazarr_mapping_sync(self):
+    @staticmethod
+    def test_unchanged_scan_does_not_queue_bazarr_mapping_sync():
         with tempfile.TemporaryDirectory() as directory:
             store = MagicMock()
             store.db.execute.return_value = []
@@ -229,7 +233,8 @@ class LibraryMetadataTest(unittest.TestCase):
 
             scheduler.enqueue_bazarr_sync.assert_not_called()
 
-    def test_subtitle_only_scan_does_not_queue_bazarr_mapping_sync(self):
+    @staticmethod
+    def test_subtitle_only_scan_does_not_queue_bazarr_mapping_sync():
         with tempfile.TemporaryDirectory() as directory:
             store = MagicMock()
             store.db.execute.return_value = []
@@ -268,7 +273,8 @@ class LibraryMetadataTest(unittest.TestCase):
 
             scheduler.enqueue_bazarr_sync.assert_not_called()
 
-    def test_removed_media_queues_bazarr_mapping_sync(self):
+    @staticmethod
+    def test_removed_media_queues_bazarr_mapping_sync():
         with tempfile.TemporaryDirectory() as directory:
             store = MagicMock()
             store.db.execute.return_value = []

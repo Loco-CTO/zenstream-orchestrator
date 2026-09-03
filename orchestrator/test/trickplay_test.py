@@ -906,7 +906,8 @@ class TrickplayTest(unittest.TestCase):
             def recover_generating():
                 return 0
 
-            def queue_pending(self, settings=None):
+            @staticmethod
+            def queue_pending(settings=None):
                 return 1
 
             def claim_next(self):

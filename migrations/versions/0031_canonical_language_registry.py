@@ -91,4 +91,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise NotImplementedError()
+    pass

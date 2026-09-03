@@ -4,180 +4,68 @@
   </a>
   <h3 align="center">ZenStream Orchestrator</h3>
   <p align="center">
-    A backend application server for <a href="https://github.com/Rystal-Team/zenstream-orchestrator">ZenStream</a>.
+    A backend application server for <a href="https://github.com/Loco-CTO/zenstream-orchestrator">ZenStream</a>.
     <br />
-    <br />  
-    <a href="https://github.com/Rystal-Team/zenstream-orchestrator/issues">Submit Issues</a>
-    · 
-    <a href="https://github.com/Rystal-Team/zenstream-orchestrator/releases">Releases</a>
+    <br />
+    <a href="https://github.com/Loco-CTO/zenstream-orchestrator/issues">Submit Issues</a>
+    ·
+    <a href="https://github.com/Loco-CTO/zenstream-orchestrator/releases">Releases</a>
   </p>
 </div>
 
 <div align="center">
 
-[![GitHub Forks](https://img.shields.io/github/forks/Rystal-Team/zenstream-orchestrator.svg?style=for-the-badge)](https://github.com/Rystal-Team/zenstream-orchestrator)
-[![GitHub Stars](https://img.shields.io/github/stars/Rystal-Team/zenstream-orchestrator.svg?style=for-the-badge)](https://github.com/Rystal-Team/zenstream-orchestrator)
-[![License](https://img.shields.io/github/license/Rystal-Team/zenstream-orchestrator.svg?style=for-the-badge)](https://github.com/Rystal-Team/zenstream-orchestrator/blob/main/LICENSE)
-[![Github Watchers](https://img.shields.io/github/watchers/Rystal-Team/zenstream-orchestrator.svg?style=for-the-badge)](https://github.com/Rystal-Team/zenstream-orchestrator)
+[![GitHub Forks](https://img.shields.io/github/forks/Loco-CTO/zenstream-orchestrator.svg?style=for-the-badge)](https://github.com/Loco-CTO/zenstream-orchestrator)
+[![GitHub Stars](https://img.shields.io/github/stars/Loco-CTO/zenstream-orchestrator.svg?style=for-the-badge)](https://github.com/Loco-CTO/zenstream-orchestrator)
+[![License](https://img.shields.io/github/license/Loco-CTO/zenstream-orchestrator.svg?style=for-the-badge)](https://github.com/Loco-CTO/zenstream-orchestrator/blob/main/LICENSE)
+[![Github Watchers](https://img.shields.io/github/watchers/Loco-CTO/zenstream-orchestrator.svg?style=for-the-badge)](https://github.com/Loco-CTO/zenstream-orchestrator)
 
 </div>
 
-## 🚀 Introduction
+## Configuration
 
-ZenStream Orchestrator is the backend for ZenStream. It manages accounts,
-libraries, metadata, playback, and Syncplay.
+Copy `.env.example` to `.env` and configure `SECRET_KEY`, `LIBRARY_PATH`, and `METADATA_PATH`. Use `ORCHESTRATOR_HOST` and `ORCHESTRATOR_PORT` to change the bind address or port. See `.env.example` for the complete list of settings.
 
-## 🪟 Windows native launcher
+## Development
 
-Windows 10/11 x64 users should use the **ZenStream Orchestrator** launcher when
-they need immediate media-library filesystem events. Docker Desktop bind mounts
-do not reliably forward Windows changes into a Linux container, while the native
-launcher lets Watchdog observe the Windows paths directly.
+Requires Python 3.14 and FFmpeg/FFprobe. Create and activate a virtual environment, install the dependencies, and run:
 
-Download either the installer or portable executable from the GitHub release.
-Both contain the backend source, a dedicated Python environment, administrator
-dashboard, FFmpeg, and FFprobe;
-Python, Node.js, Docker, and host media tools are not required. The launcher:
+```sh
+python -m venv .venv
+python -m pip install -r requirements.txt
+python orchestrator/init.py
+```
 
-- starts the API and dashboard together at `http://127.0.0.1:9088`;
-- stores configuration at
-  `%APPDATA%\zenstream-orchestrator-launcher\launcher-config.json`, protects
-  `SECRET_KEY` with Windows secure storage, and prepares the versioned launcher
-  venv beneath `%APPDATA%\zenstream-orchestrator-launcher\runtime`;
-- stores SQLite and generated caches beneath
-  `%LOCALAPPDATA%\ZenStream Orchestrator\metadata` by default;
-- shows live backend output and opens the persistent rotating log directory;
-- stores launcher stdout, stderr, and lifecycle output on demand as five
-  rotating 10 MiB `zenstream-launcher-*.ndjson` segments (50 MiB total),
-  without retaining the complete history in memory;
-- remains in the notification area when its window is closed; and
-- stops Orchestrator cleanly only when **Quit** is selected.
+## Deployment
 
-The default binding is local-only. Set `ORCHESTRATOR_HOST` to `0.0.0.0` only
-when LAN clients need access, then configure Windows Firewall and the network
-accordingly. Installer and portable builds share the same per-user settings;
-moving a portable executable after enabling **Start with Windows** requires
-registering that setting again.
+### Docker
 
-## 📦 Docker installation
+Set `SECRET_KEY`, `LIBRARY_PATH`, and `METADATA_PATH` in `.env`, then run:
 
-Docker Compose uses two separate persistent mounts:
+```sh
+docker compose up -d --build
+```
 
-- `LIBRARY_PATH` is your media directory, mounted read-only in the container at
-  `/media`.
-- `METADATA_PATH` holds the SQLite database, rotating logs, and generated
-  metadata, artwork, people, and trickplay caches. It is mounted at
-  `/app/sqlite`; native runs use the configured path directly.
+The administrator dashboard is available at `http://localhost:9088/web/` by default.
 
-These are host bind mounts, so you can use an existing directory on the host;
-no Docker named volume is required. Docker calls this a volume mount, but the
-media itself stays in the directory you choose. Keep the metadata directory
-separate from the media library and include it in your backups.
+### Native
 
-The image includes `ffmpeg` and `ffprobe`, so host media tools are not required.
-`FFMPEG_PATH` and `FFPROBE_PATH` are optional overrides for custom builds.
+Use the Development setup to run the Orchestrator directly on the host.
 
-### Windows
+## Windows launcher
 
-1. Install and start Docker Desktop, with the drive containing your media shared
-   with Docker Desktop.
-2. Copy `.env.example` to `.env` and set a long, random `SECRET_KEY`.
-3. Set paths using forward slashes. For example:
+The Windows x64 launcher starts the Orchestrator and administrator dashboard. Download the installer or portable executable from [GitHub Releases](https://github.com/Loco-CTO/zenstream-orchestrator/releases).
 
-   ```dotenv
-   LIBRARY_PATH=C:/Users/Alice/Videos
-   METADATA_PATH=C:/Users/Alice/ZenStream/metadata
-   ```
+Use the launcher's Configuration tab to set the server host and port, public web URL, metadata path, and secret key. The dashboard opens at `http://127.0.0.1:9088/web/` by default.
 
-   The library directory must already exist. Create the metadata directory if
-   you prefer not to let Docker Compose create it.
-4. Start the service:
-
-   ```powershell
-   docker compose up -d --build
-   ```
-5. Open `http://localhost:9088/web/`, sign in with the administrator credentials
-   printed in the first container startup logs, and add a physical library with
-   directory `/media` (or a subdirectory such as `/media/Movies`). Do not enter
-   the Windows host path in the dashboard.
-
-   Native Watchdog events work when the mounted storage forwards inotify. A
-   Docker Desktop Windows-host bind mounted at `/media` does not reliably
-   forward those events into the Linux container, so the existing periodic
-   library scan job is the safety net. Move the media into Linux-host storage
-   if immediate events through Docker are required.
-
-### Linux
-
-1. Install Docker Engine with the Docker Compose plugin, then copy
-   `.env.example` to `.env` and set a long, random `SECRET_KEY`.
-2. Set absolute paths owned by the account running Docker. For example:
-
-   ```dotenv
-   LIBRARY_PATH=/srv/media
-   METADATA_PATH=/var/lib/zenstream/metadata
-   ```
-
-   The container reads the library only; ensure its files are readable by the
-   container. The metadata path must be writable.
-3. Start the service and configure `/media` as the library directory in the
-   dashboard:
-
-   ```sh
-   docker compose up -d --build
-   ```
-
-Use `docker compose logs -f orchestrator` to retrieve the one-time bootstrap
-administrator credentials or diagnose a mount permission issue. Stop the
-service with `docker compose down`; this does not delete either host directory.
-
-### Native installation
-
-When running outside Docker, no mount is needed: add the host filesystem path
-directly in the administrator dashboard. Install dependencies with
-`pip install -r requirements.txt`, then run `python orchestrator/init.py`.
-
-### Building the Windows launcher
-
-From a Windows x64 PowerShell prompt with Node.js and Python 3.14 available:
+To build the launcher from Windows with Node.js 24 and Python 3.14:
 
 ```powershell
 ./scripts/build-windows.ps1 -PythonExecutable python
 ```
 
-The build verifies and stages the pinned FFmpeg binaries, exports the dashboard,
-stages the backend source with its isolated Python environment, runs launcher
-tests, serializes packaging to prevent overlapping release writers, validates
-the packaged Electron archive, and writes the
-NSIS installer, portable executable, and `SHA256SUMS.txt` beneath
-`launcher/release/`. Generated FFmpeg binaries, Python build directories, and
-release outputs are intentionally untracked.
+The installer, portable executable, and `SHA256SUMS.txt` are written to `launcher/release/`.
 
-Database schema changes are managed with Alembic. The server automatically runs
-`alembic upgrade head` during startup; to apply migrations manually, run:
+## License
 
-```sh
-alembic -c alembic.ini upgrade head
-```
-
-## 🖥️ For Developers
-
-When the public `zenstream` web client is deployed separately from the
-administrator dashboard, set the launcher's **Public web URL** setting to the
-public web origin (for example `http://localhost:9086`). Invite links then
-target `/register` on that origin; they never target the dashboard's `/web`
-routes. The configured public web origin is automatically allowed to call the
-API; use `CORS_ORIGINS` for additional browser origins.
-
-Please see [`DEVELOPER`](/DEVELOPER.md) for more information.
-
-## 📜 License
-
-Distributed under the GNU Affero General Public License v3 or later (AGPL-3.0-or-later). See [`LICENSE`](/LICENSE) for more information.
-<br>
-<br>
-<br>
-
-<div align="center">
-	<p><small>Copyright © 2026 <a href="https://rystal.net">Rystal</a>.</small></p>
-</div>
+AGPL-3.0-or-later. See [LICENSE](LICENSE).

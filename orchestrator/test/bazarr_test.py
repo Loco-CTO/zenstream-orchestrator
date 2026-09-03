@@ -798,12 +798,11 @@ class BazarrMappingCacheTest(unittest.TestCase):
         with (
             patch("app.bazarr._target", return_value=target),
             patch("app.bazarr.read_ticket", return_value=payload),
-            patch("app.bazarr._find_mapped_target", return_value={"movieId": 42}),
+            patch("app.bazarr._find_mapped_target", return_value={"movieId": 42}),self.assertRaises(HTTPException) as error
         ):
-            with self.assertRaises(HTTPException) as error:
-                BazarrSubtitleService().download(
-                    "user", "movie", "source", "movie-ticket"
-                )
+            BazarrSubtitleService().download(
+                "user", "movie", "source", "movie-ticket"
+            )
         self.assertEqual(error.exception.status_code, 409)
 
     def test_settings_save_queues_mapping_sync(self):

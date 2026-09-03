@@ -173,11 +173,11 @@ Please see [`DEVELOPER`](/DEVELOPER.md) for more information.
 
 ## 📜 License
 
-Distributed under the GPL-3.0 license. See [`LICENSE`](/LICENSE) for more information.
+Distributed under the GNU Affero General Public License v3 or later (AGPL-3.0-or-later). See [`LICENSE`](/LICENSE) for more information.
 <br>
 <br>
 <br>
 
 <div align="center">
-	<p><small>Copyright © 2026 <a href="https://rystal.net">Rystal</a>. All rights reserved.</small></p>
+	<p><small>Copyright © 2026 <a href="https://rystal.net">Rystal</a>.</small></p>
 </div>

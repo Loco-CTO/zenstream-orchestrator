@@ -119,6 +119,91 @@ def _insert_ready_asset(db, rows, duration_seconds=7002.015):
 
 
 class TrickplayTest(unittest.TestCase):
+    def test_cleanup_scopes_rows_and_cache_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            db = _Database(root)
+            _create_trickplay_schema(db)
+            db.connection.executescript(
+                """
+                CREATE TABLE libraries (id TEXT PRIMARY KEY, type TEXT NOT NULL);
+                INSERT INTO libraries VALUES('lib-a','movies');
+                INSERT INTO libraries VALUES('lib-b','tv_series');
+                """
+            )
+            media_file_id, entity_id, _output_key = _insert_ready_asset(db, [1])
+            db.connection.execute(
+                "UPDATE library_entities SET library_id='lib-a' WHERE id=?",
+                (entity_id,),
+            )
+            db.connection.execute(
+                "INSERT INTO media_files VALUES(?,?,?,?,?,?)",
+                ("media-b", "entity-b", "fingerprint-b", 100, 1, "media"),
+            )
+            db.connection.execute(
+                "INSERT INTO library_entities VALUES(?,?)", ("entity-b", "lib-b")
+            )
+            db.connection.execute(
+                "INSERT INTO media_sources VALUES(?,?,?,?,?)",
+                ("source-b", "entity-b", "media-b", "h264", 10),
+            )
+            db.connection.execute(
+                "INSERT INTO trickplay_assets VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "media-b",
+                    "entity-b",
+                    "fingerprint-b",
+                    320,
+                    180,
+                    10,
+                    "ready",
+                    "output-b",
+                    None,
+                    "created",
+                    "updated",
+                ),
+            )
+            db.connection.execute(
+                "INSERT INTO trickplay_sheets VALUES(?,?,?,?,?,?)",
+                ("media-b", "output-b", 0, 0, 1, "media-b/output-b/sheet.webp"),
+            )
+            b_path = root / "trickplay-cache" / "media-b" / "output-b" / "sheet.webp"
+            b_path.parent.mkdir(parents=True)
+            b_path.write_bytes(b"webp")
+            db.connection.commit()
+
+            extractor = TrickplayExtractor(TrickplayStore(db))
+            result = extractor.clear_data("lib-a")
+
+            self.assertEqual(
+                result,
+                {
+                    "removedAssets": 1,
+                    "removedSheets": 1,
+                    "removedCacheDirectories": 1,
+                },
+            )
+            self.assertFalse((root / "trickplay-cache" / media_file_id).exists())
+            self.assertTrue((root / "trickplay-cache" / "media-b").is_dir())
+            self.assertEqual(
+                db.execute("SELECT media_file_id FROM trickplay_assets"),
+                [("media-b",)],
+            )
+
+            result = extractor.clear_data()
+            self.assertEqual(
+                result,
+                {
+                    "removedAssets": 1,
+                    "removedSheets": 1,
+                    "removedCacheDirectories": 1,
+                },
+            )
+            self.assertEqual(db.execute("SELECT * FROM trickplay_assets"), [])
+            self.assertEqual(db.execute("SELECT * FROM trickplay_sheets"), [])
+            self.assertFalse((root / "trickplay-cache" / "media-b").exists())
+            db.connection.close()
+
     def test_queue_pending_repairs_global_incomplete_backlog(self):
         class Database:
             def __init__(self, root):

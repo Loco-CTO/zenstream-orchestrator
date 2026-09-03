@@ -18,6 +18,7 @@ type Task = {
 	lastMessage?: string | null;
 	nextRunAt?: string | null;
 };
+type Library = { id: string; name: string; type: string };
 type Settings = {
 	scanOnAdded: boolean;
 	analysisPercent: number;
@@ -90,6 +91,11 @@ export default function IntroOutroPage() {
 	const [session, setSession] = useState<Session | null>(null);
 	const [settings, setSettings] = useState<Settings>(defaults);
 	const [task, setTask] = useState<Task | null>(null);
+	const [libraries, setLibraries] = useState<Library[]>([]);
+	const [libraryId, setLibraryId] = useState("");
+	const [dataType, setDataType] = useState<"fingerprints" | "segments">(
+		"segments",
+	);
 	const [saving, setSaving] = useState(false);
 	const [clearing, setClearing] = useState(false);
 	const [confirmClear, setConfirmClear] = useState(false);
@@ -105,10 +111,25 @@ export default function IntroOutroPage() {
 		setSettings({ ...defaults, ...value });
 		setTask(value.task || null);
 	}, []);
+	async function loadLibraries(current: Session) {
+		const response = await adminFetch("/api/admin/libraries", current);
+		if (!response.ok) return;
+		const value = await response.json().catch(() => []);
+		setLibraries(
+			Array.isArray(value)
+				? value.filter(
+						(library): library is Library => library?.type === "tv_series",
+					)
+				: [],
+		);
+	}
 	useEffect(() => {
 		const current = readSession();
 		setSession(current);
-		void load(current);
+		if (current) {
+			void load(current);
+			void loadLibraries(current);
+		}
 	}, [load]);
 	useEffect(() => {
 		if (!session || !task?.lastState || !activeStates.has(task.lastState)) return;
@@ -150,24 +171,43 @@ export default function IntroOutroPage() {
 		setClearing(true);
 		const response = await adminFetch("/api/admin/intro-outro/clear", session, {
 			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ libraryId: libraryId || null, dataType }),
 		});
-		const value = response.ok ? await response.json() : null;
+		const value = await response.json().catch(() => null);
 		setMessage(
 			response.ok
-				? `Removed ${value.removedSegments} detected intro/outro ranges. Cached fingerprints were kept.`
-				: "Could not remove detected ranges.",
+				? dataType === "fingerprints"
+					? `Removed ${value?.removedFingerprints ?? 0} cached fingerprint values and ${value?.removedSegments ?? 0} detected ranges from ${libraryId ? "the selected library" : "all TV libraries"}. ${value?.queuedEpisodes ?? 0} episodes are queued for the next detection run.`
+					: `Removed ${value?.removedSegments ?? 0} detected intro/outro ranges from ${libraryId ? "the selected library" : "all TV libraries"}. Cached fingerprints were kept; the next detection run will rebuild the ranges.`
+				: value?.detail || "Could not remove intro/outro analysis data.",
 		);
 		setClearing(false);
 		setConfirmClear(false);
 	}
 
+	const selectedLibrary = libraries.find((library) => library.id === libraryId);
+	const scopeLabel = selectedLibrary?.name || "all TV libraries";
+	const clearTitle =
+		dataType === "fingerprints"
+			? `Delete cached fingerprints from ${scopeLabel}?`
+			: `Delete detected intro/outro segments from ${scopeLabel}?`;
+	const clearDescription =
+		dataType === "fingerprints"
+			? "This removes both intro and outro Chromaprint values, detected ranges, and comparison state. The media files, catalog, and source-change fingerprints remain untouched."
+			: "This removes detected intro/outro ranges and comparison state while keeping the cached Chromaprint values. The next detection run can rebuild the ranges.";
+
 	return (
 		<div className="max-w-5xl">
 			<ConfirmDialog
 				open={confirmClear}
-				title="Remove every detected intro and outro?"
-				description="This removes all skip ranges immediately. Cached fingerprints stay available for a later detection run."
-				confirmLabel="Remove all ranges"
+				title={clearTitle}
+				description={clearDescription}
+				confirmLabel={
+					dataType === "fingerprints"
+						? "Delete fingerprints"
+						: "Delete detected segments"
+				}
 				destructive
 				busy={clearing}
 				onClose={() => setConfirmClear(false)}
@@ -319,12 +359,68 @@ export default function IntroOutroPage() {
 						<IconPlayerPlay size={16} />
 						Run now
 					</button>
+				</div>
+			</SurfaceCard>
+			<SurfaceCard className="mt-5 p-6">
+				<div className="flex items-start justify-between gap-4">
+					<div>
+						<h2 className="text-xl font-bold">Clear analysis data</h2>
+						<p className="mt-3 text-sm leading-6 console-muted">
+							Choose a TV library and remove only its cached intro/outro analysis.
+							Library configuration, catalog data, media files, and source-change
+							fingerprints stay intact.
+						</p>
+					</div>
+					<IconTrash className="text-red-200" size={22} />
+				</div>
+				<div className="mt-6 grid gap-5 md:grid-cols-2">
+					<label className="block text-sm">
+						<span className="font-semibold">Library</span>
+						<select
+							value={libraryId}
+							disabled={clearing}
+							onChange={(event) => setLibraryId(event.target.value)}
+							className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-50"
+						>
+							<option value="">All TV libraries</option>
+							{libraries.map((library) => (
+								<option key={library.id} value={library.id}>
+									{library.name}
+								</option>
+							))}
+						</select>
+					</label>
+					<label className="block text-sm">
+						<span className="font-semibold">Data to remove</span>
+						<select
+							value={dataType}
+							disabled={clearing}
+							onChange={(event) =>
+								setDataType(event.target.value as "fingerprints" | "segments")
+							}
+							className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-50"
+						>
+							<option value="segments">Detected intro/outro segments</option>
+							<option value="fingerprints">Cached fingerprints and segments</option>
+						</select>
+					</label>
+				</div>
+				<div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+					<p className="max-w-2xl text-xs leading-5 console-muted">
+						{dataType === "fingerprints"
+							? "Deleting fingerprints queues the affected episodes so a later scheduled or manual detection run fingerprints them again."
+							: "Deleting segments keeps fingerprints and invalidates comparison state so a later scheduled or manual detection run recalculates the ranges."}
+					</p>
 					<button
+						type="button"
+						disabled={clearing}
 						onClick={() => setConfirmClear(true)}
-						className="ml-auto flex items-center gap-2 rounded-lg border border-red-400/30 px-4 py-2.5 text-sm text-red-200 hover:bg-red-400/10"
+						className="flex items-center gap-2 rounded-xl border border-red-400/30 px-4 py-2.5 text-sm font-semibold text-red-200 hover:bg-red-400/10 disabled:opacity-50"
 					>
 						<IconTrash size={16} />
-						Remove all detected ranges
+						{dataType === "fingerprints"
+							? "Delete cached fingerprints"
+							: "Delete detected segments"}
 					</button>
 				</div>
 			</SurfaceCard>

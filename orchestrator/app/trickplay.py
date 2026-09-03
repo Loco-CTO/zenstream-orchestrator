@@ -140,6 +140,110 @@ class TrickplayStore:
     def cache_root(self) -> Path:
         return Path(self.db.db_file).parent / "trickplay-cache"
 
+    def _tables(self) -> set[str]:
+        return {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+
+    def _validate_library_scope(self, library_id: str | None) -> None:
+        if library_id is None:
+            return
+        if not isinstance(library_id, str) or not library_id.strip():
+            raise ValueError("libraryId must be a library ID or null.")
+        rows = self.db.execute("SELECT type FROM libraries WHERE id=?", (library_id,))
+        if not rows:
+            raise LookupError("Library not found.")
+        if rows[0][0] not in {"movies", "tv_series"}:
+            raise ValueError(
+                "Trickplay cleanup is only available for movie or TV libraries."
+            )
+
+    def media_file_ids(self, library_id: str) -> list[str]:
+        """Return media IDs whose cached trickplay output belongs to a library."""
+        self._validate_library_scope(library_id)
+        tables = self._tables()
+        queries: list[str] = []
+        params: list[object] = []
+        library_tables = {"library_entities", "libraries"}
+        if "media_files" in tables and library_tables.issubset(tables):
+            queries.append(
+                "SELECT f.id FROM media_files f "
+                "JOIN library_entities entity ON entity.id=f.entity_id "
+                "JOIN libraries library ON library.id=entity.library_id "
+                "WHERE entity.library_id=? AND library.type IN ('movies','tv_series')"
+            )
+            params.append(library_id)
+        if "trickplay_assets" in tables and library_tables.issubset(tables):
+            queries.append(
+                "SELECT asset.media_file_id FROM trickplay_assets asset "
+                "JOIN library_entities entity ON entity.id=asset.entity_id "
+                "JOIN libraries library ON library.id=entity.library_id "
+                "WHERE entity.library_id=? AND library.type IN ('movies','tv_series')"
+            )
+            params.append(library_id)
+        if "trickplay_sheets" in tables and "trickplay_assets" in tables:
+            if library_tables.issubset(tables):
+                queries.append(
+                    "SELECT sheet.media_file_id FROM trickplay_sheets sheet "
+                    "JOIN trickplay_assets asset ON asset.media_file_id=sheet.media_file_id "
+                    "JOIN library_entities entity ON entity.id=asset.entity_id "
+                    "JOIN libraries library ON library.id=entity.library_id "
+                    "WHERE entity.library_id=? AND library.type IN ('movies','tv_series')"
+                )
+                params.append(library_id)
+        if not queries:
+            return []
+        return sorted(
+            {str(row[0]) for row in self.db.execute(" UNION ".join(queries), params)}
+        )
+
+    @staticmethod
+    def _id_batches(values: list[str], batch_size: int = 500):
+        for start in range(0, len(values), batch_size):
+            yield values[start : start + batch_size]
+
+    def clear_data(self, library_id: str | None = None) -> dict[str, int]:
+        """Delete trickplay rows for one eligible library or the complete cache."""
+        self._validate_library_scope(library_id)
+        tables = self._tables()
+        has_assets = "trickplay_assets" in tables
+        has_sheets = "trickplay_sheets" in tables
+        if not has_assets and not has_sheets:
+            return {"removedAssets": 0, "removedSheets": 0}
+
+        media_file_ids = (
+            self.media_file_ids(library_id) if library_id is not None else []
+        )
+        removed_assets = 0
+        removed_sheets = 0
+        with self.db.transaction() as cursor:
+            if library_id is None:
+                if has_sheets:
+                    cursor.execute("DELETE FROM trickplay_sheets")
+                    removed_sheets = max(0, cursor.rowcount)
+                if has_assets:
+                    cursor.execute("DELETE FROM trickplay_assets")
+                    removed_assets = max(0, cursor.rowcount)
+            else:
+                for batch in self._id_batches(media_file_ids):
+                    placeholders = ",".join("?" for _ in batch)
+                    if has_sheets:
+                        cursor.execute(
+                            f"DELETE FROM trickplay_sheets WHERE media_file_id IN ({placeholders})",
+                            batch,
+                        )
+                        removed_sheets += max(0, cursor.rowcount)
+                    if has_assets:
+                        cursor.execute(
+                            f"DELETE FROM trickplay_assets WHERE media_file_id IN ({placeholders})",
+                            batch,
+                        )
+                        removed_assets += max(0, cursor.rowcount)
+        return {"removedAssets": removed_assets, "removedSheets": removed_sheets}
+
     @staticmethod
     def fingerprint(quick_fingerprint, size, modified_ns) -> str:
         return str(quick_fingerprint or f"{int(size or 0)}:{int(modified_ns or 0)}")
@@ -529,6 +633,52 @@ class TrickplayExtractor:
 
     def cache_root(self) -> Path:
         return Path(self.db.db_file).parent / "trickplay-cache"
+
+    def _remove_cache_entries(self, media_file_ids: list[str] | None) -> int:
+        root = self.cache_root().resolve()
+        if not root.exists() or not root.is_dir():
+            return 0
+        if media_file_ids is None:
+            candidates = list(root.iterdir())
+        else:
+            candidates = []
+            for media_file_id in media_file_ids:
+                if not isinstance(media_file_id, str) or not media_file_id:
+                    continue
+                candidate = root / media_file_id
+                try:
+                    candidate.resolve().relative_to(root)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                if candidate != root:
+                    candidates.append(candidate)
+
+        removed = 0
+        for candidate in candidates:
+            try:
+                candidate.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            try:
+                is_directory = candidate.is_dir() and not candidate.is_symlink()
+                exists = candidate.exists() or candidate.is_symlink()
+                if is_directory:
+                    shutil.rmtree(candidate)
+                    removed += 1
+                elif exists:
+                    candidate.unlink()
+            except OSError:
+                logger.warning("could not remove trickplay cache path=%s", candidate)
+        return removed
+
+    def clear_data(self, library_id: str | None = None) -> dict[str, int]:
+        """Delete database rows and generated cache output for one or all libraries."""
+        media_file_ids = (
+            self.store.media_file_ids(library_id) if library_id is not None else None
+        )
+        result = self.store.clear_data(library_id)
+        result["removedCacheDirectories"] = self._remove_cache_entries(media_file_ids)
+        return result
 
     @staticmethod
     def command(

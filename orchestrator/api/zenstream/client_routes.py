@@ -328,7 +328,9 @@ def prune_rate_limit_events(now: float | None = None) -> int:
 
 
 async def _bounded_json_object(
-    request: Request, limit: int = AUTH_BODY_LIMIT_BYTES
+    request: Request,
+    limit: int = AUTH_BODY_LIMIT_BYTES,
+    allow_empty: bool = False,
 ) -> dict:
     content_length = request.headers.get("content-length")
     if content_length:
@@ -345,6 +347,8 @@ async def _bounded_json_object(
         body.extend(chunk)
         if len(body) > limit:
             raise HTTPException(413, "Request body is too large.")
+    if allow_empty and not body.strip():
+        return {}
     try:
         value = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:

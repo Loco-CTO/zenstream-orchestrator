@@ -269,11 +269,148 @@ class IntroOutroStore:
         )
         return normalized
 
-    def clear_segments(self) -> int:
-        rows = self.db.execute("SELECT COUNT(*) FROM intro_outro_segments")
-        count = int(rows[0][0] or 0) if rows else 0
-        self.db.execute("DELETE FROM intro_outro_segments")
-        return count
+    def _validate_library_scope(self, library_id: str | None) -> None:
+        if library_id is None:
+            return
+        if not isinstance(library_id, str) or not library_id.strip():
+            raise ValueError("libraryId must be a library ID or null.")
+        rows = self.db.execute("SELECT type FROM libraries WHERE id=?", (library_id,))
+        if not rows:
+            raise LookupError("Library not found.")
+        if rows[0][0] != "tv_series":
+            raise ValueError("Intro/outro cleanup is only available for TV libraries.")
+
+    @staticmethod
+    def _zero_cleanup_result(
+        library_id: str | None, data_type: str
+    ) -> dict[str, object]:
+        return {
+            "libraryId": library_id,
+            "dataType": data_type,
+            "removedFingerprints": 0,
+            "removedSegments": 0,
+            "invalidatedSeasons": 0,
+            "queuedEpisodes": 0,
+        }
+
+    def _asset_scope(
+        self, library_id: str | None
+    ) -> tuple[str, list[object]]:
+        if library_id is None:
+            return "", []
+        return (
+            " WHERE media_file_id IN ("
+            "SELECT asset.media_file_id FROM intro_outro_assets asset "
+            "JOIN library_entities entity ON entity.id=asset.entity_id "
+            "JOIN libraries library ON library.id=entity.library_id "
+            "WHERE entity.library_id=? AND library.type='tv_series'"
+            ")",
+            [library_id],
+        )
+
+    def clear_data(
+        self, library_id: str | None = None, data_type: str = "segments"
+    ) -> dict[str, object]:
+        """Remove cached intro/outro analysis data for one TV library or all TV libraries."""
+        if not isinstance(data_type, str) or data_type not in {
+            "fingerprints",
+            "segments",
+        }:
+            raise ValueError("dataType must be fingerprints or segments.")
+        self._validate_library_scope(library_id)
+        tables = self._tables()
+        if not {"intro_outro_assets", "intro_outro_segments"}.issubset(tables):
+            return self._zero_cleanup_result(library_id, data_type)
+
+        asset_where, asset_params = self._asset_scope(library_id)
+        comparison_where = ""
+        comparison_params: list[object] = []
+        if library_id is not None:
+            comparison_where = (
+                " WHERE season_id IN ("
+                "SELECT entity.id FROM library_entities entity "
+                "JOIN libraries library ON library.id=entity.library_id "
+                "WHERE entity.library_id=? AND library.type='tv_series'"
+                ")"
+            )
+            comparison_params = [library_id]
+
+        asset_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(intro_outro_assets)")
+        }
+        update_values = [
+            "intro_fingerprint=NULL",
+            "outro_fingerprint=NULL",
+            "state='queued'",
+        ]
+        if "error" in asset_columns:
+            update_values.append("error=NULL")
+        if "updated_at" in asset_columns:
+            update_values.append("updated_at=?")
+        update_params = ([now()] if "updated_at" in asset_columns else []) + asset_params
+
+        with self.db.transaction() as cursor:
+            fingerprint_row = cursor.execute(
+                "SELECT COALESCE(SUM((intro_fingerprint IS NOT NULL) + "
+                "(outro_fingerprint IS NOT NULL)),0) FROM intro_outro_assets"
+                + asset_where,
+                asset_params,
+            ).fetchone()
+            segment_row = cursor.execute(
+                "SELECT COUNT(*) FROM intro_outro_segments"
+                + asset_where,
+                asset_params,
+            ).fetchone()
+            removed_fingerprints = int(fingerprint_row[0] or 0) if fingerprint_row else 0
+            removed_segments = int(segment_row[0] or 0) if segment_row else 0
+
+            invalidated_seasons = 0
+            if "intro_outro_comparison_state" in tables:
+                comparison_row = cursor.execute(
+                    "SELECT COUNT(*) FROM intro_outro_comparison_state"
+                    + comparison_where,
+                    comparison_params,
+                ).fetchone()
+                invalidated_seasons = (
+                    int(comparison_row[0] or 0) if comparison_row else 0
+                )
+
+            queued_episodes = 0
+            if data_type == "fingerprints":
+                cursor.execute(
+                    "UPDATE intro_outro_assets SET "
+                    + ",".join(update_values)
+                    + asset_where,
+                    update_params,
+                )
+                queued_episodes = max(0, cursor.rowcount)
+
+            cursor.execute(
+                "DELETE FROM intro_outro_segments" + asset_where,
+                asset_params,
+            )
+            if "intro_outro_comparison_state" in tables:
+                cursor.execute(
+                    "DELETE FROM intro_outro_comparison_state" + comparison_where,
+                    comparison_params,
+                )
+
+        return {
+            "libraryId": library_id,
+            "dataType": data_type,
+            "removedFingerprints": removed_fingerprints
+            if data_type == "fingerprints"
+            else 0,
+            "removedSegments": removed_segments,
+            "invalidatedSeasons": invalidated_seasons,
+            "queuedEpisodes": queued_episodes,
+        }
+
+    def clear_fingerprints(self, library_id: str | None = None) -> dict[str, object]:
+        return self.clear_data(library_id, "fingerprints")
+
+    def clear_segments(self, library_id: str | None = None) -> int:
+        return int(self.clear_data(library_id, "segments")["removedSegments"])
 
     def queue_pending(
         self, library_id: str | None = None, settings: dict | None = None

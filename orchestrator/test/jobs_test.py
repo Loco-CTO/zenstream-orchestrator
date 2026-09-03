@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from app.database import DatabaseHandler
 from app.jobs import (
+    AnalysisMaintenanceTimeout,
     JobScheduler,
     JobStore,
     MetadataMissingJob,
@@ -1165,6 +1166,49 @@ class AnalysisCapacityTest(unittest.TestCase):
         self.assertEqual(
             scheduler.library_runtime.has_active_inventory_jobs.call_count, 2
         )
+
+
+class AnalysisMaintenanceTest(unittest.TestCase):
+    @staticmethod
+    def _scheduler():
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.active_lock = threading.RLock()
+        scheduler.condition = threading.Condition()
+        scheduler.active = set()
+        scheduler.analysis_maintenance = set()
+        return scheduler
+
+    def test_maintenance_terminates_runs_before_cleanup(self):
+        scheduler = self._scheduler()
+        scheduler._active_analysis_runs = MagicMock(
+            side_effect=[[('run-1', 'definition-1')], []]
+        )
+        scheduler.terminate = MagicMock()
+        cleanup = MagicMock(return_value={"removed": 1})
+
+        result = scheduler.run_analysis_maintenance(
+            "trickplay_extract", cleanup, timeout=1
+        )
+
+        self.assertEqual(result, {"removed": 1})
+        scheduler.terminate.assert_called_once_with("definition-1", "run-1")
+        cleanup.assert_called_once_with()
+        self.assertEqual(scheduler.analysis_maintenance, set())
+
+    def test_maintenance_times_out_without_running_cleanup(self):
+        scheduler = self._scheduler()
+        scheduler._active_analysis_runs = MagicMock(
+            return_value=[("run-1", "definition-1")]
+        )
+        scheduler.terminate = MagicMock()
+        cleanup = MagicMock()
+
+        with self.assertRaises(AnalysisMaintenanceTimeout):
+            scheduler.run_analysis_maintenance("intro_outro_detect", cleanup, timeout=0)
+
+        cleanup.assert_not_called()
+        scheduler.terminate.assert_called_once_with("definition-1", "run-1")
+        self.assertEqual(scheduler.analysis_maintenance, set())
 
 
 class JobSchedulerShutdownTest(unittest.TestCase):

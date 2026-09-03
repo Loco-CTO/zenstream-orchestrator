@@ -55,8 +55,12 @@ class IntroOutroTest(unittest.TestCase):
             CREATE TABLE media_sources (
                 media_file_id TEXT PRIMARY KEY, duration_seconds REAL
             );
+            CREATE TABLE libraries (id TEXT PRIMARY KEY, type TEXT NOT NULL);
+            CREATE TABLE library_entities (
+                id TEXT PRIMARY KEY, library_id TEXT NOT NULL
+            );
             CREATE TABLE intro_outro_assets (
-                media_file_id TEXT PRIMARY KEY, season_id TEXT,
+                media_file_id TEXT PRIMARY KEY, entity_id TEXT, season_id TEXT,
                 source_fingerprint TEXT, intro_fingerprint BLOB,
                 outro_fingerprint BLOB, state TEXT, error TEXT
             );
@@ -102,6 +106,98 @@ class IntroOutroTest(unittest.TestCase):
             ),
         )
         db.connection.commit()
+
+    def test_cleanup_scopes_fingerprints_and_segments(self):
+        db = self._comparison_database()
+        db.connection.executemany(
+            "INSERT INTO libraries(id,type) VALUES(?,?)",
+            [("tv-a", "tv_series"), ("tv-b", "tv_series")],
+        )
+        db.connection.executemany(
+            "INSERT INTO library_entities(id,library_id) VALUES(?,?)",
+            [
+                ("episode-a", "tv-a"),
+                ("season-a", "tv-a"),
+                ("episode-b", "tv-b"),
+                ("season-b", "tv-b"),
+            ],
+        )
+        db.connection.executemany(
+            "INSERT INTO intro_outro_assets(media_file_id,entity_id,season_id,source_fingerprint,intro_fingerprint,outro_fingerprint,state,error) VALUES(?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "media-a",
+                    "episode-a",
+                    "season-a",
+                    "source-a",
+                    b"intro-a",
+                    b"outro-a",
+                    "scanned",
+                    None,
+                ),
+                (
+                    "media-b",
+                    "episode-b",
+                    "season-b",
+                    "source-b",
+                    b"intro-b",
+                    b"outro-b",
+                    "scanned",
+                    None,
+                ),
+            ],
+        )
+        db.connection.executemany(
+            "INSERT INTO intro_outro_segments(media_file_id,segment_type,start_seconds,end_seconds) VALUES(?,?,?,?)",
+            [("media-a", "intro", 1, 2), ("media-b", "outro", 3, 4)],
+        )
+        db.connection.executemany(
+            "INSERT INTO intro_outro_comparison_state(season_id,comparison_key,updated_at) VALUES(?,?,?)",
+            [("season-a", "key-a", "old"), ("season-b", "key-b", "old")],
+        )
+        db.connection.commit()
+
+        result = IntroOutroStore(db).clear_data("tv-a", "fingerprints")
+
+        self.assertEqual(result["removedFingerprints"], 2)
+        self.assertEqual(result["removedSegments"], 1)
+        self.assertEqual(result["invalidatedSeasons"], 1)
+        self.assertEqual(result["queuedEpisodes"], 1)
+        self.assertEqual(
+            db.execute(
+                "SELECT source_fingerprint,intro_fingerprint,outro_fingerprint,state FROM intro_outro_assets WHERE media_file_id='media-a'"
+            ),
+            [("source-a", None, None, "queued")],
+        )
+        self.assertEqual(
+            db.execute(
+                "SELECT intro_fingerprint,outro_fingerprint,state FROM intro_outro_assets WHERE media_file_id='media-b'"
+            ),
+            [(b"intro-b", b"outro-b", "scanned")],
+        )
+        self.assertEqual(
+            db.execute("SELECT media_file_id FROM intro_outro_segments"),
+            [("media-b",)],
+        )
+        self.assertEqual(
+            db.execute("SELECT season_id FROM intro_outro_comparison_state"),
+            [("season-b",)],
+        )
+
+        result = IntroOutroStore(db).clear_data("tv-b", "segments")
+        self.assertEqual(result["removedFingerprints"], 0)
+        self.assertEqual(result["removedSegments"], 1)
+        self.assertEqual(result["invalidatedSeasons"], 1)
+        self.assertEqual(
+            db.execute(
+                "SELECT intro_fingerprint,outro_fingerprint,state FROM intro_outro_assets WHERE media_file_id='media-b'"
+            ),
+            [(b"intro-b", b"outro-b", "scanned")],
+        )
+
+        result = IntroOutroStore(db).clear_data(None, "segments")
+        self.assertEqual(result["removedSegments"], 0)
+        db.connection.close()
 
     def test_queue_pending_repairs_global_incomplete_backlog(self):
         class Database:

@@ -37,6 +37,10 @@ ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
 ANALYSIS_KINDS = {"trickplay_extract", "intro_outro_detect"}
 
 
+class AnalysisMaintenanceTimeout(TimeoutError):
+    """An analysis worker did not acknowledge cleanup termination in time."""
+
+
 def _english_configured() -> bool:
     return any(
         language_family(value) == "en" for value in MetadataLanguageSettings().get()
@@ -2229,6 +2233,7 @@ class JobScheduler:
         self.cancel_events: dict[str, threading.Event] = {}
         self.worker_threads: dict[str, threading.Thread] = {}
         self.active_lock = threading.RLock()
+        self.analysis_maintenance: set[str] = set()
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -2343,6 +2348,63 @@ class JobScheduler:
                 "could not inspect library work before analysis", exc_info=True
             )
             return True
+
+    def _analysis_maintenance_active(self, kind: str) -> bool:
+        with self.active_lock:
+            return kind in getattr(self, "analysis_maintenance", set())
+
+    def _active_analysis_runs(self, kind: str) -> list[tuple[str, str]]:
+        rows = self.store.db.execute(
+            "SELECT id,definition_id FROM job_runs "
+            "WHERE kind=? AND state IN ('queued','running','terminating')",
+            (kind,),
+        )
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+    def run_analysis_maintenance(
+        self, kind: str, operation, timeout: float = 30.0
+    ):
+        """Quiesce one analysis kind, run cleanup, and reopen scheduling."""
+        if kind not in ANALYSIS_KINDS:
+            raise ValueError("Unsupported analysis maintenance kind.")
+        with self.active_lock:
+            if not hasattr(self, "analysis_maintenance"):
+                self.analysis_maintenance = set()
+            self.analysis_maintenance.add(kind)
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        tracked_runs: set[str] = set()
+        requested_runs: set[str] = set()
+        try:
+            while True:
+                active_runs = self._active_analysis_runs(kind)
+                for run_id, definition_id in active_runs:
+                    tracked_runs.add(run_id)
+                    if run_id not in requested_runs:
+                        self.terminate(definition_id, run_id)
+                        requested_runs.add(run_id)
+                with self.active_lock:
+                    active_workers = tracked_runs.intersection(self.active)
+                if not active_runs and not active_workers:
+                    return operation()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AnalysisMaintenanceTimeout(
+                        "Analysis is still stopping; try again shortly."
+                    )
+                condition = getattr(self, "condition", None)
+                if condition is None:
+                    time.sleep(min(0.01, remaining))
+                else:
+                    with condition:
+                        condition.wait(timeout=min(0.25, remaining))
+        finally:
+            with self.active_lock:
+                self.analysis_maintenance.discard(kind)
+            condition = getattr(self, "condition", None)
+            if condition is not None:
+                with condition:
+                    condition.notify_all()
 
     def refresh_library_definition(self, library: dict) -> dict:
         definition = self.store.ensure_library(library)
@@ -2530,6 +2592,8 @@ class JobScheduler:
         for due in self.store.due_triggers():
             definition = due["definition"]
             trigger = due["trigger"]
+            if self._analysis_maintenance_active(definition["kind"]):
+                continue
             if self.store.queued_or_running(definition["id"]):
                 continue
             if definition["kind"] == "library_scan":
@@ -2561,6 +2625,8 @@ class JobScheduler:
                 ) and self._library_work_active():
                     continue
                 with self.active_lock:
+                    if run["kind"] in getattr(self, "analysis_maintenance", set()):
+                        continue
                     if (
                         run["id"] in self.active
                         or run["definitionId"] in self.active_definitions
@@ -2733,6 +2799,10 @@ class JobScheduler:
                 )
                 if row:
                     self.active_definitions.discard(row[0][0])
+            condition = getattr(self, "condition", None)
+            if condition is not None:
+                with condition:
+                    condition.notify_all()
 
     def _run_analysis(self, run_id, kind, worker, should_terminate):
         pressure_logged = False

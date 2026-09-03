@@ -1,9 +1,15 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { IconPhoto, IconPlayerPlay, IconRefresh } from "@tabler/icons-react";
+import {
+	IconPhoto,
+	IconPlayerPlay,
+	IconRefresh,
+	IconTrash,
+} from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import {
+	ConfirmDialog,
 	PageHeader,
 	StatusMessage,
 	SurfaceCard,
@@ -17,6 +23,7 @@ type PlaybackSettings = {
 	trickplayWorkers: number;
 	trickplayFfmpegThreads: number;
 };
+type Library = { id: string; name: string; type: string };
 
 const DEFAULTS: PlaybackSettings = {
 	maxTranscodes: 0,
@@ -53,8 +60,12 @@ function validTrickplaySettings(
 export default function PlaybackPage() {
 	const [session, setSession] = useState<Session | null>(null);
 	const [settings, setSettings] = useState<PlaybackSettings>(DEFAULTS);
+	const [libraries, setLibraries] = useState<Library[]>([]);
+	const [libraryId, setLibraryId] = useState("");
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
+	const [clearing, setClearing] = useState(false);
+	const [confirmClear, setConfirmClear] = useState(false);
 	const [message, setMessage] = useState("");
 
 	async function load(current: Session) {
@@ -98,13 +109,46 @@ export default function PlaybackPage() {
 		setLoading(false);
 	}
 
+	async function loadLibraries(current: Session) {
+		const response = await adminFetch("/api/admin/libraries", current);
+		if (!response.ok) return;
+		const value = await response.json().catch(() => []);
+		setLibraries(
+			Array.isArray(value)
+				? value.filter(
+						(library): library is Library =>
+							library?.type === "movies" || library?.type === "tv_series",
+					)
+				: [],
+		);
+	}
+
 	useEffect(() => {
 		const current = readSession();
 		if (current) {
 			setSession(current);
 			void load(current);
+			void loadLibraries(current);
 		}
 	}, []);
+
+	async function clearTrickplay() {
+		if (!session) return;
+		setClearing(true);
+		const response = await adminFetch("/api/admin/trickplay/clear", session, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ libraryId: libraryId || null }),
+		});
+		const value = await response.json().catch(() => null);
+		setMessage(
+			response.ok
+				? `Removed ${value?.removedAssets ?? 0} trickplay records, ${value?.removedSheets ?? 0} sheets, and ${value?.removedCacheDirectories ?? 0} cache directories from ${libraryId ? "the selected library" : "all movie and TV libraries"}. The next scheduled or manual extraction will rebuild the data.`
+				: value?.detail || "Could not remove trickplay data.",
+		);
+		setClearing(false);
+		setConfirmClear(false);
+	}
 
 	async function save(event: FormEvent) {
 		event.preventDefault();
@@ -178,9 +222,21 @@ export default function PlaybackPage() {
 		settings.trickplayWorkers,
 		settings.trickplayFfmpegThreads,
 	);
+	const selectedLibrary = libraries.find((library) => library.id === libraryId);
+	const scopeLabel = selectedLibrary?.name || "all movie and TV libraries";
 
 	return (
 		<div className="max-w-3xl">
+			<ConfirmDialog
+				open={confirmClear}
+				title={`Delete all trickplay data from ${scopeLabel}?`}
+				description="This removes cached trickplay records, sprite sheets, and generated cache directories for the selected scope. Library configuration, catalog data, source fingerprints, and media files remain untouched."
+				confirmLabel="Delete all trickplay data"
+				destructive
+				busy={clearing}
+				onClose={() => setConfirmClear(false)}
+				onConfirm={() => void clearTrickplay()}
+			/>
 			<PageHeader
 				title="Playback"
 				description="Set the server capacity available to HLS transcodes and timeline preview extraction."
@@ -389,6 +445,46 @@ export default function PlaybackPage() {
 						</button>
 					</div>
 				</form>
+			</SurfaceCard>
+			<SurfaceCard className="mt-5 p-6">
+				<div className="flex items-start justify-between gap-4">
+					<div>
+						<h2 className="text-xl font-bold">Trickplay cache</h2>
+						<p className="mt-3 text-sm leading-6 console-muted">
+							Delete generated timeline-preview data without changing the configured
+							library or any media files. The next scheduled or manual extraction
+							rebuilds the cache.
+						</p>
+					</div>
+					<IconTrash className="text-red-200" size={22} />
+				</div>
+				<div className="mt-6 flex flex-col gap-5 sm:flex-row sm:items-end">
+					<label className="block flex-1 text-sm">
+						<span className="font-semibold">Library</span>
+						<select
+							value={libraryId}
+							disabled={clearing}
+							onChange={(event) => setLibraryId(event.target.value)}
+							className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-50"
+						>
+							<option value="">All movie and TV libraries</option>
+							{libraries.map((library) => (
+								<option key={library.id} value={library.id}>
+									{library.name}
+								</option>
+							))}
+						</select>
+					</label>
+					<button
+						type="button"
+						disabled={clearing}
+						onClick={() => setConfirmClear(true)}
+						className="flex h-11 items-center justify-center gap-2 rounded-xl border border-red-400/30 px-4 text-sm font-semibold text-red-200 hover:bg-red-400/10 disabled:opacity-50"
+					>
+						<IconTrash size={16} />
+						Delete all trickplay data
+					</button>
+				</div>
 			</SurfaceCard>
 		</div>
 	);

@@ -16,7 +16,7 @@ from app.client_auth import (
 )
 from app.foreground import run_auth, run_control
 from app.intro_outro import IntroOutroStore
-from app.jobs import scheduler
+from app.jobs import AnalysisMaintenanceTimeout, scheduler
 from app.models import Invite
 from app.models.admin import ADMIN_SESSION_COOKIE, Admin
 from app.models.playback_settings import PlaybackSettings
@@ -30,6 +30,7 @@ from app.models.syncplay import (
 )
 from app.paths import PROJECT_ROOT
 from app.playback import ffmpeg_path, ffprobe_path
+from app.trickplay import TrickplayExtractor
 from fastapi import (
     APIRouter,
     Header,
@@ -833,7 +834,52 @@ async def clear_admin_intro_outro_segments(
     TOKEN: str | None = Header(None),
 ):
     await _admin_request_async(request, Username, TOKEN)
-    return {"removedSegments": await run_control(IntroOutroStore().clear_segments)}
+    data = await _bounded_json_object(request, allow_empty=True)
+    try:
+
+        def clear():
+            return scheduler.run_analysis_maintenance(
+                "intro_outro_detect",
+                lambda: IntroOutroStore().clear_data(
+                    data.get("libraryId"), data.get("dataType", "segments")
+                ),
+            )
+
+        result = await run_control(clear)
+    except AnalysisMaintenanceTimeout as error:
+        raise HTTPException(409, str(error)) from error
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
+    if not data:
+        return {"removedSegments": result["removedSegments"]}
+    return result
+
+
+@router.post("/api/admin/trickplay/clear")
+async def clear_admin_trickplay(
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    data = await _bounded_json_object(request)
+    try:
+
+        def clear():
+            return scheduler.run_analysis_maintenance(
+                "trickplay_extract",
+                lambda: TrickplayExtractor().clear_data(data.get("libraryId")),
+            )
+
+        return await run_control(clear)
+    except AnalysisMaintenanceTimeout as error:
+        raise HTTPException(409, str(error)) from error
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.get("/api/admin/accounts")

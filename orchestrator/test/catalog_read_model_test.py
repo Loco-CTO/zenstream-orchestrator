@@ -363,6 +363,46 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual([item["id"] for item in members["items"]], ["series"])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_collection_items_expose_the_authorized_child_year_range(self, _languages):
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES('user','collection','2026')"
+        )
+        CatalogReadModel(self.db).rebuild(["en"])
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('series-2','library',NULL,'series','Series 2',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO collection_members VALUES('collection-item','series-2',2)"
+        )
+        self.db.execute(
+            "UPDATE catalog_item_projection SET payload=? WHERE entity_id='series' AND locale='en'",
+            ('{"title":"Series","date":"2007-01-01"}',),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "series-2",
+                "en",
+                "library",
+                None,
+                "series",
+                '{"title":"Series 2","date":"2019-01-01"}',
+                "series 2",
+                0,
+                "2019",
+                0,
+                "2026",
+                1,
+            ),
+        )
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+
+        response = catalog.list_items("user", "collection", "en")
+
+        self.assertEqual(response["items"][0]["collectionYearRange"], "2007-2019")
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_projection_preload_deduplicates_and_caches_missing_rows(self, _languages):
         CatalogReadModel(self.db).rebuild(["en"])
         self.db.execute(

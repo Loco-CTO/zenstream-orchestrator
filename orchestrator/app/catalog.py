@@ -83,6 +83,8 @@ class _CatalogReadContext:
         self.following_states: dict[str, bool] = {}
         self.series_primary_images: dict[tuple[str, str], dict | None] = {}
         self.series_metadata: dict[tuple[str, str], dict | None] = {}
+        self.collection_year_ranges: dict[tuple[str, str], str | None] = {}
+        self.collection_year_ranges_loaded: set[str] = set()
         self.metadata_service = MetadataReadService(catalog.db)
         self.configured_languages: list[str] | None = None
         self.allowed_library_ids: set[str] | None = None
@@ -1644,7 +1646,7 @@ class Catalog:
         )
         if row[3] not in {"movie", "series"}:
             user_state.pop("following", None)
-        return {
+        value = {
             "id": row[0],
             "libraryId": row[1],
             "parentId": row[2],
@@ -1666,6 +1668,116 @@ class Catalog:
             "userState": user_state,
             "childIds": children or [],
         }
+        if row[3] == "collection":
+            value["collectionYearRange"] = self._collection_year_range(
+                user_id, row[0], language
+            )
+        return value
+
+    def _collection_year_range(
+        self, user_id: str, collection_id: str, language: str | None
+    ) -> str | None:
+        if not language or not self._has_table("collection_members"):
+            return None
+
+        language = normalize_metadata_locale(language)
+        context = self._context(user_id)
+        key = (collection_id, language)
+        if context and language in context.collection_year_ranges_loaded:
+            return context.collection_year_ranges.get(key)
+        if context and key in context.collection_year_ranges:
+            return context.collection_year_ranges[key]
+
+        allowed = sorted(self.allowed_libraries(user_id))
+        if not allowed:
+            if context:
+                context.collection_year_ranges[key] = None
+            return None
+
+        library_placeholders = ",".join("?" for _ in allowed)
+        collection_filter = ""
+        collection_params: list[str] = []
+        if context is None:
+            collection_filter = " AND member.collection_entity_id=?"
+            collection_params = [collection_id]
+
+        ranges: dict[str, list[int]] = {}
+        collection_ids: set[str] = set()
+        if self._read_model_ready() and self._has_table("catalog_item_projection"):
+            rows = self.db.execute(
+                "SELECT member.collection_entity_id,projection.payload "
+                "FROM collection_members member "
+                "JOIN library_entities collection ON collection.id=member.collection_entity_id "
+                "JOIN library_entities source ON source.id=member.source_entity_id "
+                "LEFT JOIN catalog_item_projection projection "
+                "ON projection.entity_id=source.id AND projection.locale=? "
+                f"WHERE collection.library_id IN ({library_placeholders}) "
+                f"AND source.library_id IN ({library_placeholders})"
+                + collection_filter,
+                [language, *allowed, *allowed, *collection_params],
+            )
+            for member_collection_id, payload in rows:
+                collection_ids.add(member_collection_id)
+                if not payload:
+                    continue
+                try:
+                    metadata = json.loads(payload)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                year = self._metadata_year(
+                    metadata if isinstance(metadata, dict) else None
+                )
+                if year is not None:
+                    ranges.setdefault(member_collection_id, []).append(year)
+        else:
+            rows = self.db.execute(
+                "SELECT member.collection_entity_id,source.id "
+                "FROM collection_members member "
+                "JOIN library_entities collection ON collection.id=member.collection_entity_id "
+                "JOIN library_entities source ON source.id=member.source_entity_id "
+                f"WHERE collection.library_id IN ({library_placeholders}) "
+                f"AND source.library_id IN ({library_placeholders})"
+                + collection_filter,
+                [*allowed, *allowed, *collection_params],
+            )
+            for member_collection_id, source_id in rows:
+                collection_ids.add(member_collection_id)
+                try:
+                    metadata = self.metadata(user_id, source_id, language)["metadata"]
+                except HTTPException as error:
+                    if error.status_code != 404:
+                        raise
+                    continue
+                year = self._metadata_year(metadata)
+                if year is not None:
+                    ranges.setdefault(member_collection_id, []).append(year)
+
+        values = {
+            member_collection_id: (
+                str(min(years))
+                if len(set(years)) == 1
+                else f"{min(years)}-{max(years)}"
+            )
+            for member_collection_id, years in ranges.items()
+            if years
+        }
+        values.update(
+            {
+                member_collection_id: None
+                for member_collection_id in collection_ids
+                if member_collection_id not in values
+            }
+        )
+        if context:
+            context.collection_year_ranges.update(
+                {
+                    (member_collection_id, language): value
+                    for member_collection_id, value in values.items()
+                }
+            )
+            context.collection_year_ranges_loaded.add(language)
+            return context.collection_year_ranges.get(key)
+        return values.get(collection_id)
 
     def _series_primary_image(
         self, user_id: str, series_id: str, language: str

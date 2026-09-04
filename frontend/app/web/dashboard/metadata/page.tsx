@@ -520,7 +520,7 @@ export default function MetadataPage() {
 									<div className="grid gap-4 border-t console-divider px-4 py-4 md:grid-cols-2 xl:grid-cols-4">
 										<NumberSetting
 											label="Cooldown (minutes)"
-											help="-1 disables the cooldown"
+											help="Wait this many minutes between attempts for the same item. Use -1 for no cooldown."
 											value={item.cooldownMinutes}
 											onChange={(value) =>
 												updateRefreshItem(itemType, (current) => ({
@@ -531,7 +531,7 @@ export default function MetadataPage() {
 										/>
 										<NumberSetting
 											label="Catalog cutoff (days)"
-											help="-1 includes every catalog age"
+											help="Only refresh items added to the catalog within this many days. Use -1 to include older items."
 											value={item.cutoffDays}
 											onChange={(value) =>
 												updateRefreshItem(itemType, (current) => ({
@@ -542,7 +542,7 @@ export default function MetadataPage() {
 										/>
 										<NumberSetting
 											label="Minimum provider IDs"
-											help="0 means no identity-count gate"
+											help="Require at least this many TMDB or TVDB IDs before refreshing. Use 0 for no minimum."
 											value={item.minimumProviderIds}
 											onChange={(value) =>
 												updateRefreshItem(itemType, (current) => ({
@@ -553,7 +553,7 @@ export default function MetadataPage() {
 										/>
 										<NumberSetting
 											label="Provider document age (days)"
-											help="-1 disables the cache-age gate"
+											help="Fetch provider metadata only when its cache is this many days old. Use -1 to ignore cache age."
 											value={item.documentMaxAgeDays}
 											onChange={(value) =>
 												updateRefreshItem(itemType, (current) => ({
@@ -565,7 +565,7 @@ export default function MetadataPage() {
 										{itemType === "series" && (
 											<NumberSetting
 												label="Status refresh age (days)"
-												help="-1 disables continuing-series checks"
+												help="For ongoing series, refresh metadata and status after this many days. Use -1 to disable this check."
 												value={item.statusAfterDays}
 												onChange={(value) =>
 													updateRefreshItem(itemType, (current) => ({

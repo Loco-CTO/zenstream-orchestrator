@@ -97,7 +97,7 @@ PROVIDER_PRIORITIES = {
     "season": ["tvdb", "tmdb"],
     "episode": ["tvdb", "tmdb"],
     "movie": ["tmdb", "tvdb"],
-    "collection": ["tvdb"],
+    "collection": ["tvdb", "tmdb"],
     "artist": ["musicbrainz"],
     "release": ["musicbrainz"],
     "track": ["musicbrainz"],
@@ -729,6 +729,7 @@ class MetadataSearchProjection:
         payload: dict,
         *,
         preserve_artwork: set[str] | None = None,
+        replace_metadata: bool = False,
     ) -> None:
         tables = {
             row[0]
@@ -795,6 +796,9 @@ class MetadataSearchProjection:
                         merged = {}
                     if not isinstance(merged, dict):
                         merged = {}
+                    if replace_metadata and is_primary:
+                        for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
+                            merged.pop(field, None)
                     for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
                         if (
                             field in payload
@@ -1603,6 +1607,7 @@ class MetadataIngestService:
         *,
         force: bool = False,
         force_assets: bool | None = None,
+        replace_metadata: bool = False,
         should_terminate=None,
     ) -> list[dict]:
         if provider not in {"tmdb", "tvdb", "musicbrainz"}:
@@ -1621,6 +1626,7 @@ class MetadataIngestService:
                 locales,
                 force=force,
                 force_assets=force_assets,
+                replace_metadata=replace_metadata,
             ).values()
         )
 
@@ -1633,6 +1639,7 @@ class MetadataIngestService:
         *,
         force: bool = False,
         force_assets: bool | None = None,
+        replace_metadata: bool = False,
     ) -> dict[str, dict]:
         locales = list(dict.fromkeys(locales or self.locales()))
         unsupported = [locale for locale in locales if locale not in self._locales]
@@ -1640,6 +1647,7 @@ class MetadataIngestService:
             raise ValueError(f"Metadata language is not configured: {unsupported[0]}")
         if force_assets is None:
             force_assets = force
+        complete_batch = set(locales) == set(self._locales)
         with metadata_fetch_activity():
             if hasattr(self.metadata_service, "fetch_locales"):
                 values = self.metadata_service.fetch_locales(
@@ -1670,6 +1678,8 @@ class MetadataIngestService:
                     locale,
                     values[locale],
                     force_assets=force_assets,
+                    replace_metadata=replace_metadata,
+                    complete_batch=complete_batch,
                 )
             }
 
@@ -1678,7 +1688,12 @@ class MetadataIngestService:
         if db is not None:
             for locale in locales:
                 MetadataSearchProjection(db).project(
-                    provider, entity_type, provider_id, locale, values[locale]
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    values[locale],
+                    replace_metadata=replace_metadata,
                 )
 
         def materialize_assets() -> None:
@@ -1691,7 +1706,7 @@ class MetadataIngestService:
                         provider_id,
                         values,
                         force=force_assets,
-                        complete_batch=True,
+                        complete_batch=complete_batch,
                     )
                 else:
                     for locale in locales:
@@ -1702,6 +1717,7 @@ class MetadataIngestService:
                             locale,
                             values[locale],
                             force=force_assets,
+                            complete_batch=complete_batch,
                         )
             if self.credit_ingest is not None:
                 for locale in locales:
@@ -1741,6 +1757,7 @@ class MetadataIngestService:
         *,
         force: bool = False,
         force_assets: bool | None = None,
+        replace_metadata: bool = False,
     ) -> dict:
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
@@ -1751,6 +1768,7 @@ class MetadataIngestService:
             [locale],
             force=force,
             force_assets=force_assets,
+            replace_metadata=replace_metadata,
         )[locale]
 
     def ingest_document(
@@ -1762,15 +1780,24 @@ class MetadataIngestService:
         normalized: dict,
         *,
         force_assets: bool = False,
+        replace_metadata: bool = False,
+        complete_batch: bool | None = None,
     ) -> dict:
         """Materialize a normalized document, including documents cached by aggregation."""
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
+        if complete_batch is None:
+            complete_batch = len(self._locales) == 1
         cache = getattr(self.metadata_service, "cache", None)
         db = getattr(cache, "db", None)
         if db is not None:
             MetadataSearchProjection(db).project(
-                provider, entity_type, provider_id, locale, normalized
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                normalized,
+                replace_metadata=replace_metadata,
             )
         if self.image_ingest is not None or self.credit_ingest is not None:
 
@@ -1785,6 +1812,7 @@ class MetadataIngestService:
                         locale,
                         normalized,
                         force=force_assets,
+                        complete_batch=complete_batch,
                     )
                 if self.credit_ingest is not None:
                     self.credit_ingest.ingest(
@@ -2286,10 +2314,11 @@ class MetadataImageIngestService:
                 document,
                 preserve_artwork=preserved.get(locale),
             )
-        # A single-locale replay is intentionally non-destructive.  Pruning is
-        # safe only when the caller supplied the complete configured-locale
-        # document batch, otherwise another locale's ready artwork could be
-        # mistaken for an obsolete alternate.
+        # Pruning is safe only when the caller supplied the complete
+        # configured-locale document batch.  A single-locale replay from a
+        # multi-locale configuration must remain non-destructive, otherwise
+        # another locale's ready artwork could be mistaken for an obsolete
+        # alternate.
         if complete_batch:
             self._prune_replaced(
                 provider, entity_type, provider_id, documents, outcomes
@@ -2305,6 +2334,7 @@ class MetadataImageIngestService:
         document: dict,
         *,
         force: bool = False,
+        complete_batch: bool = False,
     ) -> dict[str, int]:
         return self.ingest_documents(
             provider,
@@ -2312,7 +2342,7 @@ class MetadataImageIngestService:
             provider_id,
             {locale: document},
             force=force,
-            complete_batch=False,
+            complete_batch=complete_batch,
         )
 
 

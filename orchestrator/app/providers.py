@@ -492,6 +492,13 @@ class TMDBClient(ProviderClient):
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
         return self.details_all_locales(entity_type, provider_id, [locale])[locale]
 
+    def collection_details(self, provider_id: str, locale: str) -> dict:
+        """Fetch collection membership without the heavier metadata joins."""
+        return self._request(
+            f"/collection/{quote(provider_id)}",
+            params={"language": self._language_code(locale)},
+        )
+
     @staticmethod
     def _translation_for(payload: dict, locale: str) -> dict:
         normalized = _normalize_language_tag(locale)
@@ -562,6 +569,23 @@ class TMDBClient(ProviderClient):
                     provider_id,
                 )
                 payload = {}
+        elif entity_type == "collection":
+            payload = self._request(f"/collection/{quote(provider_id)}", params={"language": language})
+            # Collection details do not support append_to_response for the
+            # localized documents and artwork needed by the metadata cache.
+            # Fetch these documented collection resources explicitly and join
+            # them to the localized details payload below.
+            payload = copy.deepcopy(payload)
+            payload["translations"] = self._request(
+                f"/collection/{quote(provider_id)}/translations"
+            )
+            payload["images"] = self._request(
+                f"/collection/{quote(provider_id)}/images",
+                params={
+                    "language": language,
+                    "include_image_language": image_language,
+                },
+            )
         else:
             kind = "tv" if entity_type == "series" else "movie"
             payload = self._request(
@@ -723,6 +747,16 @@ class TMDBClient(ProviderClient):
         videos = _normalize_trailers(
             (payload.get("videos") or {}).get("results", []), "tmdb"
         )
+        collection_ref = None
+        if entity_type == "movie":
+            belongs_to_collection = payload.get("belongs_to_collection")
+            if isinstance(belongs_to_collection, dict):
+                collection_id = belongs_to_collection.get("id")
+                if collection_id is not None and str(collection_id).strip():
+                    collection_ref = {
+                        "id": str(collection_id),
+                        "name": belongs_to_collection.get("name"),
+                    }
         return {
             "title": title,
             "overview": payload.get("overview"),
@@ -754,6 +788,10 @@ class TMDBClient(ProviderClient):
             "credits": normalized_credits,
             "provider": "tmdb",
             "providerId": provider_id,
+            # This is an internal cache field used by collection derivation;
+            # MetadataReadService deliberately exposes only its allowlisted
+            # text/fact fields to clients.
+            "collectionRef": collection_ref,
             "ids": ids,
             "children": [
                 {
@@ -827,6 +865,22 @@ class TMDBClient(ProviderClient):
                             score=image.get("vote_average", 0),
                             width=image.get("width", 0),
                             height=image.get("height", 0),
+                        )
+                    )
+        if entity_type == "collection":
+            present_types = {value["type"] for value in values}
+            for image_type, key in (
+                (PRIMARY, "poster_path"),
+                (BACKDROP, "backdrop_path"),
+            ):
+                path = payload.get(key)
+                if path and image_type not in present_types:
+                    values.append(
+                        _image(
+                            image_type,
+                            f"https://image.tmdb.org/t/p/w1280{path}",
+                            provider="tmdb",
+                            source_type=key,
                         )
                     )
         return values

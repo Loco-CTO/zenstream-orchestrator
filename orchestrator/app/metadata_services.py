@@ -97,7 +97,7 @@ PROVIDER_PRIORITIES = {
     "season": ["tvdb", "tmdb"],
     "episode": ["tvdb", "tmdb"],
     "movie": ["tmdb", "tvdb"],
-    "collection": ["tvdb"],
+    "collection": ["tvdb", "tmdb"],
     "artist": ["musicbrainz"],
     "release": ["musicbrainz"],
     "track": ["musicbrainz"],

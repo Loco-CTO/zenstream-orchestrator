@@ -411,8 +411,8 @@ export default function MetadataPage() {
 						</label>
 					</div>
 				</section>
-				<section className="console-card rounded-2xl p-6 lg:col-span-2">
-					<div className="flex flex-wrap items-start justify-between gap-4">
+				<details className="console-card order-last rounded-2xl lg:col-span-2">
+					<summary className="flex cursor-pointer list-none items-start justify-between gap-4 p-6">
 						<div>
 							<h2 className="text-xl font-bold">Sparse refresh settings</h2>
 							<p className="mt-3 max-w-3xl text-sm leading-6 console-muted">
@@ -425,203 +425,229 @@ export default function MetadataPage() {
 							<span className="rounded-full bg-[#5ee3d8]/10 px-3 py-1 text-[#5ee3d8]">
 								Sparse by default
 							</span>
-							<a className="text-[#5ee3d8] hover:underline" href="/web/dashboard/jobs">
+							<span>Expand to configure</span>
+						</div>
+					</summary>
+					<div className="border-t console-divider p-6">
+						<div className="mb-6 flex justify-end">
+							<a
+								className="text-sm text-[#5ee3d8] hover:underline"
+								href="/web/dashboard/jobs"
+							>
 								Configure schedule in Jobs
 							</a>
 						</div>
-					</div>
-					<div className="mt-6 grid gap-4 lg:grid-cols-2">
-						<label className="flex items-start gap-3 rounded-xl border console-divider p-4 text-sm">
-							<input
-								type="checkbox"
-								checked={refreshSettings.pretend}
-								onChange={(event) =>
-									setRefreshSettings((current) => ({
-										...current,
-										pretend: event.target.checked,
-									}))
-								}
-								className="mt-1 h-4 w-4 accent-[#5ee3d8]"
-							/>
-							<span>
-								<span className="font-semibold">Preview only</span>
-								<span className="mt-1 block leading-5 console-muted">
-									Log the items that would be refreshed without contacting providers or
-									updating cooldown state.
+						<div className="grid gap-4 lg:grid-cols-2">
+							<label className="flex items-start gap-3 rounded-xl border console-divider p-4 text-sm">
+								<input
+									type="checkbox"
+									checked={refreshSettings.pretend}
+									onChange={(event) =>
+										setRefreshSettings((current) => ({
+											...current,
+											pretend: event.target.checked,
+										}))
+									}
+									className="mt-1 h-4 w-4 accent-[#5ee3d8]"
+								/>
+								<span>
+									<span className="font-semibold">Preview only</span>
+									<span className="mt-1 block leading-5 console-muted">
+										Log the items that would be refreshed without contacting providers or
+										updating cooldown state.
+									</span>
 								</span>
-							</span>
-						</label>
-						<label className="text-sm">
-							<span className="font-semibold">Series block list</span>
-							<span className="mt-1 block text-xs console-muted">
-								Pipe, comma, or newline separated title, path, or provider-ID matches.
-							</span>
-							<textarea
-								value={refreshSettings.seriesBlockList}
-								onChange={(event) =>
-									setRefreshSettings((current) => ({
-										...current,
-										seriesBlockList: event.target.value,
-									}))
-								}
-								className="console-input mt-2 min-h-20 w-full rounded-xl px-4 py-3 text-sm outline-none"
-								placeholder="Example Series | 12345"
-							/>
-						</label>
-						<label className="text-sm lg:col-span-2">
-							<span className="font-semibold">Bad names and overview text</span>
-							<span className="mt-1 block text-xs console-muted">
-								Episode checks use these values for name prefixes and overview contains
-								matches.
-							</span>
-							<textarea
-								value={refreshSettings.badNames}
-								onChange={(event) =>
-									setRefreshSettings((current) => ({
-										...current,
-										badNames: event.target.value,
-									}))
-								}
-								className="console-input mt-2 min-h-20 w-full rounded-xl px-4 py-3 text-sm outline-none"
-								placeholder="Example: TBA | TBD | Series Name"
-							/>
-						</label>
-					</div>
-					<div className="mt-6 space-y-3">
-						{Object.entries(refreshItemLabels).map(([itemType, label]) => {
-							const item = refreshSettings.itemTypes[itemType];
-							if (!item) return null;
-							return (
-								<details
-									key={itemType}
-									open
-									className="rounded-xl border console-divider"
-								>
-									<summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-4 text-sm font-semibold">
-										<span>{label}</span>
-										<label
-											className="flex items-center gap-2 text-xs font-normal console-muted"
-											onClick={(event) => event.stopPropagation()}
-										>
-											<input
-												type="checkbox"
-												checked={item.enabled}
-												onChange={(event) =>
-													updateRefreshItem(itemType, (current) => ({
-														...current,
-														enabled: event.target.checked,
-													}))
-												}
-												className="h-4 w-4 accent-[#5ee3d8]"
-											/>
-											Enabled
-										</label>
-									</summary>
-									<div className="grid gap-4 border-t console-divider px-4 py-4 md:grid-cols-2 xl:grid-cols-4">
-										<NumberSetting
-											label="Cooldown (minutes)"
-											help="Wait this many minutes between attempts for the same item. Use -1 for no cooldown."
-											value={item.cooldownMinutes}
-											onChange={(value) =>
-												updateRefreshItem(itemType, (current) => ({
-													...current,
-													cooldownMinutes: value,
-												}))
-											}
-										/>
-										<NumberSetting
-											label="Catalog cutoff (days)"
-											help="Only refresh items added to the catalog within this many days. Use -1 to include older items."
-											value={item.cutoffDays}
-											onChange={(value) =>
-												updateRefreshItem(itemType, (current) => ({
-													...current,
-													cutoffDays: value,
-												}))
-											}
-										/>
-										<NumberSetting
-											label="Minimum provider IDs"
-											help="Require at least this many TMDB or TVDB IDs before refreshing. Use 0 for no minimum."
-											value={item.minimumProviderIds}
-											onChange={(value) =>
-												updateRefreshItem(itemType, (current) => ({
-													...current,
-													minimumProviderIds: Math.max(0, value),
-												}))
-											}
-										/>
-										<NumberSetting
-											label="Provider document age (days)"
-											help="Fetch provider metadata only when its cache is this many days old. Use -1 to ignore cache age."
-											value={item.documentMaxAgeDays}
-											onChange={(value) =>
-												updateRefreshItem(itemType, (current) => ({
-													...current,
-													documentMaxAgeDays: value,
-												}))
-											}
-										/>
-										{itemType === "series" && (
+							</label>
+							<label className="text-sm">
+								<span className="font-semibold">Series block list</span>
+								<span className="mt-1 block text-xs console-muted">
+									Pipe, comma, or newline separated title, path, or provider-ID matches.
+								</span>
+								<textarea
+									value={refreshSettings.seriesBlockList}
+									onChange={(event) =>
+										setRefreshSettings((current) => ({
+											...current,
+											seriesBlockList: event.target.value,
+										}))
+									}
+									className="console-input mt-2 min-h-20 w-full rounded-xl px-4 py-3 text-sm outline-none"
+									placeholder="Example Series | 12345"
+								/>
+							</label>
+							<label className="text-sm lg:col-span-2">
+								<span className="font-semibold">Bad names and overview text</span>
+								<span className="mt-1 block text-xs console-muted">
+									Episode checks use these values for name prefixes and overview contains
+									matches.
+								</span>
+								<textarea
+									value={refreshSettings.badNames}
+									onChange={(event) =>
+										setRefreshSettings((current) => ({
+											...current,
+											badNames: event.target.value,
+										}))
+									}
+									className="console-input mt-2 min-h-20 w-full rounded-xl px-4 py-3 text-sm outline-none"
+									placeholder="Example: TBA | TBD | Series Name"
+								/>
+							</label>
+						</div>
+						<div className="mt-6 space-y-3">
+							{Object.entries(refreshItemLabels).map(([itemType, label]) => {
+								const item = refreshSettings.itemTypes[itemType];
+								if (!item) return null;
+								return (
+									<details
+										key={itemType}
+										open
+										className="rounded-xl border console-divider"
+									>
+										<summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-4 text-sm font-semibold">
+											<span>{label}</span>
+											<label
+												className="flex items-center gap-2 text-xs font-normal console-muted"
+												onClick={(event) => event.stopPropagation()}
+											>
+												<input
+													type="checkbox"
+													checked={item.enabled}
+													onChange={(event) =>
+														updateRefreshItem(itemType, (current) => ({
+															...current,
+															enabled: event.target.checked,
+														}))
+													}
+													className="h-4 w-4 accent-[#5ee3d8]"
+												/>
+												Enabled
+											</label>
+										</summary>
+										<div className="grid gap-4 border-t console-divider px-4 py-4 md:grid-cols-2 xl:grid-cols-4">
 											<NumberSetting
-												label="Status refresh age (days)"
-												help="For ongoing series, refresh metadata and status after this many days. Use -1 to disable this check."
-												value={item.statusAfterDays}
+												label="Cooldown (minutes)"
+												help="Wait this many minutes between attempts for the same item. Use -1 for no cooldown."
+												value={item.cooldownMinutes}
 												onChange={(value) =>
 													updateRefreshItem(itemType, (current) => ({
 														...current,
-														statusAfterDays: value,
+														cooldownMinutes: value,
 													}))
 												}
 											/>
-										)}
-										<div className="md:col-span-2 xl:col-span-4">
-											<p className="text-xs font-semibold uppercase tracking-[0.12em] console-muted">
-												Sparse checks
-											</p>
-											<div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-												{(
-													Object.keys(item.checks) as Array<
-														keyof RefreshItemSetting["checks"]
-													>
-												).map((check) => (
-													<label
-														key={check}
-														className="flex items-start gap-2 text-xs console-muted"
-													>
-														<input
-															type="checkbox"
-															checked={item.checks[check]}
-															onChange={(event) =>
-																updateRefreshItem(itemType, (current) => ({
-																	...current,
-																	checks: {
-																		...current.checks,
-																		[check]: event.target.checked,
-																	},
-																}))
-															}
-															className="mt-0.5 h-4 w-4 accent-[#5ee3d8]"
-														/>
-														<span>{refreshCheckLabels[check]}</span>
-													</label>
-												))}
-											</div>
-										</div>
-										<div className="md:col-span-2 xl:col-span-4">
-											<p className="text-xs font-semibold uppercase tracking-[0.12em] console-muted">
-												Artwork buckets
-											</p>
-											<div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-												{artworkTypes.map((imageType) => (
-													<div
-														key={imageType}
-														className="rounded-xl border console-divider p-3"
-													>
-														<label className="flex items-center gap-2 text-xs font-semibold">
+											<NumberSetting
+												label="Catalog cutoff (days)"
+												help="Only refresh items added to the catalog within this many days. Use -1 to include older items."
+												value={item.cutoffDays}
+												onChange={(value) =>
+													updateRefreshItem(itemType, (current) => ({
+														...current,
+														cutoffDays: value,
+													}))
+												}
+											/>
+											<NumberSetting
+												label="Minimum provider IDs"
+												help="Require at least this many TMDB or TVDB IDs before refreshing. Use 0 for no minimum."
+												value={item.minimumProviderIds}
+												onChange={(value) =>
+													updateRefreshItem(itemType, (current) => ({
+														...current,
+														minimumProviderIds: Math.max(0, value),
+													}))
+												}
+											/>
+											<NumberSetting
+												label="Provider document age (days)"
+												help="Fetch provider metadata only when its cache is this many days old. Use -1 to ignore cache age."
+												value={item.documentMaxAgeDays}
+												onChange={(value) =>
+													updateRefreshItem(itemType, (current) => ({
+														...current,
+														documentMaxAgeDays: value,
+													}))
+												}
+											/>
+											{itemType === "series" && (
+												<NumberSetting
+													label="Status refresh age (days)"
+													help="For ongoing series, refresh metadata and status after this many days. Use -1 to disable this check."
+													value={item.statusAfterDays}
+													onChange={(value) =>
+														updateRefreshItem(itemType, (current) => ({
+															...current,
+															statusAfterDays: value,
+														}))
+													}
+												/>
+											)}
+											<div className="md:col-span-2 xl:col-span-4">
+												<p className="text-xs font-semibold uppercase tracking-[0.12em] console-muted">
+													Sparse checks
+												</p>
+												<div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+													{(
+														Object.keys(item.checks) as Array<
+															keyof RefreshItemSetting["checks"]
+														>
+													).map((check) => (
+														<label
+															key={check}
+															className="flex items-start gap-2 text-xs console-muted"
+														>
 															<input
 																type="checkbox"
-																checked={item.artwork[imageType]?.enabled === true}
+																checked={item.checks[check]}
+																onChange={(event) =>
+																	updateRefreshItem(itemType, (current) => ({
+																		...current,
+																		checks: {
+																			...current.checks,
+																			[check]: event.target.checked,
+																		},
+																	}))
+																}
+																className="mt-0.5 h-4 w-4 accent-[#5ee3d8]"
+															/>
+															<span>{refreshCheckLabels[check]}</span>
+														</label>
+													))}
+												</div>
+											</div>
+											<div className="md:col-span-2 xl:col-span-4">
+												<p className="text-xs font-semibold uppercase tracking-[0.12em] console-muted">
+													Artwork buckets
+												</p>
+												<div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+													{artworkTypes.map((imageType) => (
+														<div
+															key={imageType}
+															className="rounded-xl border console-divider p-3"
+														>
+															<label className="flex items-center gap-2 text-xs font-semibold">
+																<input
+																	type="checkbox"
+																	checked={item.artwork[imageType]?.enabled === true}
+																	onChange={(event) =>
+																		updateRefreshItem(itemType, (current) => ({
+																			...current,
+																			artwork: {
+																				...current.artwork,
+																				[imageType]: {
+																					...current.artwork[imageType],
+																					enabled: event.target.checked,
+																				},
+																			},
+																		}))
+																	}
+																	className="h-4 w-4 accent-[#5ee3d8]"
+																/>
+																{imageType}
+															</label>
+															<input
+																type="number"
+																value={item.artwork[imageType]?.maxAgeDays ?? 7}
 																onChange={(event) =>
 																	updateRefreshItem(itemType, (current) => ({
 																		...current,
@@ -629,116 +655,98 @@ export default function MetadataPage() {
 																			...current.artwork,
 																			[imageType]: {
 																				...current.artwork[imageType],
-																				enabled: event.target.checked,
+																				maxAgeDays: Number(event.target.value),
 																			},
 																		},
 																	}))
 																}
-																className="h-4 w-4 accent-[#5ee3d8]"
+																className="console-input mt-3 h-9 w-full rounded-lg px-3 text-xs outline-none"
+																aria-label={`${imageType} artwork maximum age in days`}
 															/>
-															{imageType}
-														</label>
-														<input
-															type="number"
-															value={item.artwork[imageType]?.maxAgeDays ?? 7}
-															onChange={(event) =>
-																updateRefreshItem(itemType, (current) => ({
-																	...current,
-																	artwork: {
-																		...current.artwork,
-																		[imageType]: {
-																			...current.artwork[imageType],
-																			maxAgeDays: Number(event.target.value),
-																		},
-																	},
-																}))
-															}
-															className="console-input mt-3 h-9 w-full rounded-lg px-3 text-xs outline-none"
-															aria-label={`${imageType} artwork maximum age in days`}
-														/>
-														<p className="mt-1 text-[11px] console-muted">
-															-1 disables age gate
-														</p>
-													</div>
-												))}
+															<p className="mt-1 text-[11px] console-muted">
+																-1 disables age gate
+															</p>
+														</div>
+													))}
+												</div>
 											</div>
+											<label className="flex items-start gap-2 text-xs console-muted">
+												<input
+													type="checkbox"
+													checked={item.replaceAllMetadata}
+													onChange={(event) =>
+														updateRefreshItem(itemType, (current) => ({
+															...current,
+															replaceAllMetadata: event.target.checked,
+														}))
+													}
+													className="mt-0.5 h-4 w-4 accent-[#5ee3d8]"
+												/>
+												<span>
+													<span className="font-semibold text-white">
+														Overwrite existing provider metadata
+													</span>
+													<span className="mt-1 block leading-5 console-muted">
+														Use fresh TMDB/TVDB values for populated titles, overviews, dates,
+														genres, ratings, and other provider fields.
+													</span>
+												</span>
+											</label>
+											<label className="flex items-start gap-2 text-xs console-muted">
+												<input
+													type="checkbox"
+													checked={item.replaceAllImages}
+													onChange={(event) =>
+														updateRefreshItem(itemType, (current) => ({
+															...current,
+															replaceAllImages: event.target.checked,
+														}))
+													}
+													className="mt-0.5 h-4 w-4 accent-[#5ee3d8]"
+												/>
+												<span>
+													<span className="font-semibold text-white">
+														Redownload provider artwork
+													</span>
+													<span className="mt-1 block leading-5 console-muted">
+														Fetch fresh provider image files even when their URLs have not
+														changed. Local library artwork is not modified.
+													</span>
+												</span>
+											</label>
 										</div>
-										<label className="flex items-start gap-2 text-xs console-muted">
-											<input
-												type="checkbox"
-												checked={item.replaceAllMetadata}
-												onChange={(event) =>
-													updateRefreshItem(itemType, (current) => ({
-														...current,
-														replaceAllMetadata: event.target.checked,
-													}))
-												}
-												className="mt-0.5 h-4 w-4 accent-[#5ee3d8]"
-											/>
-											<span>
-												<span className="font-semibold text-white">
-													Overwrite existing provider metadata
-												</span>
-												<span className="mt-1 block leading-5 console-muted">
-													Use fresh TMDB/TVDB values for populated titles, overviews, dates,
-													genres, ratings, and other provider fields.
-												</span>
-											</span>
-										</label>
-										<label className="flex items-start gap-2 text-xs console-muted">
-											<input
-												type="checkbox"
-												checked={item.replaceAllImages}
-												onChange={(event) =>
-													updateRefreshItem(itemType, (current) => ({
-														...current,
-														replaceAllImages: event.target.checked,
-													}))
-												}
-												className="mt-0.5 h-4 w-4 accent-[#5ee3d8]"
-											/>
-											<span>
-												<span className="font-semibold text-white">
-													Redownload provider artwork
-												</span>
-												<span className="mt-1 block leading-5 console-muted">
-													Fetch fresh provider image files even when their URLs have not
-													changed. Local library artwork is not modified.
-												</span>
-											</span>
-										</label>
-									</div>
-								</details>
-							);
-						})}
+									</details>
+								);
+							})}
+						</div>
+						<div className="mt-6 flex flex-wrap items-center gap-3">
+							<button
+								type="button"
+								onClick={saveRefreshSettings}
+								className="console-button rounded-xl px-4 py-3 text-sm font-semibold"
+							>
+								Save sparse settings
+							</button>
+							<label className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm">
+								<input
+									type="checkbox"
+									checked={refreshAll}
+									onChange={(event) => setRefreshAll(event.target.checked)}
+									className="h-4 w-4 accent-[#5ee3d8]"
+								/>
+								Full refresh for the next manual run
+							</label>
+							<button
+								type="button"
+								onClick={refreshMetadata}
+								className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm font-semibold"
+							>
+								<IconRefresh size={16} />
+								{refreshAll ? "Run full refresh" : "Run sparse refresh"}
+							</button>
+						</div>
 					</div>
-					<div className="mt-6 flex flex-wrap items-center gap-3">
-						<button
-							type="button"
-							onClick={saveRefreshSettings}
-							className="console-button rounded-xl px-4 py-3 text-sm font-semibold"
-						>
-							Save sparse settings
-						</button>
-						<label className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm">
-							<input
-								type="checkbox"
-								checked={refreshAll}
-								onChange={(event) => setRefreshAll(event.target.checked)}
-								className="h-4 w-4 accent-[#5ee3d8]"
-							/>
-							Full refresh for the next manual run
-						</label>
-						<button
-							type="button"
-							onClick={refreshMetadata}
-							className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm font-semibold"
-						>
-							<IconRefresh size={16} />
-							{refreshAll ? "Run full refresh" : "Run sparse refresh"}
-						</button>
-					</div>
-				</section>
+				</details>
 				<form
 					onSubmit={(event) => save(event, "tmdb")}
 					className="console-card rounded-2xl p-6"

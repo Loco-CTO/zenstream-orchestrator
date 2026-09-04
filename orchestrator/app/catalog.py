@@ -1376,8 +1376,7 @@ class Catalog:
         from_clause = (
             "FROM {member_table} m "
             "JOIN catalog_item_projection p ON p.entity_id=m.source_entity_id AND p.locale=? "
-            "JOIN library_entities e ON e.id=p.entity_id"
-            + summary_join
+            "JOIN library_entities e ON e.id=p.entity_id" + summary_join
         )
         where_clause = (
             f"WHERE m.collection_entity_id=? AND p.library_id IN ({placeholders})"

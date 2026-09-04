@@ -4676,9 +4676,7 @@ class LibraryScanner:
                     if provider == "tvdb"
                     else f"tmdb-collection-{provider_id}"
                 )
-                collection = self._entity(
-                    library_id, None, "collection", path
-                )
+                collection = self._entity(library_id, None, "collection", path)
                 self._scan_refresh_root_ids.add(collection)
                 self._replace_ids(collection, [(provider, "collection", provider_id)])
                 current_members = [

@@ -2730,9 +2730,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 ],
             ) as request,
         ):
-            values = client.details_all_locales(
-                "collection", "10", ["en-US", "ja-JP"]
-            )
+            values = client.details_all_locales("collection", "10", ["en-US", "ja-JP"])
 
         self.assertEqual(
             [call.args[0] for call in request.call_args_list],
@@ -2759,14 +2757,13 @@ class LibraryMetadataTest(unittest.TestCase):
         )
         no_collection = client.normalize("movie", "11", {"title": "Standalone"})
 
-        self.assertEqual(
-            value["collectionRef"], {"id": "99", "name": "A Saga"}
-        )
+        self.assertEqual(value["collectionRef"], {"id": "99", "name": "A Saga"})
         self.assertIsNone(no_collection["collectionRef"])
 
     def test_tmdb_collection_discovery_uses_provider_part_order(self):
         db, scanner = self._scanner_db()
         try:
+
             class Cache:
                 @staticmethod
                 def get_locales(provider, entity_type, provider_id):
@@ -2801,6 +2798,7 @@ class LibraryMetadataTest(unittest.TestCase):
     def test_tmdb_collection_discovery_backfills_legacy_movie_cache(self):
         db, scanner = self._scanner_db()
         try:
+
             class Cache:
                 def __init__(self):
                     self.documents = {}
@@ -2822,9 +2820,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     force=False,
                     project=True,
                 ):
-                    self.calls.append(
-                        (provider_id, tuple(locales), force, project)
-                    )
+                    self.calls.append((provider_id, tuple(locales), force, project))
                     self.cache.documents[provider_id] = {
                         "en": {"collectionRef": {"id": "10"}}
                     }
@@ -2848,9 +2844,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 lambda: False,
             )
 
-            self.assertEqual(
-                {call[0] for call in service.calls}, {"1", "2"}
-            )
+            self.assertEqual({call[0] for call in service.calls}, {"1", "2"})
             self.assertTrue(all(call[2:] == (True, False) for call in service.calls))
             self.assertEqual(discovered["10"]["members"], ["movie-1", "movie-2"])
         finally:
@@ -2906,7 +2900,9 @@ class LibraryMetadataTest(unittest.TestCase):
 
             with (
                 patch("app.providers.MetadataService", return_value=Service()),
-                patch("app.metadata_services.MetadataIngestService", return_value=Ingest()),
+                patch(
+                    "app.metadata_services.MetadataIngestService", return_value=Ingest()
+                ),
                 patch("app.library_cleanup.cleanup_entities") as cleanup,
                 patch.object(scanner, "_refresh_catalog_after_cleanup"),
             ):
@@ -2914,9 +2910,7 @@ class LibraryMetadataTest(unittest.TestCase):
 
             cleanup.assert_called_once_with(db, ["tvdb-old"])
             self.assertEqual(
-                db.execute(
-                    "SELECT id FROM library_entities WHERE id='tmdb-old'"
-                ),
+                db.execute("SELECT id FROM library_entities WHERE id='tmdb-old'"),
                 [("tmdb-old",)],
             )
             self.assertIn(
@@ -2994,7 +2988,9 @@ class LibraryMetadataTest(unittest.TestCase):
 
             with (
                 patch("app.providers.MetadataService", return_value=Service()),
-                patch("app.metadata_services.MetadataIngestService", return_value=Ingest()),
+                patch(
+                    "app.metadata_services.MetadataIngestService", return_value=Ingest()
+                ),
                 patch.object(scanner, "_refresh_catalog_after_cleanup"),
             ):
                 scanner.derive_collection("collection-library", "job-1")

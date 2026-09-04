@@ -570,7 +570,9 @@ class TMDBClient(ProviderClient):
                 )
                 payload = {}
         elif entity_type == "collection":
-            payload = self._request(f"/collection/{quote(provider_id)}", params={"language": language})
+            payload = self._request(
+                f"/collection/{quote(provider_id)}", params={"language": language}
+            )
             # Collection details do not support append_to_response for the
             # localized documents and artwork needed by the metadata cache.
             # Fetch these documented collection resources explicitly and join

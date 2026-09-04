@@ -677,7 +677,15 @@ export default function MetadataPage() {
 												}
 												className="mt-0.5 h-4 w-4 accent-[#5ee3d8]"
 											/>
-											<span>Replace provider metadata values</span>
+											<span>
+												<span className="font-semibold text-white">
+													Overwrite existing provider metadata
+												</span>
+												<span className="mt-1 block leading-5 console-muted">
+													Use fresh TMDB/TVDB values for populated titles, overviews, dates,
+													genres, ratings, and other provider fields.
+												</span>
+											</span>
 										</label>
 										<label className="flex items-start gap-2 text-xs console-muted">
 											<input
@@ -691,7 +699,15 @@ export default function MetadataPage() {
 												}
 												className="mt-0.5 h-4 w-4 accent-[#5ee3d8]"
 											/>
-											<span>Replace cached artwork files</span>
+											<span>
+												<span className="font-semibold text-white">
+													Redownload provider artwork
+												</span>
+												<span className="mt-1 block leading-5 console-muted">
+													Fetch fresh provider image files even when their URLs have not
+													changed. Local library artwork is not modified.
+												</span>
+											</span>
 										</label>
 									</div>
 								</details>

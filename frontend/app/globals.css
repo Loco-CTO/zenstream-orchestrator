@@ -95,13 +95,6 @@ select:focus {
 .console-muted {
 	color: #666;
 }
-.console-kicker {
-	color: var(--primary);
-	font-size: 10px;
-	font-weight: 600;
-	letter-spacing: 0.1em;
-	text-transform: uppercase;
-}
 .console-divider {
 	border-color: #111;
 }

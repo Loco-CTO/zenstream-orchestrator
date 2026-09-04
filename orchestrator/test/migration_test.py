@@ -52,6 +52,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "idx_user_item_state_continue",
                         "idx_metadata_images_url_path_ready",
                         "idx_metadata_images_type_url_fetched",
+                        "idx_metadata_refresh_state_attempted",
                     }
                     <= indexes
                 )
@@ -107,8 +108,24 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "bazarr_series_mappings",
                         "bazarr_episode_mappings",
                         "bazarr_movie_mappings",
+                        "metadata_refresh_state",
                     }
                     <= tables
+                )
+                refresh_state_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(metadata_refresh_state)"
+                    )
+                }
+                self.assertTrue(
+                    {
+                        "entity_id",
+                        "last_attempted_at",
+                        "last_completed_at",
+                        "last_error",
+                    }
+                    <= refresh_state_columns
                 )
                 series_mapping_columns = {
                     row[1]

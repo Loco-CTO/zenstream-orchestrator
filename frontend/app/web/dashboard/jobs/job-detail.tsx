@@ -543,37 +543,39 @@ export default function JobDetailPage() {
 									</div>
 								</div>
 							)}
-							{selected.optionDefinitions?.map((option) => (
-								<label
-									key={option.key}
-									style={{
-										display: "flex",
-										alignItems: "flex-start",
-										gap: 8,
-										color: "#aaa",
-										fontSize: 12,
-									}}
-								>
-									<input
-										type="checkbox"
-										checked={Boolean(triggerOptions[option.key] ?? option.default)}
-										onChange={(event) =>
-											setTriggerOptions((current) => ({
-												...current,
-												[option.key]: event.target.checked,
-											}))
-										}
-									/>
-									<span>
-										<span style={{ color: "#ddd" }}>{option.label}</span>
-										{option.description && (
-											<span style={{ display: "block", color: "#666", marginTop: 3 }}>
-												{option.description}
-											</span>
-										)}
-									</span>
-								</label>
-							))}
+							{selected.optionDefinitions
+								?.filter((option) => !option.manualOnly)
+								.map((option) => (
+									<label
+										key={option.key}
+										style={{
+											display: "flex",
+											alignItems: "flex-start",
+											gap: 8,
+											color: "#aaa",
+											fontSize: 12,
+										}}
+									>
+										<input
+											type="checkbox"
+											checked={Boolean(triggerOptions[option.key] ?? option.default)}
+											onChange={(event) =>
+												setTriggerOptions((current) => ({
+													...current,
+													[option.key]: event.target.checked,
+												}))
+											}
+										/>
+										<span>
+											<span style={{ color: "#ddd" }}>{option.label}</span>
+											{option.description && (
+												<span style={{ display: "block", color: "#666", marginTop: 3 }}>
+													{option.description}
+												</span>
+											)}
+										</span>
+									</label>
+								))}
 							<div
 								style={{
 									display: "flex",

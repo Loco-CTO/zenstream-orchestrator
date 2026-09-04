@@ -22,6 +22,7 @@ from app.metadata_services import (
     MetadataIngestService,
     metadata_task_results,
 )
+from app.metadata_refresh import MetadataRefreshJob
 from app.models.metadata import MetadataLanguageSettings
 from app.progress import (
     WholeJobProgress,
@@ -637,6 +638,14 @@ class JobStore:
         if kind == "metadata_refresh":
             return [
                 {
+                    "key": "refreshAll",
+                    "label": "Refresh all indexed video metadata",
+                    "type": "boolean",
+                    "default": False,
+                    "manualOnly": True,
+                    "description": "Ignore sparse rules and refresh every indexed movie, series, season, and episode.",
+                },
+                {
                     "key": "preserveCachedAssets",
                     "label": "Preserve cached assets",
                     "type": "boolean",
@@ -647,11 +656,22 @@ class JobStore:
         return []
 
     @classmethod
-    def validate_options(cls, kind: str, options: dict | None) -> dict:
+    def validate_options(
+        cls, kind: str, options: dict | None, *, allow_manual: bool = True
+    ) -> dict:
         values = options or {}
         if not isinstance(values, dict):
             raise ValueError("options must be an object")
         definitions = {item["key"]: item for item in cls.option_definitions(kind)}
+        if not allow_manual:
+            manual = {
+                item["key"] for item in definitions.values() if item.get("manualOnly")
+            }
+            supplied_manual = set(values).intersection(manual)
+            if supplied_manual:
+                raise ValueError(
+                    f"{sorted(supplied_manual)[0]} is only available for manual runs"
+                )
         unknown = set(values) - set(definitions)
         if unknown:
             raise ValueError(f"Unsupported task option: {sorted(unknown)[0]}")
@@ -800,6 +820,15 @@ class JobStore:
                 "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
                 (now(), now(), upgrade["id"]),
             )
+        self.ensure(
+            "metadata_refresh",
+            "Refresh metadata",
+            "Refresh indexed metadata and artwork using the configured sparse rules.",
+            "metadata_refresh",
+            43200,
+            {},
+            enabled=False,
+        )
         cleanup = self.ensure(
             "metadata_cleanup",
             "Clean orphaned library data",
@@ -1059,7 +1088,7 @@ class JobStore:
                 **self._validate_trigger(trigger),
                 "id": str(trigger.get("id") or new_id()),
                 "options": self.validate_options(
-                    definition["kind"], trigger.get("options")
+                    definition["kind"], trigger.get("options"), allow_manual=False
                 ),
             }
             for trigger in triggers
@@ -1107,7 +1136,7 @@ class JobStore:
             raise KeyError("Job definition not found")
         validated = self._validate_trigger(trigger)
         validated["options"] = self.validate_options(
-            definition["kind"], trigger.get("options")
+            definition["kind"], trigger.get("options"), allow_manual=False
         )
         trigger_id = str(trigger.get("id") or new_id())
         timestamp = now()
@@ -1330,7 +1359,11 @@ class JobStore:
             else:
                 run_id = new_id()
                 library_id = (definition.get("config") or {}).get("libraryId")
-                values = self.validate_options(definition["kind"], options)
+                values = self.validate_options(
+                    definition["kind"],
+                    options,
+                    allow_manual=source_trigger_id is None,
+                )
                 columns = {
                     row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")
                 }
@@ -2482,10 +2515,11 @@ class JobScheduler:
             definition = self.store.ensure(
                 "metadata_refresh",
                 "Refresh metadata",
-                "Refetch all indexed provider metadata, artwork, and credits.",
+                "Refresh indexed metadata and artwork using the configured sparse rules.",
                 "metadata_refresh",
                 43200,
                 {},
+                enabled=False,
             )
         run, _ = self.store.create_or_get_active_run(definition, options=options)
         with self.condition:
@@ -2602,9 +2636,18 @@ class JobScheduler:
                     definition["id"], trigger, None, "Library scan queued"
                 )
             else:
+                trigger_options = trigger.get("options") or {}
+                # refreshAll is deliberately a manual-only option.  Ignore it
+                # on legacy persisted triggers so scheduled work always uses
+                # the sparse policy.
+                trigger_options = {
+                    key: value
+                    for key, value in trigger_options.items()
+                    if key != "refreshAll"
+                }
                 run, created = self.store.create_or_get_active_run(
                     definition,
-                    options=trigger.get("options"),
+                    options=trigger_options,
                     source_trigger_id=trigger["id"],
                 )
                 if not created:
@@ -2693,15 +2736,25 @@ class JobScheduler:
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
             elif kind == "metadata_refresh":
-                MetadataMissingJob(self.store).run(
-                    run_id,
-                    definition,
-                    self.cancel_events[run_id].is_set,
-                    force=True,
-                    force_assets=not bool(
-                        run_options.get("preserveCachedAssets", False)
-                    ),
-                )
+                if bool(run_options.get("refreshAll", False)):
+                    MetadataMissingJob(self.store).run(
+                        run_id,
+                        definition,
+                        self.cancel_events[run_id].is_set,
+                        force=True,
+                        force_assets=not bool(
+                            run_options.get("preserveCachedAssets", False)
+                        ),
+                    )
+                else:
+                    MetadataRefreshJob(self.store).run(
+                        run_id,
+                        definition,
+                        self.cancel_events[run_id].is_set,
+                        preserve_cached_assets=bool(
+                            run_options.get("preserveCachedAssets", False)
+                        ),
+                    )
             elif kind == "metadata_cleanup":
                 MetadataCleanupJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set

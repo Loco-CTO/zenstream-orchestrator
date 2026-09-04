@@ -924,6 +924,19 @@ class JobMappingTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_default_metadata_refresh_is_available_without_a_schedule(self):
+        db, store = self._scheduler_store()
+        try:
+            store.ensure_defaults()
+
+            refresh = store.by_key("metadata_refresh")
+            self.assertIsNotNone(refresh)
+            self.assertEqual(refresh["kind"], "metadata_refresh")
+            self.assertFalse(refresh["enabled"])
+            self.assertEqual(refresh["triggers"], [])
+        finally:
+            db.close()
+
     def test_default_bazarr_sync_runs_daily_at_two(self):
         db, store = self._scheduler_store()
         try:

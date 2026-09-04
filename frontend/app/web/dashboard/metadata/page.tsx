@@ -151,7 +151,6 @@ export default function MetadataPage() {
 	const [refreshSettings, setRefreshSettings] = useState<RefreshSettings>(
 		defaultRefreshSettings,
 	);
-	const [refreshAll, setRefreshAll] = useState(false);
 
 	async function load(current: Session) {
 		const response = await adminFetch("/api/admin/metadata/providers", current);
@@ -201,21 +200,6 @@ export default function MetadataPage() {
 			setLocales(data.locales || locales);
 			setPreferNoLanguageForBackdrop(data.preferNoLanguageForBackdrop === true);
 		}
-	}
-
-	async function refreshMetadata() {
-		if (!session) return;
-		const response = await adminFetch("/api/admin/metadata/refresh", session, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ refreshAll }),
-		});
-		const data = await response.json().catch(() => null);
-		setMessage(
-			response.ok
-				? "Metadata and artwork refresh queued."
-				: data?.detail || "Could not queue metadata refresh.",
-		);
 	}
 
 	async function saveRefreshSettings() {
@@ -411,25 +395,18 @@ export default function MetadataPage() {
 						</label>
 					</div>
 				</section>
-				<details className="console-card order-last rounded-2xl lg:col-span-2">
-					<summary className="flex cursor-pointer list-none items-start justify-between gap-4 p-6">
-						<div>
-							<h2 className="text-xl font-bold">Sparse refresh settings</h2>
-							<p className="mt-3 max-w-3xl text-sm leading-6 console-muted">
-								Scheduled refreshes only revisit items that match a selected missing or
-								placeholder check and whose relevant provider cache is older than the
-								configured age. Cooldowns are measured from the last attempt.
-							</p>
-						</div>
-						<div className="flex items-center gap-2 text-xs console-muted">
-							<span className="rounded-full bg-[#5ee3d8]/10 px-3 py-1 text-[#5ee3d8]">
-								Sparse by default
-							</span>
-							<span>Expand to configure</span>
-						</div>
+				<details className="console-card order-last space-y-4 rounded-2xl p-6 lg:col-span-2">
+					<summary className="cursor-pointer">
+						<span className="text-lg font-bold">Sparse refresh settings</span>
+						<span className="mt-1 block max-w-3xl text-sm leading-6 console-muted">
+							Sparse refresh is enabled by default. It only revisits items that match a
+							selected missing or placeholder check and whose relevant provider cache
+							is older than the configured age. Cooldowns are measured from the last
+							attempt.
+						</span>
 					</summary>
-					<div className="border-t console-divider p-6">
-						<div className="mb-6 flex justify-end">
+					<div className="space-y-4">
+						<div className="flex justify-end">
 							<a
 								className="text-sm text-[#5ee3d8] hover:underline"
 								href="/web/dashboard/jobs"
@@ -726,23 +703,6 @@ export default function MetadataPage() {
 								className="console-button rounded-xl px-4 py-3 text-sm font-semibold"
 							>
 								Save sparse settings
-							</button>
-							<label className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm">
-								<input
-									type="checkbox"
-									checked={refreshAll}
-									onChange={(event) => setRefreshAll(event.target.checked)}
-									className="h-4 w-4 accent-[#5ee3d8]"
-								/>
-								Full refresh for the next manual run
-							</label>
-							<button
-								type="button"
-								onClick={refreshMetadata}
-								className="flex items-center gap-2 rounded-xl border console-divider px-4 py-3 text-sm font-semibold"
-							>
-								<IconRefresh size={16} />
-								{refreshAll ? "Run full refresh" : "Run sparse refresh"}
 							</button>
 						</div>
 					</div>

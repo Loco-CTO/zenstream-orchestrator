@@ -329,6 +329,40 @@ class CatalogReadModelTest(unittest.TestCase):
         )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_collection_listing_keeps_projection_count_and_member_children(
+        self, _languages
+    ):
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES('user','collection','2026')"
+        )
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute(
+            "DELETE FROM catalog_entity_summary WHERE entity_id='collection-item'"
+        )
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+
+        root = catalog.list_items(
+            "user",
+            "collection",
+            "en",
+            sort_by="added",
+            sort_order="descending",
+        )
+        members = catalog.list_items(
+            "user",
+            "collection",
+            "en",
+            parent_id="collection-item",
+        )
+
+        self.assertEqual(root["total"], 1)
+        self.assertEqual([item["id"] for item in root["items"]], ["collection-item"])
+        self.assertEqual(members["total"], 1)
+        self.assertEqual([item["id"] for item in members["items"]], ["series"])
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_projection_preload_deduplicates_and_caches_missing_rows(self, _languages):
         CatalogReadModel(self.db).rebuild(["en"])
         self.db.execute(

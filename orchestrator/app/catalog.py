@@ -1330,6 +1330,137 @@ class Catalog:
             (language, library_id, parent_id, page_size, offset),
         )
 
+    def _list_collection_members_read_model(
+        self,
+        user_id: str,
+        collection_id: str,
+        language: str,
+        *,
+        page: int,
+        page_size: int,
+        sort_by: str | None,
+        sort_order: str,
+    ) -> dict:
+        allowed = sorted(self.allowed_libraries(user_id))
+        empty = {"items": [], "page": page, "pageSize": page_size, "total": 0}
+        if not allowed or not self._has_table("collection_members"):
+            return empty
+
+        placeholders = ",".join("?" for _ in allowed)
+        member_tables = ["collection_members"]
+        if self._has_table("catalog_collection_member_projection"):
+            member_tables.insert(0, "catalog_collection_member_projection")
+        direction = "DESC" if sort_order.lower() == "descending" else "ASC"
+        tie_direction = "ASC" if direction == "DESC" else "DESC"
+        sort_columns = {
+            "added": "COALESCE(s.added_sort_ns, 0)",
+            "lastAdded": "COALESCE(s.last_added_sort_ns, 0)",
+            "rating": "p.rating_sort",
+            "title": "p.title_sort",
+            "release": "p.release_sort",
+            "runtime": "p.runtime_sort",
+        }
+        sort_column = sort_columns.get(sort_by)
+        order = (
+            f"{sort_column} {direction},p.title_sort {tie_direction},p.entity_id {tie_direction}"
+            if sort_column
+            else "m.position ASC,e.id ASC"
+        )
+        summary_join = (
+            " LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id"
+            if sort_by in {"added", "lastAdded"}
+            else ""
+        )
+        from_clause = (
+            "FROM {member_table} m "
+            "JOIN catalog_item_projection p ON p.entity_id=m.source_entity_id AND p.locale=? "
+            "JOIN library_entities e ON e.id=p.entity_id"
+            + summary_join
+        )
+        where_clause = (
+            f"WHERE m.collection_entity_id=? AND p.library_id IN ({placeholders})"
+        )
+
+        def read_rows(member_table: str):
+            total_rows = self.db.execute(
+                "SELECT COUNT(*) "
+                + from_clause.format(member_table=member_table)
+                + " "
+                + where_clause,
+                [language, collection_id, *allowed],
+            )
+            total = int(total_rows[0][0] or 0) if total_rows else 0
+            offset = max(0, page - 1) * page_size
+            rows = self.db.execute(
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
+                "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                + from_clause.format(member_table=member_table)
+                + " "
+                + where_clause
+                + f" ORDER BY {order} LIMIT ? OFFSET ?",
+                [language, collection_id, *allowed, page_size, offset],
+            )
+            return total, rows
+
+        total, rows = read_rows(member_tables[0])
+        if total == 0 and len(member_tables) > 1:
+            total, rows = read_rows(member_tables[1])
+        if not rows:
+            return {"items": [], "page": page, "pageSize": page_size, "total": total}
+
+        ids = [row[0] for row in rows]
+        date_placeholders = ",".join("?" for _ in ids)
+        date_rows = self.db.execute(
+            "SELECT e.id,e.created_at,s.added_sort_ns,s.last_added_sort_ns "
+            "FROM library_entities e LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id "
+            f"WHERE e.id IN ({date_placeholders})",
+            ids,
+        )
+        dates = {
+            row[0]: {
+                "addedAt": _date_from_ns(row[2]) or row[1],
+                "lastAddedAt": _date_from_ns(row[3]) or row[1],
+            }
+            for row in date_rows
+        }
+        values = self._hydrate_rows(
+            user_id, [row[:10] for row in rows], language, dates
+        )
+        return {"items": values, "page": page, "pageSize": page_size, "total": total}
+
+    def _list_collection_members_legacy(
+        self,
+        user_id: str,
+        collection_id: str,
+        language: str,
+        *,
+        page: int,
+        page_size: int,
+    ) -> dict:
+        allowed = sorted(self.allowed_libraries(user_id))
+        empty = {"items": [], "page": page, "pageSize": page_size, "total": 0}
+        if not allowed or not self._has_table("collection_members"):
+            return empty
+        placeholders = ",".join("?" for _ in allowed)
+        total_rows = self.db.execute(
+            "SELECT COUNT(*) FROM collection_members m "
+            "JOIN library_entities e ON e.id=m.source_entity_id "
+            f"WHERE m.collection_entity_id=? AND e.library_id IN ({placeholders})",
+            [collection_id, *allowed],
+        )
+        total = int(total_rows[0][0] or 0) if total_rows else 0
+        offset = max(0, page - 1) * page_size
+        rows = self.db.execute(
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
+            "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+            "FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id "
+            f"WHERE m.collection_entity_id=? AND e.library_id IN ({placeholders}) "
+            "ORDER BY m.position ASC,e.id ASC LIMIT ? OFFSET ?",
+            [collection_id, *allowed, page_size, offset],
+        )
+        values = self._hydrate_rows(user_id, [row[:10] for row in rows], language)
+        return {"items": values, "page": page, "pageSize": page_size, "total": total}
+
     def _list_items_read_model(
         self,
         user_id: str,
@@ -1357,7 +1488,6 @@ class Catalog:
                 "s.added_sort_ns" if sort_by == "added" else "s.last_added_sort_ns"
             )
             select_dates = "s.added_sort_ns,s.last_added_sort_ns"
-            date_params: list[object] = []
             if library["type"] == "collection" and self._has_table(
                 "catalog_collection_summary"
             ):
@@ -1368,19 +1498,22 @@ class Catalog:
                     f"COALESCE((SELECT MAX(c.last_added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN ({scope_placeholders})),s.last_added_sort_ns)"
                 )
                 order_column = "sort_added" if sort_by == "added" else "sort_last"
-                date_params = [*scope, *scope, *scope]
             order = f"{order_column} {direction},e.id {index_tie_direction}"
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at,"
                 + select_dates
                 + " "
-                "FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
-                "WHERE s.library_id=? AND s.parent_id IS ? ORDER BY "
+                "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
+                "LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id "
+                "AND s.library_id=p.library_id AND s.parent_id IS p.parent_id "
+                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY "
                 + order
                 + " LIMIT ? OFFSET ?"
             )
-            if date_params:
+            if library["type"] == "collection" and self._has_table(
+                "catalog_collection_summary"
+            ):
                 # The computed date aliases are used only for ordering; SQLite
                 # permits the equivalent expressions in the SELECT and ORDER BY.
                 order = (
@@ -1395,9 +1528,18 @@ class Catalog:
                 query = query.replace(
                     "ORDER BY sort_added", "ORDER BY " + order
                 ).replace("ORDER BY sort_last", "ORDER BY " + order)
-                params = [*date_params, library_id, parent_id, page_size, offset]
+                params = [
+                    *scope,
+                    *scope,
+                    language,
+                    library_id,
+                    parent_id,
+                    *scope,
+                    page_size,
+                    offset,
+                ]
             else:
-                params = [library_id, parent_id, page_size, offset]
+                params = [language, library_id, parent_id, page_size, offset]
         elif sort_by in {"rating", "title", "release", "runtime"} or sort_by is None:
             projection_order = {
                 "rating": "p.rating_sort",
@@ -1883,6 +2025,16 @@ class Catalog:
             if parent[1] != library_id:
                 raise HTTPException(404, "Item not found.")
         if self._read_model_ready():
+            if library["type"] == "collection" and parent_id:
+                return self._list_collection_members_read_model(
+                    user_id,
+                    parent_id,
+                    language,
+                    page=page,
+                    page_size=page_size,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                )
             return self._list_items_read_model(
                 user_id,
                 library,
@@ -1892,6 +2044,14 @@ class Catalog:
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+            )
+        if library["type"] == "collection" and parent_id:
+            return self._list_collection_members_legacy(
+                user_id,
+                parent_id,
+                language,
+                page=page,
+                page_size=page_size,
             )
         rows = self.db.execute(
             "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id=? AND parent_id IS ?",

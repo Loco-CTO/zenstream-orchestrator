@@ -14,7 +14,9 @@ def upgrade() -> None:
         sa.Column("last_attempted_at", sa.Text(), nullable=True),
         sa.Column("last_completed_at", sa.Text(), nullable=True),
         sa.Column("last_error", sa.Text(), nullable=True),
-        sa.ForeignKeyConstraint(["entity_id"], ["library_entities.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["entity_id"], ["library_entities.id"], ondelete="CASCADE"
+        ),
         sa.PrimaryKeyConstraint("entity_id"),
     )
     op.create_index(

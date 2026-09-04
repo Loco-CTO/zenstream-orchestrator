@@ -95,9 +95,7 @@ class MetadataRefreshSettingsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.settings.update({"itemTypes": {"music": {}}})
         with self.assertRaises(ValueError):
-            self.settings.update(
-                {"itemTypes": {"movie": {"artwork": {"Poster": {}}}}}
-            )
+            self.settings.update({"itemTypes": {"movie": {"artwork": {"Poster": {}}}}})
 
     def test_malformed_persisted_value_returns_safe_defaults(self):
         self.db.execute(

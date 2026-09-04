@@ -16,13 +16,13 @@ from app.library import runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.logging_config import get_logger
 from app.metadata_domain import choose_artwork, language_family
+from app.metadata_refresh import MetadataRefreshJob
 from app.metadata_services import (
     FACT_FIELDS,
     TEXT_FIELDS,
     MetadataIngestService,
     metadata_task_results,
 )
-from app.metadata_refresh import MetadataRefreshJob
 from app.models.metadata import MetadataLanguageSettings
 from app.progress import (
     WholeJobProgress,
@@ -651,7 +651,7 @@ class JobStore:
                     "type": "boolean",
                     "default": False,
                     "description": "Reuse valid cached artwork and portraits instead of forcing a refresh.",
-                }
+                },
             ]
         return []
 

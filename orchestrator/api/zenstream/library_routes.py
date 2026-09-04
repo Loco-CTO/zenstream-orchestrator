@@ -783,9 +783,7 @@ async def refresh_metadata(
     """Queue a sparse metadata refresh or an explicit full refresh."""
     require_admin(Username, TOKEN)
     if request is None:
-        return {
-            "backfill": await run_control(scheduler.enqueue_metadata_refresh)
-        }
+        return {"backfill": await run_control(scheduler.enqueue_metadata_refresh)}
     try:
         data = await request.json()
     except Exception:
@@ -795,9 +793,7 @@ async def refresh_metadata(
     if not isinstance(data, dict):
         raise HTTPException(400, "Refresh options must be an object.")
     try:
-        return {
-            "backfill": await run_control(scheduler.enqueue_metadata_refresh, data)
-        }
+        return {"backfill": await run_control(scheduler.enqueue_metadata_refresh, data)}
     except (TypeError, ValueError) as error:
         raise HTTPException(400, str(error)) from error
 

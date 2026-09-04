@@ -8,7 +8,6 @@ from app.database import DatabaseHandler
 from app.metadata_refresh import MetadataRefreshJob, _patterns
 from app.models.metadata import (
     DEFAULT_METADATA_REFRESH_SETTINGS,
-    MetadataRefreshSettings,
 )
 from app.providers import ProviderError
 
@@ -115,7 +114,9 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
             ((datetime.now(timezone.utc) - timedelta(days=8)).isoformat(),),
         )
         candidates, _skipped = self.job._select(settings, ["en"])
-        self.assertEqual([candidate["entity"]["id"] for candidate in candidates], ["movie-1"])
+        self.assertEqual(
+            [candidate["entity"]["id"] for candidate in candidates], ["movie-1"]
+        )
 
     def test_unlimited_cache_age_refreshes_missing_metadata(self):
         settings = self.settings()
@@ -126,7 +127,9 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
 
         candidates, _skipped = self.job._select(settings, ["en"])
 
-        self.assertEqual([candidate["entity"]["id"] for candidate in candidates], ["movie-1"])
+        self.assertEqual(
+            [candidate["entity"]["id"] for candidate in candidates], ["movie-1"]
+        )
 
     def test_filter_values_trim_delimited_patterns(self):
         self.assertEqual(_patterns("  TBA | TBD\nExample  "), ["tba", "tbd", "example"])

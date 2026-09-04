@@ -84,7 +84,8 @@ class MetadataRefreshJob:
         if table not in self._columns:
             try:
                 self._columns[table] = {
-                    str(row[1]) for row in self.db.execute(f"PRAGMA table_info({table})")
+                    str(row[1])
+                    for row in self.db.execute(f"PRAGMA table_info({table})")
                 }
             except Exception:
                 self._columns[table] = set()
@@ -135,7 +136,10 @@ class MetadataRefreshJob:
             for row in rows
             if row[1]
             and str(row[2] or entity_type)
-            in {entity_type, "series" if entity_type in {"season", "episode"} else entity_type}
+            in {
+                entity_type,
+                "series" if entity_type in {"season", "episode"} else entity_type,
+            }
         ]
         priorities = PROVIDER_PRIORITIES.get(entity_type, ())
         return sorted(
@@ -178,9 +182,7 @@ class MetadataRefreshJob:
                 (entity_id, attempted, completed, error),
             )
 
-    def _projection_values(
-        self, entity_id: str, locales: list[str]
-    ) -> list[dict]:
+    def _projection_values(self, entity_id: str, locales: list[str]) -> list[dict]:
         if "catalog_item_projection" not in self._table_names():
             return []
         values = []
@@ -209,9 +211,7 @@ class MetadataRefreshJob:
             placeholders = ",".join("?" for _ in locales)
             rows = self.db.execute(
                 "SELECT payload FROM metadata_cache WHERE provider=? AND entity_type=? "
-                "AND provider_id=? AND locale IN ("
-                + placeholders
-                + ")",
+                "AND provider_id=? AND locale IN (" + placeholders + ")",
                 [identity["provider"], entity_type, identity["id"], *locales],
             )
             for row in rows:
@@ -236,9 +236,7 @@ class MetadataRefreshJob:
             rows.extend(
                 self.db.execute(
                     "SELECT fetched_at FROM metadata_cache WHERE provider=? AND entity_type=? "
-                    "AND provider_id=? AND locale IN ("
-                    + placeholders
-                    + ")",
+                    "AND provider_id=? AND locale IN (" + placeholders + ")",
                     [identity["provider"], entity_type, identity["id"], *locales],
                 )
             )
@@ -248,15 +246,18 @@ class MetadataRefreshJob:
         return any(_age_exceeded(row[0], days, current) for row in rows)
 
     def _artwork_available(
-        self, entity_id: str, entity_type: str, identities: list[dict], locales: list[str], image_type: str
+        self,
+        entity_id: str,
+        entity_type: str,
+        identities: list[dict],
+        locales: list[str],
+        image_type: str,
     ) -> bool:
         if "catalog_artwork_selection" in self._table_names():
             placeholders = ",".join("?" for _ in locales)
             rows = self.db.execute(
                 "SELECT local_path FROM catalog_artwork_selection WHERE entity_id=? "
-                "AND image_type=? AND locale IN ("
-                + placeholders
-                + ")",
+                "AND image_type=? AND locale IN (" + placeholders + ")",
                 [entity_id, image_type, *locales],
             )
             if any(_ready_path(row[0]) for row in rows):
@@ -330,12 +331,16 @@ class MetadataRefreshJob:
             current = parent
         return current
 
-    def _blocked(self, entity: dict, entities_by_id: dict[str, dict], patterns: list[str]) -> bool:
+    def _blocked(
+        self, entity: dict, entities_by_id: dict[str, dict], patterns: list[str]
+    ) -> bool:
         if not patterns:
             return False
         root = self._root(entity, entities_by_id)
         candidates = [root.get("path", ""), Path(root.get("path", "")).stem]
-        candidates.extend(identity["id"] for identity in self._identities(root["id"], root["type"]))
+        candidates.extend(
+            identity["id"] for identity in self._identities(root["id"], root["type"])
+        )
         folded = [str(value).casefold() for value in candidates if value]
         return any(
             pattern == "*" or any(pattern in value for value in folded)
@@ -348,7 +353,9 @@ class MetadataRefreshJob:
         values = self._projection_values(entity["id"], locales)
         if not values:
             values = self._cached_values(entity["type"], identities, locales)
-        titles = [str(value["title"]) for value in values if _usable(value.get("title"))]
+        titles = [
+            str(value["title"]) for value in values if _usable(value.get("title"))
+        ]
         overviews = [
             str(value.get("overview") or value.get("description"))
             for value in values
@@ -366,7 +373,9 @@ class MetadataRefreshJob:
         config = settings["itemTypes"][entity["type"]]
         if not config["enabled"]:
             return None, "disabled item type"
-        if self._blocked(entity, entities_by_id, _patterns(settings["seriesBlockList"])):
+        if self._blocked(
+            entity, entities_by_id, _patterns(settings["seriesBlockList"])
+        ):
             return None, "series block list"
         current = datetime.now(timezone.utc)
         created = _utc(entity.get("createdAt"))
@@ -377,13 +386,10 @@ class MetadataRefreshJob:
         ):
             return None, "outside catalog age cutoff"
         last_attempted, last_completed = self._state(entity["id"])
-        if (
-            config["cooldownMinutes"] != -1
-            and not _age_exceeded(
-                last_attempted,
-                config["cooldownMinutes"] / 1440,
-                current,
-            )
+        if config["cooldownMinutes"] != -1 and not _age_exceeded(
+            last_attempted,
+            config["cooldownMinutes"] / 1440,
+            current,
         ):
             return None, "refresh cooldown"
         identities = self._identities(entity["id"], entity["type"])
@@ -413,29 +419,41 @@ class MetadataRefreshJob:
             metadata_due = metadata_due or self._metadata_bucket_due(
                 entity["type"], identities, locales, config["documentMaxAgeDays"]
             )
-        if checks["nameIsDate"] and any(DATE_NAME_RE.fullmatch(title.strip()) for title in titles):
+        if checks["nameIsDate"] and any(
+            DATE_NAME_RE.fullmatch(title.strip()) for title in titles
+        ):
             reasons.append("date name")
             metadata_due = metadata_due or self._metadata_bucket_due(
                 entity["type"], identities, locales, config["documentMaxAgeDays"]
             )
-        if checks["overviewContainsBadName"] and patterns and any(
-            pattern in overview.casefold() for overview in overviews for pattern in patterns
+        if (
+            checks["overviewContainsBadName"]
+            and patterns
+            and any(
+                pattern in overview.casefold()
+                for overview in overviews
+                for pattern in patterns
+            )
         ):
             reasons.append("bad overview name")
             metadata_due = metadata_due or self._metadata_bucket_due(
                 entity["type"], identities, locales, config["documentMaxAgeDays"]
             )
-        if patterns and entity["type"] == "episode" and any(
-            title.casefold().startswith(pattern) for title in titles for pattern in patterns
+        if (
+            patterns
+            and entity["type"] == "episode"
+            and any(
+                title.casefold().startswith(pattern)
+                for title in titles
+                for pattern in patterns
+            )
         ):
             reasons.append("bad name")
             metadata_due = metadata_due or self._metadata_bucket_due(
                 entity["type"], identities, locales, config["documentMaxAgeDays"]
             )
         if entity["type"] == "series" and config["statusAfterDays"] != -1:
-            statuses = {
-                str(value.get("status") or "").casefold() for value in values
-            }
+            statuses = {str(value.get("status") or "").casefold() for value in values}
             if statuses.intersection(
                 {"continuing", "returning series", "in production", "planned"}
             ) and _age_exceeded(last_completed, config["statusAfterDays"], current):
@@ -500,7 +518,11 @@ class MetadataRefreshJob:
         for candidate in candidates:
             config = candidate["config"]
             for identity in candidate["identities"]:
-                key = (identity["provider"], candidate["entity"]["type"], identity["id"])
+                key = (
+                    identity["provider"],
+                    candidate["entity"]["type"],
+                    identity["id"],
+                )
                 group = groups.setdefault(
                     key,
                     {
@@ -530,7 +552,9 @@ class MetadataRefreshJob:
 
             CatalogReadModel(self.db).refresh_roots(sorted(root_ids))
         except Exception:
-            logger.exception("sparse metadata catalog publication failed roots=%s", root_ids)
+            logger.exception(
+                "sparse metadata catalog publication failed roots=%s", root_ids
+            )
 
     def run(
         self,
@@ -551,7 +575,9 @@ class MetadataRefreshJob:
 
             _repair_missing_tv_child_identities(self.db, ingest.metadata_service)
         except Exception:
-            logger.warning("sparse metadata child identity repair failed", exc_info=True)
+            logger.warning(
+                "sparse metadata child identity repair failed", exc_info=True
+            )
         candidates, skipped = self._select(settings, locales)
         groups = self._groups(candidates)
         total = max(1, len(groups))

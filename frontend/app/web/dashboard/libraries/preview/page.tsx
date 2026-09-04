@@ -1054,9 +1054,8 @@ function EntityDetailView({
 						) : (
 							<div className="space-y-5">
 								<section className="dashboard-card p-6">
-									<p className="console-kicker">Item information</p>
 									{!metadataPending && (
-										<div className="mt-5 max-w-4xl text-sm leading-6">
+										<div className="max-w-4xl text-sm leading-6">
 											<MetadataSummary detail={detail} />
 										</div>
 									)}
@@ -1167,8 +1166,7 @@ function IntroOutroInspectionPanel({
 		<section className="dashboard-card space-y-4 p-5">
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<div>
-					<p className="console-kicker">Intro & outro inspection</p>
-					<p className="mt-1 text-sm material-muted">
+					<p className="text-sm material-muted">
 						Detected ranges and a downsampled Chromaprint bit-density preview. This is
 						not an audio waveform.
 					</p>

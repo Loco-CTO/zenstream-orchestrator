@@ -2997,7 +2997,7 @@ class Catalog:
             select_rows = lambda: self.db.execute(
                 f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,s.added_sort_ns,s.last_added_sort_ns "
                 f"FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
-                f"WHERE s.library_id IN ({placeholders}) AND s.entity_type IN ('movie','series','collection') "
+                f"WHERE s.library_id IN ({placeholders}) AND s.entity_type IN ('movie','series') "
                 "ORDER BY CASE WHEN s.entity_type='series' THEN s.added_sort_ns ELSE s.last_added_sort_ns END DESC,s.entity_id LIMIT 36",
                 list(allowed),
             )
@@ -3017,7 +3017,7 @@ class Catalog:
                 user_id, [row[:10] for row in rows], language, dates
             )
         select_rows = lambda: self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection')",
+            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series')",
             list(allowed),
         )
         rows = (

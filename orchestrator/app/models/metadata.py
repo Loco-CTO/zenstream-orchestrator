@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import base64
-from copy import deepcopy
 import hashlib
 import json
 import os
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 from app.config import Config
@@ -58,8 +58,7 @@ def _refresh_item_defaults(
         "cutoffDays": cutoff_days,
         "minimumProviderIds": minimum_provider_ids,
         "checks": {
-            check: bool(checks.get(check, False))
-            for check in METADATA_REFRESH_CHECKS
+            check: bool(checks.get(check, False)) for check in METADATA_REFRESH_CHECKS
         },
         "statusAfterDays": status_after_days,
         "documentMaxAgeDays": 7,
@@ -121,7 +120,9 @@ class MetadataRefreshSettings:
     def _unknown(values: dict, allowed: set[str]) -> None:
         unknown = set(values) - allowed
         if unknown:
-            raise ValueError(f"Unsupported metadata refresh setting: {sorted(unknown)[0]}")
+            raise ValueError(
+                f"Unsupported metadata refresh setting: {sorted(unknown)[0]}"
+            )
 
     @staticmethod
     def _bool(values: dict, key: str, default: bool) -> bool:
@@ -182,12 +183,8 @@ class MetadataRefreshSettings:
             )
             normalized = {
                 "enabled": cls._bool(source, "enabled", defaults["enabled"]),
-                "cooldownMinutes": cls._cooldown(
-                    source, defaults["cooldownMinutes"]
-                ),
-                "cutoffDays": cls._days(
-                    source, "cutoffDays", defaults["cutoffDays"]
-                ),
+                "cooldownMinutes": cls._cooldown(source, defaults["cooldownMinutes"]),
+                "cutoffDays": cls._days(source, "cutoffDays", defaults["cutoffDays"]),
                 "minimumProviderIds": source.get(
                     "minimumProviderIds", defaults["minimumProviderIds"]
                 ),
@@ -214,9 +211,7 @@ class MetadataRefreshSettings:
                 raise ValueError(f"itemTypes.{entity_type}.checks must be an object")
             cls._unknown(checks, set(METADATA_REFRESH_CHECKS))
             normalized["checks"] = {
-                check: cls._bool(
-                    checks, check, defaults["checks"].get(check, False)
-                )
+                check: cls._bool(checks, check, defaults["checks"].get(check, False))
                 for check in METADATA_REFRESH_CHECKS
             }
             artwork = source.get("artwork", {})

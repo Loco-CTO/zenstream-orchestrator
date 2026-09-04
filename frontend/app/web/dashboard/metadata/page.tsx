@@ -327,8 +327,7 @@ export default function MetadataPage() {
 				<section className="console-card rounded-2xl p-6 lg:col-span-2">
 					<div className="flex items-start justify-between gap-4">
 						<div>
-							<p className="console-kicker">Scan-time translations</p>
-							<h2 className="mt-2 text-xl font-bold">Metadata languages</h2>
+							<h2 className="text-xl font-bold">Metadata languages</h2>
 							<p className="mt-3 max-w-3xl text-sm leading-6 console-muted">
 								Choose the languages the Orchestrator should collect during library
 								scans. Saving queues a backfill for existing indexed items; unavailable
@@ -415,8 +414,7 @@ export default function MetadataPage() {
 				<section className="console-card rounded-2xl p-6 lg:col-span-2">
 					<div className="flex flex-wrap items-start justify-between gap-4">
 						<div>
-							<p className="console-kicker">Scheduled metadata policy</p>
-							<h2 className="mt-2 text-xl font-bold">Sparse refresh settings</h2>
+							<h2 className="text-xl font-bold">Sparse refresh settings</h2>
 							<p className="mt-3 max-w-3xl text-sm leading-6 console-muted">
 								Scheduled refreshes only revisit items that match a selected missing or
 								placeholder check and whose relevant provider cache is older than the
@@ -747,8 +745,7 @@ export default function MetadataPage() {
 				>
 					<div className="flex items-start justify-between">
 						<div>
-							<p className="console-kicker">Movies and secondary TV metadata</p>
-							<h2 className="mt-2 text-xl font-bold">TMDB</h2>
+							<h2 className="text-xl font-bold">TMDB</h2>
 						</div>
 						<IconKey className="text-[#5ee3d8]" size={22} />
 					</div>
@@ -794,8 +791,7 @@ export default function MetadataPage() {
 				>
 					<div className="flex items-start justify-between">
 						<div>
-							<p className="console-kicker">Series and collection metadata</p>
-							<h2 className="mt-2 text-xl font-bold">TheTVDB</h2>
+							<h2 className="text-xl font-bold">TheTVDB</h2>
 						</div>
 						<IconKey className="text-[#5ee3d8]" size={22} />
 					</div>
@@ -844,10 +840,7 @@ export default function MetadataPage() {
 							<IconMusic size={22} />
 						</span>
 						<div>
-							<p className="console-kicker">Music</p>
-							<h2 className="mt-2 text-xl font-bold">
-								MusicBrainz and Cover Art Archive
-							</h2>
+							<h2 className="text-xl font-bold">MusicBrainz and Cover Art Archive</h2>
 							<p className="mt-2 text-sm leading-6 console-muted">
 								MusicBrainz does not require an API key. ZenStream identifies requests
 								with its application user agent and uses local artwork before querying

@@ -17,6 +17,7 @@ from app.library import (
     LibraryScanner,
     LibraryStore,
     _quick_fingerprint,
+    _audio_inventory_fingerprint,
     _SidecarStatWorker,
     _top_level_key,
     guess_media,
@@ -749,6 +750,14 @@ class LibraryMetadataTest(unittest.TestCase):
             path.write_bytes(data)
             last_fingerprint, _ = _quick_fingerprint(path)
             self.assertNotEqual(last_fingerprint, first_fingerprint)
+
+    def test_new_audio_inventory_fingerprint_does_not_depend_on_file_contents(self):
+        first = _audio_inventory_fingerprint(123, 456)
+        second = _audio_inventory_fingerprint(123, 456)
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, _audio_inventory_fingerprint(124, 456))
+        self.assertNotEqual(first, _audio_inventory_fingerprint(123, 457))
 
     def test_sidecar_display_titles_preserve_descriptors_and_ignore_flags(self):
         media_paths = ["5 Centimeters per Second/5 Centimeters per Second.mkv"]

@@ -1418,6 +1418,21 @@ class MusicBrainzClient(ProviderClient):
                 payload["_coverArt"] = {}
         return payload
 
+    def details_all_locales(
+        self, entity_type: str, provider_id: str, locales: list[str]
+    ) -> dict[str, dict]:
+        """Fetch one locale-neutral MusicBrainz document for the batch.
+
+        MusicBrainz recording/release documents are not localized in the same
+        way as TMDB/TVDB documents.  Repeating the identical request for every
+        configured ZenStream locale both wastes the provider's one-request-per
+        second allowance and made large music scans appear stalled.
+        """
+        if not locales:
+            return {}
+        payload = self.details(entity_type, provider_id, locales[0])
+        return {locale: copy.deepcopy(payload) for locale in locales}
+
     def search(self, entity_type: str, query: str) -> list[dict]:
         endpoint = {
             "artist": "artist",

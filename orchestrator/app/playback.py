@@ -19,7 +19,12 @@ from app.catalog import Catalog
 from app.client_auth import issue_ticket
 from app.config import Config
 from app.language_registry import normalize_track_language
-from app.library import language_name, sidecar_display_title, sidecar_media_path
+from app.library import (
+    AUDIO_EXTENSIONS,
+    language_name,
+    sidecar_display_title,
+    sidecar_media_path,
+)
 from app.logging_config import get_logger
 from app.media_probe import first_audio_stream, select_usable_video_stream
 from app.models.playback_settings import PlaybackSettings
@@ -63,6 +68,89 @@ def ffmpeg_path() -> str | None:
 
 def ffprobe_path() -> str | None:
     return _media_tool_path("ffprobe")
+
+
+def _mutagen_audio_probe(path: Path) -> dict | None:
+    """Return the playback probe shape for an audio-only file.
+
+    Library scans already open audio files with Mutagen for tags.  Reusing its
+    container metadata avoids starting one FFprobe process per track.  FFprobe
+    remains the fallback for malformed/unsupported files and all video media.
+    """
+    try:
+        from mutagen import File
+
+        audio = File(path, easy=False)
+        info = getattr(audio, "info", None) if audio is not None else None
+        if info is None:
+            return None
+        suffix = path.suffix.lower().lstrip(".")
+        raw_codec = str(
+            getattr(info, "codec", None)
+            or getattr(info, "codec_name", None)
+            or ""
+        ).strip().lower()
+        info_type = type(info).__name__.casefold()
+        if raw_codec.startswith("mp4a") or raw_codec in {"aac", "aac lc"}:
+            codec = "aac"
+        elif "mpeg" in raw_codec or suffix == "mp3":
+            codec = "mp3"
+        elif "flac" in raw_codec or suffix == "flac":
+            codec = "flac"
+        elif "opus" in raw_codec or "opus" in info_type or suffix == "opus":
+            codec = "opus"
+        elif (
+            "vorbis" in raw_codec
+            or "vorbis" in info_type
+            or suffix in {"ogg", "oga"}
+        ):
+            codec = "vorbis"
+        elif suffix == "aac":
+            codec = "aac"
+        elif suffix in {"wav", "wave"}:
+            codec = "pcm_s16le"
+        elif suffix in {"aiff", "aif"}:
+            codec = "pcm_s16be"
+        elif suffix == "wma":
+            codec = "wmav2"
+        elif suffix == "ape":
+            codec = "ape"
+        elif suffix == "wv":
+            codec = "wavpack"
+        else:
+            codec = raw_codec or suffix
+
+        def number(value, default=0):
+            try:
+                return float(value or default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        duration = max(0.0, number(getattr(info, "length", 0)))
+        bitrate = max(0, int(number(getattr(info, "bitrate", 0))))
+        sample_rate = int(number(getattr(info, "sample_rate", 0)))
+        channels = int(number(getattr(info, "channels", 0)))
+        stream = {
+            "index": 0,
+            "codec_type": "audio",
+            "codec_name": codec,
+            "duration": duration,
+            "bit_rate": bitrate,
+            "sample_rate": str(sample_rate) if sample_rate else None,
+            "channels": channels or None,
+            "tags": {},
+        }
+        return {
+            "format": {
+                "format_name": suffix,
+                "duration": duration,
+                "bit_rate": bitrate,
+            },
+            "streams": [stream],
+        }
+    except Exception as error:
+        logger.debug("mutagen audio probe failed path=%s error=%s", path, error)
+        return None
 
 
 class PlaybackManager:
@@ -342,8 +430,6 @@ class PlaybackManager:
 
     def probe_entity(self, entity_id: str) -> list[dict]:
         executable = ffprobe_path()
-        if not executable:
-            return []
         rows = self.db.execute(
             "SELECT f.id,l.directory,f.relative_path FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.entity_id=? AND f.role=?",
             (entity_id, PLAYABLE_ROLE),
@@ -365,28 +451,44 @@ class PlaybackManager:
                 continue
             if path.is_symlink() or not resolved.is_file():
                 continue
-            try:
-                completed = subprocess.run(
-                    [
-                        executable,
-                        "-v",
-                        "error",
-                        "-show_format",
-                        "-show_streams",
-                        "-of",
-                        "json",
-                        str(resolved),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=60,
-                    check=True,
+            payload = (
+                _mutagen_audio_probe(resolved)
+                if resolved.suffix.lower() in AUDIO_EXTENSIONS
+                else None
+            )
+            if payload is None and not executable:
+                logger.warning(
+                    "playback probe unavailable entity_id=%s media_file_id=%s path=%s",
+                    entity_id,
+                    media_file_id,
+                    resolved,
                 )
-                if not completed.stdout or not isinstance(completed.stdout, str):
-                    raise json.JSONDecodeError("FFprobe returned no JSON output", "", 0)
-                payload = json.loads(completed.stdout)
+                continue
+            try:
+                if payload is None:
+                    completed = subprocess.run(
+                        [
+                            executable,
+                            "-v",
+                            "error",
+                            "-show_format",
+                            "-show_streams",
+                            "-of",
+                            "json",
+                            str(resolved),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=60,
+                        check=True,
+                    )
+                    if not completed.stdout or not isinstance(completed.stdout, str):
+                        raise json.JSONDecodeError(
+                            "FFprobe returned no JSON output", "", 0
+                        )
+                    payload = json.loads(completed.stdout)
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
                 logger.warning(
                     "playback probe failed entity_id=%s media_file_id=%s error=%s",

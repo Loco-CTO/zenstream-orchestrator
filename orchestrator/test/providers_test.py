@@ -28,3 +28,15 @@ class MusicBrainzLookupTest(unittest.TestCase):
             },
         )
         get.assert_called_once()
+
+    @patch.object(MusicBrainzClient, "_get", return_value={})
+    @patch.object(MusicBrainzClient, "_request", return_value={"id": "release-id"})
+    def test_locale_batch_fetches_musicbrainz_once(self, request, get):
+        values = MusicBrainzClient().details_all_locales(
+            "release", "release-id", ["en", "ja", "zh-TW"]
+        )
+
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(set(values), {"en", "ja", "zh-TW"})
+        self.assertIsNot(values["en"], values["ja"])

@@ -1,14 +1,48 @@
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from app.playback import PlaybackManager
+from app.playback import PlaybackManager, _mutagen_audio_probe
 from fastapi import HTTPException
 
 
 class PlaybackTest(unittest.TestCase):
+    def test_mutagen_audio_probe_returns_playback_source_shape(self):
+        info = SimpleNamespace(
+            length=123.5,
+            bitrate=900_000,
+            sample_rate=96_000,
+            channels=2,
+            codec="FLAC",
+        )
+        fake_mutagen = SimpleNamespace(
+            File=lambda path, easy=False: SimpleNamespace(info=info)
+        )
+        with patch.dict(sys.modules, {"mutagen": fake_mutagen}):
+            value = _mutagen_audio_probe(Path("album/track.flac"))
+
+        self.assertEqual(value["format"]["format_name"], "flac")
+        self.assertEqual(value["format"]["duration"], 123.5)
+        self.assertEqual(value["streams"][0]["codec_name"], "flac")
+        self.assertEqual(value["streams"][0]["channels"], 2)
+
+    def test_mutagen_audio_probe_detects_ogg_opus_from_info_type(self):
+        class OggOpusInfo(SimpleNamespace):
+            pass
+
+        info = OggOpusInfo(length=4, bitrate=128_000, sample_rate=48_000, channels=2)
+        fake_mutagen = SimpleNamespace(
+            File=lambda path, easy=False: SimpleNamespace(info=info)
+        )
+        with patch.dict(sys.modules, {"mutagen": fake_mutagen}):
+            value = _mutagen_audio_probe(Path("album/track.ogg"))
+
+        self.assertEqual(value["streams"][0]["codec_name"], "opus")
+
     def test_progressive_playlist_is_ready_only_with_playlist_and_segment(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

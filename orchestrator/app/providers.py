@@ -1578,32 +1578,43 @@ class MusicBrainzClient(ProviderClient):
             )
         date = payload.get("first-release-date") or payload.get("date")
         tags = _names(payload.get("tags"))
-        credits = []
-        for value in payload.get("artist-credit", []) or []:
-            artist = value.get("artist") or {}
-            if artist.get("id") or artist.get("name"):
-                credits.append(
-                    {
-                        "id": artist.get("id"),
-                        "name": artist.get("name"),
-                        "joinPhrase": value.get("joinphrase"),
-                    }
-                )
+        def artist_credits(values) -> list[dict]:
+            credits = []
+            for value in values or []:
+                if not isinstance(value, dict):
+                    continue
+                artist = value.get("artist") or {}
+                if artist.get("id") or artist.get("name"):
+                    credits.append(
+                        {
+                            "id": artist.get("id"),
+                            "name": artist.get("name"),
+                            "joinPhrase": value.get("joinphrase"),
+                        }
+                    )
+            return credits
+
+        credits = artist_credits(payload.get("artist-credit"))
         tracks = []
         for medium in payload.get("media", []) or []:
             for position, track in enumerate(medium.get("tracks", []) or [], start=1):
                 recording = track.get("recording") or {}
                 length = track.get("length") or recording.get("length")
-                tracks.append(
-                    {
-                        "id": recording.get("id") or track.get("id"),
-                        "title": track.get("title") or recording.get("title"),
-                        "position": track.get("position") or position,
-                        "disc": medium.get("position"),
-                        "length": length,
-                        "durationSeconds": duration_seconds(length),
-                    }
+                track_value = {
+                    "id": recording.get("id") or track.get("id"),
+                    "title": track.get("title") or recording.get("title"),
+                    "position": track.get("position") or position,
+                    "disc": medium.get("position"),
+                    "length": length,
+                    "durationSeconds": duration_seconds(length),
+                }
+                track_credits = artist_credits(
+                    recording.get("artist-credit") or track.get("artist-credit")
                 )
+                if track_credits:
+                    track_value["artists"] = track_credits
+                    track_value["contributingArtists"] = track_credits
+                tracks.append(track_value)
         if entity_type == "track" and not tracks:
             length = payload.get("length")
             tracks = [
@@ -1613,6 +1624,8 @@ class MusicBrainzClient(ProviderClient):
                     "position": payload.get("position"),
                     "length": length,
                     "durationSeconds": duration_seconds(length),
+                    "artists": credits,
+                    "contributingArtists": credits,
                 }
             ]
         label_names = []

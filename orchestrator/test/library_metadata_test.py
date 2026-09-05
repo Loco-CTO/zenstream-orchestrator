@@ -19,6 +19,7 @@ from app.library import (
     _quick_fingerprint,
     _audio_inventory_fingerprint,
     _SidecarStatWorker,
+    _audio_tag_key,
     _inventory_query,
     _music_filename_parts,
     _music_local_document,
@@ -1930,6 +1931,71 @@ class LibraryMetadataTest(unittest.TestCase):
                 "track",
             )["title"],
             "Tagged title",
+        )
+
+    def test_music_local_metadata_keeps_track_artists_and_common_tag_aliases(self):
+        self.assertEqual(_audio_tag_key("PERFORMER"), "ARTIST")
+        self.assertEqual(_audio_tag_key("ARTISTS"), "ARTIST")
+        document = _music_local_document(
+            Path("1.01. Track.flac"),
+            {"ARTIST": "Track Artist;Featured Artist", "ALBUMARTIST": "Album Artist"},
+            "track",
+            artist_name="Album Artist",
+        )
+        self.assertEqual(
+            document["artists"],
+            [{"name": "Track Artist"}, {"name": "Featured Artist"}],
+        )
+        self.assertEqual(document["contributingArtists"], document["artists"])
+
+        fallback = _music_local_document(
+            Path("1.02. Track.flac"),
+            {},
+            "track",
+            artist_name="Album Artist",
+        )
+        self.assertEqual(fallback["artists"], [{"name": "Album Artist"}])
+
+    def test_music_track_documents_prefer_track_artists_over_release_artists(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._music_local_metadata = {
+            "track-1": {
+                "title": "Track",
+                "artists": [{"name": "Track Artist"}],
+                "contributingArtists": [{"name": "Track Artist"}],
+                "trackNumber": 1,
+                "discNumber": 1,
+            }
+        }
+        release_documents = {
+            "release-1": {
+                "providerId": "release-mbid",
+                "title": "Album",
+                "artists": [{"name": "Album Artist"}],
+                "contributingArtists": [{"name": "Album Artist"}],
+                "tracks": [
+                    {
+                        "id": "track-1",
+                        "title": "Track",
+                        "position": 1,
+                        "disc": 1,
+                    }
+                ],
+            }
+        }
+
+        values = scanner._music_track_documents(
+            "track-1",
+            "release-1",
+            "track-1",
+            release_documents,
+            MagicMock(),
+            ["en"],
+        )
+
+        self.assertEqual(values["en"]["artists"], [{"name": "Track Artist"}])
+        self.assertEqual(
+            values["en"]["contributingArtists"], [{"name": "Track Artist"}]
         )
 
     def test_music_scan_uses_filename_numbers_and_title_fallback(self):

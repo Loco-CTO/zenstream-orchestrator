@@ -17,6 +17,55 @@ class MusicBrainzLookupTest(unittest.TestCase):
             {"inc": "artist-credits+isrcs+tags"},
         )
 
+    def test_release_normalization_keeps_recording_artist_credits_on_tracks(self):
+        value = MusicBrainzClient.normalize(
+            "release",
+            "release-id",
+            {
+                "id": "release-id",
+                "title": "Album",
+                "artist-credit": [
+                    {"artist": {"id": "album-artist-id", "name": "Album Artist"}}
+                ],
+                "media": [
+                    {
+                        "position": 1,
+                        "tracks": [
+                            {
+                                "position": "1",
+                                "title": "Track",
+                                "recording": {
+                                    "id": "recording-id",
+                                    "title": "Track",
+                                    "artist-credit": [
+                                        {
+                                            "artist": {
+                                                "id": "track-artist-id",
+                                                "name": "Track Artist",
+                                            },
+                                            "joinphrase": " & ",
+                                        }
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(
+            value["tracks"][0]["artists"],
+            [
+                {
+                    "id": "track-artist-id",
+                    "name": "Track Artist",
+                    "joinPhrase": " & ",
+                }
+            ],
+        )
+        self.assertEqual(value["tracks"][0]["contributingArtists"], value["tracks"][0]["artists"])
+
     @patch.object(MusicBrainzClient, "_get", return_value={})
     @patch.object(MusicBrainzClient, "_request", return_value={})
     def test_release_lookup_keeps_media_and_label_includes(self, request, get):

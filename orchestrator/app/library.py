@@ -423,6 +423,12 @@ _AUDIO_TAG_ALIASES = {
     "TPE1": "ARTIST",
     "ARTIST": "ARTIST",
     "ART": "ARTIST",
+    "ARTISTS": "ARTIST",
+    "PERFORMER": "ARTIST",
+    "PERFORMERS": "ARTIST",
+    "PERFORMER NAME": "ARTIST",
+    "VOCALIST": "ARTIST",
+    "SINGER": "ARTIST",
     "TPE2": "ALBUMARTIST",
     "ALBUMARTIST": "ALBUMARTIST",
     "ALBUM ARTIST": "ALBUMARTIST",
@@ -2409,6 +2415,22 @@ class LibraryScanner:
                 value["trackNumber"] = candidate.get("position") or track_number
                 value["durationSeconds"] = candidate.get("durationSeconds")
                 value["tracks"] = [candidate]
+                local_artists = (
+                    local.get("artists")
+                    if isinstance(local, dict)
+                    else None
+                )
+                candidate_artists = candidate.get("artists")
+                if not isinstance(candidate_artists, list):
+                    candidate_artists = candidate.get("contributingArtists")
+                track_artists = (
+                    local_artists
+                    if isinstance(local_artists, list) and local_artists
+                    else candidate_artists
+                )
+                if isinstance(track_artists, list) and track_artists:
+                    value["artists"] = deepcopy(track_artists)
+                    value["contributingArtists"] = deepcopy(track_artists)
                 # Track artwork is inherited from the release by catalog
                 # serialization. Avoid one image/credit asset job per track.
                 value["images"] = []
@@ -5594,6 +5616,10 @@ def _music_local_document(
     being repaired; provider artwork still comes from release metadata.
     """
     artists = _music_tag_values(tags, "ARTIST")
+    if not artists and artist_name:
+        fallback_artist = _music_display_value(artist_name)
+        if fallback_artist:
+            artists = [fallback_artist]
     album_artist = (
         _music_display_value(tags.get("ALBUMARTIST"))
         or _music_display_value(artist_name)

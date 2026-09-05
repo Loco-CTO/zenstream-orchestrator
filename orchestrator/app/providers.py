@@ -1383,6 +1383,18 @@ class MusicBrainzClient(ProviderClient):
             },
         )
 
+    @staticmethod
+    def _lookup_includes(entity_type: str) -> str:
+        """Return only the include parameters supported by each MB resource."""
+        return {
+            "artist": "aliases+tags",
+            "release": "artist-credits+labels+recordings+release-groups+media+discids+isrcs+tags",
+            "release_group": "artist-credits+tags",
+            "track": "artist-credits+isrcs+tags",
+            "recording": "artist-credits+isrcs+tags",
+            "work": "aliases+tags",
+        }.get(entity_type, "tags")
+
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
         endpoint = {
             "artist": "artist",
@@ -1395,7 +1407,7 @@ class MusicBrainzClient(ProviderClient):
         payload = self._request(
             f"/{endpoint}/{quote(provider_id)}",
             {
-                "inc": "artist-credits+aliases+releases+release-groups+recordings+relationships+tags+media"
+                "inc": self._lookup_includes(entity_type)
             },
         )
         if endpoint in {"release", "release-group"}:
@@ -1441,6 +1453,13 @@ class MusicBrainzClient(ProviderClient):
 
     @staticmethod
     def normalize(entity_type: str, provider_id: str, payload: dict) -> dict:
+        def duration_seconds(value) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed / 1000.0 if parsed >= 0 else None
+
         images = []
         extra_images = []
         if entity_type in {"release", "release_group"}:
@@ -1530,23 +1549,57 @@ class MusicBrainzClient(ProviderClient):
         for medium in payload.get("media", []) or []:
             for position, track in enumerate(medium.get("tracks", []) or [], start=1):
                 recording = track.get("recording") or {}
+                length = track.get("length") or recording.get("length")
                 tracks.append(
                     {
                         "id": recording.get("id") or track.get("id"),
                         "title": track.get("title") or recording.get("title"),
                         "position": track.get("position") or position,
                         "disc": medium.get("position"),
-                        "length": track.get("length") or recording.get("length"),
+                        "length": length,
+                        "durationSeconds": duration_seconds(length),
                     }
                 )
         if entity_type == "track" and not tracks:
+            length = payload.get("length")
             tracks = [
                 {
                     "id": provider_id,
                     "title": payload.get("title") or payload.get("name"),
                     "position": payload.get("position"),
+                    "length": length,
+                    "durationSeconds": duration_seconds(length),
                 }
             ]
+        label_names = []
+        for label_info in payload.get("label-info", []) or []:
+            label = (label_info.get("label") or {}) if isinstance(label_info, dict) else {}
+            name = label.get("name") if isinstance(label, dict) else None
+            if name:
+                label_names.append(str(name))
+        primary_identifier_type = {
+            "artist": "artist",
+            "release": "release",
+            "release_group": "release_group",
+            "track": "recording",
+            "recording": "recording",
+            "work": "work",
+        }.get(entity_type, entity_type)
+        provider_ids = [
+            {
+                "provider": "musicbrainz",
+                "identifierType": primary_identifier_type,
+                "id": provider_id,
+            }
+        ]
+        provider_ids.extend(external_ids)
+        releases = payload.get("releases", []) or []
+        first_release = releases[0] if releases and isinstance(releases[0], dict) else {}
+        track_duration = (
+            tracks[0].get("durationSeconds")
+            if entity_type in {"track", "recording"} and tracks
+            else None
+        )
         return {
             "title": payload.get("name") or payload.get("title"),
             "overview": None,
@@ -1558,10 +1611,15 @@ class MusicBrainzClient(ProviderClient):
             "originalLanguage": None,
             "albumArtist": credits[0]["name"] if credits else None,
             "artists": credits,
+            "contributingArtists": credits,
+            "album": first_release.get("title") or first_release.get("name"),
+            "albumId": first_release.get("id"),
+            "label": ", ".join(dict.fromkeys(label_names)) or None,
+            "durationSeconds": track_duration,
             "tracks": tracks,
             "provider": "musicbrainz",
             "providerId": provider_id,
-            "ids": external_ids,
+            "ids": provider_ids,
             "images": images,
             "extraImages": extra_images,
         }

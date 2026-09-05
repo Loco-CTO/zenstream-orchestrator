@@ -789,6 +789,37 @@ class MetadataServicesTest(unittest.TestCase):
             "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
         )
 
+    def test_public_artwork_does_not_cache_empty_selection(self):
+        service = MetadataReadService(self.db)
+        service.resolve_raw = MagicMock(
+            side_effect=[
+                {"images": [], "originalLanguage": "en"},
+                {"images": [{"type": "Primary", "url": "poster.jpg"}]},
+            ]
+        )
+
+        def ready_artwork(_entity_type, _provider_ids, _images, _requested, image_type, *_args, **_kwargs):
+            if image_type == "Primary" and service.resolve_raw.call_count > 1:
+                return {
+                    "provider": "tmdb",
+                    "url": "poster.jpg",
+                    "language": "en",
+                }
+            return None
+
+        service.ready_artwork = MagicMock(side_effect=ready_artwork)
+        provider_ids = [{"provider": "tmdb", "id": "10"}]
+
+        first = service.resolve_public("entity", "movie", provider_ids, "en")
+        second = service.resolve_public("entity", "movie", provider_ids, "en")
+
+        self.assertEqual(first["metadata"]["images"], {})
+        self.assertEqual(
+            second["metadata"]["images"]["Primary"]["url"],
+            "/api/catalog/items/entity/images/Primary?language=en",
+        )
+        self.assertEqual(service.resolve_raw.call_count, 2)
+
     def test_original_language_provider_codes_match_canonical_cache_locales(self):
         self._cache("en", {"title": "English", "originalLanguage": "eng"})
         service = MetadataReadService(self.db)

@@ -69,6 +69,13 @@ TEXT_FIELDS = {
     "networks",
     "productionCompanies",
     "people",
+    "albumArtist",
+    "artists",
+    "contributingArtists",
+    "tracks",
+    "label",
+    "album",
+    "albumId",
 }
 
 FACT_FIELDS = {
@@ -78,6 +85,9 @@ FACT_FIELDS = {
     "lastAired",
     "airTime",
     "runtimeMinutes",
+    "durationSeconds",
+    "discNumber",
+    "trackNumber",
     "seasonNumber",
     "episodeNumber",
     "originalCountry",
@@ -510,7 +520,7 @@ class MetadataSearchProjection:
         if not entity_rows:
             return 0
         library_id, parent_id, entity_type = entity_rows[0]
-        if entity_type not in {"movie", "episode"}:
+        if entity_type not in {"movie", "episode", "artist", "release", "track"}:
             return 0
         configured = list(locales or MetadataLanguageSettings().get()) or ["en"]
         identities = [
@@ -1001,10 +1011,12 @@ class MetadataSearchProjection:
                         merged.get("date") or merged.get("releaseDate") or ""
                     )
                     runtime_sort = float(merged.get("runtimeMinutes") or 0)
-                    if (
-                        entity
-                        and entity[0] is None
-                        and entity[1] in {"movie", "series", "collection"}
+                    if entity and (
+                        entity[1] in {"artist", "release", "track"}
+                        or (
+                            entity[0] is None
+                            and entity[1] in {"movie", "series", "collection"}
+                        )
                     ):
                         documents = [(locale, merged.get("title") or "")]
                         if merged.get("originalTitle"):
@@ -1329,7 +1341,16 @@ class MetadataReadService:
         )
         cached = self._public_resolutions.get(cache_key)
         if cached is not None:
-            return copy.deepcopy(cached)
+            cached_images = (cached.get("metadata") or {}).get("images")
+            if isinstance(cached_images, dict) and any(
+                isinstance(image, dict) and image.get("url")
+                for image in cached_images.values()
+            ):
+                return copy.deepcopy(cached)
+            # Artwork may have been selected before the scan's image asset
+            # finished publishing. Do not keep that empty result in the
+            # process cache once a later catalog read can see the ready file.
+            self._public_resolutions.pop(cache_key, None)
         raw = self.resolve_raw(entity_type, provider_ids, requested)
         original = raw.get("originalLanguage")
         providers = self.providers(entity_type)
@@ -1898,7 +1919,7 @@ class MetadataImageIngestService:
             host.strip().lower()
             for host in os.getenv(
                 "METADATA_IMAGE_HOST_ALLOWLIST",
-                "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com",
+                "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org",
             ).split(",")
             if host.strip()
         }

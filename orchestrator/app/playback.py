@@ -669,13 +669,25 @@ class PlaybackManager:
                 continue
         return {}
 
+    @staticmethod
+    def _source_has_video(source: dict) -> bool:
+        return bool(
+            any(
+                str(stream.get("codec_type") or "").lower() == "video"
+                for stream in source.get("streams", [])
+            )
+            or source.get("width")
+            or source.get("height")
+            or source.get("videoCodec")
+        )
+
     @classmethod
     def _playback_mode(cls, source: dict, profile: dict) -> str:
         if profile.get("forceTranscoding") is True:
-            return "video-transcode"
+            return "video-transcode" if cls._source_has_video(source) else "audio-transcode"
         requested_mode = str(profile.get("requestedMode") or "").lower()
         if requested_mode == "video-transcode":
-            return requested_mode
+            return requested_mode if cls._source_has_video(source) else "audio-transcode"
         containers = cls._profile_values(profile, "containers", {"mp4", "webm"})
         video = {
             codec
@@ -698,12 +710,7 @@ class PlaybackManager:
             for stream in source.get("streams", [])
             if str(stream.get("codec_type") or "").lower() == "video"
         ]
-        has_video = bool(
-            video_streams
-            or source.get("width")
-            or source.get("height")
-            or source.get("videoCodec")
-        )
+        has_video = bool(video_streams) or cls._source_has_video(source)
         video_codec = next(iter(cls._codec_values(source.get("videoCodec"))), "")
         audio_stream = cls._stream_for_profile(source, profile)
         audio_codec = next(
@@ -947,12 +954,35 @@ class PlaybackManager:
     @staticmethod
     def _mime(source: dict) -> str:
         container = str(source.get("container") or "").split(",", 1)[0].lower()
+        has_video = PlaybackManager._source_has_video(source)
+        if has_video:
+            return {
+                "matroska": "video/x-matroska",
+                "mkv": "video/x-matroska",
+                "webm": "video/webm",
+                "mov": "video/mp4",
+                "mp4": "video/mp4",
+            }.get(container, "application/octet-stream")
         return {
-            "matroska": "video/x-matroska",
-            "mkv": "video/x-matroska",
-            "webm": "video/webm",
-            "mov": "video/mp4",
-            "mp4": "video/mp4",
+            "mp3": "audio/mpeg",
+            "flac": "audio/flac",
+            "ogg": "audio/ogg",
+            "oga": "audio/ogg",
+            "opus": "audio/ogg",
+            "wav": "audio/wav",
+            "aac": "audio/aac",
+            "adts": "audio/aac",
+            "m4a": "audio/mp4",
+            "mp4": "audio/mp4",
+            "mov": "audio/mp4",
+            "aiff": "audio/aiff",
+            "aif": "audio/aiff",
+            "wma": "audio/x-ms-wma",
+            "ape": "audio/x-ape",
+            "wv": "audio/wavpack",
+            "webm": "audio/webm",
+            "matroska": "audio/x-matroska",
+            "mkv": "audio/x-matroska",
         }.get(container, "application/octet-stream")
 
     def _transcode(
@@ -1203,10 +1233,7 @@ class PlaybackManager:
             and selected_audio_codec == "aac"
             and selected_audio_channels <= 2
         )
-        has_video = any(
-            str(stream.get("codec_type") or "").lower() == "video"
-            for stream in source.get("streams", [])
-        ) or bool(source.get("width") or source.get("height"))
+        has_video = self._source_has_video(source)
         command = [
             spec["executable"],
             "-hide_banner",
@@ -1245,7 +1272,7 @@ class PlaybackManager:
                     str(int(maximum_bitrate) * 2),
                 ]
             )
-        if mode == "video-transcode":
+        if mode == "video-transcode" and has_video:
             command.extend(
                 [
                     "-pix_fmt",
@@ -2084,6 +2111,47 @@ class PlaybackManager:
                 raise HTTPException(404, "Media source not found.")
             media_file_id = rows[0][0]
         return self._file_path(entity_id, media_file_id)[1]
+
+    def direct_path_and_metadata(
+        self, user_id: str, entity_id: str, media_source_id: str | None = None
+    ) -> tuple[Path, int, str]:
+        """Resolve a direct source with the MIME type implied by its probe metadata."""
+        self.catalog.require_entity(user_id, entity_id)
+        media_file_id = None
+        source: dict = {}
+        if media_source_id:
+            rows = self.db.execute(
+                "SELECT media_file_id,container,width,height,video_codec,audio_codec FROM media_sources WHERE id=? AND entity_id=?",
+                (media_source_id, entity_id),
+            )
+            if not rows:
+                raise HTTPException(404, "Media source not found.")
+            media_file_id, container, width, height, video_codec, audio_codec = rows[0]
+            source = {
+                "container": container,
+                "width": width,
+                "height": height,
+                "videoCodec": video_codec,
+                "audioCodec": audio_codec,
+            }
+        media_file_id, path = self._file_path(entity_id, media_file_id)
+        if not source:
+            rows = self.db.execute(
+                "SELECT container,width,height,video_codec,audio_codec FROM media_sources WHERE entity_id=? AND media_file_id=? ORDER BY id LIMIT 1",
+                (entity_id, media_file_id),
+            )
+            if rows:
+                container, width, height, video_codec, audio_codec = rows[0]
+                source = {
+                    "container": container,
+                    "width": width,
+                    "height": height,
+                    "videoCodec": video_codec,
+                    "audioCodec": audio_codec,
+                }
+        if not source:
+            source = {"container": path.suffix.lower().lstrip(".")}
+        return path, path.stat().st_size, self._mime(source)
 
     def session_file(self, user_id: str, session_id: str, filename: str) -> Path:
         self._cleanup_expired()

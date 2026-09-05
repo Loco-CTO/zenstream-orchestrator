@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.config import Config
@@ -39,6 +40,21 @@ def _prune_subtitle_cache(db, retention_days: int) -> int:
         except OSError:
             logger.debug("could not prune subtitle cache path=%s", entry, exc_info=True)
     return removed
+
+
+def _prune_play_events(db, retention_days: int) -> int:
+    """Bound the idempotency ledger using the shared history retention policy."""
+    rows = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_play_events'"
+    )
+    if not rows:
+        return 0
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))
+    ).isoformat()
+    with db.transaction() as cursor:
+        cursor.execute("DELETE FROM user_play_events WHERE started_at<?", (cutoff,))
+        return max(0, int(cursor.rowcount or 0))
 
 
 def _run(label: str, function, *args, **kwargs):
@@ -80,6 +96,7 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
             "syncplay_history", SyncplayGroup.cleanup_history, days
         ),
         "subtitle_cache": _run("subtitle_cache", _prune_subtitle_cache, db, days),
+        "play_events": _run("play_events", _prune_play_events, db, days),
         "notifications": _run("notifications", NotificationService(db).cleanup, days),
     }
     if job_store is not None:

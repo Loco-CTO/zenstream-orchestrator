@@ -159,6 +159,7 @@ class PlaybackTest(unittest.TestCase):
             ),
             "direct",
         )
+
         self.assertEqual(
             PlaybackManager._playback_mode(
                 {"container": "mkv", "videoCodec": "h264", "audioCodec": "aac"},
@@ -233,6 +234,112 @@ class PlaybackTest(unittest.TestCase):
             ),
             "direct",
         )
+
+    def test_audio_playback_mode_decision_matrix(self):
+        for container, codec in (
+            ("mp3", "mp3"),
+            ("flac", "flac"),
+            ("ogg", "opus"),
+            ("opus", "opus"),
+            ("aac", "aac"),
+        ):
+            with self.subTest(container=container, codec=codec):
+                self.assertEqual(
+                    PlaybackManager._playback_mode(
+                        {"container": container, "audioCodec": codec},
+                        {"containers": [container], "audioCodecs": [codec]},
+                    ),
+                    "direct",
+                )
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {"container": "flac", "audioCodec": "flac"},
+                {"containers": ["mp3"], "audioCodecs": ["flac"]},
+            ),
+            "remux",
+        )
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {"container": "m4a", "audioCodec": "alac"},
+                {"containers": ["m4a"], "audioCodecs": ["aac"]},
+            ),
+            "audio-transcode",
+        )
+
+    def test_audio_mime_mapping_does_not_use_video_types(self):
+        self.assertEqual(
+            PlaybackManager._mime({"container": "mp3", "audioCodec": "mp3"}),
+            "audio/mpeg",
+        )
+        self.assertEqual(
+            PlaybackManager._mime({"container": "m4a", "audioCodec": "aac"}),
+            "audio/mp4",
+        )
+        self.assertEqual(
+            PlaybackManager._mime({"container": "adts", "audioCodec": "aac"}),
+            "audio/aac",
+        )
+        self.assertEqual(
+            PlaybackManager._mime({"container": "matroska", "audioCodec": "flac"}),
+            "audio/x-matroska",
+        )
+
+    def test_audio_only_ffmpeg_command_disables_video(self):
+        manager = object.__new__(PlaybackManager)
+        manager._segment_seconds = 4.0
+        spec = {
+            "source": {
+                "container": "m4a",
+                "audioCodec": "alac",
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_type": "audio",
+                        "codec_name": "alac",
+                        "channels": 2,
+                    }
+                ],
+            },
+            "profile": {},
+            "mode": "audio-transcode",
+            "executable": "ffmpeg",
+            "path": Path("track.m4a"),
+        }
+
+        command = manager._build_ffmpeg_command(spec, Path("worker"), 0)
+
+        self.assertIn("-vn", command)
+        self.assertNotIn("0:v:0", command)
+        self.assertNotIn("-c:v", command)
+        self.assertEqual(command[command.index("-c:a") + 1], "aac")
+
+    def test_audio_remux_preserves_original_stream(self):
+        manager = object.__new__(PlaybackManager)
+        manager._segment_seconds = 4.0
+        spec = {
+            "source": {
+                "container": "flac",
+                "audioCodec": "flac",
+                "streams": [
+                    {
+                        "index": 0,
+                        "codec_type": "audio",
+                        "codec_name": "flac",
+                        "channels": 2,
+                    }
+                ],
+            },
+            "profile": {"audioCodecs": ["flac"], "containers": ["mp4"]},
+            "mode": "remux",
+            "executable": "ffmpeg",
+            "path": Path("track.flac"),
+        }
+
+        command = manager._build_ffmpeg_command(spec, Path("worker"), 0)
+
+        self.assertIn("-vn", command)
+        self.assertEqual(command[command.index("-c:a") + 1], "copy")
+        self.assertNotIn("-c:v", command)
 
     def test_bitrate_limit_requires_video_transcode(self):
         self.assertEqual(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import mimetypes
 import os
 import re
 import subprocess
@@ -78,6 +77,18 @@ CARD_METADATA_FIELDS = {
     "officialRating",
     "tags",
     "genres",
+    "albumArtist",
+    "artists",
+    "contributingArtists",
+    "album",
+    "albumId",
+    "label",
+    "tracks",
+    "durationSeconds",
+    "discNumber",
+    "trackNumber",
+    "show",
+    "releaseDate",
     "images",
 }
 
@@ -197,9 +208,8 @@ def _end_playback_viewer_sync(user_id: str, auth_session_id: str, viewer_id: str
     return PlaybackViewerStore().end_viewer(user_id, auth_session_id, viewer_id)
 
 
-def _direct_path_and_size(user_id: str, entity_id: str, source_id: str | None):
-    path = media.direct_path(user_id, entity_id, source_id)
-    return path, path.stat().st_size
+def _direct_path_and_metadata(user_id: str, entity_id: str, source_id: str | None):
+    return media.direct_path_and_metadata(user_id, entity_id, source_id)
 
 
 def _read_playlist(path: Path, access: str) -> str:
@@ -989,6 +999,64 @@ async def items(
     return _catalog_response(result, view)
 
 
+@router.get("/api/catalog/music/albums")
+async def music_albums(
+    request: Request,
+    libraryId: str | None = Query(None),
+    language: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(40, ge=1, le=100),
+    sortBy: str | None = Query(None),
+    sortOrder: str = Query("ascending"),
+    view: str | None = Query(None),
+    limit: int | None = Query(None, ge=1, le=100),
+):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    effective_page_size = min(pageSize, limit) if limit is not None else pageSize
+    result = await run_foreground(
+        catalog.music_albums,
+        account["id"],
+        preferred,
+        libraryId,
+        page=page,
+        page_size=effective_page_size,
+        sort_by=sortBy,
+        sort_order=sortOrder,
+    )
+    return _catalog_response(result, view)
+
+
+@router.get("/api/catalog/music/albums/{release_id}")
+async def music_album(
+    release_id: str,
+    request: Request,
+    language: str | None = Query(None),
+    view: str | None = Query(None),
+):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    result = await run_foreground(
+        catalog.music_album_detail, account["id"], release_id, preferred
+    )
+    return _catalog_response(result, view)
+
+
+@router.get("/api/catalog/music/artists/{artist_id}")
+async def music_artist(
+    artist_id: str,
+    request: Request,
+    language: str | None = Query(None),
+    view: str | None = Query(None),
+):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    result = await run_foreground(
+        catalog.music_artist_detail, account["id"], artist_id, preferred
+    )
+    return _catalog_response(result, view)
+
+
 @router.get("/api/catalog/search")
 async def search(
     request: Request,
@@ -1226,6 +1294,15 @@ async def update_item_progress(entity_id: str, request: Request):
     )
 
 
+@router.post("/api/catalog/items/{entity_id}/play-start")
+async def record_item_play_start(entity_id: str, request: Request):
+    account, _ = await _require_account(request)
+    payload = await _bounded_json_object(request)
+    return await run_control(
+        catalog.record_play_start, account["id"], entity_id, payload
+    )
+
+
 @router.delete("/api/account/watch-history", status_code=204)
 async def clear_watch_history(request: Request):
     account, _ = await _require_account(request)
@@ -1357,10 +1434,9 @@ async def trickplay_sheet(
 async def direct_stream(entity_id: str, request: Request):
     account = await _require_access(request)
     media_source_id = request.query_params.get("sourceId")
-    path, size = await run_control(
-        _direct_path_and_size, account["id"], entity_id, media_source_id
+    path, size, media_type = await run_control(
+        _direct_path_and_metadata, account["id"], entity_id, media_source_id
     )
-    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     headers = {"Accept-Ranges": "bytes", "Content-Length": str(size)}
     range_header = request.headers.get("range")
     if not range_header:

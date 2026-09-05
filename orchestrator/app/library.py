@@ -5025,6 +5025,13 @@ class LibraryScanner:
                 self._check_termination(should_terminate)
                 track_number = _int_tag(tags.get("TRACKNUMBER"))
                 disc_number = _int_tag(tags.get("DISCNUMBER"))
+                _, filename_disc_number, filename_track_number = (
+                    _music_filename_parts(track)
+                )
+                if disc_number is None:
+                    disc_number = filename_disc_number
+                if track_number is None:
+                    track_number = filename_track_number
                 entity = self._entity(
                     library_id,
                     release,
@@ -5515,11 +5522,42 @@ class LibraryScanner:
             self.store.end_progress(job_id)
 
 
+_MUSIC_FILENAME_RE = re.compile(
+    r"^\s*(?:(?P<disc>\d{1,3})\s*\.\s*)?"
+    r"(?P<track>\d{1,3})\s*\.\s*(?P<title>.+?)\s*$"
+)
+
+
+def _music_filename_parts(path: Path) -> tuple[str, int | None, int | None]:
+    """Return a clean title and numeric positions from a music filename.
+
+    Music libraries commonly omit embedded tags and use either ``01. Title``
+    or ``1.01. Title``.  The numeric prefix is inventory metadata, not part of
+    the track title.  Keep other filenames unchanged so the fallback remains
+    deterministic and does not reinterpret ordinary titles.
+    """
+    stem = re.sub(r"\s+", " ", (path.stem if path.suffix else path.name)).strip()
+    match = _MUSIC_FILENAME_RE.fullmatch(stem)
+    if not match:
+        return stem, None, None
+    title = re.sub(r"\s+", " ", match.group("title")).strip()
+    if not title:
+        return stem, None, None
+    disc = match.group("disc")
+    track = match.group("track")
+    return title, int(disc) if disc else None, int(track)
+
+
 def _inventory_query(relative_path: str) -> tuple[str, str | None]:
     path = Path(relative_path)
     raw = path.stem if path.suffix else path.name
+    filename_title = raw
+    if path.suffix.lower() in AUDIO_EXTENSIONS:
+        filename_title, _, _ = _music_filename_parts(path)
     parsed = guess_media(path)
-    query = str(parsed.get("title") or raw)
+    query = str(parsed.get("title") or filename_title)
+    if filename_title != raw:
+        query = filename_title
     query = re.sub(r"\[[^\]]+\]", " ", query)
     query = re.sub(r"\s+", " ", query).strip(" .-_[]")
     year = str(parsed.get("year") or "")[:4] or None
@@ -5575,10 +5613,17 @@ def _music_local_document(
         or _music_display_value(artist_name)
         or (artists[0] if artists else None)
     )
+    filename_title, filename_disc_number, filename_track_number = (
+        _music_filename_parts(path)
+    )
+    if disc_number is None:
+        disc_number = filename_disc_number
+    if track_number is None:
+        track_number = filename_track_number
     album = _music_display_value(album_name) or _music_display_value(
         tags.get("ALBUM")
     )
-    title = _music_display_value(tags.get("TITLE")) or path.stem
+    title = _music_display_value(tags.get("TITLE")) or filename_title
     date = _music_display_value(tags.get("DATE")) or None
     genres = []
     for key in ("GENRE", "STYLE", "MOOD"):

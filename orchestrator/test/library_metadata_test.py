@@ -19,6 +19,8 @@ from app.library import (
     _quick_fingerprint,
     _audio_inventory_fingerprint,
     _SidecarStatWorker,
+    _inventory_query,
+    _music_filename_parts,
     _top_level_key,
     guess_media,
     normalized_path,
@@ -1899,6 +1901,57 @@ class LibraryMetadataTest(unittest.TestCase):
                         "SELECT COUNT(*) FROM library_entities WHERE entity_type='track'"
                     )[0][0],
                     1,
+                )
+        finally:
+            db.close()
+
+    def test_music_filename_fallback_removes_numeric_track_prefixes(self):
+        self.assertEqual(
+            _music_filename_parts(Path("01. Track name.flac")),
+            ("Track name", None, 1),
+        )
+        self.assertEqual(
+            _music_filename_parts(Path("2.03. Track name.flac")),
+            ("Track name", 2, 3),
+        )
+        self.assertEqual(
+            _music_filename_parts(Path("Track name.flac")),
+            ("Track name", None, None),
+        )
+        self.assertEqual(
+            _inventory_query("Artist/2.03. Track name.flac")[0],
+            "Track name",
+        )
+
+    def test_music_scan_uses_filename_numbers_and_title_fallback(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                album = root / "Artist" / "Album"
+                album.mkdir(parents=True)
+                (album / "1.01. ラケナリアの夢.flac").touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                track_id, = db.execute(
+                    "SELECT id FROM library_entities WHERE entity_type='track'"
+                )[0]
+                self.assertEqual(
+                    db.execute(
+                        "SELECT disc_number,track_number FROM library_entities WHERE id=?",
+                        (track_id,),
+                    ),
+                    [(1, 1)],
+                )
+                self.assertEqual(
+                    scanner._music_local_metadata[track_id]["title"],
+                    "ラケナリアの夢",
+                )
+                self.assertEqual(
+                    scanner._music_local_metadata[track_id]["tracks"][0]["title"],
+                    "ラケナリアの夢",
                 )
         finally:
             db.close()

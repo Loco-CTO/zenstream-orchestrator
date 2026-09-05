@@ -21,6 +21,7 @@ from app.library import (
     _SidecarStatWorker,
     _inventory_query,
     _music_filename_parts,
+    _music_local_document,
     _top_level_key,
     guess_media,
     normalized_path,
@@ -1921,6 +1922,14 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(
             _inventory_query("Artist/2.03. Track name.flac")[0],
             "Track name",
+        )
+        self.assertEqual(
+            _music_local_document(
+                Path("1.01. Tagged title.flac"),
+                {"TITLE": "1.01. Tagged title"},
+                "track",
+            )["title"],
+            "Tagged title",
         )
 
     def test_music_scan_uses_filename_numbers_and_title_fallback(self):

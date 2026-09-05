@@ -21,6 +21,7 @@ from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORIES,
     ARTWORK_CATEGORY_SET,
+    clean_music_title,
     fallback_tiers,
     language_family,
     locale_variants,
@@ -741,6 +742,24 @@ class MetadataSearchProjection:
         preserve_artwork: set[str] | None = None,
         replace_metadata: bool = False,
     ) -> None:
+        if entity_type == "track" and isinstance(payload, dict):
+            # Track filenames may carry ordering prefixes such as
+            # ``1.01. Title``. They are structural metadata, not part of the
+            # title, and older cached documents may still contain them.
+            payload = dict(payload)
+            if "title" in payload:
+                payload["title"] = clean_music_title(payload.get("title"))
+            tracks = payload.get("tracks")
+            if isinstance(tracks, list):
+                payload["tracks"] = [
+                    {
+                        **track,
+                        "title": clean_music_title(track.get("title")),
+                    }
+                    if isinstance(track, dict) and "title" in track
+                    else track
+                    for track in tracks
+                ]
         tables = {
             row[0]
             for row in self.db.execute(

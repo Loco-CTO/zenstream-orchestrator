@@ -23,6 +23,7 @@ from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
 from app.language_registry import language_options, normalize_track_language
 from app.logging_config import get_logger
+from app.metadata_domain import clean_music_title, music_filename_parts
 from app.progress import WholeJobProgress
 from app.worker_config import configured_worker_limit
 
@@ -2386,8 +2387,8 @@ class LibraryScanner:
                     candidate = track
             if candidate is not None and release_document is not None:
                 value = deepcopy(release_document)
-                value["title"] = candidate.get("title") or (
-                    local.get("title") if local else None
+                value["title"] = clean_music_title(
+                    candidate.get("title") or (local.get("title") if local else None)
                 )
                 value["album"] = release_document.get("title") or value.get(
                     "album"
@@ -5522,12 +5523,6 @@ class LibraryScanner:
             self.store.end_progress(job_id)
 
 
-_MUSIC_FILENAME_RE = re.compile(
-    r"^\s*(?:(?P<disc>\d{1,3})\s*\.\s*)?"
-    r"(?P<track>\d{1,3})\s*\.\s*(?P<title>.+?)\s*$"
-)
-
-
 def _music_filename_parts(path: Path) -> tuple[str, int | None, int | None]:
     """Return a clean title and numeric positions from a music filename.
 
@@ -5536,16 +5531,7 @@ def _music_filename_parts(path: Path) -> tuple[str, int | None, int | None]:
     the track title.  Keep other filenames unchanged so the fallback remains
     deterministic and does not reinterpret ordinary titles.
     """
-    stem = re.sub(r"\s+", " ", (path.stem if path.suffix else path.name)).strip()
-    match = _MUSIC_FILENAME_RE.fullmatch(stem)
-    if not match:
-        return stem, None, None
-    title = re.sub(r"\s+", " ", match.group("title")).strip()
-    if not title:
-        return stem, None, None
-    disc = match.group("disc")
-    track = match.group("track")
-    return title, int(disc) if disc else None, int(track)
+    return music_filename_parts(path)
 
 
 def _inventory_query(relative_path: str) -> tuple[str, str | None]:
@@ -5623,7 +5609,7 @@ def _music_local_document(
     album = _music_display_value(album_name) or _music_display_value(
         tags.get("ALBUM")
     )
-    title = _music_display_value(tags.get("TITLE")) or filename_title
+    title = clean_music_title(_music_display_value(tags.get("TITLE"))) or filename_title
     date = _music_display_value(tags.get("DATE")) or None
     genres = []
     for key in ("GENRE", "STYLE", "MOOD"):

@@ -14,6 +14,7 @@ from app.config import Config
 from app.images import LocalArtworkCache
 from app.logging_config import get_logger
 from app.metadata_domain import (
+    clean_music_title,
     fallback_tiers,
     is_language_code_placeholder,
     locale_variants,
@@ -1764,6 +1765,22 @@ class Catalog:
                 for field in ("album", "albumArtist", "label", "releaseDate"):
                     if not metadata.get(field) and release_metadata.get(field):
                         metadata[field] = release_metadata[field]
+        if row[3] == "track" and metadata.get("title"):
+            clean_title = clean_music_title(metadata.get("title"))
+            if clean_title != metadata.get("title"):
+                metadata = dict(metadata)
+                metadata["title"] = clean_title
+                tracks = metadata.get("tracks")
+                if isinstance(tracks, list):
+                    metadata["tracks"] = [
+                        {
+                            **track,
+                            "title": clean_music_title(track.get("title")),
+                        }
+                        if isinstance(track, dict) and track.get("title")
+                        else track
+                        for track in tracks
+                    ]
         user_state = (
             self._leaf_state(user_id, row[0])
             if row[3] in {"movie", "episode", "track"}

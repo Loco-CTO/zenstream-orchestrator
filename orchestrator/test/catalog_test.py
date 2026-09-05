@@ -1794,6 +1794,36 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(metadata["images"]["Primary"]["blurHash"], "L5D@blur")
         resolve_public.assert_called_once()
 
+    def test_track_serialization_removes_numeric_filename_prefix_from_cached_title(
+        self,
+    ):
+        account = self.account().create("audio-title-prefix", "password-123")
+        row = (
+            "track",
+            "allowed",
+            None,
+            "track",
+            "Album/1.01. Track title.flac",
+            None,
+            None,
+            None,
+            "2026",
+            "2026",
+        )
+
+        value = self.catalog()._serialize(
+            account["id"],
+            row,
+            {
+                "title": "1.01. Track title",
+                "tracks": [{"title": "1.01. Track title"}],
+            },
+        )
+
+        self.assertEqual(value["name"], "Track title")
+        self.assertEqual(value["metadata"]["title"], "Track title")
+        self.assertEqual(value["metadata"]["tracks"][0]["title"], "Track title")
+
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
     def test_progress_marks_played_at_ninety_percent(self, _languages):
         account = self.account().create("progress", "password-123")

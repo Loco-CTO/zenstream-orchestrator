@@ -2245,7 +2245,7 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(response["locales"], ["en", "zh-TW"])
         self.assertTrue(response["preferNoLanguageForBackdrop"])
         settings.update.assert_called_once_with(["en", "zh-TW"], True)
-        refresh.assert_called_once_with()
+        refresh.assert_called_once_with({"refreshAll": True})
 
     def test_metadata_language_update_preserves_option_when_omitted(self):
         settings = MagicMock()
@@ -2289,6 +2289,65 @@ class LibraryMetadataTest(unittest.TestCase):
             )
         self.assertEqual(response, {"backfill": {"id": "run-1"}})
         refresh.assert_called_once_with()
+
+    def test_sparse_refresh_settings_endpoint_uses_control_lane(self):
+        expected = {"itemTypes": {"movie": {"enabled": False}}}
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(
+                library_routes,
+                "_get_metadata_refresh_settings_sync",
+                return_value=expected,
+            ) as get_settings,
+        ):
+            response = asyncio.run(
+                library_routes.metadata_refresh_settings(
+                    Username="admin", TOKEN="token"
+                )
+            )
+
+        self.assertEqual(response, expected)
+        get_settings.assert_called_once_with()
+
+    def test_sparse_refresh_settings_are_saved_without_queueing_a_run(self):
+        values = {"pretend": True}
+        expected = {"pretend": True}
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(
+                library_routes,
+                "_update_metadata_refresh_settings_sync",
+                return_value=expected,
+            ) as update_settings,
+        ):
+            response = asyncio.run(
+                library_routes.update_metadata_refresh_settings(
+                    _JsonRequest(values), Username="admin", TOKEN="token"
+                )
+            )
+
+        self.assertEqual(response, expected)
+        update_settings.assert_called_once_with(values)
+
+    def test_manual_metadata_refresh_accepts_full_mode(self):
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(
+                library_routes.scheduler,
+                "enqueue_metadata_refresh",
+                return_value={"id": "run-1"},
+            ) as refresh,
+        ):
+            response = asyncio.run(
+                library_routes.refresh_metadata(
+                    _JsonRequest({"refreshAll": True}),
+                    Username="admin",
+                    TOKEN="token",
+                )
+            )
+
+        self.assertEqual(response, {"backfill": {"id": "run-1"}})
+        refresh.assert_called_once_with({"refreshAll": True})
 
     def test_item_metadata_refresh_forces_all_locales_assets_and_publication(self):
         ingest = MagicMock()
@@ -2641,6 +2700,322 @@ class LibraryMetadataTest(unittest.TestCase):
             "translations",
             provider_request.call_args_list[0].kwargs["params"]["append_to_response"],
         )
+
+    def test_tmdb_collection_details_fetches_documented_collection_resources(self):
+        client = TMDBClient({"value": "test"})
+        with (
+            patch.object(client, "_language_code", side_effect=lambda value: value),
+            patch.object(
+                client,
+                "_request",
+                side_effect=[
+                    {
+                        "id": 10,
+                        "name": "Base collection",
+                        "parts": [{"id": 1}, {"id": 2}],
+                    },
+                    {
+                        "translations": [
+                            {
+                                "iso_639_1": "ja",
+                                "iso_3166_1": "JP",
+                                "data": {"name": "日本語コレクション"},
+                            }
+                        ]
+                    },
+                    {
+                        "posters": [{"file_path": "/poster.jpg"}],
+                        "backdrops": [{"file_path": "/backdrop.jpg"}],
+                    },
+                ],
+            ) as request,
+        ):
+            values = client.details_all_locales("collection", "10", ["en-US", "ja-JP"])
+
+        self.assertEqual(
+            [call.args[0] for call in request.call_args_list],
+            ["/collection/10", "/collection/10/translations", "/collection/10/images"],
+        )
+        self.assertEqual(values["ja-JP"]["name"], "日本語コレクション")
+        self.assertEqual(
+            set(values["en-US"]["images"]),
+            {"posters", "backdrops"},
+        )
+        self.assertNotIn(
+            "append_to_response", request.call_args_list[0].kwargs["params"]
+        )
+
+    def test_tmdb_movie_normalization_records_collection_reference(self):
+        client = TMDBClient({}, "api_key")
+        value = client.normalize(
+            "movie",
+            "10",
+            {
+                "title": "Part One",
+                "belongs_to_collection": {"id": 99, "name": "A Saga"},
+            },
+        )
+        no_collection = client.normalize("movie", "11", {"title": "Standalone"})
+
+        self.assertEqual(value["collectionRef"], {"id": "99", "name": "A Saga"})
+        self.assertIsNone(no_collection["collectionRef"])
+
+    def test_tmdb_collection_discovery_uses_provider_part_order(self):
+        db, scanner = self._scanner_db()
+        try:
+
+            class Cache:
+                @staticmethod
+                def get_locales(provider, entity_type, provider_id):
+                    return {"en": {"collectionRef": {"id": "10"}}}
+
+            class Service:
+                cache = Cache()
+
+            class Client:
+                @staticmethod
+                def collection_details(provider_id, locale):
+                    return {
+                        "id": provider_id,
+                        "name": "A Saga",
+                        "parts": [{"id": 2}, {"id": 1}],
+                    }
+
+            discovered, total = scanner._discover_tmdb_collections(
+                Service(),
+                Client(),
+                [("movie-1", "movie", "1"), ("movie-2", "movie", "2")],
+                ["en"],
+                lambda: False,
+            )
+
+            self.assertEqual(total, 1)
+            self.assertEqual(discovered["10"]["members"], ["movie-2", "movie-1"])
+            self.assertEqual(discovered["10"]["title"], "A Saga")
+        finally:
+            db.close()
+
+    def test_tmdb_collection_discovery_backfills_legacy_movie_cache(self):
+        db, scanner = self._scanner_db()
+        try:
+
+            class Cache:
+                def __init__(self):
+                    self.documents = {}
+
+                def get_locales(self, provider, entity_type, provider_id):
+                    return self.documents.get(provider_id, {})
+
+            class Service:
+                def __init__(self):
+                    self.cache = Cache()
+                    self.calls = []
+
+                def fetch_locales(
+                    self,
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locales,
+                    force=False,
+                    project=True,
+                ):
+                    self.calls.append((provider_id, tuple(locales), force, project))
+                    self.cache.documents[provider_id] = {
+                        "en": {"collectionRef": {"id": "10"}}
+                    }
+                    return self.cache.documents[provider_id]
+
+            class Client:
+                @staticmethod
+                def collection_details(provider_id, locale):
+                    return {
+                        "id": provider_id,
+                        "name": "A Saga",
+                        "parts": [{"id": 1}, {"id": 2}],
+                    }
+
+            service = Service()
+            discovered, _total = scanner._discover_tmdb_collections(
+                service,
+                Client(),
+                [("movie-1", "movie", "1"), ("movie-2", "movie", "2")],
+                ["en", "ja"],
+                lambda: False,
+            )
+
+            self.assertEqual({call[0] for call in service.calls}, {"1", "2"})
+            self.assertTrue(all(call[2:] == (True, False) for call in service.calls))
+            self.assertEqual(discovered["10"]["members"], ["movie-1", "movie-2"])
+        finally:
+            db.close()
+
+    def test_collection_rebuild_preserves_tmdb_inventory_when_tmdb_fails(self):
+        db, _scanner = self._scanner_db()
+        try:
+            db.execute(
+                "INSERT INTO library_entities(id,library_id,entity_type,relative_path) VALUES('tmdb-old','collection-library','collection','tmdb-collection-10')"
+            )
+            db.execute(
+                "INSERT INTO entity_provider_ids VALUES('tmdb-old','tmdb','collection','10',0)"
+            )
+            db.execute(
+                "INSERT INTO library_entities(id,library_id,entity_type,relative_path) VALUES('tvdb-old','collection-library','collection','tvdb-list-20')"
+            )
+            db.execute(
+                "INSERT INTO entity_provider_ids VALUES('tvdb-old','tvdb','collection','20',1)"
+            )
+
+            store = MagicMock()
+            store.db = db
+            store.get.return_value = {
+                "id": "collection-library",
+                "name": "Collections",
+            }
+            store.sources.return_value = []
+            scanner = LibraryScanner(store)
+
+            class Tvdb:
+                @staticmethod
+                def lists(page):
+                    return []
+
+                @staticmethod
+                def list_details(provider_id):
+                    return {}
+
+            class Service:
+                cache = MagicMock()
+
+                @staticmethod
+                def client(provider):
+                    if provider == "tvdb":
+                        return Tvdb()
+                    raise ProviderError("TMDB unavailable")
+
+            class Ingest:
+                @staticmethod
+                def locales():
+                    return ["en"]
+
+            with (
+                patch("app.providers.MetadataService", return_value=Service()),
+                patch(
+                    "app.metadata_services.MetadataIngestService", return_value=Ingest()
+                ),
+                patch("app.library_cleanup.cleanup_entities") as cleanup,
+                patch.object(scanner, "_refresh_catalog_after_cleanup"),
+            ):
+                scanner.derive_collection("collection-library", "job-1")
+
+            cleanup.assert_called_once_with(db, ["tvdb-old"])
+            self.assertEqual(
+                db.execute("SELECT id FROM library_entities WHERE id='tmdb-old'"),
+                [("tmdb-old",)],
+            )
+            self.assertIn(
+                "preserved TMDB inventory after provider failure",
+                store.update_job.call_args.kwargs["message"],
+            )
+        finally:
+            db.close()
+
+    def test_collection_rebuild_persists_tmdb_collection_members(self):
+        db, _scanner = self._scanner_db()
+        try:
+            for entity_id, provider_id in (("movie-1", "1"), ("movie-2", "2")):
+                db.execute(
+                    "INSERT INTO library_entities(id,library_id,entity_type,relative_path) VALUES(?,?,?,?)",
+                    (entity_id, "movie-library", "movie", f"{entity_id}.mkv"),
+                )
+                db.execute(
+                    "INSERT INTO entity_provider_ids VALUES(?,?,?,?,0)",
+                    (entity_id, "tmdb", "movie", provider_id),
+                )
+
+            store = MagicMock()
+            store.db = db
+            store.get.return_value = {
+                "id": "collection-library",
+                "name": "Collections",
+            }
+            store.sources.return_value = ["movie-library"]
+            scanner = LibraryScanner(store)
+
+            class Cache:
+                @staticmethod
+                def get_locales(provider, entity_type, provider_id):
+                    return {"en": {"collectionRef": {"id": "10"}}}
+
+                @staticmethod
+                def put(*args):
+                    return None
+
+            class Tvdb:
+                @staticmethod
+                def lists(page):
+                    return []
+
+                @staticmethod
+                def list_details(provider_id):
+                    return {}
+
+            class Tmdb:
+                @staticmethod
+                def collection_details(provider_id, locale):
+                    return {
+                        "id": provider_id,
+                        "name": "A Saga",
+                        "parts": [{"id": 2}, {"id": 1}],
+                    }
+
+            class Service:
+                def __init__(self):
+                    self.cache = Cache()
+
+                @staticmethod
+                def client(provider):
+                    return Tvdb() if provider == "tvdb" else Tmdb()
+
+            class Ingest:
+                @staticmethod
+                def locales():
+                    return ["en"]
+
+                @staticmethod
+                def ingest_locales(*args, **kwargs):
+                    return {"en": {"title": "A Saga"}}
+
+            with (
+                patch("app.providers.MetadataService", return_value=Service()),
+                patch(
+                    "app.metadata_services.MetadataIngestService", return_value=Ingest()
+                ),
+                patch.object(scanner, "_refresh_catalog_after_cleanup"),
+            ):
+                scanner.derive_collection("collection-library", "job-1")
+
+            collection = db.execute(
+                "SELECT id FROM library_entities WHERE library_id='collection-library' AND entity_type='collection'"
+            )
+            self.assertEqual(len(collection), 1)
+            collection_id = collection[0][0]
+            self.assertEqual(
+                db.execute(
+                    "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
+                    (collection_id,),
+                ),
+                [("tmdb", "collection", "10")],
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT source_entity_id,position FROM collection_members WHERE collection_entity_id=? ORDER BY position",
+                    (collection_id,),
+                ),
+                [("movie-2", 0), ("movie-1", 1)],
+            )
+        finally:
+            db.close()
 
     def test_tmdb_tv_details_requests_all_configured_video_languages(self):
         client = TMDBClient({"value": "test"})

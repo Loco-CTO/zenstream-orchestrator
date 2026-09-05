@@ -9,6 +9,7 @@ import stat
 import threading
 import time
 import traceback
+import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable
@@ -399,6 +400,98 @@ def parse_nfo_ids(path: Path) -> list[tuple[str, str, str]]:
     return values
 
 
+_AUDIO_TAG_ALIASES = {
+    "NAM": "TITLE",
+    "TALB": "ALBUM",
+    "ALBUM": "ALBUM",
+    "ALB": "ALBUM",
+    "TPE1": "ARTIST",
+    "ARTIST": "ARTIST",
+    "ART": "ARTIST",
+    "TPE2": "ALBUMARTIST",
+    "ALBUMARTIST": "ALBUMARTIST",
+    "ALBUM ARTIST": "ALBUMARTIST",
+    "AART": "ALBUMARTIST",
+    "TIT2": "TITLE",
+    "TITLE": "TITLE",
+    "DAY": "DATE",
+    "TDRC": "DATE",
+    "TYER": "DATE",
+    "TDRL": "DATE",
+    "TDOR": "DATE",
+    "DATE": "DATE",
+    "YEAR": "DATE",
+    "TRCK": "TRACKNUMBER",
+    "TRKN": "TRACKNUMBER",
+    "TRACK": "TRACKNUMBER",
+    "TRACKNUMBER": "TRACKNUMBER",
+    "TPOS": "DISCNUMBER",
+    "DISK": "DISCNUMBER",
+    "DISC": "DISCNUMBER",
+    "DISCNUMBER": "DISCNUMBER",
+    "MUSICBRAINZ ARTIST ID": "MUSICBRAINZ_ARTISTID",
+    "MUSICBRAINZ ARTISTID": "MUSICBRAINZ_ARTISTID",
+    "MUSICBRAINZ ALBUM ARTIST ID": "MUSICBRAINZ_ALBUMARTISTID",
+    "MUSICBRAINZ ALBUM ARTISTID": "MUSICBRAINZ_ALBUMARTISTID",
+    "MUSICBRAINZ ALBUM ID": "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ ALBUMID": "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ RELEASE ID": "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ RELEASEID": "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ RELEASE GROUP ID": "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ RELEASE GROUPID": "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ RELEASEGROUPID": "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ TRACK ID": "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ TRACKID": "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ RECORDING ID": "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ RECORDINGID": "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ RELEASE TRACK ID": "MUSICBRAINZ_RELEASETRACKID",
+    "MUSICBRAINZ RELEASE TRACKID": "MUSICBRAINZ_RELEASETRACKID",
+    "MUSICBRAINZ RELEASETRACKID": "MUSICBRAINZ_RELEASETRACKID",
+    "MUSICBRAINZ WORK ID": "MUSICBRAINZ_WORKID",
+    "MUSICBRAINZ WORKID": "MUSICBRAINZ_WORKID",
+}
+_AUDIO_ID_TAGS = {
+    "MUSICBRAINZ_ARTISTID",
+    "MUSICBRAINZ_ALBUMARTISTID",
+    "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ_RELEASETRACKID",
+    "MUSICBRAINZ_WORKID",
+}
+_AUDIO_MULTI_TAGS = {"ARTIST", "ALBUMARTIST"}
+
+
+def _audio_tag_key(raw_key: object) -> str:
+    key = str(raw_key).strip().upper()
+    if ":" in key:
+        # Mutagen exposes MP4 freeform tags as
+        # ``----:com.apple.iTunes:MusicBrainz ...``. The final component is
+        # the semantic tag name; the preceding namespace is not part of the
+        # catalog field.
+        key = key.rsplit(":", 1)[-1].strip()
+    key = key.replace("©", "")
+    key = re.sub(r"[._-]+", " ", key)
+    key = re.sub(r"\s+", " ", key).strip()
+    return _AUDIO_TAG_ALIASES.get(key, key.replace(" ", "_"))
+
+
+def _audio_tag_values(raw_value: object) -> list[str]:
+    value = getattr(raw_value, "text", raw_value)
+    if isinstance(value, (list, tuple)):
+        values = value
+    else:
+        values = [value]
+    result = []
+    for item in values:
+        if isinstance(item, bytes):
+            item = item.decode("utf-8", errors="replace")
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return list(dict.fromkeys(result))
+
+
 def parse_audio_tags(path: Path) -> dict[str, str]:
     try:
         from mutagen import File
@@ -408,13 +501,15 @@ def parse_audio_tags(path: Path) -> dict[str, str]:
             return {}
         tags: dict[str, str] = {}
         for raw_key, raw_value in audio.tags.items():
-            key = str(raw_key).upper()
-            if isinstance(raw_value, (list, tuple)):
-                value = str(raw_value[0]) if raw_value else ""
-            else:
-                value = str(raw_value)
-            if value:
-                tags[key] = value
+            key = _audio_tag_key(raw_key)
+            values = _audio_tag_values(raw_value)
+            if not values:
+                continue
+            tags[key] = (
+                ";".join(values)
+                if key in _AUDIO_ID_TAGS or key in _AUDIO_MULTI_TAGS
+                else values[0]
+            )
         return tags
     except Exception:
         return {}
@@ -2271,18 +2366,20 @@ class LibraryScanner:
         entity_type: str,
         should_terminate: Callable[[], bool],
     ) -> None:
-        if entity_type not in {"movie", "episode"}:
+        if entity_type not in {"movie", "episode", "artist", "release", "track"}:
             return
         try:
             from app.metadata_services import reproject_entity_artwork
-            from app.screen_extractor import extract_entity
 
-            extract_entity(
-                self.db,
-                entity_id,
-                entity_type,
-                should_terminate=should_terminate,
-            )
+            if entity_type in {"movie", "episode"}:
+                from app.screen_extractor import extract_entity
+
+                extract_entity(
+                    self.db,
+                    entity_id,
+                    entity_type,
+                    should_terminate=should_terminate,
+                )
             reproject_entity_artwork(self.db, entity_id)
         except Exception as error:
             logger.warning(
@@ -2820,7 +2917,17 @@ class LibraryScanner:
             return False
 
         def needs_artwork_reconciliation(row: tuple) -> bool:
-            if row[1] not in {"movie", "episode"} or row[0] not in self._scan_seen_ids:
+            if (
+                row[1]
+                not in {
+                    "movie",
+                    "episode",
+                    "artist",
+                    "release",
+                    "track",
+                }
+                or row[0] not in self._scan_seen_ids
+            ):
                 return False
             if needs_localized_metadata(row):
                 return True
@@ -3110,6 +3217,13 @@ class LibraryScanner:
 
     def _persist_child_ids(self, parent_id: str, normalized: dict) -> None:
         """Attach provider child IDs to inventory children by stable numbers."""
+
+        def number(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         tracks = [
             value for value in normalized.get("tracks", []) or [] if value.get("id")
         ]
@@ -3125,7 +3239,12 @@ class LibraryScanner:
                     value
                     for value in tracks
                     if track_number is not None
-                    and int(value.get("position") or 0) == int(track_number)
+                    and (
+                        value.get("disc") is None
+                        or disc_number is None
+                        or number(value.get("disc")) == number(disc_number)
+                    )
+                    and number(value.get("position")) == number(track_number)
                 ),
                 None,
             )
@@ -3650,7 +3769,7 @@ class LibraryScanner:
                         yield path, None
                         continue
                 except OSError:
-                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                    if path.suffix.lower() in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
                         self._record_access_error(path)
                     yield path, None
                     continue
@@ -3658,7 +3777,7 @@ class LibraryScanner:
                 try:
                     file_stat = path.stat()
                 except OSError:
-                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                    if path.suffix.lower() in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
                         self._record_access_error(path)
                     yield path, None
                     continue
@@ -4297,47 +4416,128 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
         targets: set[str] | None = None,
     ) -> int:
-        album_dirs = []
-
-        def traversal_error(error):
-            raise error
+        entries: list[tuple[Path, dict[str, str]]] = []
 
         scan_roots = [root] if targets is None else self._target_entries(root, targets)
         for scan_root in scan_roots:
-            if not scan_root.is_dir():
+            try:
+                is_directory = scan_root.is_dir()
+            except OSError:
+                is_directory = False
+            if not is_directory:
+                self._defer_root(
+                    relative(str(root), str(scan_root)),
+                    "music root is inaccessible",
+                )
                 continue
-            for directory, _, filenames in os.walk(scan_root, onerror=traversal_error):
-                if any(
-                    Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames
-                ):
-                    album_dirs.append(Path(directory))
-        self.store.update_job(job_id, progress_total=len(album_dirs))
+            try:
+                for path, file_stat in self._walk_file_entries(scan_root):
+                    self._check_termination(should_terminate)
+                    if (
+                        path.suffix.lower() not in AUDIO_EXTENSIONS
+                        or file_stat is None
+                        or not stat.S_ISREG(file_stat.st_mode)
+                    ):
+                        continue
+                    entries.append((path, parse_audio_tags(path)))
+            except OSError:
+                self._record_access_error(scan_root)
+            for inaccessible in list(self._scan_access_errors):
+                try:
+                    inaccessible.relative_to(scan_root)
+                except (ValueError, RuntimeError):
+                    continue
+                self._defer_root(
+                    relative(str(root), str(inaccessible)),
+                    "music path could not be inspected",
+                )
+
+        groups: dict[tuple[str, ...], list[tuple[Path, dict[str, str]]]] = {}
+        for path, tags in sorted(entries, key=lambda value: str(value[0]).casefold()):
+            release_id = next(
+                iter(_music_tag_values(tags, "MUSICBRAINZ_ALBUMID")), None
+            )
+            relative_path = Path(relative(str(root), str(path)))
+            top_level = (
+                relative_path.parts[0] if relative_path.parts else path.parent.name
+            )
+            album = _music_display_value(tags.get("ALBUM")) or path.parent.name
+            album_artist = (
+                _music_display_value(tags.get("ALBUMARTIST"))
+                or _music_display_value(tags.get("ARTIST"))
+                or top_level
+            )
+            key = (
+                (
+                    "id",
+                    release_id,
+                )
+                if release_id
+                else (
+                    "tag",
+                    top_level,
+                    _music_normalize(album_artist),
+                    _music_normalize(album),
+                )
+            )
+            groups.setdefault(key, []).append((path, tags))
+
+        self.store.update_job(job_id, progress_total=len(groups))
         count = 0
         artists: dict[str, str] = {}
-        for album_dir in album_dirs:
+        artist_id_values: dict[str, list[tuple[str, str, str]]] = {}
+        for group_index, group_entries in enumerate(groups.values(), start=1):
             self._check_termination(should_terminate)
+            first_path, first_tags = group_entries[0]
             artist_name = (
-                album_dir.relative_to(root).parts[0]
-                if album_dir.relative_to(root).parts
-                else album_dir.name
+                _music_display_value(first_tags.get("ALBUMARTIST"))
+                or _music_display_value(first_tags.get("ARTIST"))
+                or (
+                    first_path.relative_to(root).parts[0]
+                    if first_path.relative_to(root).parts
+                    else first_path.parent.name
+                )
             )
-            artist = artists.get(artist_name)
+            artist_key = _music_normalize(artist_name)
+            artist = artists.get(artist_key)
             if not artist:
                 artist = self._entity(library_id, None, "artist", artist_name)
-                artists[artist_name] = artist
-            release = self._entity(
-                library_id, artist, "release", relative(str(root), str(album_dir))
+                artists[artist_key] = artist
+            artist_ids = []
+            for _, tags in group_entries:
+                artist_ids.extend(_music_ids(tags, "artist"))
+            if artist_ids:
+                artist_id_values.setdefault(artist, []).extend(artist_ids)
+
+            album_dirs = [path.parent for path, _ in group_entries]
+            try:
+                album_dir = Path(
+                    os.path.commonpath([str(value) for value in album_dirs])
+                )
+            except (ValueError, OSError):
+                album_dir = first_path.parent
+            if album_dir == root:
+                album_dir = first_path.parent
+            album_path = relative(str(root), str(album_dir))
+            release = self._entity(library_id, artist, "release", album_path)
+            release_ids = []
+            for _, tags in group_entries:
+                release_ids.extend(_music_ids(tags, "release"))
+            if release_ids:
+                self._replace_ids(release, release_ids)
+
+            ordered_entries = sorted(
+                group_entries,
+                key=lambda value: (
+                    _int_tag(value[1].get("DISCNUMBER")) or 0,
+                    _int_tag(value[1].get("TRACKNUMBER")) or 10**9,
+                    relative(str(root), str(value[0])).casefold(),
+                ),
             )
-            tracks = [
-                path
-                for path in album_dir.iterdir()
-                if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
-            ]
-            for track in sorted(tracks):
+            for track, tags in ordered_entries:
                 self._check_termination(should_terminate)
-                tags = parse_audio_tags(track)
-                track_number = _int_tag(tags.get("TRACKNUMBER") or tags.get("TRACK"))
-                disc_number = _int_tag(tags.get("DISCNUMBER") or tags.get("DISC"))
+                track_number = _int_tag(tags.get("TRACKNUMBER"))
+                disc_number = _int_tag(tags.get("DISCNUMBER"))
                 entity = self._entity(
                     library_id,
                     release,
@@ -4346,36 +4546,245 @@ class LibraryScanner:
                     disc_number=disc_number,
                     track_number=track_number,
                 )
-                music_ids = _music_ids(tags)
+                music_ids = _music_ids(tags, "track")
                 if music_ids:
                     self._replace_ids(entity, music_ids)
-                self._files(
-                    entity,
-                    root,
-                    [track]
-                    + [
+                sidecars = []
+                try:
+                    sidecars = [
                         sidecar
                         for sidecar in track.parent.iterdir()
                         if sidecar.is_file()
                         and sidecar.stem.startswith(track.stem)
                         and sidecar != track
-                    ],
-                )
+                    ]
+                except OSError:
+                    self._defer_root(
+                        relative(str(root), str(track.parent)),
+                        "track sidecars are inaccessible",
+                    )
+                self._files(entity, root, [track, *sidecars])
                 count += 1
-            self._files(
-                release,
-                root,
-                [
+            image_paths = []
+            artwork_accessible = True
+            try:
+                image_paths = [
                     path
                     for path in album_dir.iterdir()
                     if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-                ],
-            )
+                ]
+            except OSError:
+                artwork_accessible = False
+                self._defer_root(album_path, "album artwork directory is inaccessible")
+            if artwork_accessible:
+                self._files(release, root, image_paths)
             self.store.update_job(
-                job_id, progress_current=count, message=f"Indexed {album_dir.name}"
+                job_id,
+                progress_current=group_index,
+                message=f"Indexed {album_dir.name}",
             )
+        for artist, values in artist_id_values.items():
+            self._replace_ids(artist, list(dict.fromkeys(values)))
         self._scan_complete = True
         return count
+
+    def _collection_source_rows(
+        self,
+        sources: Iterable[str],
+        provider: str,
+        identifier_types: Iterable[str],
+    ) -> list[tuple[str, str, str]]:
+        source_ids = list(dict.fromkeys(sources))
+        types = list(dict.fromkeys(identifier_types))
+        if not source_ids or not types:
+            return []
+        source_placeholders = ",".join("?" for _ in source_ids)
+        type_placeholders = ",".join("?" for _ in types)
+        return self.db.execute(
+            "SELECT e.id,e.entity_type,p.provider_id "
+            "FROM library_entities e "
+            "JOIN entity_provider_ids p ON p.entity_id=e.id "
+            f"WHERE e.library_id IN ({source_placeholders}) "
+            "AND p.provider=? "
+            f"AND p.identifier_type IN ({type_placeholders}) "
+            "ORDER BY e.id,p.provider_id",
+            [*source_ids, provider, *types],
+        )
+
+    def _discover_tvdb_collections(
+        self,
+        client,
+        source_rows: Iterable[tuple[str, str, str]],
+        should_terminate: Callable[[], bool],
+    ) -> tuple[dict[str, dict], int]:
+        from app.providers import ProviderError
+
+        if not callable(getattr(client, "lists", None)) or not callable(
+            getattr(client, "list_details", None)
+        ):
+            raise ProviderError("TheTVDB collection endpoints are unavailable")
+        by_id = {(row[1], str(row[2])): row[0] for row in source_rows}
+        lists: dict[str, dict] = {}
+        # Lists are paged; stop at the first short page to avoid unbounded calls.
+        for page in range(50):
+            self._check_termination(should_terminate)
+            page_values = list(client.lists(page) or [])
+            for value in page_values:
+                if not isinstance(value, dict) or not value.get("isOfficial"):
+                    continue
+                list_id = value.get("id")
+                if list_id is not None:
+                    lists[str(list_id)] = value
+            if len(page_values) < 100:
+                break
+
+        discovered: dict[str, dict] = {}
+        for list_id, base in lists.items():
+            self._check_termination(should_terminate)
+            payload = client.list_details(list_id)
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            if not isinstance(data, dict):
+                data = {}
+            members = []
+            for entity in data.get("entities", []) or []:
+                if not isinstance(entity, dict):
+                    continue
+                movie_id = entity.get("movieId")
+                series_id = entity.get("seriesId")
+                key = (
+                    ("movie", str(movie_id))
+                    if movie_id is not None
+                    else (("series", str(series_id)) if series_id is not None else None)
+                )
+                if key and key in by_id:
+                    members.append(by_id[key])
+            members = list(dict.fromkeys(members))
+            if len(members) < 2:
+                continue
+            title = base.get("name") or data.get("name") or f"Collection {list_id}"
+            discovered[list_id] = {"members": members, "title": title, "data": data}
+        return discovered, len(lists)
+
+    def _discover_tmdb_collections(
+        self,
+        service,
+        client,
+        source_rows: Iterable[tuple[str, str, str]],
+        locales: list[str],
+        should_terminate: Callable[[], bool],
+    ) -> tuple[dict[str, dict], int]:
+        from app.metadata_services import metadata_task_results
+        from app.providers import ProviderError
+
+        if not callable(getattr(client, "collection_details", None)) and not callable(
+            getattr(client, "details", None)
+        ):
+            raise ProviderError("TMDB collection endpoints are unavailable")
+        movie_entities: dict[str, list[str]] = {}
+        for entity_id, _entity_type, provider_id in source_rows:
+            movie_entities.setdefault(str(provider_id), []).append(entity_id)
+        if not movie_entities:
+            return {}, 0
+        if not locales:
+            raise ProviderError("No metadata language is configured")
+
+        discovery_locale = locales[0]
+        missing_references = []
+        for provider_id in movie_entities:
+            cached = service.cache.get_locales("tmdb", "movie", provider_id)
+            document = cached.get(discovery_locale)
+            if not document or "collectionRef" not in document:
+                missing_references.append(provider_id)
+
+        def backfill_reference(provider_id: str):
+            # The collection relationship is language-independent. Backfill
+            # only the first configured locale so legacy caches become usable
+            # without refetching every movie's complete localized metadata.
+            return service.fetch_locales(
+                "tmdb",
+                "movie",
+                provider_id,
+                [discovery_locale],
+                force=True,
+                project=False,
+            )
+
+        errors = []
+        for provider_id, _result, error in metadata_task_results(
+            sorted(missing_references), backfill_reference, should_terminate
+        ):
+            self._check_termination(should_terminate)
+            if error is not None:
+                errors.append((provider_id, error))
+        self._check_termination(should_terminate)
+        if errors:
+            provider_id, error = errors[0]
+            raise ProviderError(
+                f"TMDB movie collection-reference backfill failed for "
+                f"{len(errors)} movie(s); first provider_id={provider_id}: {error}"
+            )
+
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        for provider_id, entity_ids in movie_entities.items():
+            cached = service.cache.get_locales("tmdb", "movie", provider_id)
+            document = cached.get(discovery_locale)
+            if not document or "collectionRef" not in document:
+                raise ProviderError(
+                    f"TMDB movie collection-reference cache missing provider_id={provider_id}"
+                )
+            reference = document.get("collectionRef")
+            if not isinstance(reference, dict):
+                continue
+            collection_id = reference.get("id")
+            if collection_id is None or not str(collection_id).strip():
+                continue
+            grouped.setdefault(str(collection_id), []).extend(
+                (provider_id, entity_id) for entity_id in entity_ids
+            )
+
+        self._check_termination(should_terminate)
+        details = getattr(client, "collection_details", None)
+        if not callable(details):
+            details = lambda provider_id, locale: client.details(
+                "collection", provider_id, locale
+            )
+        discovered: dict[str, dict] = {}
+        for collection_id, local_members in grouped.items():
+            self._check_termination(should_terminate)
+            payload = details(collection_id, discovery_locale)
+            if not isinstance(payload, dict):
+                raise ProviderError(
+                    f"TMDB collection details returned an invalid payload "
+                    f"provider_id={collection_id}"
+                )
+            by_movie_id: dict[str, list[str]] = {}
+            for movie_id, entity_id in local_members:
+                by_movie_id.setdefault(movie_id, []).append(entity_id)
+            ordered_members = []
+            seen_entities = set()
+            for part in payload.get("parts", []) or []:
+                if not isinstance(part, dict) or part.get("id") is None:
+                    continue
+                for entity_id in by_movie_id.get(str(part["id"]), []):
+                    if entity_id not in seen_entities:
+                        seen_entities.add(entity_id)
+                        ordered_members.append(entity_id)
+            # Keep locally indexed movies that TMDB has not yet included in
+            # its parts response, with a deterministic fallback order.
+            for movie_id in sorted(by_movie_id):
+                for entity_id in by_movie_id[movie_id]:
+                    if entity_id not in seen_entities:
+                        seen_entities.add(entity_id)
+                        ordered_members.append(entity_id)
+            if len(ordered_members) < 2:
+                continue
+            title = payload.get("name") or f"Collection {collection_id}"
+            discovered[collection_id] = {
+                "members": ordered_members,
+                "title": title,
+                "data": payload,
+            }
+        return discovered, len(grouped)
 
     def derive_collection(
         self,
@@ -4405,72 +4814,82 @@ class LibraryScanner:
         self._scan_complete = False
         try:
             from app.library_cleanup import cleanup_entities
-            from app.providers import MetadataService, ProviderError, TVDBClient
+            from app.metadata_services import MetadataIngestService
+            from app.providers import MetadataService, ProviderError
 
             service = MetadataService()
-            client = service.client("tvdb")
-            if not isinstance(client, TVDBClient):
-                raise ProviderError("TheTVDB is not configured")
-            source_rows = (
-                self.db.execute(
-                    "SELECT e.id,e.entity_type,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.library_id IN ({}) AND p.provider='tvdb' AND p.identifier_type IN ('series','movie')".format(
-                        ",".join("?" * len(sources))
-                    ),
-                    sources,
-                )
-                if sources
-                else []
+            collection_locales = MetadataIngestService(service).locales()
+            tvdb_source_rows = self._collection_source_rows(
+                sources, "tvdb", ("series", "movie")
             )
-            by_id = {(row[1], str(row[2])): row[0] for row in source_rows}
-            lists: dict[str, dict] = {}
-            # Lists are paged; stop at the first short page to avoid unbounded calls.
-            for page in range(50):
-                self._check_termination(should_terminate)
-                page_values = client.lists(page)
-                for value in page_values:
-                    if value.get("isOfficial"):
-                        lists[str(value.get("id"))] = value
-                if len(page_values) < 100:
-                    break
-            self.store.update_job(job_id, progress_total=len(lists))
-            discovered: dict[str, dict] = {}
-            for list_id, base in lists.items():
-                self._check_termination(should_terminate)
-                payload = client.list_details(list_id)
-                data = payload.get("data", payload)
-                members = []
-                for entity in data.get("entities", []) or []:
-                    key = (
-                        ("movie", str(entity.get("movieId")))
-                        if entity.get("movieId")
-                        else (
-                            ("series", str(entity.get("seriesId")))
-                            if entity.get("seriesId")
-                            else None
-                        )
+            tmdb_source_rows = self._collection_source_rows(sources, "tmdb", ("movie",))
+            discovered: list[tuple[str, str, dict]] = []
+            successful_providers = set()
+            provider_errors = []
+            progress_total = 0
+
+            for provider, discover in (
+                (
+                    "tvdb",
+                    lambda client: self._discover_tvdb_collections(
+                        client, tvdb_source_rows, should_terminate
+                    ),
+                ),
+                (
+                    "tmdb",
+                    lambda client: self._discover_tmdb_collections(
+                        service,
+                        client,
+                        tmdb_source_rows,
+                        collection_locales,
+                        should_terminate,
+                    ),
+                ),
+            ):
+                try:
+                    result, provider_total = discover(service.client(provider))
+                except JobTerminated:
+                    raise
+                except Exception as error:
+                    provider_errors.append((provider, error))
+                    logger.warning(
+                        "collection provider enumeration failed provider=%s",
+                        provider,
+                        exc_info=True,
                     )
-                    if key and key in by_id:
-                        members.append(by_id[key])
-                members = list(dict.fromkeys(members))
-                if len(members) < 2:
                     continue
-                title = base.get("name") or data.get("name") or f"Collection {list_id}"
-                discovered[list_id] = {"members": members, "title": title, "data": data}
+                successful_providers.add(provider)
+                progress_total += provider_total
+                discovered.extend(
+                    (provider, provider_id, value)
+                    for provider_id, value in result.items()
+                )
+
+            if not successful_providers:
+                reasons = ", ".join(
+                    f"{provider}: {type(error).__name__}"
+                    for provider, error in provider_errors
+                )
+                suffix = f" ({reasons})" if reasons else ""
+                raise ProviderError(
+                    f"No collection provider could be enumerated{suffix}"
+                )
 
             # Provider enumeration is complete at this point. Only now mutate
             # the collection inventory, so a partial/failing provider response
-            # cannot erase the previous catalog.
-            from app.metadata_services import MetadataIngestService
-
+            # cannot erase the previous catalog for that provider.
             ingest = MetadataIngestService(service)
             count = 0
-            for list_id, value in discovered.items():
+            for provider, provider_id, value in discovered:
                 self._check_termination(should_terminate)
-                collection = self._entity(
-                    library_id, None, "collection", f"tvdb-list-{list_id}"
+                path = (
+                    f"tvdb-list-{provider_id}"
+                    if provider == "tvdb"
+                    else f"tmdb-collection-{provider_id}"
                 )
+                collection = self._entity(library_id, None, "collection", path)
                 self._scan_refresh_root_ids.add(collection)
-                self._replace_ids(collection, [("tvdb", "collection", list_id)])
+                self._replace_ids(collection, [(provider, "collection", provider_id)])
                 current_members = [
                     (row[0], row[1])
                     for row in self.db.execute(
@@ -4493,12 +4912,11 @@ class LibraryScanner:
                             (collection, source_entity, position),
                         )
                     self._mark_changed(collection)
-                collection_locales = ingest.locales()
                 try:
                     ingest.ingest_locales(
-                        "tvdb",
+                        provider,
                         "collection",
-                        list_id,
+                        provider_id,
                         collection_locales,
                         force=False,
                     )
@@ -4507,30 +4925,33 @@ class LibraryScanner:
                         normalized = {
                             "title": value["title"],
                             "overview": value["data"].get("overview"),
-                            "provider": "tvdb",
-                            "providerId": list_id,
+                            "provider": provider,
+                            "providerId": provider_id,
                             "images": [],
                         }
                         service.cache.put(
-                            "tvdb", "collection", list_id, locale, normalized
+                            provider, "collection", provider_id, locale, normalized
                         )
                 count += 1
                 self.store.update_job(
                     job_id, progress_current=count, message=f"Derived {value['title']}"
                 )
+            provider_placeholders = ",".join("?" for _ in successful_providers)
+            stale_params = [library_id, *sorted(successful_providers)]
+            stale_filter = ""
+            if self._scan_seen_ids:
+                seen_placeholders = ",".join("?" for _ in self._scan_seen_ids)
+                stale_filter = f" AND e.id NOT IN ({seen_placeholders})"
+                stale_params.extend(sorted(self._scan_seen_ids))
             stale = [
                 row[0]
                 for row in self.db.execute(
-                    "SELECT e.id FROM library_entities e WHERE e.library_id=? AND e.entity_type='collection' AND e.id NOT IN ({})".format(
-                        ",".join("?" * len(self._scan_seen_ids))
-                        if self._scan_seen_ids
-                        else "SELECT NULL"
-                    ),
-                    (
-                        [library_id, *self._scan_seen_ids]
-                        if self._scan_seen_ids
-                        else [library_id]
-                    ),
+                    "SELECT DISTINCT e.id FROM library_entities e "
+                    "JOIN entity_provider_ids p ON p.entity_id=e.id "
+                    "WHERE e.library_id=? AND e.entity_type='collection' "
+                    "AND p.identifier_type='collection' "
+                    f"AND p.provider IN ({provider_placeholders}){stale_filter}",
+                    stale_params,
                 )
             ]
             if stale:
@@ -4542,9 +4963,18 @@ class LibraryScanner:
                 job_id,
                 state="completed",
                 progress_current=count,
-                progress_total=len(lists),
+                progress_total=progress_total,
                 finished_at=now(),
-                message=f"Derived {count} official collections",
+                message=(
+                    f"Derived {count} collections"
+                    + (
+                        "; preserved "
+                        + ", ".join(provider.upper() for provider, _ in provider_errors)
+                        + " inventory after provider failure"
+                        if provider_errors
+                        else ""
+                    )
+                ),
             )
             self.store.set_scan_state(library_id, "ready", finished=now())
         except JobTerminated:
@@ -4607,7 +5037,26 @@ def _int_tag(value: str | None) -> int | None:
     return int(match.group(0)) if match else None
 
 
-def _music_ids(tags: dict[str, str]) -> list[tuple[str, str, str]]:
+def _music_tag_values(tags: dict[str, str], key: str) -> list[str]:
+    return [
+        value.strip()
+        for value in re.split(r"[;\x00]", str(tags.get(key) or ""))
+        if value.strip()
+    ]
+
+
+def _music_display_value(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _music_normalize(value: str | None) -> str:
+    normalized = unicodedata.normalize("NFKC", _music_display_value(value))
+    return re.sub(r"\s+", " ", normalized).casefold()
+
+
+def _music_ids(
+    tags: dict[str, str], entity_type: str | None = None
+) -> list[tuple[str, str, str]]:
     ids: list[tuple[str, str, str]] = []
     mapping = {
         "MUSICBRAINZ_ARTISTID": "artist",
@@ -4618,10 +5067,30 @@ def _music_ids(tags: dict[str, str]) -> list[tuple[str, str, str]]:
         "MUSICBRAINZ_RELEASETRACKID": "release_track",
         "MUSICBRAINZ_WORKID": "work",
     }
+    if entity_type == "artist":
+        # The parent artist represents the album artist.  Contributing artist
+        # IDs remain structured metadata on the track rather than being
+        # incorrectly attached to that parent entity.
+        artist_values = _music_tag_values(tags, "MUSICBRAINZ_ALBUMARTISTID")
+        if not artist_values:
+            artist_values = _music_tag_values(tags, "MUSICBRAINZ_ARTISTID")
+        return [("musicbrainz", "artist", value) for value in artist_values]
     for key, identifier_type in mapping.items():
-        for value in (tags.get(key) or "").split(";"):
-            if value.strip():
-                ids.append(("musicbrainz", identifier_type, value.strip()))
+        if entity_type == "artist" and identifier_type != "artist":
+            continue
+        if entity_type == "release" and identifier_type not in {
+            "release",
+            "release_group",
+        }:
+            continue
+        if entity_type == "track" and identifier_type not in {
+            "recording",
+            "release_track",
+            "work",
+        }:
+            continue
+        for value in _music_tag_values(tags, key):
+            ids.append(("musicbrainz", identifier_type, value))
     return ids
 
 

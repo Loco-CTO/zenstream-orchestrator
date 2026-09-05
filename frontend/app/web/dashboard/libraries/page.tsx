@@ -224,20 +224,6 @@ export default function LibrariesPage() {
 				</div>
 			)}
 			<div style={{ background: "#080808", borderRadius: 12, padding: 0 }}>
-				<div style={{ padding: "14px 22px" }}>
-					<span
-						style={{
-							fontSize: 10,
-							fontWeight: 600,
-							color: "var(--primary)",
-							letterSpacing: ".1em",
-							textTransform: "uppercase",
-						}}
-					>
-						Configured libraries {libraries.length}
-					</span>
-				</div>
-				<div style={{ height: 1, background: "#111" }} />
 				{libraries.map((library, index) => (
 					<div key={library.id}>
 						<div

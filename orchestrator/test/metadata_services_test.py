@@ -789,6 +789,45 @@ class MetadataServicesTest(unittest.TestCase):
             "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
         )
 
+    def test_public_artwork_does_not_cache_empty_selection(self):
+        service = MetadataReadService(self.db)
+        service.resolve_raw = MagicMock(
+            side_effect=[
+                {"images": [], "originalLanguage": "en"},
+                {"images": [{"type": "Primary", "url": "poster.jpg"}]},
+            ]
+        )
+
+        def ready_artwork(
+            _entity_type,
+            _provider_ids,
+            _images,
+            _requested,
+            image_type,
+            *_args,
+            **_kwargs,
+        ):
+            if image_type == "Primary" and service.resolve_raw.call_count > 1:
+                return {
+                    "provider": "tmdb",
+                    "url": "poster.jpg",
+                    "language": "en",
+                }
+            return None
+
+        service.ready_artwork = MagicMock(side_effect=ready_artwork)
+        provider_ids = [{"provider": "tmdb", "id": "10"}]
+
+        first = service.resolve_public("entity", "movie", provider_ids, "en")
+        second = service.resolve_public("entity", "movie", provider_ids, "en")
+
+        self.assertEqual(first["metadata"]["images"], {})
+        self.assertEqual(
+            second["metadata"]["images"]["Primary"]["url"],
+            "/api/catalog/items/entity/images/Primary?language=en",
+        )
+        self.assertEqual(service.resolve_raw.call_count, 2)
+
     def test_original_language_provider_codes_match_canonical_cache_locales(self):
         self._cache("en", {"title": "English", "originalLanguage": "eng"})
         service = MetadataReadService(self.db)
@@ -845,6 +884,106 @@ class MetadataServicesTest(unittest.TestCase):
             self.assertTrue(
                 all(str(value[-1]).endswith(".webp") for value in cache.rows)
             )
+
+    def test_single_locale_refresh_removes_replaced_cached_artwork(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
+            try:
+                database.execute(
+                    "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,blur_hash TEXT,local_path TEXT,fetched_at TEXT,expires_at TEXT,PRIMARY KEY(provider,entity_type,provider_id,locale,image_type,image_url))"
+                )
+                old_path = Path(directory) / "old.webp"
+                old_path.write_bytes(b"old")
+                old_url = "https://images.example/old.jpg"
+                new_url = "https://images.example/new.jpg"
+                database.execute(
+                    "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "tmdb",
+                        "movie",
+                        "10",
+                        "en",
+                        "Primary",
+                        old_url,
+                        "old-hash",
+                        str(old_path),
+                        "now",
+                        "later",
+                    ),
+                )
+                cache = MetadataCache.__new__(MetadataCache)
+                cache.db = database
+                fetcher = MagicMock()
+                fetcher.cache = cache
+                fetcher.fetch_locales.return_value = {
+                    "en": {
+                        "images": [
+                            {
+                                "type": "Primary",
+                                "language": "en",
+                                "url": new_url,
+                            }
+                        ]
+                    }
+                }
+                image_ingest = MetadataImageIngestService(
+                    cache,
+                    directory,
+                    downloader=lambda url: b"new-image",
+                    encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
+                    hasher=lambda target: "new-hash",
+                )
+                ingest = MetadataIngestService(
+                    fetcher,
+                    _Settings(["en"]),
+                    image_ingest=image_ingest,
+                    background_assets=False,
+                )
+                with patch.object(MetadataSearchProjection, "project"):
+                    ingest.ingest_locales("tmdb", "movie", "10", ["en"])
+
+                rows = database.execute(
+                    "SELECT image_url,local_path FROM metadata_images WHERE provider=? AND entity_type=? AND provider_id=? AND image_type=?",
+                    ("tmdb", "movie", "10", "Primary"),
+                )
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0][0], new_url)
+                self.assertTrue(Path(rows[0][1]).is_file())
+                self.assertFalse(old_path.exists())
+            finally:
+                database.close()
+
+    def test_partial_locale_refresh_keeps_multilocale_artwork_non_destructive(self):
+        image_ingest = MagicMock()
+        ingest = MetadataIngestService(
+            _Fetcher(),
+            _Settings(["en", "ja"]),
+            image_ingest=image_ingest,
+            background_assets=False,
+        )
+
+        ingest.ingest_locale("tmdb", "movie", "10", "en")
+
+        image_ingest.ingest.assert_called_once_with(
+            "tmdb",
+            "movie",
+            "10",
+            "en",
+            {
+                "title": "en",
+                "images": [
+                    {
+                        "type": "Primary",
+                        "url": "https://images.example/en.jpg",
+                        "language": "en",
+                    }
+                ],
+            },
+            force=False,
+            complete_batch=False,
+        )
 
     def test_image_ingest_materializes_only_the_first_provider_candidate(self):
         cache = _ImageCache(self.db)
@@ -999,6 +1138,7 @@ class MetadataServicesTest(unittest.TestCase):
             "en",
             {"title": "en", "images": []},
             force=True,
+            complete_batch=True,
         )
         credit_ingest.ingest.assert_called_once_with(
             "tmdb",

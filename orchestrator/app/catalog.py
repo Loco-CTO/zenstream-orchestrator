@@ -83,6 +83,9 @@ class _CatalogReadContext:
         self.following_states: dict[str, bool] = {}
         self.series_primary_images: dict[tuple[str, str], dict | None] = {}
         self.series_metadata: dict[tuple[str, str], dict | None] = {}
+        self.audio_fields: dict[str, tuple[int | None, int | None, float]] = {}
+        self.collection_year_ranges: dict[tuple[str, str], str | None] = {}
+        self.collection_year_ranges_loaded: set[str] = set()
         self.metadata_service = MetadataReadService(catalog.db)
         self.configured_languages: list[str] | None = None
         self.allowed_library_ids: set[str] | None = None
@@ -408,7 +411,7 @@ class Catalog:
             return []
         sort_order = self._library_sort_order_sql()
         rows = self.db.execute(
-            f"SELECT id,name,type,{sort_order} AS sort_order,scan_state,last_scan_finished_at FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) AND type IN ('movies','tv_series','collection') ORDER BY COALESCE({sort_order},0) DESC,name COLLATE NOCASE,id",
+            f"SELECT id,name,type,{sort_order} AS sort_order,scan_state,last_scan_finished_at FROM libraries WHERE id IN ({','.join('?' for _ in allowed)}) AND type IN ('movies','tv_series','music','collection') ORDER BY COALESCE({sort_order},0) DESC,name COLLATE NOCASE,id",
             list(allowed),
         )
         context = self._context(user_id)
@@ -464,6 +467,46 @@ class Catalog:
         if context is not None:
             context.entity_rows[entity_id] = row
         return row
+
+    def _audio_fields(self, entity_id: str) -> tuple[int | None, int | None, float]:
+        """Return catalog-owned track numbers and the probed duration.
+
+        Track numbers live on the entity while duration is authoritative in the
+        media source table.  Keep this read tolerant of older/minimal schemas so
+        catalog reads remain usable while a read-model migration is in flight.
+        """
+        context = self._read_context.get()
+        if context is not None and entity_id in context.audio_fields:
+            return context.audio_fields[entity_id]
+        disc_number: int | None = None
+        track_number: int | None = None
+        duration = 0.0
+        try:
+            rows = self.db.execute(
+                "SELECT disc_number,track_number FROM library_entities WHERE id=?",
+                (entity_id,),
+            )
+            if rows:
+                disc_number = rows[0][0]
+                track_number = rows[0][1]
+        except Exception:
+            # A few legacy test/embedded schemas do not carry the optional
+            # music ordering columns yet.
+            pass
+        if self._has_table("media_sources"):
+            try:
+                rows = self.db.execute(
+                    "SELECT MAX(COALESCE(duration_seconds,0)) FROM media_sources WHERE entity_id=?",
+                    (entity_id,),
+                )
+                if rows and rows[0][0] is not None:
+                    duration = max(0.0, float(rows[0][0] or 0))
+            except (TypeError, ValueError):
+                duration = 0.0
+        value = (disc_number, track_number, duration)
+        if context is not None:
+            context.audio_fields[entity_id] = value
+        return value
 
     def require_entity(self, user_id: str, entity_id: str):
         row = self._entity_row(entity_id)
@@ -524,6 +567,31 @@ class Catalog:
             )
         ):
             value = dict(projected)
+            projected_images = value.get("images")
+            has_projected_artwork = isinstance(projected_images, dict) and any(
+                isinstance(image, dict) and image.get("url")
+                for image in projected_images.values()
+            )
+            if not has_projected_artwork:
+                # A projection can be published before an eager artwork
+                # materialization finishes.  The admin preview resolves the
+                # ready cache directly, so do the same repair here instead of
+                # permanently returning the stale empty image map for this
+                # read context.
+                resolved_artwork = self._read_service().resolve_public(
+                    entity_id,
+                    row[3],
+                    self._provider_ids(entity_id, row[3]),
+                    language,
+                )
+                resolved_images = resolved_artwork["metadata"].get("images")
+                if isinstance(resolved_images, dict) and resolved_images:
+                    value["images"] = resolved_images
+                    if context:
+                        context.projected_metadata[(entity_id, language)] = value
+            value = self._merge_local_artwork(entity_id, language, value)
+            if context:
+                context.projected_metadata[(entity_id, language)] = value
             if include_credits:
                 value["credits"] = self.credits(
                     user_id, entity_id, language, value.get("originalLanguage")
@@ -571,6 +639,9 @@ class Catalog:
                         resolved_value["images"] = resolved_artwork["metadata"].get(
                             "images", {}
                         )
+                        resolved_value = self._merge_local_artwork(
+                            entity_id, language, resolved_value
+                        )
                         if context:
                             context.projected_metadata[(entity_id, language)] = (
                                 resolved_value
@@ -589,20 +660,9 @@ class Catalog:
             entity_id, row[3], self._provider_ids(entity_id, row[3]), language
         )
         resolved = context.measure("metadata", resolve) if context else resolve()
-        images = resolved["metadata"].get("images")
-        if isinstance(images, dict):
-            for image_type, image in images.items():
-                if not isinstance(image, dict):
-                    continue
-                if image_type == "Logo":
-                    image.pop("blurHash", None)
-                    continue
-                local = self.local_artwork(entity_id, image_type)
-                if local is None:
-                    continue
-                image.pop("blurHash", None)
-                if local[1]:
-                    image["blurHash"] = local[1]
+        resolved["metadata"] = self._merge_local_artwork(
+            entity_id, language, resolved["metadata"]
+        )
         if include_credits:
             resolved["metadata"]["credits"] = self.credits(
                 user_id,
@@ -757,6 +817,52 @@ class Catalog:
                 return cached, blur_hash[0] if blur_hash else None
         return None
 
+    def _merge_local_artwork(
+        self, entity_id: str, language: str, metadata: dict
+    ) -> dict:
+        """Expose admitted local artwork when provider artwork is unavailable.
+
+        The image route already gives local files precedence over provider
+        assets.  Keep that same precedence in catalog metadata so cards and
+        detail pages can advertise a usable Primary URL even when the
+        provider projection has no artwork.
+        """
+        if not isinstance(metadata, dict):
+            return metadata
+        raw_images = metadata.get("images")
+        images = (
+            {
+                key: dict(value) if isinstance(value, dict) else value
+                for key, value in raw_images.items()
+            }
+            if isinstance(raw_images, dict)
+            else {}
+        )
+        for image_type in LOCAL_ARTWORK_NAMES:
+            local = self.local_artwork(entity_id, image_type)
+            if local is None:
+                continue
+            image = images.get(image_type)
+            if not isinstance(image, dict) or not image.get("url"):
+                image = {
+                    "url": (
+                        f"/api/catalog/items/{entity_id}/images/"
+                        f"{image_type}?language={language}"
+                    )
+                }
+            else:
+                image = dict(image)
+            if image_type == "Logo":
+                image.pop("blurHash", None)
+            else:
+                image.pop("blurHash", None)
+                if local[1]:
+                    image["blurHash"] = local[1]
+            images[image_type] = image
+        value = dict(metadata)
+        value["images"] = images
+        return value
+
     def selected_image(
         self, user_id: str, entity_id: str, language: str, image_type: str
     ) -> dict | None:
@@ -802,10 +908,16 @@ class Catalog:
                 else []
             )
         else:
-            children = self.db.execute(
-                "SELECT id FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
-                (entity_id,),
-            )
+            try:
+                children = self.db.execute(
+                    "SELECT id FROM library_entities WHERE parent_id=? ORDER BY disc_number IS NULL,disc_number,track_number IS NULL,track_number,relative_path COLLATE NOCASE,id",
+                    (entity_id,),
+                )
+            except Exception:
+                children = self.db.execute(
+                    "SELECT id FROM library_entities WHERE parent_id=? ORDER BY season_number,episode_number,track_number,relative_path COLLATE NOCASE",
+                    (entity_id,),
+                )
         return self._serialize(
             user_id, row, metadata, [child[0] for child in children], language=language
         )
@@ -1330,6 +1442,136 @@ class Catalog:
             (language, library_id, parent_id, page_size, offset),
         )
 
+    def _list_collection_members_read_model(
+        self,
+        user_id: str,
+        collection_id: str,
+        language: str,
+        *,
+        page: int,
+        page_size: int,
+        sort_by: str | None,
+        sort_order: str,
+    ) -> dict:
+        allowed = sorted(self.allowed_libraries(user_id))
+        empty = {"items": [], "page": page, "pageSize": page_size, "total": 0}
+        if not allowed or not self._has_table("collection_members"):
+            return empty
+
+        placeholders = ",".join("?" for _ in allowed)
+        member_tables = ["collection_members"]
+        if self._has_table("catalog_collection_member_projection"):
+            member_tables.insert(0, "catalog_collection_member_projection")
+        direction = "DESC" if sort_order.lower() == "descending" else "ASC"
+        tie_direction = "ASC" if direction == "DESC" else "DESC"
+        sort_columns = {
+            "added": "COALESCE(s.added_sort_ns, 0)",
+            "lastAdded": "COALESCE(s.last_added_sort_ns, 0)",
+            "rating": "p.rating_sort",
+            "title": "p.title_sort",
+            "release": "p.release_sort",
+            "runtime": "p.runtime_sort",
+        }
+        sort_column = sort_columns.get(sort_by)
+        order = (
+            f"{sort_column} {direction},p.title_sort {tie_direction},p.entity_id {tie_direction}"
+            if sort_column
+            else "m.position ASC,e.id ASC"
+        )
+        summary_join = (
+            " LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id"
+            if sort_by in {"added", "lastAdded"}
+            else ""
+        )
+        from_clause = (
+            "FROM {member_table} m "
+            "JOIN catalog_item_projection p ON p.entity_id=m.source_entity_id AND p.locale=? "
+            "JOIN library_entities e ON e.id=p.entity_id" + summary_join
+        )
+        where_clause = (
+            f"WHERE m.collection_entity_id=? AND p.library_id IN ({placeholders})"
+        )
+
+        def read_rows(member_table: str):
+            total_rows = self.db.execute(
+                "SELECT COUNT(*) "
+                + from_clause.format(member_table=member_table)
+                + " "
+                + where_clause,
+                [language, collection_id, *allowed],
+            )
+            total = int(total_rows[0][0] or 0) if total_rows else 0
+            offset = max(0, page - 1) * page_size
+            rows = self.db.execute(
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
+                "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                + from_clause.format(member_table=member_table)
+                + " "
+                + where_clause
+                + f" ORDER BY {order} LIMIT ? OFFSET ?",
+                [language, collection_id, *allowed, page_size, offset],
+            )
+            return total, rows
+
+        total, rows = read_rows(member_tables[0])
+        if total == 0 and len(member_tables) > 1:
+            total, rows = read_rows(member_tables[1])
+        if not rows:
+            return {"items": [], "page": page, "pageSize": page_size, "total": total}
+
+        ids = [row[0] for row in rows]
+        date_placeholders = ",".join("?" for _ in ids)
+        date_rows = self.db.execute(
+            "SELECT e.id,e.created_at,s.added_sort_ns,s.last_added_sort_ns "
+            "FROM library_entities e LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id "
+            f"WHERE e.id IN ({date_placeholders})",
+            ids,
+        )
+        dates = {
+            row[0]: {
+                "addedAt": _date_from_ns(row[2]) or row[1],
+                "lastAddedAt": _date_from_ns(row[3]) or row[1],
+            }
+            for row in date_rows
+        }
+        values = self._hydrate_rows(
+            user_id, [row[:10] for row in rows], language, dates
+        )
+        return {"items": values, "page": page, "pageSize": page_size, "total": total}
+
+    def _list_collection_members_legacy(
+        self,
+        user_id: str,
+        collection_id: str,
+        language: str,
+        *,
+        page: int,
+        page_size: int,
+    ) -> dict:
+        allowed = sorted(self.allowed_libraries(user_id))
+        empty = {"items": [], "page": page, "pageSize": page_size, "total": 0}
+        if not allowed or not self._has_table("collection_members"):
+            return empty
+        placeholders = ",".join("?" for _ in allowed)
+        total_rows = self.db.execute(
+            "SELECT COUNT(*) FROM collection_members m "
+            "JOIN library_entities e ON e.id=m.source_entity_id "
+            f"WHERE m.collection_entity_id=? AND e.library_id IN ({placeholders})",
+            [collection_id, *allowed],
+        )
+        total = int(total_rows[0][0] or 0) if total_rows else 0
+        offset = max(0, page - 1) * page_size
+        rows = self.db.execute(
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
+            "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+            "FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id "
+            f"WHERE m.collection_entity_id=? AND e.library_id IN ({placeholders}) "
+            "ORDER BY m.position ASC,e.id ASC LIMIT ? OFFSET ?",
+            [collection_id, *allowed, page_size, offset],
+        )
+        values = self._hydrate_rows(user_id, [row[:10] for row in rows], language)
+        return {"items": values, "page": page, "pageSize": page_size, "total": total}
+
     def _list_items_read_model(
         self,
         user_id: str,
@@ -1357,7 +1599,6 @@ class Catalog:
                 "s.added_sort_ns" if sort_by == "added" else "s.last_added_sort_ns"
             )
             select_dates = "s.added_sort_ns,s.last_added_sort_ns"
-            date_params: list[object] = []
             if library["type"] == "collection" and self._has_table(
                 "catalog_collection_summary"
             ):
@@ -1368,19 +1609,22 @@ class Catalog:
                     f"COALESCE((SELECT MAX(c.last_added_sort_ns) FROM catalog_collection_summary c WHERE c.collection_entity_id=e.id AND c.source_library_id IN ({scope_placeholders})),s.last_added_sort_ns)"
                 )
                 order_column = "sort_added" if sort_by == "added" else "sort_last"
-                date_params = [*scope, *scope, *scope]
             order = f"{order_column} {direction},e.id {index_tie_direction}"
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at,"
                 + select_dates
                 + " "
-                "FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
-                "WHERE s.library_id=? AND s.parent_id IS ? ORDER BY "
+                "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
+                "LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id "
+                "AND s.library_id=p.library_id AND s.parent_id IS p.parent_id "
+                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY "
                 + order
                 + " LIMIT ? OFFSET ?"
             )
-            if date_params:
+            if library["type"] == "collection" and self._has_table(
+                "catalog_collection_summary"
+            ):
                 # The computed date aliases are used only for ordering; SQLite
                 # permits the equivalent expressions in the SELECT and ORDER BY.
                 order = (
@@ -1395,9 +1639,18 @@ class Catalog:
                 query = query.replace(
                     "ORDER BY sort_added", "ORDER BY " + order
                 ).replace("ORDER BY sort_last", "ORDER BY " + order)
-                params = [*date_params, library_id, parent_id, page_size, offset]
+                params = [
+                    *scope,
+                    *scope,
+                    language,
+                    library_id,
+                    parent_id,
+                    *scope,
+                    page_size,
+                    offset,
+                ]
             else:
-                params = [library_id, parent_id, page_size, offset]
+                params = [language, library_id, parent_id, page_size, offset]
         elif sort_by in {"rating", "title", "release", "runtime"} or sort_by is None:
             projection_order = {
                 "rating": "p.rating_sort",
@@ -1495,6 +1748,22 @@ class Catalog:
             if row[3] == "episode" and series_id and language
             else None
         )
+        if row[3] == "track" and row[2] and language:
+            release_row = self._entity_row(row[2])
+            if release_row and release_row[3] == "release":
+                release_metadata = self.metadata(user_id, row[2], language)["metadata"]
+                metadata = dict(metadata)
+                track_images = metadata.get("images")
+                release_images = release_metadata.get("images")
+                if isinstance(release_images, dict) and isinstance(track_images, dict):
+                    merged_images = dict(release_images)
+                    merged_images.update(track_images)
+                    metadata = {**metadata, "images": merged_images}
+                elif isinstance(release_images, dict) and not track_images:
+                    metadata = {**metadata, "images": dict(release_images)}
+                for field in ("album", "albumArtist", "label", "releaseDate"):
+                    if not metadata.get(field) and release_metadata.get(field):
+                        metadata[field] = release_metadata[field]
         user_state = (
             self._leaf_state(user_id, row[0])
             if row[3] in {"movie", "episode", "track"}
@@ -1502,7 +1771,24 @@ class Catalog:
         )
         if row[3] not in {"movie", "series"}:
             user_state.pop("following", None)
-        return {
+        disc_number = None
+        track_number = None
+        duration_seconds = None
+        album_id = None
+        artist_id = None
+        if row[3] == "track":
+            disc_number, track_number, duration_seconds = self._audio_fields(row[0])
+            album_id = row[2]
+            album_row = self._entity_row(album_id) if album_id else None
+            artist_id = (
+                album_row[2] if album_row and album_row[3] == "release" else None
+            )
+            if duration_seconds and not user_state.get("durationSeconds"):
+                user_state["durationSeconds"] = duration_seconds
+        elif row[3] == "release":
+            album_id = row[0]
+            artist_id = row[2]
+        value = {
             "id": row[0],
             "libraryId": row[1],
             "parentId": row[2],
@@ -1524,6 +1810,128 @@ class Catalog:
             "userState": user_state,
             "childIds": children or [],
         }
+        if row[3] == "track":
+            value.update(
+                {
+                    "albumId": album_id,
+                    "artistId": artist_id,
+                    "discNumber": disc_number,
+                    "trackNumber": track_number,
+                    "durationSeconds": duration_seconds,
+                }
+            )
+        elif row[3] == "release":
+            value.update({"albumId": album_id, "artistId": artist_id})
+        if row[3] == "collection":
+            value["collectionYearRange"] = self._collection_year_range(
+                user_id, row[0], language
+            )
+        return value
+
+    def _collection_year_range(
+        self, user_id: str, collection_id: str, language: str | None
+    ) -> str | None:
+        if not language or not self._has_table("collection_members"):
+            return None
+
+        language = normalize_metadata_locale(language)
+        context = self._context(user_id)
+        key = (collection_id, language)
+        if context and language in context.collection_year_ranges_loaded:
+            return context.collection_year_ranges.get(key)
+        if context and key in context.collection_year_ranges:
+            return context.collection_year_ranges[key]
+
+        allowed = sorted(self.allowed_libraries(user_id))
+        if not allowed:
+            if context:
+                context.collection_year_ranges[key] = None
+            return None
+
+        library_placeholders = ",".join("?" for _ in allowed)
+        collection_filter = ""
+        collection_params: list[str] = []
+        if context is None:
+            collection_filter = " AND member.collection_entity_id=?"
+            collection_params = [collection_id]
+
+        ranges: dict[str, list[int]] = {}
+        collection_ids: set[str] = set()
+        if self._read_model_ready() and self._has_table("catalog_item_projection"):
+            rows = self.db.execute(
+                "SELECT member.collection_entity_id,projection.payload "
+                "FROM collection_members member "
+                "JOIN library_entities collection ON collection.id=member.collection_entity_id "
+                "JOIN library_entities source ON source.id=member.source_entity_id "
+                "LEFT JOIN catalog_item_projection projection "
+                "ON projection.entity_id=source.id AND projection.locale=? "
+                f"WHERE collection.library_id IN ({library_placeholders}) "
+                f"AND source.library_id IN ({library_placeholders})"
+                + collection_filter,
+                [language, *allowed, *allowed, *collection_params],
+            )
+            for member_collection_id, payload in rows:
+                collection_ids.add(member_collection_id)
+                if not payload:
+                    continue
+                try:
+                    metadata = json.loads(payload)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                year = self._metadata_year(
+                    metadata if isinstance(metadata, dict) else None
+                )
+                if year is not None:
+                    ranges.setdefault(member_collection_id, []).append(year)
+        else:
+            rows = self.db.execute(
+                "SELECT member.collection_entity_id,source.id "
+                "FROM collection_members member "
+                "JOIN library_entities collection ON collection.id=member.collection_entity_id "
+                "JOIN library_entities source ON source.id=member.source_entity_id "
+                f"WHERE collection.library_id IN ({library_placeholders}) "
+                f"AND source.library_id IN ({library_placeholders})"
+                + collection_filter,
+                [*allowed, *allowed, *collection_params],
+            )
+            for member_collection_id, source_id in rows:
+                collection_ids.add(member_collection_id)
+                try:
+                    metadata = self.metadata(user_id, source_id, language)["metadata"]
+                except HTTPException as error:
+                    if error.status_code != 404:
+                        raise
+                    continue
+                year = self._metadata_year(metadata)
+                if year is not None:
+                    ranges.setdefault(member_collection_id, []).append(year)
+
+        values = {
+            member_collection_id: (
+                str(min(years))
+                if len(set(years)) == 1
+                else f"{min(years)}-{max(years)}"
+            )
+            for member_collection_id, years in ranges.items()
+            if years
+        }
+        values.update(
+            {
+                member_collection_id: None
+                for member_collection_id in collection_ids
+                if member_collection_id not in values
+            }
+        )
+        if context:
+            context.collection_year_ranges.update(
+                {
+                    (member_collection_id, language): value
+                    for member_collection_id, value in values.items()
+                }
+            )
+            context.collection_year_ranges_loaded.add(language)
+            return context.collection_year_ranges.get(key)
+        return values.get(collection_id)
 
     def _series_primary_image(
         self, user_id: str, series_id: str, language: str
@@ -1864,6 +2272,269 @@ class Catalog:
                 )
         return values
 
+    def _music_release_rows(self, library_ids: set[str]) -> list[tuple]:
+        if not library_ids:
+            return []
+        placeholders = ",".join("?" for _ in library_ids)
+        playable = (
+            "EXISTS (SELECT 1 FROM library_entities track "
+            "JOIN media_files media ON media.entity_id=track.id AND media.role='media' "
+            "WHERE track.parent_id=release.id AND track.entity_type='track')"
+            if self._has_table("media_files")
+            else "EXISTS (SELECT 1 FROM library_entities track WHERE track.parent_id=release.id AND track.entity_type='track')"
+        )
+        return self.db.execute(
+            "SELECT release.id,release.library_id,release.parent_id,release.entity_type,"
+            "release.relative_path,release.season_number,release.episode_number,"
+            "release.episode_end_number,release.created_at,release.updated_at "
+            "FROM library_entities release "
+            "JOIN library_entities artist ON artist.id=release.parent_id "
+            f"WHERE release.library_id IN ({placeholders}) "
+            "AND release.entity_type='release' AND artist.entity_type='artist' "
+            f"AND {playable}",
+            sorted(library_ids),
+        )
+
+    def _music_track_rows(self, release_id: str) -> list[tuple]:
+        playable = (
+            " AND EXISTS (SELECT 1 FROM media_files media "
+            "WHERE media.entity_id=track.id AND media.role='media')"
+            if self._has_table("media_files")
+            else ""
+        )
+        rows = self.db.execute(
+            "SELECT track.id,track.library_id,track.parent_id,track.entity_type,"
+            "track.relative_path,track.season_number,track.episode_number,"
+            "track.episode_end_number,track.created_at,track.updated_at "
+            "FROM library_entities track "
+            "WHERE track.parent_id=? AND track.entity_type='track'" + playable,
+            (release_id,),
+        )
+        return sorted(
+            rows,
+            key=lambda row: (
+                self._audio_fields(row[0])[0] is None,
+                self._audio_fields(row[0])[0] or 0,
+                self._audio_fields(row[0])[1] is None,
+                self._audio_fields(row[0])[1] or 0,
+                str(row[4] or "").casefold(),
+                row[0],
+            ),
+        )
+
+    def _music_catalog_generation(self, library_id: str) -> int:
+        if not self._has_table("catalog_library_summary"):
+            return 0
+        rows = self.db.execute(
+            "SELECT generation FROM catalog_library_summary WHERE library_id=?",
+            (library_id,),
+        )
+        return int(rows[0][0] or 0) if rows else 0
+
+    def _music_album_value(
+        self,
+        user_id: str,
+        row: tuple,
+        language: str,
+        dates: dict[str, dict] | None = None,
+        children: list[str] | None = None,
+    ) -> dict:
+        return self._serialize(
+            user_id,
+            row,
+            self.metadata(user_id, row[0], language)["metadata"],
+            children=children,
+            dates=(dates or {}).get(row[0]),
+            language=language,
+        )
+
+    @_catalog_read
+    def music_albums(
+        self,
+        user_id: str,
+        language: str,
+        library_id: str | None = None,
+        *,
+        page: int = 1,
+        page_size: int = 40,
+        sort_by: str | None = None,
+        sort_order: str = "ascending",
+    ) -> dict:
+        if library_id is not None:
+            library = self.require_library(user_id, library_id)
+            if library["type"] != "music":
+                raise HTTPException(404, "Music library not found.")
+            allowed = {library_id}
+        else:
+            allowed = {
+                library["id"]
+                for library in self.libraries(user_id)
+                if library["type"] == "music"
+            }
+        rows = self._music_release_rows(allowed)
+        row_by_id = {row[0]: row for row in rows}
+        if not rows:
+            return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+        dates = self._date_values(library_id or "", allowed, set(row_by_id))
+        track_rows = {
+            release_id: self._music_track_rows(release_id) for release_id in row_by_id
+        }
+        hydration_rows = [
+            *rows,
+            *[track for tracks in track_rows.values() for track in tracks],
+        ]
+        self._seed_hydration_rows(user_id, hydration_rows, language)
+        self._preload_projected_metadata(
+            user_id, [row[0] for row in hydration_rows], language
+        )
+        values = [
+            self._music_album_value(
+                user_id,
+                row,
+                language,
+                dates,
+                [track[0] for track in track_rows[row[0]]],
+            )
+            for row in rows
+        ]
+        sort_key = str(sort_by or "title").casefold()
+        if sort_key in {"year", "release", "date"}:
+            key = lambda value: (
+                str(
+                    (value.get("metadata") or {}).get("year")
+                    or (value.get("metadata") or {}).get("date")
+                    or ""
+                ),
+                str(value.get("name") or "").casefold(),
+                value["id"],
+            )
+        elif sort_key in {"added", "added-date", "dateadded", "lastadded"}:
+            key = lambda value: (
+                value.get("lastAddedAt") or value.get("addedAt") or "",
+                str(value.get("name") or "").casefold(),
+                value["id"],
+            )
+        else:
+            key = lambda value: (
+                str(value.get("name") or "").casefold(),
+                value["id"],
+            )
+        values.sort(key=key, reverse=str(sort_order).casefold() == "descending")
+        start = max(0, page - 1) * page_size
+        return {
+            "items": values[start : start + page_size],
+            "page": page,
+            "pageSize": page_size,
+            "total": len(values),
+        }
+
+    @_catalog_read
+    def music_album_detail(self, user_id: str, release_id: str, language: str) -> dict:
+        row = self.require_entity(user_id, release_id)
+        if row[3] != "release":
+            raise HTTPException(404, "Album not found.")
+        artist_row = self._entity_row(row[2]) if row[2] else None
+        if artist_row and artist_row[1] not in self.allowed_libraries(user_id):
+            raise HTTPException(404, "Album not found.")
+        tracks = self._music_track_rows(release_id)
+        related_rows = []
+        if row[2]:
+            related_rows = [
+                candidate
+                for candidate in self._music_release_rows({row[1]})
+                if candidate[0] != release_id and candidate[2] == row[2]
+            ]
+        all_rows = [row, *tracks, *related_rows]
+        if artist_row:
+            all_rows.append(artist_row)
+        self._seed_hydration_rows(user_id, all_rows, language)
+        self._preload_projected_metadata(
+            user_id, [value[0] for value in all_rows], language
+        )
+        dates = self._date_values("", {row[1]}, {value[0] for value in all_rows})
+        album = self._music_album_value(
+            user_id,
+            row,
+            language,
+            dates,
+            [track[0] for track in tracks],
+        )
+        artist = (
+            self._serialize(
+                user_id,
+                artist_row,
+                self.metadata(user_id, artist_row[0], language)["metadata"],
+                language=language,
+            )
+            if artist_row
+            else None
+        )
+        track_values = self._hydrate_rows(user_id, tracks, language, dates)
+        related_values = [
+            self._music_album_value(
+                user_id,
+                candidate,
+                language,
+                dates,
+                [track[0] for track in self._music_track_rows(candidate[0])],
+            )
+            for candidate in related_rows
+        ]
+        related_values.sort(
+            key=lambda value: (str(value.get("name") or "").casefold(), value["id"])
+        )
+        return {
+            "album": album,
+            "artist": artist,
+            "tracks": track_values,
+            "relatedAlbums": related_values,
+            "catalogGeneration": self._music_catalog_generation(row[1]),
+        }
+
+    @_catalog_read
+    def music_artist_detail(self, user_id: str, artist_id: str, language: str) -> dict:
+        artist_row = self.require_entity(user_id, artist_id)
+        if artist_row[3] != "artist":
+            raise HTTPException(404, "Artist not found.")
+        album_rows = [
+            row
+            for row in self._music_release_rows({artist_row[1]})
+            if row[2] == artist_id
+        ]
+        all_rows = [artist_row, *album_rows]
+        self._seed_hydration_rows(user_id, all_rows, language)
+        self._preload_projected_metadata(
+            user_id, [value[0] for value in all_rows], language
+        )
+        dates = self._date_values(
+            "", {artist_row[1]}, {value[0] for value in album_rows}
+        )
+        artist = self._serialize(
+            user_id,
+            artist_row,
+            self.metadata(user_id, artist_id, language)["metadata"],
+            children=[row[0] for row in album_rows],
+            language=language,
+        )
+        albums = [
+            self._music_album_value(
+                user_id,
+                row,
+                language,
+                dates,
+                [track[0] for track in self._music_track_rows(row[0])],
+            )
+            for row in album_rows
+        ]
+        albums.sort(
+            key=lambda value: (str(value.get("name") or "").casefold(), value["id"])
+        )
+        return {
+            "artist": artist,
+            "albums": albums,
+            "catalogGeneration": self._music_catalog_generation(artist_row[1]),
+        }
+
     @_catalog_read
     def list_items(
         self,
@@ -1882,7 +2553,27 @@ class Catalog:
             parent = self.require_entity(user_id, parent_id)
             if parent[1] != library_id:
                 raise HTTPException(404, "Item not found.")
+        if library["type"] == "music" and parent_id is None:
+            return self.music_albums(
+                user_id,
+                language,
+                library_id,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
         if self._read_model_ready():
+            if library["type"] == "collection" and parent_id:
+                return self._list_collection_members_read_model(
+                    user_id,
+                    parent_id,
+                    language,
+                    page=page,
+                    page_size=page_size,
+                    sort_by=sort_by,
+                    sort_order=sort_order,
+                )
             return self._list_items_read_model(
                 user_id,
                 library,
@@ -1892,6 +2583,14 @@ class Catalog:
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+            )
+        if library["type"] == "collection" and parent_id:
+            return self._list_collection_members_legacy(
+                user_id,
+                parent_id,
+                language,
+                page=page,
+                page_size=page_size,
             )
         rows = self.db.execute(
             "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id=? AND parent_id IS ?",
@@ -2096,7 +2795,7 @@ class Catalog:
             else:
                 title_expression = "p.title_sort"
                 source_join = "JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale JOIN library_entities e ON e.id=g.entity_id"
-                root_filter = "p.parent_id IS NULL AND p.entity_type IN ('movie','series','collection')"
+                root_filter = "(p.entity_type IN ('artist','release','track') OR (p.parent_id IS NULL AND p.entity_type IN ('movie','series','collection')))"
             source = (
                 "WITH scored AS ("
                 "SELECT g.entity_id,g.locale," + title_expression + " AS title_sort,"
@@ -2148,7 +2847,7 @@ class Catalog:
             "SELECT s.entity_id,s.locale,s.title,0 "
             "FROM catalog_search s JOIN library_entities e ON e.id=s.entity_id "
             f"WHERE s.library_id IN ({placeholders}) AND s.locale IN ({locale_placeholders}) "
-            "AND e.parent_id IS NULL AND e.entity_type IN ('movie','series','collection')",
+            "AND (e.entity_type IN ('artist','release','track') OR (e.parent_id IS NULL AND e.entity_type IN ('movie','series','collection')))",
             [*allowed, *locale_order],
         )
         indexed_by_entity: dict[str, list[tuple]] = {}
@@ -2158,7 +2857,7 @@ class Catalog:
             return {"items": [], "page": page, "pageSize": page_size, "total": 0}
         entity_placeholders = ",".join("?" for _ in indexed_by_entity)
         rows = self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE id IN ({entity_placeholders}) AND library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection')",
+            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE id IN ({entity_placeholders}) AND library_id IN ({placeholders}) AND (entity_type IN ('artist','release','track') OR (parent_id IS NULL AND entity_type IN ('movie','series','collection')))",
             [*indexed_by_entity, *allowed],
         )
         ranked = []
@@ -2212,11 +2911,108 @@ class Catalog:
             return result
         return self.update_state(user_id, entity_id, changes)
 
+    def record_play_start(self, user_id: str, entity_id: str, changes: dict) -> dict:
+        row = self.require_entity(user_id, entity_id)
+        if row[3] != "track":
+            raise HTTPException(404, "Audio track not found.")
+        if not isinstance(changes, dict):
+            raise HTTPException(400, "Invalid play-start payload.")
+        playback_instance_id = changes.get("playbackInstanceId")
+        if not isinstance(playback_instance_id, str):
+            raise HTTPException(400, "playbackInstanceId is required.")
+        playback_instance_id = playback_instance_id.strip()
+        if not playback_instance_id or len(playback_instance_id) > 200:
+            raise HTTPException(400, "Invalid playbackInstanceId.")
+        if not self._watch_history_enabled(user_id):
+            result = self._state(user_id, entity_id)
+            result.pop("following", None)
+            return result
+        if not self._has_table("user_play_events"):
+            raise HTTPException(503, "Audio play history is not ready.")
+
+        entities, children, parents = self._relationship_graph(user_id)
+        ancestor_ids = self._walk_parents(entity_id, parents)
+        affected = [entity_id, *ancestor_ids]
+        duration_seconds = self._audio_fields(entity_id)[2]
+        now = _now()
+        inserted = False
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "INSERT OR IGNORE INTO user_play_events(user_id,entity_id,playback_instance_id,started_at) VALUES(?,?,?,?)",
+                (user_id, entity_id, playback_instance_id, now),
+            )
+            changed_rows = cursor.execute("SELECT changes()").fetchone()
+            inserted = bool(changed_rows and changed_rows[0])
+            if inserted:
+                states = {
+                    affected_id: self._direct_state(
+                        self._state_row(user_id, affected_id, cursor)
+                    )
+                    for affected_id in affected
+                }
+                track_state = states[entity_id]
+                track_state.update(
+                    played=True,
+                    positionSeconds=0,
+                    durationSeconds=max(
+                        duration_seconds, track_state.get("durationSeconds", 0)
+                    ),
+                    lastPlayedAt=now,
+                )
+                for ancestor_id in ancestor_ids:
+                    leaves = self._playable_descendants(ancestor_id, entities, children)
+                    if not leaves:
+                        continue
+                    leaf_states = []
+                    for leaf_id in leaves:
+                        leaf_states.append(
+                            states.get(leaf_id)
+                            or self._direct_state(
+                                self._state_row(user_id, leaf_id, cursor)
+                            )
+                        )
+                    states[ancestor_id]["played"] = bool(leaf_states) and all(
+                        value["played"] for value in leaf_states
+                    )
+                    states[ancestor_id]["positionSeconds"] = 0
+                for affected_id in dict.fromkeys(affected):
+                    state = states[affected_id]
+                    play_count = state["playCount"] + int(affected_id == entity_id)
+                    cursor.execute(
+                        "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,position_seconds,duration_seconds,last_played_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(user_id,entity_id) DO UPDATE SET favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
+                        (
+                            user_id,
+                            affected_id,
+                            int(state["favorite"]),
+                            int(state["played"]),
+                            play_count,
+                            state["positionSeconds"],
+                            state["durationSeconds"],
+                            state.get("lastPlayedAt"),
+                            now,
+                        ),
+                    )
+        if inserted:
+            if self._has_table("catalog_user_summary"):
+                from app.catalog_read_model import CatalogReadModel
+
+                CatalogReadModel(self.db).refresh_user_entities(user_id, affected)
+            self._invalidate_home_cache(user_id)
+        result = self._state(user_id, entity_id)
+        result.pop("following", None)
+        return result
+
     def clear_watch_history(self, user_id: str) -> None:
         has_user_summary = self._has_table("catalog_user_summary")
         has_legacy_rollups = self._has_table("catalog_user_rollups")
+        has_play_events = self._has_table("user_play_events")
         now = _now()
         with self.db.transaction() as cursor:
+            if has_play_events:
+                cursor.execute(
+                    "DELETE FROM user_play_events WHERE user_id=?", (user_id,)
+                )
             cursor.execute(
                 "DELETE FROM user_item_state WHERE user_id=? AND favorite=0",
                 (user_id,),
@@ -2725,7 +3521,7 @@ class Catalog:
             select_rows = lambda: self.db.execute(
                 f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,s.added_sort_ns,s.last_added_sort_ns "
                 f"FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
-                f"WHERE s.library_id IN ({placeholders}) AND s.entity_type IN ('movie','series','collection') "
+                f"WHERE s.library_id IN ({placeholders}) AND s.entity_type IN ('movie','series') "
                 "ORDER BY CASE WHEN s.entity_type='series' THEN s.added_sort_ns ELSE s.last_added_sort_ns END DESC,s.entity_id LIMIT 36",
                 list(allowed),
             )
@@ -2745,7 +3541,7 @@ class Catalog:
                 user_id, [row[:10] for row in rows], language, dates
             )
         select_rows = lambda: self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series','collection')",
+            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series')",
             list(allowed),
         )
         rows = (
@@ -2933,7 +3729,12 @@ class Catalog:
         self, user_id: str, language: str, discovery_items: list[dict] | None = None
     ) -> dict:
         allowed = self.allowed_libraries(user_id)
-        empty = {"myList": [], "recentlyPlayed": [], "genreRows": []}
+        empty = {
+            "myList": [],
+            "recentlyPlayed": [],
+            "genreRows": [],
+            "audioRows": [],
+        }
         if not allowed:
             return empty
         placeholders = ",".join("?" for _ in allowed)
@@ -2991,6 +3792,65 @@ class Catalog:
             for row in recent_rows
         ]
 
+        music_allowed = {
+            library["id"]
+            for library in self.libraries(user_id)
+            if library["id"] in allowed and library["type"] == "music"
+        }
+        audio_rows: list[dict] = []
+        if music_allowed:
+            new_albums = self.music_albums(
+                user_id,
+                language,
+                page=1,
+                page_size=18,
+                sort_by="added",
+                sort_order="descending",
+            )["items"]
+            if new_albums:
+                audio_rows.append(
+                    {
+                        "key": "newAlbums",
+                        "titleKey": "newAlbums",
+                        "variant": "square",
+                        "items": new_albums[:18],
+                    }
+                )
+            music_placeholders = ",".join("?" for _ in music_allowed)
+            playable_filter = (
+                " AND EXISTS (SELECT 1 FROM media_files media "
+                "WHERE media.entity_id=e.id AND media.role='media')"
+                if self._has_table("media_files")
+                else ""
+            )
+            audio_recent_rows = self.db.execute(
+                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+                "e.season_number,e.episode_number,e.episode_end_number,e.created_at,"
+                "e.updated_at "
+                "FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
+                f"WHERE s.user_id=? AND e.library_id IN ({music_placeholders}) "
+                "AND e.entity_type='track' AND s.last_played_at IS NOT NULL"
+                + playable_filter
+                + " ORDER BY s.last_played_at DESC,e.id LIMIT 18",
+                [user_id, *sorted(music_allowed)],
+            )
+            if audio_recent_rows:
+                self._seed_hydration_rows(user_id, audio_recent_rows, language)
+                self._preload_projected_metadata(
+                    user_id, [row[0] for row in audio_recent_rows], language
+                )
+                recently_played_audio = self._hydrate_rows(
+                    user_id, audio_recent_rows, language
+                )
+                audio_rows.append(
+                    {
+                        "key": "recentlyPlayedAudio",
+                        "titleKey": "recentlyPlayedAudio",
+                        "variant": "square",
+                        "items": recently_played_audio[:18],
+                    }
+                )
+
         candidates = discovery_items or self._home_discovery_items(
             user_id, language, allowed
         )
@@ -3033,6 +3893,7 @@ class Catalog:
             "myList": my_list[:18],
             "recentlyPlayed": recently_played,
             "genreRows": genre_rows,
+            "audioRows": audio_rows,
         }
 
     def _newly_added_rows(self, library_id: str, entity_type: str) -> list[tuple]:
@@ -3325,6 +4186,7 @@ class Catalog:
                 "myList": [],
                 "recentlyPlayed": [],
                 "genreRows": [],
+                "audioRows": [],
             }
         items = self._home_discovery_items(user_id, language, allowed)
         resume = self.home_continue_watching(user_id, language)

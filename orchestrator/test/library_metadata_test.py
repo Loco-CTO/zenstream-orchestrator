@@ -2031,6 +2031,82 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_music_scan_resolves_each_album_before_discovering_the_next(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first = root / "Artist" / "Album A"
+                second = root / "Artist" / "Album B"
+                first.mkdir(parents=True)
+                second.mkdir(parents=True)
+                first_track = first / "01. First.flac"
+                second_track = second / "01. Second.flac"
+                first_track.touch()
+                second_track.touch()
+                tags = {
+                    first_track: {
+                        "TITLE": "First",
+                        "ALBUM": "Album A",
+                        "ALBUMARTIST": "Artist",
+                    },
+                    second_track: {
+                        "TITLE": "Second",
+                        "ALBUM": "Album B",
+                        "ALBUMARTIST": "Artist",
+                    },
+                }
+                resolved = []
+
+                def resolve(*args):
+                    resolved.append(args[6][0]["local"]["title"])
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", side_effect=tags.get),
+                    patch.object(scanner, "_resolve_music_group", side_effect=resolve),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                self.assertEqual(resolved, ["First", "Second"])
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM library_entities WHERE entity_type='release'"
+                    )[0][0],
+                    2,
+                )
+        finally:
+            db.close()
+
+    def test_music_release_track_matching_uses_disc_position_title_and_duration(self):
+        local = {
+            "title": "Track",
+            "discNumber": 2,
+            "trackNumber": 3,
+            "durationSeconds": 120.0,
+        }
+        candidate = LibraryScanner._music_release_track_candidate(
+            local,
+            [
+                {
+                    "id": "wrong",
+                    "title": "Track",
+                    "disc": 1,
+                    "position": 3,
+                    "durationSeconds": 120.0,
+                },
+                {
+                    "id": "right",
+                    "title": "Track",
+                    "disc": 2,
+                    "position": 3,
+                    "durationSeconds": 121.0,
+                },
+            ],
+            set(),
+        )
+        self.assertEqual(candidate["id"], "right")
+
     def test_jellyfin_style_provider_ids_are_extracted(self):
         self.assertEqual(
             provider_ids("The Matrix (1999) [tmdbid-603] [tvdbid-Movie-123]"),

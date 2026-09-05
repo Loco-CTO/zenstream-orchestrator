@@ -853,6 +853,20 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(fetcher.bulk_calls[0][3], ("en", "ja", "zh-TW"))
         self.assertEqual([value["title"] for value in values], ["en", "ja", "zh-TW"])
 
+    def test_musicbrainz_ingest_fetches_one_neutral_document_for_all_catalog_locales(
+        self,
+    ):
+        fetcher = _BulkFetcher()
+        ingest = MetadataIngestService(fetcher, _Settings(["en", "ja", "zh-TW"]))
+
+        values = ingest.ingest_locales(
+            "musicbrainz", "release", "release-id", ["en", "ja", "zh-TW"]
+        )
+
+        self.assertEqual(fetcher.bulk_calls[0][3], ("",))
+        self.assertEqual(set(values), {"en", "ja", "zh-TW"})
+        self.assertEqual({value["title"] for value in values.values()}, {""})
+
     def test_ingest_locale_rejects_unconfigured_language(self):
         fetcher = _Fetcher()
         ingest = MetadataIngestService(fetcher, _Settings(["ja"]))

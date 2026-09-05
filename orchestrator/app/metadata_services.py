@@ -51,6 +51,10 @@ def _ready_file(path: Path | str | None) -> bool:
 
 CATALOG_ITEM_PROJECTION_SCHEMA = 2
 
+MUSICBRAINZ_NEUTRAL_ENTITY_TYPES = frozenset(
+    {"artist", "release", "release_group", "track", "recording", "work"}
+)
+
 LOCAL_ARTWORK_NAMES = {
     "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
     "Backdrop": {"backdrop", "fanart", "background"},
@@ -1258,6 +1262,14 @@ class MetadataReadService:
             media=False,
             include_english=any(language_family(value) == "en" for value in configured),
         )
+        if entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES and any(
+            identity.get("provider") == "musicbrainz" for identity in provider_ids
+        ):
+            # MusicBrainz audio metadata is locale-neutral. Keep the catalog
+            # language selection API intact, but allow the neutral cache bucket
+            # to satisfy every configured display locale.
+            if "" not in tiers:
+                tiers.append("")
         providers = self.providers(entity_type)
         result: dict = {}
 
@@ -1639,6 +1651,25 @@ class MetadataIngestService:
     def locales(self) -> list[str]:
         return list(self._locales)
 
+    @staticmethod
+    def is_locale_neutral(provider: str, entity_type: str) -> bool:
+        return (
+            provider == "musicbrainz"
+            and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+        )
+
+    def provider_locales(self, provider: str, entity_type: str) -> list[str]:
+        """Return cache and repair locales for one provider entity.
+
+        MusicBrainz audio documents have no configured-language variants. The
+        empty locale is the existing neutral metadata/image bucket; the same
+        normalized document is still projected to each configured catalog
+        locale by ``ingest_locales``.
+        """
+        if self.is_locale_neutral(provider, entity_type):
+            return [""]
+        return self.locales()
+
     def ingest(
         self,
         provider: str,
@@ -1653,8 +1684,9 @@ class MetadataIngestService:
         if provider not in {"tmdb", "tvdb", "musicbrainz"}:
             return []
         should_terminate = should_terminate or (lambda: False)
+        provider_locales = self.provider_locales(provider, entity_type)
         locales = []
-        for locale in self.locales():
+        for locale in provider_locales:
             if should_terminate():
                 break
             locales.append(locale)
@@ -1681,22 +1713,49 @@ class MetadataIngestService:
         force_assets: bool | None = None,
         replace_metadata: bool = False,
     ) -> dict[str, dict]:
-        locales = list(dict.fromkeys(locales or self.locales()))
-        unsupported = [locale for locale in locales if locale not in self._locales]
+        neutral = self.is_locale_neutral(provider, entity_type)
+        locales = list(dict.fromkeys(self.locales() if locales is None else locales))
+        if not locales:
+            return {}
+        if neutral and locales == [""]:
+            # ``""`` is the only MusicBrainz provider/cache locale. The
+            # normalized document is still projected to every configured
+            # catalog locale so existing language-aware reads remain intact.
+            locales = self.locales()
+        unsupported = [
+            locale
+            for locale in locales
+            if locale not in self._locales and not (neutral and locale == "")
+        ]
         if unsupported:
             raise ValueError(f"Metadata language is not configured: {unsupported[0]}")
         if force_assets is None:
             force_assets = force
-        complete_batch = set(locales) == set(self._locales)
+        fetch_locales = [""] if neutral else locales
+        complete_batch = neutral or set(locales) == set(self._locales)
         with metadata_fetch_activity():
             if hasattr(self.metadata_service, "fetch_locales"):
-                values = self.metadata_service.fetch_locales(
-                    provider,
-                    entity_type,
-                    provider_id,
-                    locales,
-                    force=force,
-                )
+                try:
+                    values = self.metadata_service.fetch_locales(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        fetch_locales,
+                        force=force,
+                        project=not neutral,
+                    )
+                except TypeError as error:
+                    # Older provider adapters and test doubles may not expose
+                    # the optional projection switch.
+                    if "project" not in str(error):
+                        raise
+                    values = self.metadata_service.fetch_locales(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        fetch_locales,
+                        force=force,
+                    )
             else:
                 values = {
                     locale: self.metadata_service.fetch(
@@ -1706,9 +1765,20 @@ class MetadataIngestService:
                         locale,
                         force=force,
                     )
-                    for locale in locales
+                    for locale in fetch_locales
                 }
-        if len(locales) == 1:
+        if neutral:
+            normalized = values.get("") or next(iter(values.values()), None)
+            if not isinstance(normalized, dict):
+                raise ValueError(
+                    f"MusicBrainz {entity_type} {provider_id} returned no metadata document"
+                )
+            values = {
+                locale: copy.deepcopy(normalized)
+                for locale in locales
+            }
+
+        if len(locales) == 1 and not neutral:
             locale = locales[0]
             return {
                 locale: self.ingest_document(
@@ -1736,6 +1806,8 @@ class MetadataIngestService:
                     replace_metadata=replace_metadata,
                 )
 
+        asset_documents = {"": values[locales[0]]} if neutral else values
+
         def materialize_assets() -> None:
             if self.image_ingest is not None:
                 batch_ingest = getattr(self.image_ingest, "ingest_documents", None)
@@ -1744,41 +1816,41 @@ class MetadataIngestService:
                         provider,
                         entity_type,
                         provider_id,
-                        values,
+                        asset_documents,
                         force=force_assets,
                         complete_batch=complete_batch,
                     )
                 else:
-                    for locale in locales:
+                    for locale in asset_documents:
                         self.image_ingest.ingest(
                             provider,
                             entity_type,
                             provider_id,
                             locale,
-                            values[locale],
+                            asset_documents[locale],
                             force=force_assets,
                             complete_batch=complete_batch,
                         )
             if self.credit_ingest is not None:
-                for locale in locales:
+                for locale in asset_documents:
                     self.credit_ingest.ingest(
                         provider,
                         entity_type,
                         provider_id,
                         locale,
-                        values[locale],
+                        asset_documents[locale],
                         force_images=force_assets,
                     )
 
         if self.image_ingest is not None or self.credit_ingest is not None:
             digest = hashlib.sha256(
-                json.dumps(values, sort_keys=True, default=str).encode("utf-8")
+                json.dumps(asset_documents, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()
             key = (
                 provider,
                 entity_type,
                 provider_id,
-                tuple(locales),
+                tuple(asset_documents),
                 digest,
                 int(force_assets),
             )
@@ -1824,21 +1896,27 @@ class MetadataIngestService:
         complete_batch: bool | None = None,
     ) -> dict:
         """Materialize a normalized document, including documents cached by aggregation."""
-        if locale not in self.locales():
+        neutral = self.is_locale_neutral(provider, entity_type)
+        if locale not in self.locales() and not (neutral and locale == ""):
             raise ValueError(f"Metadata language is not configured: {locale}")
         if complete_batch is None:
-            complete_batch = len(self._locales) == 1
+            complete_batch = neutral or len(self._locales) == 1
+        asset_locale = "" if neutral else locale
         cache = getattr(self.metadata_service, "cache", None)
         db = getattr(cache, "db", None)
         if db is not None:
-            MetadataSearchProjection(db).project(
-                provider,
-                entity_type,
-                provider_id,
-                locale,
-                normalized,
-                replace_metadata=replace_metadata,
+            projection_locales = (
+                self.locales() if neutral and locale == "" else [locale]
             )
+            for projection_locale in projection_locales:
+                MetadataSearchProjection(db).project(
+                    provider,
+                    entity_type,
+                    provider_id,
+                    projection_locale,
+                    normalized,
+                    replace_metadata=replace_metadata,
+                )
         if self.image_ingest is not None or self.credit_ingest is not None:
 
             def materialize_assets() -> None:
@@ -1849,7 +1927,7 @@ class MetadataIngestService:
                         provider,
                         entity_type,
                         provider_id,
-                        locale,
+                        asset_locale,
                         normalized,
                         force=force_assets,
                         complete_batch=complete_batch,
@@ -1859,7 +1937,7 @@ class MetadataIngestService:
                         provider,
                         entity_type,
                         provider_id,
-                        locale,
+                        asset_locale,
                         normalized,
                         force_images=force_assets,
                     )

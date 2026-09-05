@@ -304,11 +304,18 @@ class ProviderClient:
         try:
             logger.debug("provider request url=%s params=%s", url, request_params)
             verify = kwargs.pop("verify", True)
+            follow_redirects = kwargs.pop("follow_redirects", False)
+            retry_wait = kwargs.pop("retry_wait", None)
             client = self._http_client(verify)
             response = None
             for attempt in range(3):
                 try:
-                    response = client.get(url, timeout=self.timeout, **kwargs)
+                    response = client.get(
+                        url,
+                        timeout=self.timeout,
+                        follow_redirects=follow_redirects,
+                        **kwargs,
+                    )
                 except httpx.TransportError as error:
                     if attempt == 2:
                         raise
@@ -321,7 +328,10 @@ class ProviderClient:
                         attempt + 1,
                         error,
                     )
-                    time.sleep(delay)
+                    if retry_wait is not None:
+                        retry_wait(delay)
+                    else:
+                        time.sleep(delay)
                     continue
                 if response.status_code not in {429, 502, 503, 504} or attempt == 2:
                     break
@@ -343,7 +353,10 @@ class ProviderClient:
                     delay,
                     attempt + 1,
                 )
-                time.sleep(delay)
+                if retry_wait is not None:
+                    retry_wait(delay)
+                else:
+                    time.sleep(delay)
             assert response is not None
             if response.status_code == 404:
                 logger.info(
@@ -1363,15 +1376,31 @@ class TVDBClient(ProviderClient):
 
 class MusicBrainzClient(ProviderClient):
     base_url = "https://musicbrainz.org/ws/2"
+    _request_interval_seconds = 1.0
     _lock = threading.Lock()
     _last_request = 0.0
 
-    def _request(self, path: str, params: dict | None = None) -> dict:
-        with self._lock:
-            wait = 1.0 - (time.monotonic() - self._last_request)
+    @classmethod
+    def _wait_for_request_slot(cls, minimum_delay: float = 0.0) -> None:
+        """Throttle every MusicBrainz attempt, including retries.
+
+        MusicBrainz applies its request-rate limit to retries too.  The
+        generic provider retry loop used to sleep independently, allowing
+        concurrent workers to send retry attempts back-to-back even though
+        the initial requests were serialized.
+        """
+        with cls._lock:
+            elapsed = time.monotonic() - cls._last_request
+            wait = max(
+                max(0.0, float(minimum_delay)),
+                cls._request_interval_seconds - elapsed,
+            )
             if wait > 0:
                 time.sleep(wait)
-            self.__class__._last_request = time.monotonic()
+            cls._last_request = time.monotonic()
+
+    def _request(self, path: str, params: dict | None = None) -> dict:
+        self.__class__._wait_for_request_slot()
         params = dict(params or {})
         params["fmt"] = "json"
         return self._get(
@@ -1381,6 +1410,7 @@ class MusicBrainzClient(ProviderClient):
                 "User-Agent": f"ZenStream/{__version__}",
                 "Accept": "application/json",
             },
+            retry_wait=self.__class__._wait_for_request_slot,
         )
 
     @staticmethod
@@ -1413,6 +1443,7 @@ class MusicBrainzClient(ProviderClient):
                 payload["_coverArt"] = self._get(
                     f"https://coverartarchive.org/{endpoint}/{quote(provider_id)}",
                     headers={"Accept": "application/json"},
+                    follow_redirects=True,
                 )
             except ProviderError:
                 payload["_coverArt"] = {}

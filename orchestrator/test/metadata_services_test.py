@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -1227,6 +1228,21 @@ class MetadataServicesTest(unittest.TestCase):
                 "https://images.example/redirected-poster.jpg",
             ],
         )
+
+    def test_cover_art_archive_redirect_host_is_allowlisted(self):
+        with (
+            patch.dict(
+                os.environ,
+                {"METADATA_IMAGE_HOST_ALLOWLIST": "coverartarchive.org,archive.org"},
+            ),
+            patch(
+                "app.metadata_services.socket.getaddrinfo",
+                return_value=[(None, None, None, None, ("8.8.8.8", 443))],
+            ),
+        ):
+            MetadataImageIngestService._validate_provider_url(
+                "https://archive.org/download/mbid-id/front.jpg"
+            )
 
     def test_ingest_document_materializes_aggregated_series(self):
         cache = _ImageCache(self.db)

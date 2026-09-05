@@ -1592,7 +1592,15 @@ class MetadataMissingJob:
         rows = self.db.execute(
             "SELECT DISTINCT p.provider,p.identifier_type,p.provider_id "
             "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
-            "WHERE p.provider IN ('tmdb','tvdb','musicbrainz') ORDER BY p.provider,e.entity_type,p.provider_id"
+            "WHERE p.provider IN ('tmdb','tvdb','musicbrainz') "
+            # MusicBrainz release-group, release-track, and work IDs are
+            # supporting identities attached to an admitted release/track;
+            # they are not catalog metadata documents. Treating them as
+            # entity types here makes the repair job issue redundant or
+            # malformed requests for every configured locale.
+            "AND NOT (p.provider='musicbrainz' AND p.identifier_type IN "
+            "('release_group','release_track','work')) "
+            "ORDER BY p.provider,e.entity_type,p.provider_id"
         )
         items = list(rows)
         total = len(items) * len(locales)

@@ -1919,7 +1919,7 @@ class MetadataImageIngestService:
             host.strip().lower()
             for host in os.getenv(
                 "METADATA_IMAGE_HOST_ALLOWLIST",
-                "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org",
+                "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org,archive.org",
             ).split(",")
             if host.strip()
         }

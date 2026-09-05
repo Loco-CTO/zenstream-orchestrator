@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from app.providers import MusicBrainzClient
+import httpx
+from app.providers import MusicBrainzClient, ProviderClient
 
 
 class MusicBrainzLookupTest(unittest.TestCase):
@@ -28,6 +29,7 @@ class MusicBrainzLookupTest(unittest.TestCase):
             },
         )
         get.assert_called_once()
+        self.assertTrue(get.call_args.kwargs["follow_redirects"])
 
     @patch.object(MusicBrainzClient, "_get", return_value={})
     @patch.object(MusicBrainzClient, "_request", return_value={"id": "release-id"})
@@ -40,3 +42,39 @@ class MusicBrainzLookupTest(unittest.TestCase):
         self.assertEqual(get.call_count, 1)
         self.assertEqual(set(values), {"en", "ja", "zh-TW"})
         self.assertIsNot(values["en"], values["ja"])
+
+    def test_provider_requests_can_follow_cover_art_archive_redirects(self):
+        requests = []
+
+        def handler(request):
+            requests.append(str(request.url))
+            if request.url.path == "/release/release-id":
+                return httpx.Response(
+                    307,
+                    headers={"location": "https://archive.org/download/mbid-id/index.json"},
+                )
+            return httpx.Response(200, json={"images": []})
+
+        client = ProviderClient()
+        transport_client = httpx.Client(
+            transport=httpx.MockTransport(handler), follow_redirects=False
+        )
+        try:
+            with patch.object(client, "_http_client", return_value=transport_client):
+                self.assertEqual(
+                    client._get(
+                        "https://coverartarchive.org/release/release-id",
+                        follow_redirects=True,
+                    ),
+                    {"images": []},
+                )
+        finally:
+            transport_client.close()
+
+        self.assertEqual(
+            requests,
+            [
+                "https://coverartarchive.org/release/release-id",
+                "https://archive.org/download/mbid-id/index.json",
+            ],
+        )

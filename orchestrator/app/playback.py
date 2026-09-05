@@ -684,10 +684,16 @@ class PlaybackManager:
     @classmethod
     def _playback_mode(cls, source: dict, profile: dict) -> str:
         if profile.get("forceTranscoding") is True:
-            return "video-transcode" if cls._source_has_video(source) else "audio-transcode"
+            return (
+                "video-transcode"
+                if cls._source_has_video(source)
+                else "audio-transcode"
+            )
         requested_mode = str(profile.get("requestedMode") or "").lower()
         if requested_mode == "video-transcode":
-            return requested_mode if cls._source_has_video(source) else "audio-transcode"
+            return (
+                requested_mode if cls._source_has_video(source) else "audio-transcode"
+            )
         containers = cls._profile_values(profile, "containers", {"mp4", "webm"})
         video = {
             codec

@@ -1756,9 +1756,7 @@ class CatalogTest(unittest.TestCase):
                 "2026",
             ),
         )
-        self.db.execute(
-            "CREATE TABLE catalog_entity_summary(entity_id TEXT)"
-        )
+        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT)")
         self.db.execute(
             "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
         )
@@ -1851,15 +1849,51 @@ class CatalogTest(unittest.TestCase):
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("artist-1", "allowed", None, "artist", "Artist", None, None, None, None, "2026", "2026"),
+            (
+                "artist-1",
+                "allowed",
+                None,
+                "artist",
+                "Artist",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("release-1", "allowed", "artist-1", "release", "Album", None, None, None, None, "2026", "2026"),
+            (
+                "release-1",
+                "allowed",
+                "artist-1",
+                "release",
+                "Album",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("track-1", "allowed", "release-1", "track", "01.flac", None, 1, None, 1, "2026", "2026"),
+            (
+                "track-1",
+                "allowed",
+                "release-1",
+                "track",
+                "01.flac",
+                None,
+                1,
+                None,
+                1,
+                "2026",
+                "2026",
+            ),
         )
 
         catalog = self.catalog()
@@ -1885,7 +1919,9 @@ class CatalogTest(unittest.TestCase):
         )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_audio_play_start_does_not_mutate_when_history_is_disabled(self, _languages):
+    def test_audio_play_start_does_not_mutate_when_history_is_disabled(
+        self, _languages
+    ):
         account = self.account().create("audio-play-disabled", "password-123")
         self.db.execute(
             "INSERT INTO user_library_access VALUES(?,?,?)",
@@ -1900,7 +1936,19 @@ class CatalogTest(unittest.TestCase):
         )
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("track-disabled", "allowed", None, "track", "01.flac", None, None, None, 1, "2026", "2026"),
+            (
+                "track-disabled",
+                "allowed",
+                None,
+                "track",
+                "01.flac",
+                None,
+                None,
+                None,
+                1,
+                "2026",
+                "2026",
+            ),
         )
 
         state = self.catalog().record_play_start(

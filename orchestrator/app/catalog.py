@@ -1780,7 +1780,9 @@ class Catalog:
             disc_number, track_number, duration_seconds = self._audio_fields(row[0])
             album_id = row[2]
             album_row = self._entity_row(album_id) if album_id else None
-            artist_id = album_row[2] if album_row and album_row[3] == "release" else None
+            artist_id = (
+                album_row[2] if album_row and album_row[3] == "release" else None
+            )
             if duration_seconds and not user_state.get("durationSeconds"):
                 user_state["durationSeconds"] = duration_seconds
         elif row[3] == "release":
@@ -2305,8 +2307,7 @@ class Catalog:
             "track.relative_path,track.season_number,track.episode_number,"
             "track.episode_end_number,track.created_at,track.updated_at "
             "FROM library_entities track "
-            "WHERE track.parent_id=? AND track.entity_type='track'"
-            + playable,
+            "WHERE track.parent_id=? AND track.entity_type='track'" + playable,
             (release_id,),
         )
         return sorted(
@@ -2374,12 +2375,9 @@ class Catalog:
         row_by_id = {row[0]: row for row in rows}
         if not rows:
             return {"items": [], "page": page, "pageSize": page_size, "total": 0}
-        dates = self._date_values(
-            library_id or "", allowed, set(row_by_id)
-        )
+        dates = self._date_values(library_id or "", allowed, set(row_by_id))
         track_rows = {
-            release_id: self._music_track_rows(release_id)
-            for release_id in row_by_id
+            release_id: self._music_track_rows(release_id) for release_id in row_by_id
         }
         hydration_rows = [
             *rows,
@@ -2431,9 +2429,7 @@ class Catalog:
         }
 
     @_catalog_read
-    def music_album_detail(
-        self, user_id: str, release_id: str, language: str
-    ) -> dict:
+    def music_album_detail(self, user_id: str, release_id: str, language: str) -> dict:
         row = self.require_entity(user_id, release_id)
         if row[3] != "release":
             raise HTTPException(404, "Album not found.")
@@ -2473,9 +2469,7 @@ class Catalog:
             if artist_row
             else None
         )
-        track_values = self._hydrate_rows(
-            user_id, tracks, language, dates
-        )
+        track_values = self._hydrate_rows(user_id, tracks, language, dates)
         related_values = [
             self._music_album_value(
                 user_id,
@@ -2498,21 +2492,23 @@ class Catalog:
         }
 
     @_catalog_read
-    def music_artist_detail(
-        self, user_id: str, artist_id: str, language: str
-    ) -> dict:
+    def music_artist_detail(self, user_id: str, artist_id: str, language: str) -> dict:
         artist_row = self.require_entity(user_id, artist_id)
         if artist_row[3] != "artist":
             raise HTTPException(404, "Artist not found.")
         album_rows = [
-            row for row in self._music_release_rows({artist_row[1]}) if row[2] == artist_id
+            row
+            for row in self._music_release_rows({artist_row[1]})
+            if row[2] == artist_id
         ]
         all_rows = [artist_row, *album_rows]
         self._seed_hydration_rows(user_id, all_rows, language)
         self._preload_projected_metadata(
             user_id, [value[0] for value in all_rows], language
         )
-        dates = self._date_values("", {artist_row[1]}, {value[0] for value in album_rows})
+        dates = self._date_values(
+            "", {artist_row[1]}, {value[0] for value in album_rows}
+        )
         artist = self._serialize(
             user_id,
             artist_row,
@@ -2915,9 +2911,7 @@ class Catalog:
             return result
         return self.update_state(user_id, entity_id, changes)
 
-    def record_play_start(
-        self, user_id: str, entity_id: str, changes: dict
-    ) -> dict:
+    def record_play_start(self, user_id: str, entity_id: str, changes: dict) -> dict:
         row = self.require_entity(user_id, entity_id)
         if row[3] != "track":
             raise HTTPException(404, "Audio track not found.")
@@ -2966,9 +2960,7 @@ class Catalog:
                     lastPlayedAt=now,
                 )
                 for ancestor_id in ancestor_ids:
-                    leaves = self._playable_descendants(
-                        ancestor_id, entities, children
-                    )
+                    leaves = self._playable_descendants(ancestor_id, entities, children)
                     if not leaves:
                         continue
                     leaf_states = []

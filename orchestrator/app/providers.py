@@ -1406,9 +1406,7 @@ class MusicBrainzClient(ProviderClient):
         }.get(entity_type, "release")
         payload = self._request(
             f"/{endpoint}/{quote(provider_id)}",
-            {
-                "inc": self._lookup_includes(entity_type)
-            },
+            {"inc": self._lookup_includes(entity_type)},
         )
         if endpoint in {"release", "release-group"}:
             try:
@@ -1573,7 +1571,9 @@ class MusicBrainzClient(ProviderClient):
             ]
         label_names = []
         for label_info in payload.get("label-info", []) or []:
-            label = (label_info.get("label") or {}) if isinstance(label_info, dict) else {}
+            label = (
+                (label_info.get("label") or {}) if isinstance(label_info, dict) else {}
+            )
             name = label.get("name") if isinstance(label, dict) else None
             if name:
                 label_names.append(str(name))
@@ -1594,7 +1594,9 @@ class MusicBrainzClient(ProviderClient):
         ]
         provider_ids.extend(external_ids)
         releases = payload.get("releases", []) or []
-        first_release = releases[0] if releases and isinstance(releases[0], dict) else {}
+        first_release = (
+            releases[0] if releases and isinstance(releases[0], dict) else {}
+        )
         track_duration = (
             tracks[0].get("durationSeconds")
             if entity_type in {"track", "recording"} and tracks

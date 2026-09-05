@@ -798,7 +798,15 @@ class MetadataServicesTest(unittest.TestCase):
             ]
         )
 
-        def ready_artwork(_entity_type, _provider_ids, _images, _requested, image_type, *_args, **_kwargs):
+        def ready_artwork(
+            _entity_type,
+            _provider_ids,
+            _images,
+            _requested,
+            image_type,
+            *_args,
+            **_kwargs,
+        ):
             if image_type == "Primary" and service.resolve_raw.call_count > 1:
                 return {
                     "provider": "tmdb",

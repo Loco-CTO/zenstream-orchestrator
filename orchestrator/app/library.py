@@ -2370,6 +2370,7 @@ class LibraryScanner:
             return
         try:
             from app.metadata_services import reproject_entity_artwork
+
             if entity_type in {"movie", "episode"}:
                 from app.screen_extractor import extract_entity
 
@@ -2916,13 +2917,17 @@ class LibraryScanner:
             return False
 
         def needs_artwork_reconciliation(row: tuple) -> bool:
-            if row[1] not in {
-                "movie",
-                "episode",
-                "artist",
-                "release",
-                "track",
-            } or row[0] not in self._scan_seen_ids:
+            if (
+                row[1]
+                not in {
+                    "movie",
+                    "episode",
+                    "artist",
+                    "release",
+                    "track",
+                }
+                or row[0] not in self._scan_seen_ids
+            ):
                 return False
             if needs_localized_metadata(row):
                 return True
@@ -3212,6 +3217,7 @@ class LibraryScanner:
 
     def _persist_child_ids(self, parent_id: str, normalized: dict) -> None:
         """Attach provider child IDs to inventory children by stable numbers."""
+
         def number(value):
             try:
                 return int(value)
@@ -4448,9 +4454,13 @@ class LibraryScanner:
 
         groups: dict[tuple[str, ...], list[tuple[Path, dict[str, str]]]] = {}
         for path, tags in sorted(entries, key=lambda value: str(value[0]).casefold()):
-            release_id = next(iter(_music_tag_values(tags, "MUSICBRAINZ_ALBUMID")), None)
+            release_id = next(
+                iter(_music_tag_values(tags, "MUSICBRAINZ_ALBUMID")), None
+            )
             relative_path = Path(relative(str(root), str(path)))
-            top_level = relative_path.parts[0] if relative_path.parts else path.parent.name
+            top_level = (
+                relative_path.parts[0] if relative_path.parts else path.parent.name
+            )
             album = _music_display_value(tags.get("ALBUM")) or path.parent.name
             album_artist = (
                 _music_display_value(tags.get("ALBUMARTIST"))
@@ -4458,13 +4468,17 @@ class LibraryScanner:
                 or top_level
             )
             key = (
-                "id",
-                release_id,
-            ) if release_id else (
-                "tag",
-                top_level,
-                _music_normalize(album_artist),
-                _music_normalize(album),
+                (
+                    "id",
+                    release_id,
+                )
+                if release_id
+                else (
+                    "tag",
+                    top_level,
+                    _music_normalize(album_artist),
+                    _music_normalize(album),
+                )
             )
             groups.setdefault(key, []).append((path, tags))
 
@@ -4497,15 +4511,15 @@ class LibraryScanner:
 
             album_dirs = [path.parent for path, _ in group_entries]
             try:
-                album_dir = Path(os.path.commonpath([str(value) for value in album_dirs]))
+                album_dir = Path(
+                    os.path.commonpath([str(value) for value in album_dirs])
+                )
             except (ValueError, OSError):
                 album_dir = first_path.parent
             if album_dir == root:
                 album_dir = first_path.parent
             album_path = relative(str(root), str(album_dir))
-            release = self._entity(
-                library_id, artist, "release", album_path
-            )
+            release = self._entity(library_id, artist, "release", album_path)
             release_ids = []
             for _, tags in group_entries:
                 release_ids.extend(_music_ids(tags, "release"))
@@ -4565,7 +4579,9 @@ class LibraryScanner:
             if artwork_accessible:
                 self._files(release, root, image_paths)
             self.store.update_job(
-                job_id, progress_current=group_index, message=f"Indexed {album_dir.name}"
+                job_id,
+                progress_current=group_index,
+                message=f"Indexed {album_dir.name}",
             )
         for artist, values in artist_id_values.items():
             self._replace_ids(artist, list(dict.fromkeys(values)))

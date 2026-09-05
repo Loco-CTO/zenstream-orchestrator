@@ -1,7 +1,6 @@
 import sqlalchemy as sa
 from alembic import op
 
-
 revision = "0047_audio_play_events"
 down_revision = "0046_metadata_refresh_state"
 branch_labels = None
@@ -15,7 +14,9 @@ def upgrade() -> None:
         sa.Column("entity_id", sa.Text(), nullable=False),
         sa.Column("playback_instance_id", sa.Text(), nullable=False),
         sa.Column("started_at", sa.Text(), nullable=False),
-        sa.ForeignKeyConstraint(["entity_id"], ["library_entities.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["entity_id"], ["library_entities.id"], ondelete="CASCADE"
+        ),
         sa.PrimaryKeyConstraint("user_id", "playback_instance_id"),
     )
     op.create_index(

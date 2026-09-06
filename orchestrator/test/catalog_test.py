@@ -2360,17 +2360,13 @@ class CatalogTest(unittest.TestCase):
             ("track-appears", "artist-other", 2, "Other Artist"),
             ("track-main", "artist-hidden", 2, "Hidden Artist"),
         ):
-            self.db.execute(
-                "INSERT INTO music_artist_credits VALUES(?,?,?,?)", values
-            )
+            self.db.execute("INSERT INTO music_artist_credits VALUES(?,?,?,?)", values)
         self.db.execute(
             "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
             ("artist-main", "musicbrainz", "artist", "mb-main", 1),
         )
 
-        result = self.catalog().music_artist_detail(
-            account["id"], "artist-main", "en"
-        )
+        result = self.catalog().music_artist_detail(account["id"], "artist-main", "en")
 
         self.assertEqual(result["artist"]["id"], "artist-main")
         self.assertEqual([value["id"] for value in result["albums"]], ["release-main"])

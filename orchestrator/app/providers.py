@@ -1674,9 +1674,7 @@ class MusicBrainzClient(ProviderClient):
         album_secondary_types: list[str] = []
         if entity_type in {"release", "release_group"}:
             type_sources = [
-                value
-                for value in (release_group, payload)
-                if isinstance(value, dict)
+                value for value in (release_group, payload) if isinstance(value, dict)
             ]
             for source in type_sources:
                 if not album_type:

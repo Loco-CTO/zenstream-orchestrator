@@ -5631,9 +5631,7 @@ class LibraryScanner:
             values = []
             for value in source:
                 if isinstance(value, dict):
-                    name = _music_display_value(
-                        value.get("name") or value.get("title")
-                    )
+                    name = _music_display_value(value.get("name") or value.get("title"))
                     provider_id = value.get("id") or value.get("providerId")
                 else:
                     name = _music_display_value(value)
@@ -5671,9 +5669,7 @@ class LibraryScanner:
             "ORDER BY is_primary DESC,provider_id LIMIT 1",
             (album_artist_id,),
         )
-        album_artist_provider_id = (
-            str(parent_id_rows[0][0]) if parent_id_rows else None
-        )
+        album_artist_provider_id = str(parent_id_rows[0][0]) if parent_id_rows else None
         parent_credit = {
             "name": album_artist_name,
             "id": album_artist_provider_id,
@@ -5828,12 +5824,16 @@ class LibraryScanner:
                     continue
                 if isinstance(document, dict):
                     projected_document = document
-                    if entity_type == "artist" or (
-                        entity_type == "release"
-                        and isinstance(document.get("tracks"), list)
-                    ) or (
-                        entity_type == "track"
-                        and self._music_document_credits(document)
+                    if (
+                        entity_type == "artist"
+                        or (
+                            entity_type == "release"
+                            and isinstance(document.get("tracks"), list)
+                        )
+                        or (
+                            entity_type == "track"
+                            and self._music_document_credits(document)
+                        )
                     ):
                         return document
 
@@ -5943,8 +5943,7 @@ class LibraryScanner:
                 self._music_local_metadata[str(album_artist_id)] = artist_document
 
             track_columns = {
-                row[1]
-                for row in self.db.execute("PRAGMA table_info(library_entities)")
+                row[1] for row in self.db.execute("PRAGMA table_info(library_entities)")
             }
             disc_expression = (
                 "disc_number" if "disc_number" in track_columns else "NULL"
@@ -5953,13 +5952,21 @@ class LibraryScanner:
                 "track_number" if "track_number" in track_columns else "NULL"
             )
             tracks = self.db.execute(
-                "SELECT id,relative_path," + disc_expression + "," + track_expression + " "
+                "SELECT id,relative_path,"
+                + disc_expression
+                + ","
+                + track_expression
+                + " "
                 "FROM library_entities WHERE parent_id=? AND entity_type='track' "
                 "ORDER BY "
                 + disc_expression
-                + " IS NULL," + disc_expression + ","
+                + " IS NULL,"
+                + disc_expression
+                + ","
                 + track_expression
-                + " IS NULL," + track_expression + ",relative_path COLLATE NOCASE,id",
+                + " IS NULL,"
+                + track_expression
+                + ",relative_path COLLATE NOCASE,id",
                 (release_id,),
             )
             materialized_tracks = []
@@ -5992,9 +5999,7 @@ class LibraryScanner:
                     {
                         "entity_id": str(track_id),
                         "local": document,
-                        "resolved_artists": self._music_document_credits(
-                            release_track
-                        ),
+                        "resolved_artists": self._music_document_credits(release_track),
                     }
                 )
             if not materialized_tracks:

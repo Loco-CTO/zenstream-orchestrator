@@ -42,12 +42,8 @@ class MusicArtistCreditsTest(unittest.TestCase):
         )
 
     def _seed_track(self):
-        album_artist = self.scanner._entity(
-            "library-1", None, "artist", "Album Artist"
-        )
-        release = self.scanner._entity(
-            "library-1", album_artist, "release", "Album"
-        )
+        album_artist = self.scanner._entity("library-1", None, "artist", "Album Artist")
+        release = self.scanner._entity("library-1", album_artist, "release", "Album")
         track = self.scanner._entity(
             "library-1",
             release,
@@ -113,7 +109,10 @@ class MusicArtistCreditsTest(unittest.TestCase):
         )
         self.assertEqual(
             artists,
-            [(album_artist, "Album Artist"), (self.scanner._music_artist_entities["guest artist"], "Guest Artist")],
+            [
+                (album_artist, "Album Artist"),
+                (self.scanner._music_artist_entities["guest artist"], "Guest Artist"),
+            ],
         )
         self.assertEqual(
             self.db.execute(
@@ -122,7 +121,11 @@ class MusicArtistCreditsTest(unittest.TestCase):
             ),
             [
                 (album_artist, 0, "Album Artist"),
-                (self.scanner._music_artist_entities["guest artist"], 1, "Guest Artist"),
+                (
+                    self.scanner._music_artist_entities["guest artist"],
+                    1,
+                    "Guest Artist",
+                ),
             ],
         )
         self.assertEqual(

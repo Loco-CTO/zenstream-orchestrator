@@ -1657,9 +1657,9 @@ class MetadataIngestService:
     @staticmethod
     def is_locale_neutral(provider: str, entity_type: str) -> bool:
         return (
-            (provider == "musicbrainz" and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES)
-            or (provider == "local" and entity_type == "artist")
-        )
+            provider == "musicbrainz"
+            and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+        ) or (provider == "local" and entity_type == "artist")
 
     def provider_locales(self, provider: str, entity_type: str) -> list[str]:
         """Return cache and repair locales for one provider entity.

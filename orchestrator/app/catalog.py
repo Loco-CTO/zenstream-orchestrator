@@ -2588,9 +2588,7 @@ class Catalog:
             related_counts = {str(row[0]): int(row[1] or 0) for row in related_rows}
 
         own_track_rows = [
-            track
-            for album in album_rows
-            for track in self._music_track_rows(album[0])
+            track for album in album_rows for track in self._music_track_rows(album[0])
         ]
         track_by_id = {row[0]: row for row in own_track_rows}
         if credited_track_ids:
@@ -2600,8 +2598,7 @@ class Catalog:
                 "track.episode_end_number,track.created_at,track.updated_at "
                 "FROM library_entities track "
                 "WHERE track.library_id=? AND track.entity_type='track' "
-                "AND track.id IN (%s)"
-                % ",".join("?" for _ in credited_track_ids),
+                "AND track.id IN (%s)" % ",".join("?" for _ in credited_track_ids),
                 [artist_row[1], *sorted(credited_track_ids)],
             )
             track_by_id.update({row[0]: row for row in credited_rows})
@@ -2623,7 +2620,8 @@ class Catalog:
             )
         )
         appears_rows = [
-            row for release_id, row in release_by_id.items()
+            row
+            for release_id, row in release_by_id.items()
             if release_id in appears_release_ids
         ]
         appears_rows.sort(

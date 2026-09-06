@@ -11,7 +11,7 @@ from pathlib import Path
 from app.config import Config
 from app.foreground import active_requests
 from app.intro_outro import IntroOutroDetector
-from app.library import JobTerminated
+from app.library import JobTerminated, LibraryScanner, LibraryStore
 from app.library import runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.logging_config import get_logger
@@ -2154,6 +2154,21 @@ class MetadataMissingJob:
                 CatalogReadModel(self.db).refresh_roots(sorted(roots))
         except Exception:
             logger.exception("screen extractor catalog refresh failed")
+        try:
+            # Metadata refreshes can discover new MusicBrainz track credits
+            # without traversing the media filesystem. Rebuild the durable
+            # artist entities/links from the documents just materialized so
+            # those credits are immediately navigable.
+            repair_store = LibraryStore.__new__(LibraryStore)
+            repair_store.db = self.db
+            repair_store._progress = {}
+            LibraryScanner(repair_store).repair_music_artist_credits(
+                ingest, run_id, should_terminate
+            )
+        except JobTerminated:
+            raise
+        except Exception:
+            logger.exception("music artist credit repair failed")
         if should_terminate():
             raise JobTerminated()
         if failures:

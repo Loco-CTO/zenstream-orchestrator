@@ -2515,8 +2515,31 @@ class Catalog:
             "catalogGeneration": self._music_catalog_generation(row[1]),
         }
 
+    def _resolve_music_artist_entity_id(self, user_id: str, artist_id: str) -> str:
+        """Accept both catalog artist entity IDs and MusicBrainz credit IDs."""
+        if self._entity_row(artist_id) is not None:
+            return artist_id
+        if not self._has_table("entity_provider_ids"):
+            return artist_id
+        allowed = sorted(self.allowed_libraries(user_id))
+        if not allowed:
+            return artist_id
+        placeholders = ",".join("?" for _ in allowed)
+        rows = self.db.execute(
+            "SELECT entity.id FROM entity_provider_ids identity "
+            "JOIN library_entities entity ON entity.id=identity.entity_id "
+            "WHERE identity.provider='musicbrainz' "
+            "AND identity.identifier_type='artist' "
+            "AND identity.provider_id=? AND entity.entity_type='artist' "
+            f"AND entity.library_id IN ({placeholders}) "
+            "ORDER BY entity.library_id,entity.id LIMIT 1",
+            [artist_id, *allowed],
+        )
+        return str(rows[0][0]) if rows else artist_id
+
     @_catalog_read
     def music_artist_detail(self, user_id: str, artist_id: str, language: str) -> dict:
+        artist_id = self._resolve_music_artist_entity_id(user_id, artist_id)
         artist_row = self.require_entity(user_id, artist_id)
         if artist_row[3] != "artist":
             raise HTTPException(404, "Artist not found.")

@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from app.database import DatabaseHandler
@@ -202,6 +203,73 @@ class MusicArtistCreditsTest(unittest.TestCase):
 
         self.assertNotIn((guest_id, "artist", None, "Guest Artist"), self._entities())
         self.assertIn((album_artist, "artist", None, "Album Artist"), self._entities())
+
+    def test_repair_materializes_release_track_credits_without_provider_requests(self):
+        album_artist, release, track = self._seed_track()
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT, locale TEXT, payload TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            (track, "musicbrainz", "recording", "mb-recording", 1),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                release,
+                "en",
+                json.dumps(
+                    {
+                        "albumArtist": "Album Artist",
+                        "artists": [{"id": "mb-album", "name": "Album Artist"}],
+                        "tracks": [
+                            {
+                                "id": "mb-recording",
+                                "position": 1,
+                                "disc": 1,
+                                "artists": [
+                                    {"id": "mb-album", "name": "Album Artist"},
+                                    {"id": "mb-guest", "name": "Guest Artist"},
+                                ],
+                                "contributingArtists": [
+                                    {"id": "mb-guest", "name": "Guest Artist"},
+                                    {"id": "mb-album", "name": "Album Artist"},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+            ),
+        )
+
+        repaired = self.scanner.repair_music_artist_credits(
+            _SuccessfulIngest(), "job-1", lambda: False
+        )
+
+        self.assertEqual(repaired, 1)
+        guest_rows = self.db.execute(
+            "SELECT id FROM library_entities WHERE entity_type='artist' AND relative_path=?",
+            ("Guest Artist",),
+        )
+        self.assertEqual(len(guest_rows), 1)
+        guest_id = guest_rows[0][0]
+        self.assertEqual(
+            self.db.execute(
+                "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? AND provider='musicbrainz'",
+                (guest_id,),
+            ),
+            [("mb-guest",)],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT artist_id,credit_order,credited_name FROM music_artist_credits WHERE track_id=? ORDER BY credit_order",
+                (track,),
+            ),
+            [
+                (album_artist, 0, "Album Artist"),
+                (guest_id, 1, "Guest Artist"),
+            ],
+        )
 
 
 if __name__ == "__main__":

@@ -2363,6 +2363,10 @@ class CatalogTest(unittest.TestCase):
             self.db.execute(
                 "INSERT INTO music_artist_credits VALUES(?,?,?,?)", values
             )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            ("artist-main", "musicbrainz", "artist", "mb-main", 1),
+        )
 
         result = self.catalog().music_artist_detail(
             account["id"], "artist-main", "en"
@@ -2383,6 +2387,14 @@ class CatalogTest(unittest.TestCase):
         )
         self.assertNotIn(
             "artist-hidden", {value["id"] for value in result["relatedArtists"]}
+        )
+        provider_id_result = self.catalog().music_artist_detail(
+            account["id"], "mb-main", "en"
+        )
+        self.assertEqual(provider_id_result["artist"]["id"], "artist-main")
+        self.assertEqual(
+            [value["id"] for value in provider_id_result["appearsIn"]],
+            ["release-appears"],
         )
 
 

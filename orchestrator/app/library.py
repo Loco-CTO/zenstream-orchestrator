@@ -5618,6 +5618,8 @@ class LibraryScanner:
         ingest,
         job_id: str,
         should_terminate: Callable[[], bool],
+        *,
+        resolve_provider_metadata: bool = True,
     ) -> None:
         """Materialize every credited artist and rewrite this group's links."""
         if not self._has_table("music_artist_credits"):
@@ -5733,7 +5735,12 @@ class LibraryScanner:
             if provider_id:
                 self._replace_ids(entity, [("musicbrainz", "artist", provider_id)])
                 self._music_mark_identity_changed(entity)
-                if provider_id not in attempted_provider_ids:
+                if not resolve_provider_metadata:
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
+                        (now(), entity),
+                    )
+                elif provider_id not in attempted_provider_ids:
                     attempted_provider_ids.add(provider_id)
                     try:
                         ingest.ingest_locales(
@@ -5804,6 +5811,207 @@ class LibraryScanner:
             self._scan_refresh_root_ids.add(entity)
             self._publish_root(entity)
         self._flush_publications()
+
+    def _music_document(self, entity_id: str, entity_type: str) -> dict:
+        """Read one cached/projected music document without contacting a provider."""
+        projected_document = None
+        if self._has_table("catalog_item_projection"):
+            rows = self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id=? "
+                "ORDER BY CASE locale WHEN '' THEN 0 WHEN 'en' THEN 1 ELSE 2 END,locale",
+                (entity_id,),
+            )
+            for row in rows:
+                try:
+                    document = json.loads(row[0] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(document, dict):
+                    projected_document = document
+                    if entity_type == "artist" or (
+                        entity_type == "release"
+                        and isinstance(document.get("tracks"), list)
+                    ) or (
+                        entity_type == "track"
+                        and self._music_document_credits(document)
+                    ):
+                        return document
+
+        if not self._has_table("metadata_cache"):
+            return projected_document or {}
+        identifier_type = "recording" if entity_type == "track" else entity_type
+        rows = self.db.execute(
+            "SELECT cache.payload FROM metadata_cache cache "
+            "JOIN entity_provider_ids identity ON identity.provider='musicbrainz' "
+            "AND identity.identifier_type=? AND identity.provider_id=cache.provider_id "
+            "WHERE identity.entity_id=? AND cache.provider='musicbrainz' "
+            "AND cache.entity_type=? ORDER BY cache.locale",
+            (identifier_type, entity_id, entity_type),
+        )
+        for row in rows:
+            try:
+                document = json.loads(row[0] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(document, dict):
+                return document
+        return projected_document or {}
+
+    @staticmethod
+    def _music_document_credits(document: dict) -> list[dict]:
+        """Combine primary and contributing credits from a cached document."""
+        values: list[dict] = []
+        for key in ("artists", "contributingArtists"):
+            source = document.get(key)
+            if isinstance(source, list):
+                values.extend(value for value in source if isinstance(value, dict))
+        return values
+
+    @staticmethod
+    def _music_release_track_document(
+        release_document: dict,
+        recording_id: str | None,
+        disc_number,
+        track_number,
+    ) -> dict:
+        candidates = release_document.get("tracks")
+        if not isinstance(candidates, list):
+            return {}
+        for candidate in candidates:
+            if (
+                isinstance(candidate, dict)
+                and recording_id
+                and str(candidate.get("id") or "") == str(recording_id)
+            ):
+                return candidate
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if track_number is not None and str(candidate.get("position") or "") != str(
+                track_number
+            ):
+                continue
+            candidate_disc = candidate.get("disc")
+            if disc_number is not None and candidate_disc is not None:
+                if str(candidate_disc) != str(disc_number):
+                    continue
+            return candidate
+        return {}
+
+    def repair_music_artist_credits(
+        self,
+        ingest,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> int:
+        """Backfill credited artist entities from already indexed music metadata."""
+        if not self._has_table("music_artist_credits") or not self._has_table(
+            "library_entities"
+        ):
+            return 0
+
+        self._music_local_metadata = {}
+        self._music_artist_entities = {}
+        release_rows = self.db.execute(
+            "SELECT id,library_id,parent_id FROM library_entities "
+            "WHERE entity_type='release' AND parent_id IS NOT NULL "
+            "ORDER BY library_id,id"
+        )
+        repaired = 0
+        for release_id, library_id, album_artist_id in release_rows:
+            self._check_termination(should_terminate)
+            release_document = self._music_document(str(release_id), "release")
+            artist_document = self._music_document(str(album_artist_id), "artist")
+            artist_row = self.db.execute(
+                "SELECT relative_path FROM library_entities WHERE id=? AND entity_type='artist'",
+                (album_artist_id,),
+            )
+            artist_name = _music_display_value(
+                (artist_document or {}).get("title")
+                or (release_document or {}).get("albumArtist")
+                or (artist_row[0][0] if artist_row else "")
+            )
+            if not isinstance(release_document, dict):
+                release_document = {}
+            release_document = deepcopy(release_document)
+            if artist_name:
+                release_document.setdefault("albumArtist", artist_name)
+                if not release_document.get("artists"):
+                    release_document["artists"] = [{"name": artist_name}]
+            self._music_local_metadata[str(release_id)] = release_document
+            if artist_document:
+                self._music_local_metadata[str(album_artist_id)] = artist_document
+
+            track_columns = {
+                row[1]
+                for row in self.db.execute("PRAGMA table_info(library_entities)")
+            }
+            disc_expression = (
+                "disc_number" if "disc_number" in track_columns else "NULL"
+            )
+            track_expression = (
+                "track_number" if "track_number" in track_columns else "NULL"
+            )
+            tracks = self.db.execute(
+                "SELECT id,relative_path," + disc_expression + "," + track_expression + " "
+                "FROM library_entities WHERE parent_id=? AND entity_type='track' "
+                "ORDER BY "
+                + disc_expression
+                + " IS NULL," + disc_expression + ","
+                + track_expression
+                + " IS NULL," + track_expression + ",relative_path COLLATE NOCASE,id",
+                (release_id,),
+            )
+            materialized_tracks = []
+            for track_id, relative_path, disc_number, track_number in tracks:
+                self._check_termination(should_terminate)
+                document = self._music_document(str(track_id), "track")
+                if not isinstance(document, dict):
+                    document = {}
+                document = deepcopy(document)
+                recording_rows = self.db.execute(
+                    "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? "
+                    "AND provider='musicbrainz' AND identifier_type='recording' "
+                    "ORDER BY is_primary DESC,provider_id LIMIT 1",
+                    (track_id,),
+                )
+                recording_id = str(recording_rows[0][0]) if recording_rows else None
+                release_track = self._music_release_track_document(
+                    release_document, recording_id, disc_number, track_number
+                )
+                if not self._music_document_credits(document):
+                    credits = self._music_document_credits(release_track)
+                    if credits:
+                        document["artists"] = deepcopy(credits)
+                        document["contributingArtists"] = deepcopy(credits)
+                document.setdefault("discNumber", disc_number)
+                document.setdefault("trackNumber", track_number)
+                if not document.get("title") and relative_path:
+                    document["title"] = clean_music_title(Path(relative_path).stem)
+                materialized_tracks.append(
+                    {
+                        "entity_id": str(track_id),
+                        "local": document,
+                        "resolved_artists": self._music_document_credits(
+                            release_track
+                        ),
+                    }
+                )
+            if not materialized_tracks:
+                continue
+            self._materialize_music_artist_credits(
+                str(library_id),
+                str(album_artist_id),
+                str(release_id),
+                materialized_tracks,
+                {"": release_document},
+                ingest,
+                job_id,
+                should_terminate,
+                resolve_provider_metadata=False,
+            )
+            repaired += 1
+        return repaired
 
     def _remove_orphan_music_artists(self, library_id: str) -> None:
         if not self._has_table("music_artist_credits"):

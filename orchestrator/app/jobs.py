@@ -666,11 +666,11 @@ class JobStore:
             return [
                 {
                     "key": "refreshAll",
-                    "label": "Refresh all indexed video metadata",
+                    "label": "Refresh all indexed media metadata",
                     "type": "boolean",
                     "default": False,
                     "manualOnly": True,
-                    "description": "Ignore sparse rules and refresh every indexed movie, series, season, and episode.",
+                    "description": "Ignore sparse rules and refresh every indexed movie, series, season, episode, album, and track.",
                 },
                 {
                     "key": "preserveCachedAssets",
@@ -820,14 +820,50 @@ class JobStore:
             )
         return self.definition(definition_id)  # type: ignore[return-value]
 
+    def _sync_default_definition_text(
+        self,
+        key: str,
+        name: str,
+        description: str,
+        previous_name: str,
+        previous_description: str,
+    ) -> None:
+        """Update labels from an older built-in definition without clobbering edits."""
+        rows = self.db.execute(
+            "SELECT id,name,description FROM job_definitions WHERE job_key=?",
+            (key,),
+        )
+        if not rows:
+            return
+        definition_id, current_name, current_description = rows[0]
+        next_name = name if current_name == previous_name else current_name
+        next_description = (
+            description
+            if current_description == previous_description
+            else current_description
+        )
+        if next_name == current_name and next_description == current_description:
+            return
+        self.db.execute(
+            "UPDATE job_definitions SET name=?,description=?,updated_at=? WHERE id=?",
+            (next_name, next_description, now(), definition_id),
+        )
+
     def ensure_defaults(self) -> None:
         definition = self.ensure(
             "metadata_missing",
-            "Find missing metadata",
-            "Fetch missing provider metadata, artwork, and credits for indexed IDs.",
+            "Find missing media metadata",
+            "Fetch missing provider metadata, artwork, and credits for indexed movie, TV, album, and track records.",
             "metadata_missing",
             1440,
             {"locales": ["en"], "batchSize": 50},
+        )
+        self._sync_default_definition_text(
+            "metadata_missing",
+            "Find missing media metadata",
+            "Fetch missing provider metadata, artwork, and credits for indexed movie, TV, album, and track records.",
+            "Find missing metadata",
+            "Fetch missing provider metadata, artwork, and credits for indexed IDs.",
         )
         if definition["lastRunAt"] is None:
             self.db.execute(
@@ -836,11 +872,18 @@ class JobStore:
             )
         upgrade = self.ensure(
             "metadata_upgrade",
-            "Find metadata upgrade",
-            "Refetch provider metadata and repair existing metadata that can be improved.",
+            "Find metadata upgrades",
+            "Refetch provider metadata and repair existing metadata for indexed movie, TV, album, and track records.",
             "metadata_upgrade",
             10080,
             {"locales": ["en"], "batchSize": 50},
+        )
+        self._sync_default_definition_text(
+            "metadata_upgrade",
+            "Find metadata upgrades",
+            "Refetch provider metadata and repair existing metadata for indexed movie, TV, album, and track records.",
+            "Find metadata upgrade",
+            "Refetch provider metadata and repair existing metadata that can be improved.",
         )
         if upgrade["lastRunAt"] is None:
             self.db.execute(
@@ -849,12 +892,19 @@ class JobStore:
             )
         self.ensure(
             "metadata_refresh",
-            "Refresh metadata",
-            "Refresh indexed metadata and artwork using the configured sparse rules.",
+            "Refresh media metadata",
+            "Refresh indexed movie, TV, album, and track metadata and artwork using the configured sparse rules.",
             "metadata_refresh",
             43200,
             {},
             enabled=False,
+        )
+        self._sync_default_definition_text(
+            "metadata_refresh",
+            "Refresh media metadata",
+            "Refresh indexed movie, TV, album, and track metadata and artwork using the configured sparse rules.",
+            "Refresh metadata",
+            "Refresh indexed metadata and artwork using the configured sparse rules.",
         )
         cleanup = self.ensure(
             "metadata_cleanup",
@@ -2594,8 +2644,8 @@ class JobScheduler:
         if not definition:
             definition = self.store.ensure(
                 "metadata_refresh",
-                "Refresh metadata",
-                "Refresh indexed metadata and artwork using the configured sparse rules.",
+                "Refresh media metadata",
+                "Refresh indexed movie, TV, album, and track metadata and artwork using the configured sparse rules.",
                 "metadata_refresh",
                 43200,
                 {},

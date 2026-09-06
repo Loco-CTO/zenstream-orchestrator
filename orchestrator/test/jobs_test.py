@@ -1013,6 +1013,95 @@ class JobMappingTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_default_metadata_tasks_describe_movie_tv_and_music_media(self):
+        db, store = self._scheduler_store()
+        try:
+            store.ensure_defaults()
+
+            missing = store.by_key("metadata_missing")
+            upgrade = store.by_key("metadata_upgrade")
+            refresh = store.by_key("metadata_refresh")
+
+            self.assertEqual(missing["name"], "Find missing media metadata")
+            self.assertIn("album", missing["description"])
+            self.assertEqual(upgrade["name"], "Find metadata upgrades")
+            self.assertIn("track", upgrade["description"])
+            self.assertEqual(refresh["name"], "Refresh media metadata")
+            self.assertIn("album", refresh["description"])
+            self.assertEqual(
+                refresh["optionDefinitions"][0]["label"],
+                "Refresh all indexed media metadata",
+            )
+            self.assertIn("album", refresh["optionDefinitions"][0]["description"])
+        finally:
+            db.close()
+
+    def test_default_metadata_labels_upgrade_existing_builtins_without_overwriting_edits(
+        self,
+    ):
+        db, store = self._scheduler_store()
+        try:
+            old_definitions = [
+                (
+                    "metadata_missing",
+                    "Find missing metadata",
+                    "Fetch missing provider metadata, artwork, and credits for indexed IDs.",
+                    "metadata_missing",
+                    1,
+                ),
+                (
+                    "metadata_upgrade",
+                    "Find metadata upgrade",
+                    "Refetch provider metadata and repair existing metadata that can be improved.",
+                    "metadata_upgrade",
+                    1,
+                ),
+                (
+                    "metadata_refresh",
+                    "Custom metadata task",
+                    "Refresh indexed metadata and artwork using the configured sparse rules.",
+                    "metadata_refresh",
+                    0,
+                ),
+            ]
+            for index, (key, name, description, kind, enabled) in enumerate(
+                old_definitions
+            ):
+                db.execute(
+                    "INSERT INTO job_definitions(id,job_key,name,description,kind,enabled,config,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        f"definition-{index}",
+                        key,
+                        name,
+                        description,
+                        kind,
+                        enabled,
+                        "{}",
+                        "created",
+                        "updated",
+                    ),
+                )
+            store.ensure_defaults()
+
+            self.assertEqual(
+                store.by_key("metadata_missing")["name"],
+                "Find missing media metadata",
+            )
+            self.assertEqual(
+                store.by_key("metadata_upgrade")["name"],
+                "Find metadata upgrades",
+            )
+            self.assertEqual(
+                store.by_key("metadata_refresh")["name"],
+                "Custom metadata task",
+            )
+            self.assertEqual(
+                store.by_key("metadata_refresh")["description"],
+                "Refresh indexed movie, TV, album, and track metadata and artwork using the configured sparse rules.",
+            )
+        finally:
+            db.close()
+
     def test_default_bazarr_sync_runs_daily_at_two(self):
         db, store = self._scheduler_store()
         try:

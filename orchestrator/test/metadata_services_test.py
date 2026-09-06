@@ -735,6 +735,38 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(value["overview"], "English overview")
         self.assertEqual(value["images"][0]["url"], "neutral.jpg")
 
+    def test_read_preserves_music_release_types(self):
+        self.db.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+            (
+                "musicbrainz",
+                "release",
+                "release-1",
+                "",
+                json.dumps(
+                    {
+                        "_imageLanguageSchema": 3,
+                        "albumType": "EP",
+                        "albumSecondaryTypes": ["Live", "Remix"],
+                    }
+                ),
+                "now",
+                "later",
+            ),
+        )
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en"]),
+        ):
+            value = MetadataReadService(self.db).resolve_raw(
+                "release",
+                [{"provider": "musicbrainz", "id": "release-1"}],
+                "en",
+            )
+
+        self.assertEqual(value["albumType"], "EP")
+        self.assertEqual(value["albumSecondaryTypes"], ["Live", "Remix"])
+
     def test_read_fallback_ignores_language_code_overview_placeholders(self):
         self._cache(
             "ja", {"title": "Japanese", "overview": "eng", "originalLanguage": "ja"}

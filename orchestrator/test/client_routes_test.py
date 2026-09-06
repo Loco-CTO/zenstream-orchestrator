@@ -445,6 +445,8 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
                 "title": "Episode 1",
                 "overview": "Long synopsis",
                 "genres": ["Drama"],
+                "albumType": "EP",
+                "albumSecondaryTypes": ["Live"],
                 "images": {
                     "Primary": {"url": "/primary"},
                     "Backdrop": {"url": "/backdrop"},
@@ -468,6 +470,8 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
             {
                 "title": "Episode 1",
                 "genres": ["Drama"],
+                "albumType": "EP",
+                "albumSecondaryTypes": ["Live"],
                 "images": {
                     "Primary": {"url": "/primary"},
                     "Backdrop": {"url": "/backdrop"},

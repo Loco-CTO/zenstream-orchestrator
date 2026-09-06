@@ -75,6 +75,8 @@ TEXT_FIELDS = {
     "productionCompanies",
     "people",
     "albumArtist",
+    "albumType",
+    "albumSecondaryTypes",
     "artists",
     "contributingArtists",
     "tracks",

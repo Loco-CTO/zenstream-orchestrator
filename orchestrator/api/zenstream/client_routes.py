@@ -78,6 +78,8 @@ CARD_METADATA_FIELDS = {
     "tags",
     "genres",
     "albumArtist",
+    "albumType",
+    "albumSecondaryTypes",
     "artists",
     "contributingArtists",
     "album",

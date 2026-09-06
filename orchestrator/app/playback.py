@@ -25,8 +25,8 @@ from app.library import (
     sidecar_display_title,
     sidecar_media_path,
 )
-from app.lyrics import choose_lyrics, embedded_lyrics, parse_lyrics_text
 from app.logging_config import get_logger
+from app.lyrics import choose_lyrics, embedded_lyrics, parse_lyrics_text
 from app.media_probe import first_audio_stream, select_usable_video_stream
 from app.models.playback_settings import PlaybackSettings
 from app.models.playback_viewer import PlaybackViewerStore
@@ -86,11 +86,11 @@ def _mutagen_audio_probe(path: Path) -> dict | None:
         if info is None:
             return None
         suffix = path.suffix.lower().lstrip(".")
-        raw_codec = str(
-            getattr(info, "codec", None)
-            or getattr(info, "codec_name", None)
-            or ""
-        ).strip().lower()
+        raw_codec = (
+            str(getattr(info, "codec", None) or getattr(info, "codec_name", None) or "")
+            .strip()
+            .lower()
+        )
         info_type = type(info).__name__.casefold()
         if raw_codec.startswith("mp4a") or raw_codec in {"aac", "aac lc"}:
             codec = "aac"
@@ -100,11 +100,7 @@ def _mutagen_audio_probe(path: Path) -> dict | None:
             codec = "flac"
         elif "opus" in raw_codec or "opus" in info_type or suffix == "opus":
             codec = "opus"
-        elif (
-            "vorbis" in raw_codec
-            or "vorbis" in info_type
-            or suffix in {"ogg", "oga"}
-        ):
+        elif "vorbis" in raw_codec or "vorbis" in info_type or suffix in {"ogg", "oga"}:
             codec = "vorbis"
         elif suffix == "aac":
             codec = "aac"
@@ -695,9 +691,7 @@ class PlaybackManager:
             (entity_id,),
         )
         durations = {
-            row[0]: float(row[1])
-            for row in duration_rows
-            if row[1] is not None
+            row[0]: float(row[1]) for row in duration_rows if row[1] is not None
         }
         media_rows = [row for row in rows if row[3] == "media"]
         sidecar_rows = [row for row in rows if row[3] == "lyrics"]

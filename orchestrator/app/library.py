@@ -13,8 +13,8 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable
-from copy import deepcopy
 from concurrent.futures import Future, as_completed
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty
@@ -2457,9 +2457,7 @@ class LibraryScanner:
                 )
                 value["albumId"] = (release_document or {}).get(
                     "providerId"
-                ) or value.get(
-                    "albumId"
-                )
+                ) or value.get("albumId")
                 value["provider"] = "musicbrainz"
                 value["providerId"] = str(provider_id)
                 value["ids"] = [
@@ -2474,9 +2472,7 @@ class LibraryScanner:
                 value["durationSeconds"] = candidate.get("durationSeconds")
                 value["tracks"] = [candidate]
                 local_artists = (
-                    local.get("artists")
-                    if isinstance(local, dict)
-                    else None
+                    local.get("artists") if isinstance(local, dict) else None
                 )
                 candidate_artists = candidate.get("artists")
                 if not isinstance(candidate_artists, list):
@@ -2597,7 +2593,8 @@ class LibraryScanner:
                 (
                     str(value["id"])
                     for value in explicit
-                    if value.get("provider") == "musicbrainz" and value.get("id")
+                    if value.get("provider") == "musicbrainz"
+                    and value.get("id")
                     and value.get("identifierType")
                     == {
                         "artist": "artist",
@@ -3497,7 +3494,10 @@ class LibraryScanner:
                     )
                     continue
             if not provider_rows:
-                if entity_type in {"release", "track"} and entity_id in self._music_local_metadata:
+                if (
+                    entity_type in {"release", "track"}
+                    and entity_id in self._music_local_metadata
+                ):
                     self.db.execute(
                         "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
                         (now(), entity_id),
@@ -3802,9 +3802,7 @@ class LibraryScanner:
             )
             candidate = candidate or (tracks[index] if index < len(tracks) else None)
             if candidate and candidate.get("id"):
-                identities = [
-                    ("musicbrainz", "recording", str(candidate["id"]))
-                ]
+                identities = [("musicbrainz", "recording", str(candidate["id"]))]
                 identities.extend(
                     ("musicbrainz", "work", str(work_id))
                     for work_id in candidate.get("workIds", []) or []
@@ -5017,13 +5015,10 @@ class LibraryScanner:
             score = 0
             if title and candidate_title == title:
                 score += 100
-            elif title and (
-                title in candidate_title or candidate_title in title
-            ):
+            elif title and (title in candidate_title or candidate_title in title):
                 score += 55
-            if (
-                track_number is not None
-                and str(candidate.get("position") or "") == str(track_number)
+            if track_number is not None and str(candidate.get("position") or "") == str(
+                track_number
             ):
                 score += 45
             if disc_number is not None and candidate.get("disc") is not None:
@@ -5038,7 +5033,9 @@ class LibraryScanner:
                 except (TypeError, ValueError):
                     difference = None
                 if difference is not None:
-                    score += 15 if difference <= max(2.0, float(duration) * 0.03) else -10
+                    score += (
+                        15 if difference <= max(2.0, float(duration) * 0.03) else -10
+                    )
             if score:
                 scored.append((score, provider_id or str(index), candidate))
         scored.sort(key=lambda value: (value[0], value[1]), reverse=True)
@@ -5066,7 +5063,11 @@ class LibraryScanner:
         artist_name = (
             _music_display_value(first_tags.get("ALBUMARTIST"))
             or _music_display_value(first_tags.get("ARTIST"))
-            or (relative_first.parts[0] if relative_first.parts else first_path.parent.name)
+            or (
+                relative_first.parts[0]
+                if relative_first.parts
+                else first_path.parent.name
+            )
         )
         artist_key = _music_normalize(artist_name)
         embedded_artist_ids = []
@@ -5148,7 +5149,9 @@ class LibraryScanner:
             self._check_termination(should_terminate)
             track_number = _int_tag(tags.get("TRACKNUMBER"))
             disc_number = _int_tag(tags.get("DISCNUMBER"))
-            _, filename_disc_number, filename_track_number = _music_filename_parts(track)
+            _, filename_disc_number, filename_track_number = _music_filename_parts(
+                track
+            )
             if disc_number is None:
                 disc_number = filename_disc_number
             if track_number is None:
@@ -5237,10 +5240,9 @@ class LibraryScanner:
         release_local = self._music_local_metadata.get(release) or {}
         album_name = _music_display_value(release_local.get("title"))
         artist_local = self._music_local_metadata.get(artist) or {}
-        artist_name = (
-            _music_display_value(release_local.get("albumArtist"))
-            or _music_display_value(artist_local.get("title"))
-        )
+        artist_name = _music_display_value(
+            release_local.get("albumArtist")
+        ) or _music_display_value(artist_local.get("title"))
         year = str(release_local.get("year") or "")[:4] or None
         provider_rows = self.db.execute(
             "SELECT identifier_type,provider_id FROM entity_provider_ids "
@@ -5254,8 +5256,10 @@ class LibraryScanner:
         client = service.client("musicbrainz")
         release_documents: dict[str, dict] = {}
         release_error: Exception | None = None
-        if not release_id and album_name and (
-            release_local.get("album") or release_local.get("albumArtist")
+        if (
+            not release_id
+            and album_name
+            and (release_local.get("album") or release_local.get("albumArtist"))
         ):
             try:
                 candidates = client.search_releases(album_name, artist_name, year)
@@ -5304,9 +5308,7 @@ class LibraryScanner:
         release_document_values = list(release_documents.values())
         release_tracks = []
         if release_document_values:
-            release_tracks = list(
-                release_document_values[0].get("tracks", []) or []
-            )
+            release_tracks = list(release_document_values[0].get("tracks", []) or [])
         used_release_track_ids: set[str] = set()
         artist_ids = []
         for document in release_document_values:
@@ -5315,9 +5317,7 @@ class LibraryScanner:
                     artist_ids.append(str(value["id"]))
         if artist_ids:
             album_artist_id = artist_ids[0]
-            self._replace_ids(
-                artist, [("musicbrainz", "artist", album_artist_id)]
-            )
+            self._replace_ids(artist, [("musicbrainz", "artist", album_artist_id)])
             self._music_mark_identity_changed(artist)
             try:
                 ingest.ingest_locales(
@@ -5349,11 +5349,7 @@ class LibraryScanner:
             entity_id = track["entity_id"]
             local = track["local"]
             explicit_id = next(
-                (
-                    value[2]
-                    for value in track["music_ids"]
-                    if value[1] == "recording"
-                ),
+                (value[2] for value in track["music_ids"] if value[1] == "recording"),
                 None,
             )
             candidate = None
@@ -5451,9 +5447,7 @@ class LibraryScanner:
                 candidate.setdefault("disc", local.get("discNumber"))
                 candidate_id = candidate.get("id")
                 if candidate_id and not explicit_id:
-                    identities = [
-                        ("musicbrainz", "recording", str(candidate_id))
-                    ]
+                    identities = [("musicbrainz", "recording", str(candidate_id))]
                     identities.extend(
                         ("musicbrainz", "work", str(work_id))
                         for work_id in candidate.get("workIds", []) or []
@@ -6180,13 +6174,9 @@ def _music_normalize(value: str | None) -> str:
 
 def _music_group_key(root: Path, path: Path, tags: dict[str, str]) -> tuple[str, ...]:
     """Return the existing stable grouping key for one admitted track."""
-    release_id = next(
-        iter(_music_tag_values(tags, "MUSICBRAINZ_ALBUMID")), None
-    )
+    release_id = next(iter(_music_tag_values(tags, "MUSICBRAINZ_ALBUMID")), None)
     relative_path = Path(relative(str(root), str(path)))
-    top_level = (
-        relative_path.parts[0] if relative_path.parts else path.parent.name
-    )
+    top_level = relative_path.parts[0] if relative_path.parts else path.parent.name
     album = _music_display_value(tags.get("ALBUM")) or path.parent.name
     album_artist = (
         _music_display_value(tags.get("ALBUMARTIST"))
@@ -6229,16 +6219,14 @@ def _music_local_document(
         or _music_display_value(artist_name)
         or (artists[0] if artists else None)
     )
-    filename_title, filename_disc_number, filename_track_number = (
-        _music_filename_parts(path)
+    filename_title, filename_disc_number, filename_track_number = _music_filename_parts(
+        path
     )
     if disc_number is None:
         disc_number = filename_disc_number
     if track_number is None:
         track_number = filename_track_number
-    album = _music_display_value(album_name) or _music_display_value(
-        tags.get("ALBUM")
-    )
+    album = _music_display_value(album_name) or _music_display_value(tags.get("ALBUM"))
     title = clean_music_title(_music_display_value(tags.get("TITLE"))) or filename_title
     date = _music_display_value(tags.get("DATE")) or None
     duration_seconds = None
@@ -6272,9 +6260,7 @@ def _music_local_document(
         "album": album or None,
         "albumId": None,
         "label": _music_display_value(
-            tags.get("LABEL")
-            or tags.get("ORGANIZATION")
-            or tags.get("PUBLISHER")
+            tags.get("LABEL") or tags.get("ORGANIZATION") or tags.get("PUBLISHER")
         )
         or None,
         "durationSeconds": duration_seconds,

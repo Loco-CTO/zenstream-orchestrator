@@ -4,7 +4,6 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-
 _TIMESTAMP_RE = re.compile(r"\[(\d+):(\d{2})(?:[.:](\d{1,3}))?\]")
 _METADATA_RE = re.compile(r"^\[[A-Za-z][A-Za-z0-9_-]*:.*\]$")
 
@@ -119,7 +118,7 @@ def embedded_lyrics(path: Path, duration_seconds: float | None = None) -> list[d
     candidates: list[dict] = []
     seen: set[tuple[bool, str, str | None]] = set()
     order = 0
-    for frame in getattr(tags, "values", lambda: [])():
+    for frame in getattr(tags, "values", list)():
         frame_id = str(getattr(frame, "FrameID", "")).upper()
         if frame_id == "SYLT":
             pairs: list[tuple[float, str]] = []
@@ -151,12 +150,16 @@ def embedded_lyrics(path: Path, duration_seconds: float | None = None) -> list[d
             )
             order += 1
             if candidate:
-                key = (candidate["timed"], repr(candidate["lines"]), candidate["language"])
+                key = (
+                    candidate["timed"],
+                    repr(candidate["lines"]),
+                    candidate["language"],
+                )
                 if key not in seen:
                     seen.add(key)
                     candidates.append(candidate)
 
-    for raw_key, raw_value in getattr(tags, "items", lambda: [])():
+    for raw_key, raw_value in getattr(tags, "items", list)():
         key = str(raw_key).casefold()
         if "lyric" not in key and not key.endswith("lyr"):
             continue
@@ -202,7 +205,9 @@ def lyrics_to_vtt(text: str, duration_seconds: float | None = None) -> str:
     if not parsed:
         return "WEBVTT\n\n"
     if not parsed["timed"]:
-        end = duration_seconds if duration_seconds and duration_seconds > 0 else 359999.0
+        end = (
+            duration_seconds if duration_seconds and duration_seconds > 0 else 359999.0
+        )
         lines = "\n".join(line["text"] for line in parsed["lines"])
         return f"WEBVTT\n\n1\n00:00:00.000 --> {_vtt_time(end)}\n{lines}\n"
     cues = []

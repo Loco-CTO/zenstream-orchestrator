@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import subprocess
 import time
 from collections import defaultdict, deque
@@ -36,8 +35,8 @@ from app.foreground import run_auth, run_control, run_foreground
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore
 from app.language_registry import language_options
-from app.lyrics import lyrics_to_vtt
 from app.logging_config import get_logger
+from app.lyrics import lyrics_to_vtt
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings

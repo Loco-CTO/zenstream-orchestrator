@@ -16,13 +16,13 @@ from app.library import (
     LibraryRuntime,
     LibraryScanner,
     LibraryStore,
-    _quick_fingerprint,
     _audio_inventory_fingerprint,
-    _SidecarStatWorker,
     _audio_tag_key,
     _inventory_query,
     _music_filename_parts,
     _music_local_document,
+    _quick_fingerprint,
+    _SidecarStatWorker,
     _top_level_key,
     guess_media,
     normalized_path,
@@ -2010,7 +2010,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 self._prepare_incremental_scan(scanner)
                 scanner._scan_music("library-1", root, "job-1", lambda: False)
 
-                track_id, = db.execute(
+                (track_id,) = db.execute(
                     "SELECT id FROM library_entities WHERE entity_type='track'"
                 )[0]
                 self.assertEqual(

@@ -56,9 +56,7 @@ class MusicBrainzLookupTest(unittest.TestCase):
         },
     )
     def test_recording_search_includes_album_year_and_duration_context(self, request):
-        MusicBrainzClient().search_recordings(
-            "Track", "Artist", "Album", "2024", 123.4
-        )
+        MusicBrainzClient().search_recordings("Track", "Artist", "Album", "2024", 123.4)
 
         request.assert_called_once_with(
             "/recording",
@@ -145,7 +143,9 @@ class MusicBrainzLookupTest(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(value["tracks"][0]["contributingArtists"], value["tracks"][0]["artists"])
+        self.assertEqual(
+            value["tracks"][0]["contributingArtists"], value["tracks"][0]["artists"]
+        )
 
     def test_recording_normalization_keeps_work_provider_ids(self):
         value = MusicBrainzClient.normalize(
@@ -201,7 +201,9 @@ class MusicBrainzLookupTest(unittest.TestCase):
             if request.url.path == "/release/release-id":
                 return httpx.Response(
                     307,
-                    headers={"location": "https://archive.org/download/mbid-id/index.json"},
+                    headers={
+                        "location": "https://archive.org/download/mbid-id/index.json"
+                    },
                 )
             return httpx.Response(200, json={"images": []})
 

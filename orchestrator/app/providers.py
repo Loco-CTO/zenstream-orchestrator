@@ -1505,9 +1505,7 @@ class MusicBrainzClient(ProviderClient):
         return credits
 
     def _search(self, endpoint: str, query: str) -> list[dict]:
-        payload = self._request(
-            f"/{endpoint}", {"query": query, "limit": 10}
-        )
+        payload = self._request(f"/{endpoint}", {"query": query, "limit": 10})
         values = payload.get(f"{endpoint}s", []) or []
         results = []
         for value in values:
@@ -1518,22 +1516,18 @@ class MusicBrainzClient(ProviderClient):
                 "provider": "musicbrainz",
                 "providerId": str(value["id"]),
                 "title": value.get("name") or value.get("title"),
-                "year": str(
-                    value.get("first-release-date") or value.get("date") or ""
-                )[:4]
+                "year": str(value.get("first-release-date") or value.get("date") or "")[
+                    :4
+                ]
                 or None,
                 "artists": credits,
                 "artistIds": [
-                    str(credit["id"])
-                    for credit in credits
-                    if credit.get("id")
+                    str(credit["id"]) for credit in credits if credit.get("id")
                 ],
                 "score": value.get("score"),
             }
             if endpoint == "release":
-                result["releaseGroupId"] = (
-                    (value.get("release-group") or {}).get("id")
-                )
+                result["releaseGroupId"] = (value.get("release-group") or {}).get("id")
             results.append(result)
         return results
 
@@ -1571,9 +1565,7 @@ class MusicBrainzClient(ProviderClient):
                 duration_ms = None
             if duration_ms is not None and duration_ms >= 0:
                 fields.append(("dur", duration_ms))
-        return self._search(
-            "recording", self._fielded_search_query(fields)
-        )
+        return self._search("recording", self._fielded_search_query(fields))
 
     def search(self, entity_type: str, query: str) -> list[dict]:
         """Retain the generic provider interface for legacy callers.
@@ -1677,6 +1669,7 @@ class MusicBrainzClient(ProviderClient):
             )
         date = payload.get("first-release-date") or payload.get("date")
         tags = _names(payload.get("tags"))
+
         def artist_credits(values) -> list[dict]:
             credits = []
             for value in values or []:
@@ -2547,7 +2540,9 @@ def _select_music_match(
         or scored[0][0] < 100
         or (len(scored) > 1 and scored[0][0] == scored[1][0])
     ):
-        raise ProviderError(f"No unique high-confidence MusicBrainz match for '{title}'")
+        raise ProviderError(
+            f"No unique high-confidence MusicBrainz match for '{title}'"
+        )
     return scored[0][1]
 
 

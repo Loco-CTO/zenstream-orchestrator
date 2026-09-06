@@ -1773,10 +1773,7 @@ class MetadataIngestService:
                 raise ValueError(
                     f"MusicBrainz {entity_type} {provider_id} returned no metadata document"
                 )
-            values = {
-                locale: copy.deepcopy(normalized)
-                for locale in locales
-            }
+            values = {locale: copy.deepcopy(normalized) for locale in locales}
 
         if len(locales) == 1 and not neutral:
             locale = locales[0]

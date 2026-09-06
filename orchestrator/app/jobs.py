@@ -168,8 +168,7 @@ def _fetch_upgrade_documents(
     """Fetch and cache fresh documents without projecting unchanged upgrades."""
     service = ingest.metadata_service
     neutral = (
-        provider == "musicbrainz"
-        and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+        provider == "musicbrainz" and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
     )
     fetch_method = getattr(service, "fetch_locales", None)
     provider_locales = [""] if neutral else locales
@@ -1759,9 +1758,7 @@ class MetadataMissingJob:
                 else:
                     cached = dict(cached)
                     cached.pop("_stale", None)
-                    documents = {
-                        locale: dict(cached) for locale in locales
-                    }
+                    documents = {locale: dict(cached) for locale in locales}
                     gaps, _linked = _metadata_document_gaps(
                         self.db,
                         provider,

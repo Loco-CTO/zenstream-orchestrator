@@ -501,9 +501,7 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             def ingest_locales(
                 self, provider, entity_type, provider_id, locales, **_kwargs
             ):
-                self.fetches.append(
-                    (provider, entity_type, provider_id, list(locales))
-                )
+                self.fetches.append((provider, entity_type, provider_id, list(locales)))
                 return {}
 
         ingest = Ingest()

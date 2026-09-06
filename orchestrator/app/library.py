@@ -15,7 +15,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, as_completed
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Empty
 
@@ -1111,6 +1111,13 @@ class LibraryScanner:
         self._publication_lock = threading.Lock()
         self._pending_publication_roots: dict[str, None] = {}
         self._last_publication_at = 0.0
+
+    def _has_table(self, name: str) -> bool:
+        return bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            )
+        )
 
     def _set_stage(
         self, job_id: str, stage: str, *, persist: bool = True, **context
@@ -2264,6 +2271,14 @@ class LibraryScanner:
                 value
                 for value in current
                 if value[0] == "tmdb" and value not in normalized_keys
+            )
+            normalized = list(dict.fromkeys(normalized))
+        if entity_type == "artist":
+            normalized_keys = set(normalized)
+            normalized.extend(
+                value
+                for value in current
+                if value[0] == "local" and value not in normalized_keys
             )
             normalized = list(dict.fromkeys(normalized))
         if set(normalized) != set(current):
@@ -5005,7 +5020,73 @@ class LibraryScanner:
             "ORDER BY e.id LIMIT 1",
             (library_id, entity_type, identifier_type, str(provider_id)),
         )
-        return str(rows[0][0]) if rows else None
+        if not rows:
+            return None
+        entity_id = str(rows[0][0])
+        self._scan_seen_ids.add(entity_id)
+        return entity_id
+
+    def _music_artist_by_name(self, library_id: str, name: str) -> str | None:
+        normalized = _music_normalize(name)
+        if not normalized:
+            return None
+        rows = self.db.execute(
+            "SELECT id,relative_path FROM library_entities "
+            "WHERE library_id=? AND entity_type='artist' AND parent_id IS NULL "
+            "ORDER BY id",
+            (library_id,),
+        )
+        for entity_id, relative_path in rows:
+            if _music_normalize(relative_path) == normalized:
+                entity_id = str(entity_id)
+                self._scan_seen_ids.add(entity_id)
+                return entity_id
+        return None
+
+    def _persist_music_local_artist(
+        self, artist_id: str, name: str, ingest=None
+    ) -> None:
+        """Keep providerless artist metadata durable and projection-readable."""
+        display_name = _music_display_value(name)
+        if not display_name:
+            return
+        document = _music_local_artist_document(display_name, artist_id)
+        self._music_local_metadata[artist_id] = document
+        self.db.execute(
+            "INSERT OR IGNORE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
+            (artist_id, "local", "artist", artist_id),
+        )
+        if self._has_table("metadata_cache"):
+            from app.metadata_services import MetadataSearchProjection
+            from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
+
+            payload = dict(document)
+            payload["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
+            payload["_metadataLocale"] = ""
+            fetched_at = datetime.now(timezone.utc)
+            cache_values = (
+                json.dumps(payload, ensure_ascii=False),
+                fetched_at.isoformat(),
+                (fetched_at + timedelta(days=7)).isoformat(),
+            )
+            cache_key = ("local", "artist", artist_id, "")
+            if self.db.execute(
+                "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
+                cache_key,
+            ):
+                self.db.execute(
+                    "UPDATE metadata_cache SET payload=?,fetched_at=?,expires_at=? WHERE provider=? AND entity_type=? AND provider_id=? AND locale=?",
+                    (*cache_values, *cache_key),
+                )
+            else:
+                self.db.execute(
+                    "INSERT INTO metadata_cache(provider,entity_type,provider_id,locale,payload,fetched_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+                    (*cache_key, *cache_values),
+                )
+            for locale in getattr(ingest, "locales", lambda: ["en"])():
+                MetadataSearchProjection(self.db).project(
+                    "local", "artist", artist_id, locale, document
+                )
 
     def _music_mark_identity_changed(self, entity_id: str) -> None:
         if entity_id not in self._scan_created_ids:
@@ -5098,7 +5179,11 @@ class LibraryScanner:
             )
             if artist:
                 break
-        artist = artist or artist_entities.get(artist_key)
+        artist = (
+            artist
+            or artist_entities.get(artist_key)
+            or self._music_artist_by_name(library_id, artist_name)
+        )
         if not artist:
             artist = self._entity(library_id, None, "artist", artist_name)
         artist_entities[artist_key] = artist
@@ -5468,6 +5553,11 @@ class LibraryScanner:
                     )
             if candidate is not None:
                 candidate = deepcopy(candidate)
+                track["resolved_artists"] = deepcopy(
+                    candidate.get("artists")
+                    or candidate.get("contributingArtists")
+                    or []
+                )
                 candidate.setdefault("position", local.get("trackNumber"))
                 candidate.setdefault("disc", local.get("discNumber"))
                 candidate_id = candidate.get("id")
@@ -5494,6 +5584,16 @@ class LibraryScanner:
                         ):
                             document_tracks.append(deepcopy(candidate))
 
+        self._materialize_music_artist_credits(
+            library_id,
+            artist,
+            release,
+            tracks,
+            release_documents,
+            ingest,
+            job_id,
+            should_terminate,
+        )
         self._extract_and_reproject(release, "release", should_terminate)
         self._seed_all_children(
             library_id,
@@ -5507,6 +5607,230 @@ class LibraryScanner:
         self._scan_refresh_root_ids.add(artist)
         self._publish_root(artist)
         self._flush_publications()
+
+    def _materialize_music_artist_credits(
+        self,
+        library_id: str,
+        album_artist_id: str,
+        release_id: str,
+        tracks: list[dict],
+        release_documents: dict[str, dict] | None,
+        ingest,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> None:
+        """Materialize every credited artist and rewrite this group's links."""
+        if not self._has_table("music_artist_credits"):
+            return
+
+        def values_from(source) -> list[dict]:
+            if not isinstance(source, list):
+                return []
+            values = []
+            for value in source:
+                if isinstance(value, dict):
+                    name = _music_display_value(
+                        value.get("name") or value.get("title")
+                    )
+                    provider_id = value.get("id") or value.get("providerId")
+                else:
+                    name = _music_display_value(value)
+                    provider_id = None
+                if name:
+                    values.append(
+                        {
+                            "name": name,
+                            "id": str(provider_id).strip()
+                            if provider_id is not None and str(provider_id).strip()
+                            else None,
+                        }
+                    )
+            return values
+
+        release_values: list[dict] = []
+        local_release = self._music_local_metadata.get(release_id) or {}
+        release_values.extend(values_from(local_release.get("artists")))
+        release_values.extend(values_from(local_release.get("contributingArtists")))
+        for document in (release_documents or {}).values():
+            if not isinstance(document, dict):
+                continue
+            release_values.extend(values_from(document.get("artists")))
+            release_values.extend(values_from(document.get("contributingArtists")))
+
+        artist_local = self._music_local_metadata.get(album_artist_id) or {}
+        album_artist_name = _music_display_value(
+            local_release.get("albumArtist")
+            or artist_local.get("title")
+            or artist_local.get("albumArtist")
+        )
+        parent_id_rows = self.db.execute(
+            "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? "
+            "AND provider='musicbrainz' AND identifier_type='artist' "
+            "ORDER BY is_primary DESC,provider_id LIMIT 1",
+            (album_artist_id,),
+        )
+        album_artist_provider_id = (
+            str(parent_id_rows[0][0]) if parent_id_rows else None
+        )
+        parent_credit = {
+            "name": album_artist_name,
+            "id": album_artist_provider_id,
+        }
+        attempted_provider_ids: set[str] = set()
+        materialized_artists: set[str] = set()
+        artist_entities = getattr(self, "_music_artist_entities", {})
+
+        def dedupe(values: list[dict]) -> list[dict]:
+            result: list[dict] = []
+            by_id: dict[str, int] = {}
+            by_name: dict[str, int] = {}
+            for value in values:
+                name = _music_display_value(value.get("name"))
+                if not name:
+                    continue
+                provider_id = value.get("id")
+                provider_id = (
+                    str(provider_id).strip() if provider_id is not None else None
+                ) or None
+                name_key = _music_normalize(name)
+                if provider_id and provider_id in by_id:
+                    existing = result[by_id[provider_id]]
+                    if not existing.get("name"):
+                        existing["name"] = name
+                    continue
+                if name_key in by_name:
+                    index = by_name[name_key]
+                    existing = result[index]
+                    if provider_id and not existing.get("id"):
+                        existing["id"] = provider_id
+                        by_id[provider_id] = index
+                    continue
+                index = len(result)
+                result.append({"name": name, "id": provider_id})
+                by_name[name_key] = index
+                if provider_id:
+                    by_id[provider_id] = index
+            return result
+
+        def resolve_artist(credit: dict) -> str:
+            name = credit["name"]
+            provider_id = credit.get("id")
+            entity = None
+            normalized_name = _music_normalize(name)
+            if normalized_name == _music_normalize(album_artist_name):
+                entity = album_artist_id
+            elif provider_id:
+                entity = self._music_entity_by_provider_id(
+                    library_id, "artist", "artist", provider_id
+                )
+            entity = entity or artist_entities.get(normalized_name)
+            entity = entity or self._music_artist_by_name(library_id, name)
+            if not entity:
+                entity = self._entity(library_id, None, "artist", name)
+            self._scan_seen_ids.add(entity)
+            artist_entities[normalized_name] = entity
+            self._persist_music_local_artist(entity, name, ingest)
+            if provider_id:
+                self._replace_ids(entity, [("musicbrainz", "artist", provider_id)])
+                self._music_mark_identity_changed(entity)
+                if provider_id not in attempted_provider_ids:
+                    attempted_provider_ids.add(provider_id)
+                    try:
+                        ingest.ingest_locales(
+                            "musicbrainz",
+                            "artist",
+                            provider_id,
+                            ingest.provider_locales("musicbrainz", "artist"),
+                            force=False,
+                        )
+                        self.db.execute(
+                            "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
+                            (now(), entity),
+                        )
+                    except Exception as error:
+                        self.db.execute(
+                            "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                            (now(), entity),
+                        )
+                        self._queue_metadata_repair(
+                            entity,
+                            library_id,
+                            job_id,
+                            f"MusicBrainz artist metadata unavailable; local artist retained: {error}",
+                            ingest.provider_locales("musicbrainz", "artist"),
+                        )
+            else:
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                    (now(), entity),
+                )
+            materialized_artists.add(entity)
+            return entity
+
+        for track in tracks:
+            self._check_termination(should_terminate)
+            local = track.get("local") or {}
+            candidates = [parent_credit]
+            candidates.extend(release_values)
+            candidates.extend(values_from(local.get("artists")))
+            candidates.extend(values_from(local.get("contributingArtists")))
+            candidates.extend(values_from(track.get("resolved_artists")))
+            credits = dedupe(candidates)
+            rows = []
+            for order, credit in enumerate(credits):
+                artist_entity = resolve_artist(credit)
+                rows.append(
+                    (
+                        track["entity_id"],
+                        artist_entity,
+                        order,
+                        credit["name"],
+                    )
+                )
+            self.db.execute(
+                "DELETE FROM music_artist_credits WHERE track_id=?",
+                (track["entity_id"],),
+            )
+            if rows:
+                self.db.write_many(
+                    (
+                        "INSERT INTO music_artist_credits(track_id,artist_id,credit_order,credited_name) VALUES(?,?,?,?)",
+                        row,
+                    )
+                    for row in rows
+                )
+
+        for entity in materialized_artists:
+            self._scan_refresh_root_ids.add(entity)
+            self._publish_root(entity)
+        self._flush_publications()
+
+    def _remove_orphan_music_artists(self, library_id: str) -> None:
+        if not self._has_table("music_artist_credits"):
+            return
+        rows = self.db.execute(
+            "SELECT artist.id FROM library_entities artist "
+            "WHERE artist.library_id=? AND artist.entity_type='artist' "
+            "AND NOT EXISTS (SELECT 1 FROM library_entities release "
+            "WHERE release.parent_id=artist.id AND release.entity_type='release') "
+            "AND NOT EXISTS (SELECT 1 FROM music_artist_credits credit "
+            "WHERE credit.artist_id=artist.id)",
+            (library_id,),
+        )
+        orphan_ids = [str(row[0]) for row in rows]
+        if not orphan_ids:
+            return
+        from app.library_cleanup import cleanup_entities
+
+        cleanup_entities(self.db, orphan_ids)
+        self._scan_delta["removed"].update(orphan_ids)
+        self._scan_seen_ids.difference_update(orphan_ids)
+        self._scan_refresh_root_ids.difference_update(orphan_ids)
+        self._scan_created_ids = [
+            entity_id
+            for entity_id in self._scan_created_ids
+            if entity_id not in orphan_ids
+        ]
 
     def _scan_music(
         self,
@@ -5558,6 +5882,13 @@ class LibraryScanner:
                 self._music_artist_entities,
                 self._music_release_entities,
             )
+            artist_local = self._music_local_metadata.get(artist) or {}
+            self._persist_music_local_artist(
+                artist,
+                _music_display_value(artist_local.get("title"))
+                or _music_display_value(artist_local.get("albumArtist")),
+                ingest,
+            )
             has_metadata_context = any(
                 tags.get("ALBUM")
                 or tags.get("ALBUMARTIST")
@@ -5590,6 +5921,16 @@ class LibraryScanner:
                         "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
                         (now(), artist, release),
                     )
+                    self._materialize_music_artist_credits(
+                        library_id,
+                        artist,
+                        release,
+                        tracks,
+                        None,
+                        ingest,
+                        job_id,
+                        should_terminate,
+                    )
                     self._seed_all_children(
                         library_id,
                         service,
@@ -5619,6 +5960,22 @@ class LibraryScanner:
                     "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
                     (now(), artist, release),
                 )
+                try:
+                    self._materialize_music_artist_credits(
+                        library_id,
+                        artist,
+                        release,
+                        tracks,
+                        None,
+                        ingest,
+                        job_id,
+                        should_terminate,
+                    )
+                except Exception:
+                    logger.exception(
+                        "local music artist credit materialization failed release_id=%s",
+                        release,
+                    )
                 self._queue_metadata_repair(
                     release,
                     library_id,
@@ -5712,6 +6069,7 @@ class LibraryScanner:
                 message=f"Discovered {inspected_files} music files",
             )
         flush_group()
+        self._remove_orphan_music_artists(library_id)
         self._scan_complete = True
         return count
 
@@ -6284,6 +6642,14 @@ def _music_local_document(
     for key in ("GENRE", "STYLE", "MOOD"):
         genres.extend(_music_tag_values(tags, key))
     genres = list(dict.fromkeys(genres))
+    artist_ids = _music_tag_values(tags, "MUSICBRAINZ_ARTISTID")
+    artist_credits = [
+        {
+            **({"id": artist_ids[index]} if index < len(artist_ids) else {}),
+            "name": value,
+        }
+        for index, value in enumerate(artists)
+    ]
     if entity_type == "artist":
         title = _music_display_value(artist_name) or title
     elif entity_type == "release":
@@ -6300,8 +6666,8 @@ def _music_local_document(
         "tags": genres,
         "originalLanguage": None,
         "albumArtist": album_artist,
-        "artists": [{"name": value} for value in artists],
-        "contributingArtists": [{"name": value} for value in artists],
+        "artists": artist_credits,
+        "contributingArtists": deepcopy(artist_credits),
         "album": album or None,
         "albumId": None,
         "albumType": album_type,
@@ -6334,6 +6700,43 @@ def _music_local_document(
             }
         ]
     return values
+
+
+def _music_local_artist_document(name: str, artist_id: str) -> dict:
+    return {
+        "title": name,
+        "overview": None,
+        "description": None,
+        "date": None,
+        "releaseDate": None,
+        "year": None,
+        "tags": [],
+        "originalLanguage": None,
+        "albumArtist": name,
+        "artists": [{"name": name}],
+        "contributingArtists": [{"name": name}],
+        "album": None,
+        "albumId": None,
+        "albumType": None,
+        "albumSecondaryTypes": [],
+        "label": None,
+        "durationSeconds": None,
+        "discNumber": None,
+        "trackNumber": None,
+        "tracks": [],
+        "provider": "local",
+        "providerId": artist_id,
+        "ids": [
+            {
+                "provider": "local",
+                "identifierType": "artist",
+                "id": artist_id,
+            }
+        ],
+        "images": [],
+        "extraImages": [],
+        "credits": [],
+    }
 
 
 def _music_ids(

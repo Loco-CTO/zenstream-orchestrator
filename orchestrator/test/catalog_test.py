@@ -2312,6 +2312,79 @@ class CatalogTest(unittest.TestCase):
             ["movie-new", "movie-old"],
         )
 
+    def test_music_artist_detail_includes_appearances_tracks_and_related_artists(self):
+        account = self.account().create("music-user", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.db.execute(
+            "CREATE TABLE music_artist_credits(track_id TEXT NOT NULL, artist_id TEXT NOT NULL, credit_order INTEGER NOT NULL, credited_name TEXT NOT NULL, PRIMARY KEY(track_id,artist_id))"
+        )
+
+        def insert_entity(entity_id, library_id, parent_id, entity_type, path):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    library_id,
+                    parent_id,
+                    entity_type,
+                    path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+
+        insert_entity("artist-main", "allowed", None, "artist", "Main Artist")
+        insert_entity("artist-feature", "allowed", None, "artist", "Feature Artist")
+        insert_entity("artist-other", "allowed", None, "artist", "Other Artist")
+        insert_entity("artist-hidden", "hidden", None, "artist", "Hidden Artist")
+        insert_entity("release-main", "allowed", "artist-main", "release", "Main")
+        insert_entity(
+            "release-appears", "allowed", "artist-other", "release", "Appears"
+        )
+        insert_entity("track-main", "allowed", "release-main", "track", "Main/01.mp3")
+        insert_entity(
+            "track-appears", "allowed", "release-appears", "track", "Appears/01.mp3"
+        )
+        for values in (
+            ("track-main", "artist-main", 0, "Main Artist"),
+            ("track-main", "artist-feature", 1, "Feature Artist"),
+            ("track-appears", "artist-main", 0, "Main Artist"),
+            ("track-appears", "artist-feature", 1, "Feature Artist"),
+            ("track-appears", "artist-other", 2, "Other Artist"),
+            ("track-main", "artist-hidden", 2, "Hidden Artist"),
+        ):
+            self.db.execute(
+                "INSERT INTO music_artist_credits VALUES(?,?,?,?)", values
+            )
+
+        result = self.catalog().music_artist_detail(
+            account["id"], "artist-main", "en"
+        )
+
+        self.assertEqual(result["artist"]["id"], "artist-main")
+        self.assertEqual([value["id"] for value in result["albums"]], ["release-main"])
+        self.assertEqual(
+            [value["id"] for value in result["appearsIn"]], ["release-appears"]
+        )
+        self.assertEqual(
+            {value["id"] for value in result["tracks"]},
+            {"track-main", "track-appears"},
+        )
+        self.assertEqual(
+            [value["id"] for value in result["relatedArtists"]],
+            ["artist-feature", "artist-other"],
+        )
+        self.assertNotIn(
+            "artist-hidden", {value["id"] for value in result["relatedArtists"]}
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

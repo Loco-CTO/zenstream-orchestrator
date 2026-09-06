@@ -2520,18 +2520,133 @@ class Catalog:
         artist_row = self.require_entity(user_id, artist_id)
         if artist_row[3] != "artist":
             raise HTTPException(404, "Artist not found.")
-        album_rows = [
-            row
-            for row in self._music_release_rows({artist_row[1]})
-            if row[2] == artist_id
+        release_rows = self._music_release_rows({artist_row[1]})
+        release_by_id = {row[0]: row for row in release_rows}
+        album_rows = [row for row in release_rows if row[2] == artist_id]
+
+        credited_track_ids: set[str] = set()
+        appears_release_ids: set[str] = set()
+        related_counts: dict[str, int] = {}
+        playable_track_filter = (
+            "AND EXISTS (SELECT 1 FROM media_files media "
+            "WHERE media.entity_id=track.id AND media.role='media')"
+            if self._has_table("media_files")
+            else ""
+        )
+        if self._has_table("music_artist_credits"):
+            credited_rows = self.db.execute(
+                "SELECT DISTINCT track.id,track.parent_id,release.parent_id "
+                "FROM music_artist_credits credit "
+                "JOIN library_entities track ON track.id=credit.track_id "
+                "JOIN library_entities release ON release.id=track.parent_id "
+                "WHERE credit.artist_id=? AND track.library_id=? "
+                "AND track.entity_type='track' AND release.entity_type='release' "
+                + playable_track_filter,
+                (artist_id, artist_row[1]),
+            )
+            for track_id, release_id, release_artist_id in credited_rows:
+                credited_track_ids.add(str(track_id))
+                if release_artist_id != artist_id:
+                    appears_release_ids.add(str(release_id))
+            related_rows = self.db.execute(
+                "SELECT other.artist_id,COUNT(DISTINCT current.track_id) "
+                "FROM music_artist_credits current "
+                "JOIN music_artist_credits other "
+                "ON other.track_id=current.track_id "
+                "JOIN library_entities track ON track.id=current.track_id "
+                "JOIN library_entities other_artist ON other_artist.id=other.artist_id "
+                "WHERE current.artist_id=? AND other.artist_id<>? "
+                "AND track.library_id=? AND track.entity_type='track' "
+                + playable_track_filter
+                + " "
+                "GROUP BY other.artist_id",
+                (artist_id, artist_id, artist_row[1]),
+            )
+            related_counts = {str(row[0]): int(row[1] or 0) for row in related_rows}
+
+        own_track_rows = [
+            track
+            for album in album_rows
+            for track in self._music_track_rows(album[0])
         ]
-        all_rows = [artist_row, *album_rows]
-        self._seed_hydration_rows(user_id, all_rows, language)
+        track_by_id = {row[0]: row for row in own_track_rows}
+        if credited_track_ids:
+            credited_rows = self.db.execute(
+                "SELECT track.id,track.library_id,track.parent_id,track.entity_type,"
+                "track.relative_path,track.season_number,track.episode_number,"
+                "track.episode_end_number,track.created_at,track.updated_at "
+                "FROM library_entities track "
+                "WHERE track.library_id=? AND track.entity_type='track' "
+                "AND track.id IN (%s)"
+                % ",".join("?" for _ in credited_track_ids),
+                [artist_row[1], *sorted(credited_track_ids)],
+            )
+            track_by_id.update({row[0]: row for row in credited_rows})
+        track_rows = list(track_by_id.values())
+        track_rows.sort(
+            key=lambda row: (
+                str(
+                    (self.metadata(user_id, row[0], language)["metadata"] or {}).get(
+                        "title"
+                    )
+                    or ""
+                ).casefold(),
+                self._audio_fields(row[0])[0] is None,
+                self._audio_fields(row[0])[0] or 0,
+                self._audio_fields(row[0])[1] is None,
+                self._audio_fields(row[0])[1] or 0,
+                str(row[4] or "").casefold(),
+                row[0],
+            )
+        )
+        appears_rows = [
+            row for release_id, row in release_by_id.items()
+            if release_id in appears_release_ids
+        ]
+        appears_rows.sort(
+            key=lambda row: (
+                str(
+                    self.metadata(user_id, row[0], language)["metadata"].get("title")
+                    or ""
+                ).casefold(),
+                row[0],
+            )
+        )
+        allowed_libraries = self.allowed_libraries(user_id)
+        related_rows = []
+        for entity_id in related_counts:
+            row = self._entity_row(entity_id)
+            if row and row[1] in allowed_libraries and row[3] == "artist":
+                related_rows.append(row)
+        related_rows.sort(
+            key=lambda row: (
+                -related_counts.get(row[0], 0),
+                str(
+                    (self.metadata(user_id, row[0], language)["metadata"] or {}).get(
+                        "title"
+                    )
+                    or row[4]
+                    or ""
+                ).casefold(),
+                row[0],
+            )
+        )
+        all_rows = [
+            artist_row,
+            *album_rows,
+            *appears_rows,
+            *track_rows,
+            *related_rows,
+        ]
+        unique_rows = list({row[0]: row for row in all_rows}.values())
+        self._seed_hydration_rows(user_id, unique_rows, language)
         self._preload_projected_metadata(
-            user_id, [value[0] for value in all_rows], language
+            user_id, [value[0] for value in unique_rows], language
         )
         dates = self._date_values(
-            "", {artist_row[1]}, {value[0] for value in album_rows}
+            "",
+            {artist_row[1]},
+            {value[0] for value in (*album_rows, *appears_rows)},
         )
         artist = self._serialize(
             user_id,
@@ -2553,9 +2668,35 @@ class Catalog:
         albums.sort(
             key=lambda value: (str(value.get("name") or "").casefold(), value["id"])
         )
+        appears_in = [
+            self._music_album_value(user_id, row, language, dates)
+            for row in appears_rows
+        ]
+        tracks = [
+            self._serialize(
+                user_id,
+                row,
+                self.metadata(user_id, row[0], language)["metadata"],
+                dates=dates.get(row[0]),
+                language=language,
+            )
+            for row in track_rows
+        ]
+        related_artists = [
+            self._serialize(
+                user_id,
+                row,
+                self.metadata(user_id, row[0], language)["metadata"],
+                language=language,
+            )
+            for row in related_rows
+        ]
         return {
             "artist": artist,
             "albums": albums,
+            "tracks": tracks,
+            "appearsIn": appears_in,
+            "relatedArtists": related_artists,
             "catalogGeneration": self._music_catalog_generation(artist_row[1]),
         }
 

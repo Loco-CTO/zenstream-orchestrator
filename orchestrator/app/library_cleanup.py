@@ -118,6 +118,11 @@ def _delete_entity_rows(cursor, tables: set[str], entity_ids: list[str]) -> None
                 f"DELETE FROM entity_person_credits WHERE entity_id IN ({placeholders})",
                 batch,
             )
+        if "music_artist_credits" in tables:
+            cursor.execute(
+                f"DELETE FROM music_artist_credits WHERE track_id IN ({placeholders}) OR artist_id IN ({placeholders})",
+                batch + batch,
+            )
         if "media_files" in tables:
             cursor.execute(
                 f"DELETE FROM media_files WHERE entity_id IN ({placeholders})", batch
@@ -180,6 +185,10 @@ def _purge_orphan_inventory(cursor, tables: set[str]) -> None:
     if "entity_provider_ids" in tables:
         cursor.execute(
             f"DELETE FROM entity_provider_ids AS p WHERE NOT {valid_entity('p.entity_id')}"
+        )
+    if "music_artist_credits" in tables:
+        cursor.execute(
+            f"DELETE FROM music_artist_credits AS c WHERE NOT ({valid_entity('c.track_id')} AND {valid_entity('c.artist_id')})"
         )
     if "library_entities" in tables and "libraries" in tables:
         cursor.execute(

@@ -1669,6 +1669,39 @@ class MusicBrainzClient(ProviderClient):
             )
         date = payload.get("first-release-date") or payload.get("date")
         tags = _names(payload.get("tags"))
+        release_group = payload.get("release-group") or payload.get("release_group")
+        album_type = None
+        album_secondary_types: list[str] = []
+        if entity_type in {"release", "release_group"}:
+            type_sources = [
+                value
+                for value in (release_group, payload)
+                if isinstance(value, dict)
+            ]
+            for source in type_sources:
+                if not album_type:
+                    candidate = (
+                        source.get("primary-type")
+                        or source.get("primaryType")
+                        or source.get("type")
+                    )
+                    if candidate:
+                        album_type = str(candidate).strip() or None
+                secondary = source.get("secondary-types") or source.get(
+                    "secondaryTypes"
+                )
+                if isinstance(secondary, (list, tuple)):
+                    values = secondary
+                elif secondary:
+                    values = [secondary]
+                else:
+                    values = []
+                for value in values:
+                    normalized = str(value).strip()
+                    if normalized and normalized.casefold() not in {
+                        existing.casefold() for existing in album_secondary_types
+                    }:
+                        album_secondary_types.append(normalized)
 
         def artist_credits(values) -> list[dict]:
             credits = []
@@ -1768,7 +1801,6 @@ class MusicBrainzClient(ProviderClient):
                 "id": provider_id,
             }
         ]
-        release_group = payload.get("release-group") or payload.get("release_group")
         if isinstance(release_group, dict) and release_group.get("id"):
             provider_ids.append(
                 {
@@ -1810,6 +1842,8 @@ class MusicBrainzClient(ProviderClient):
             "contributingArtists": credits,
             "album": first_release.get("title") or first_release.get("name"),
             "albumId": first_release.get("id"),
+            "albumType": album_type,
+            "albumSecondaryTypes": album_secondary_types,
             "label": ", ".join(dict.fromkeys(label_names)) or None,
             "durationSeconds": track_duration,
             "tracks": tracks,

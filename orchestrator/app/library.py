@@ -473,6 +473,24 @@ _AUDIO_TAG_ALIASES = {
     "MUSICBRAINZ RELEASETRACKID": "MUSICBRAINZ_RELEASETRACKID",
     "MUSICBRAINZ WORK ID": "MUSICBRAINZ_WORKID",
     "MUSICBRAINZ WORKID": "MUSICBRAINZ_WORKID",
+    "ALBUM TYPE": "ALBUMTYPE",
+    "ALBUMTYPE": "ALBUMTYPE",
+    "ALBUM TYPES": "ALBUMTYPES",
+    "ALBUMTYPES": "ALBUMTYPES",
+    "ALBUM SECONDARY TYPES": "ALBUMSECONDARYTYPES",
+    "ALBUMSECONDARYTYPES": "ALBUMSECONDARYTYPES",
+    "RELEASE TYPE": "ALBUMTYPE",
+    "RELEASETYPE": "ALBUMTYPE",
+    "RELEASE TYPES": "ALBUMTYPES",
+    "RELEASETYPES": "ALBUMTYPES",
+    "MUSICBRAINZ ALBUM TYPE": "ALBUMTYPE",
+    "MUSICBRAINZ ALBUMTYPE": "ALBUMTYPE",
+    "MUSICBRAINZ ALBUM TYPES": "ALBUMTYPES",
+    "MUSICBRAINZ ALBUMTYPES": "ALBUMTYPES",
+    "MUSICBRAINZ RELEASE TYPE": "ALBUMTYPE",
+    "MUSICBRAINZ RELEASETYPE": "ALBUMTYPE",
+    "MUSICBRAINZ RELEASE TYPES": "ALBUMTYPES",
+    "MUSICBRAINZ RELEASETYPES": "ALBUMTYPES",
 }
 _AUDIO_ID_TAGS = {
     "MUSICBRAINZ_ARTISTID",
@@ -483,7 +501,7 @@ _AUDIO_ID_TAGS = {
     "MUSICBRAINZ_RELEASETRACKID",
     "MUSICBRAINZ_WORKID",
 }
-_AUDIO_MULTI_TAGS = {"ARTIST", "ALBUMARTIST"}
+_AUDIO_MULTI_TAGS = {"ARTIST", "ALBUMARTIST", "ALBUMTYPES", "ALBUMSECONDARYTYPES"}
 
 
 def _audio_tag_key(raw_key: object) -> str:
@@ -5121,9 +5139,16 @@ class LibraryScanner:
         if not release:
             release = self._entity(library_id, artist, "release", album_path)
         release_entities[release_key] = release
+        release_tags = dict(first_tags)
+        for key in ("ALBUMTYPE", "ALBUMTYPES", "ALBUMSECONDARYTYPES"):
+            values: list[str] = []
+            for _, tags in group_entries:
+                values.extend(_music_tag_values(tags, key))
+            if values:
+                release_tags[key] = ";".join(dict.fromkeys(values))
         self._music_local_metadata[release] = _music_local_document(
             first_path,
-            first_tags,
+            release_tags,
             "release",
             artist_name=artist_name,
             album_name=album_name,
@@ -6167,6 +6192,25 @@ def _music_display_value(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _music_album_type_values(tags: dict[str, str]) -> tuple[str | None, list[str]]:
+    primary_values = _music_tag_values(tags, "ALBUMTYPE")
+    all_values = _music_tag_values(tags, "ALBUMTYPES")
+    secondary_values = _music_tag_values(tags, "ALBUMSECONDARYTYPES")
+    primary = _music_display_value(primary_values[0]) if primary_values else None
+    if not primary and all_values:
+        primary = _music_display_value(all_values.pop(0))
+    secondary = [*all_values, *secondary_values]
+    unique_secondary: list[str] = []
+    for value in secondary:
+        normalized = _music_display_value(value)
+        if normalized and normalized.casefold() != (primary or "").casefold():
+            if normalized.casefold() not in {
+                existing.casefold() for existing in unique_secondary
+            }:
+                unique_secondary.append(normalized)
+    return primary, unique_secondary
+
+
 def _music_normalize(value: str | None) -> str:
     normalized = unicodedata.normalize("NFKC", _music_display_value(value))
     return re.sub(r"\s+", " ", normalized).casefold()
@@ -6244,6 +6288,7 @@ def _music_local_document(
         title = _music_display_value(artist_name) or title
     elif entity_type == "release":
         title = album or title
+    album_type, album_secondary_types = _music_album_type_values(tags)
 
     values = {
         "title": title,
@@ -6259,6 +6304,8 @@ def _music_local_document(
         "contributingArtists": [{"name": value} for value in artists],
         "album": album or None,
         "albumId": None,
+        "albumType": album_type,
+        "albumSecondaryTypes": album_secondary_types,
         "label": _music_display_value(
             tags.get("LABEL") or tags.get("ORGANIZATION") or tags.get("PUBLISHER")
         )

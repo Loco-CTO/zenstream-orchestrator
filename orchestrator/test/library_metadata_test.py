@@ -1956,6 +1956,21 @@ class LibraryMetadataTest(unittest.TestCase):
         )
         self.assertEqual(fallback["artists"], [{"name": "Album Artist"}])
 
+    def test_music_local_metadata_keeps_album_type_tags(self):
+        self.assertEqual(_audio_tag_key("MUSICBRAINZ ALBUM TYPE"), "ALBUMTYPE")
+        document = _music_local_document(
+            Path("1.01. Track.flac"),
+            {
+                "ALBUM": "Live EP",
+                "ALBUMTYPE": "EP",
+                "ALBUMTYPES": "EP;Live",
+            },
+            "release",
+        )
+
+        self.assertEqual(document["albumType"], "EP")
+        self.assertEqual(document["albumSecondaryTypes"], ["Live"])
+
     def test_music_track_documents_prefer_track_artists_over_release_artists(self):
         scanner = LibraryScanner.__new__(LibraryScanner)
         scanner._music_local_metadata = {

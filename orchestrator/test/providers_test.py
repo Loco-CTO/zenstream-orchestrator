@@ -147,6 +147,24 @@ class MusicBrainzLookupTest(unittest.TestCase):
             value["tracks"][0]["contributingArtists"], value["tracks"][0]["artists"]
         )
 
+    def test_release_normalization_keeps_release_group_types(self):
+        value = MusicBrainzClient.normalize(
+            "release",
+            "release-id",
+            {
+                "id": "release-id",
+                "title": "Live EP",
+                "release-group": {
+                    "id": "release-group-id",
+                    "primary-type": "EP",
+                    "secondary-types": ["Live", "Remix"],
+                },
+            },
+        )
+
+        self.assertEqual(value["albumType"], "EP")
+        self.assertEqual(value["albumSecondaryTypes"], ["Live", "Remix"])
+
     def test_recording_normalization_keeps_work_provider_ids(self):
         value = MusicBrainzClient.normalize(
             "track",

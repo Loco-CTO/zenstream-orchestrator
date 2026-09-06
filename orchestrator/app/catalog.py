@@ -1762,7 +1762,14 @@ class Catalog:
                     metadata = {**metadata, "images": merged_images}
                 elif isinstance(release_images, dict) and not track_images:
                     metadata = {**metadata, "images": dict(release_images)}
-                for field in ("album", "albumArtist", "label", "releaseDate"):
+                for field in (
+                    "album",
+                    "albumArtist",
+                    "albumType",
+                    "albumSecondaryTypes",
+                    "label",
+                    "releaseDate",
+                ):
                     if not metadata.get(field) and release_metadata.get(field):
                         metadata[field] = release_metadata[field]
         if row[3] == "track" and metadata.get("title"):

@@ -622,6 +622,36 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
             ),
         )
 
+    def test_lyrics_route_uses_authenticated_control_work(self):
+        request = _json_request(
+            {}, method="GET", path="/api/playback/items/track-1/lyrics"
+        )
+        payload = {
+            "trackId": "track-1",
+            "lyrics": {
+                "source": "embedded",
+                "timed": True,
+                "language": None,
+                "lines": [],
+            },
+        }
+        with (
+            patch.object(
+                client_routes,
+                "_require_access",
+                new=AsyncMock(return_value={"id": "user-1"}),
+            ),
+            patch.object(
+                client_routes, "run_control", new=AsyncMock(return_value=payload)
+            ) as control,
+        ):
+            response = asyncio.run(client_routes.playback_lyrics("track-1", request))
+
+        self.assertEqual(response, payload)
+        control.assert_awaited_once_with(
+            client_routes.media.lyrics, "user-1", "track-1"
+        )
+
     def test_versioned_cached_image_uses_stored_version_without_rehashing(self):
         request = _json_request(
             {},

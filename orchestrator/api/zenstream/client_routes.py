@@ -36,6 +36,7 @@ from app.foreground import run_auth, run_control, run_foreground
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore
 from app.language_registry import language_options
+from app.lyrics import lyrics_to_vtt
 from app.logging_config import get_logger
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
@@ -1530,39 +1531,13 @@ async def cancel_playback_session(session_id: str, request: Request):
 
 
 def _lyrics_to_vtt(source: Path) -> str:
-    text = source.read_text(encoding="utf-8-sig", errors="replace")
-    timed: list[tuple[float, str]] = []
-    for line in text.splitlines():
-        stamps = re.findall(r"\[(\d+):(\d{2})(?:[.:](\d{1,3}))?\]", line)
-        lyric = re.sub(r"\[[^\]]+\]", "", line).strip()
-        if not lyric:
-            continue
-        for minutes, seconds, fraction in stamps:
-            value = float(minutes) * 60 + float(seconds)
-            if fraction:
-                value += int(fraction.ljust(3, "0")) / 1000
-            timed.append((value, lyric))
-    if timed:
-        timed.sort(key=lambda value: value[0])
-        cues = []
-        for index, (start, lyric) in enumerate(timed):
-            end = timed[index + 1][0] if index + 1 < len(timed) else start + 8
-            cues.append(
-                f"{index + 1}\n{_vtt_time(start)} --> {_vtt_time(max(end, start + 0.5))}\n{lyric}\n"
-            )
-        return "WEBVTT\n\n" + "\n".join(cues)
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.startswith("[")
-    ]
-    return "WEBVTT\n\n1\n00:00:00.000 --> 99:59:59.000\n" + "\n".join(lines) + "\n"
+    return lyrics_to_vtt(source.read_text(encoding="utf-8-sig", errors="replace"))
 
 
-def _vtt_time(seconds: float) -> str:
-    hours, remainder = divmod(max(0.0, seconds), 3600)
-    minutes, remainder = divmod(remainder, 60)
-    return f"{int(hours):02d}:{int(minutes):02d}:{remainder:06.3f}"
+@router.get("/api/playback/items/{entity_id}/lyrics")
+async def playback_lyrics(entity_id: str, request: Request):
+    account = await _require_access(request)
+    return await run_control(media.lyrics, account["id"], entity_id)
 
 
 def _prepare_subtitle(

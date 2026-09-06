@@ -157,6 +157,7 @@ class AsyncRouteBlockingGuardTests(unittest.TestCase):
         "enqueue",
         "job",
         "sources",
+        "lyrics",
         "jobs",
         "require_entity",
         "allowed_libraries",

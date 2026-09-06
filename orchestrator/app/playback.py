@@ -25,6 +25,7 @@ from app.library import (
     sidecar_display_title,
     sidecar_media_path,
 )
+from app.lyrics import choose_lyrics, embedded_lyrics, parse_lyrics_text
 from app.logging_config import get_logger
 from app.media_probe import first_audio_stream, select_usable_video_stream
 from app.models.playback_settings import PlaybackSettings
@@ -671,6 +672,96 @@ class PlaybackManager:
         return {
             "id": source["id"],
             "streams": source.get("streams") or [],
+        }
+
+    def lyrics(self, user_id: str, entity_id: str) -> dict:
+        """Return the best local lyrics candidate for one accessible track."""
+        self.catalog.require_entity(user_id, entity_id)
+        rows = self.db.execute(
+            "SELECT f.id,f.relative_path,f.language,f.role,l.directory "
+            "FROM media_files f "
+            "JOIN library_entities e ON e.id=f.entity_id "
+            "JOIN libraries l ON l.id=e.library_id "
+            "WHERE f.entity_id=? AND f.role IN ('media','lyrics') "
+            "ORDER BY f.role DESC,f.relative_path COLLATE NOCASE",
+            (entity_id,),
+        )
+        if not rows:
+            return {"trackId": entity_id, "lyrics": None}
+
+        duration_rows = self.db.execute(
+            "SELECT media_file_id,MAX(duration_seconds) "
+            "FROM media_sources WHERE entity_id=? GROUP BY media_file_id",
+            (entity_id,),
+        )
+        durations = {
+            row[0]: float(row[1])
+            for row in duration_rows
+            if row[1] is not None
+        }
+        media_rows = [row for row in rows if row[3] == "media"]
+        sidecar_rows = [row for row in rows if row[3] == "lyrics"]
+        media_paths = [row[1] for row in media_rows]
+        candidates: list[dict] = []
+
+        def resolve_file(directory: str, relative_path: str) -> Path | None:
+            root = Path(directory).resolve()
+            path = root / relative_path
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                return None
+            if path.is_symlink() or not resolved.is_file():
+                return None
+            return resolved
+
+        for media_index, row in enumerate(media_rows):
+            media_id, media_path, _language, _role, directory = row
+            source = resolve_file(directory, media_path)
+            if source is None:
+                continue
+            duration = durations.get(media_id)
+            for candidate_index, candidate in enumerate(
+                embedded_lyrics(source, duration)
+            ):
+                candidate["_order"] = media_index * 100 + candidate_index
+                candidates.append(candidate)
+
+            matching_sidecars = [
+                sidecar
+                for sidecar in sidecar_rows
+                if self._sidecar_matches_media(sidecar[1], media_path, media_paths)
+            ]
+            for sidecar_index, sidecar in enumerate(matching_sidecars):
+                sidecar_source = resolve_file(sidecar[4], sidecar[1])
+                if sidecar_source is None:
+                    continue
+                try:
+                    with sidecar_source.open(
+                        "r", encoding="utf-8-sig", errors="replace"
+                    ) as handle:
+                        parsed = parse_lyrics_text(handle.read(2_000_000), duration)
+                except OSError:
+                    continue
+                if not parsed:
+                    continue
+                candidates.append(
+                    {
+                        "source": "sidecar",
+                        "timed": bool(parsed["timed"]),
+                        "language": sidecar[2] or None,
+                        "lines": parsed["lines"],
+                        "_order": 10_000 + media_index * 100 + sidecar_index,
+                    }
+                )
+
+        selected = choose_lyrics(candidates)
+        if selected is None:
+            return {"trackId": entity_id, "lyrics": None}
+        return {
+            "trackId": entity_id,
+            "lyrics": selected,
         }
 
     def refresh_access(

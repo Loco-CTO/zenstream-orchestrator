@@ -453,6 +453,82 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 0", store.updates[-1]["message"])
 
+    def test_musicbrainz_repair_uses_one_neutral_provider_locale(self):
+        self.db.execute("DELETE FROM entity_provider_ids WHERE entity_id='movie-1'")
+        self.db.execute("DELETE FROM library_entities WHERE id='movie-1'")
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('track-1','library-1','track')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('track-1','musicbrainz','recording','recording-1',1)"
+        )
+        for locale in ("en", "ja"):
+            self.db.execute(
+                "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+                ("track-1", locale, json.dumps({"title": "Track", "images": {}})),
+            )
+
+        class Cache:
+            @staticmethod
+            def get(provider, entity_type, provider_id, locale):
+                if (
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                ) == ("musicbrainz", "track", "recording-1", ""):
+                    return {"title": "Track", "images": []}
+                return None
+
+        class Ingest:
+            metadata_service = type("MetadataService", (), {"cache": Cache()})()
+
+            @staticmethod
+            def locales():
+                return ["en", "ja"]
+
+            def __init__(self):
+                self.materialized = []
+                self.fetches = []
+
+            def ingest_document(
+                self, provider, entity_type, provider_id, locale, document, **_kwargs
+            ):
+                self.materialized.append(
+                    (provider, entity_type, provider_id, locale, document)
+                )
+
+            def ingest_locales(
+                self, provider, entity_type, provider_id, locales, **_kwargs
+            ):
+                self.fetches.append((provider, entity_type, provider_id, list(locales)))
+                return {}
+
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with (
+            patch("app.jobs.MetadataIngestService", return_value=ingest),
+            patch("app.catalog_read_model.CatalogReadModel"),
+        ):
+            MetadataMissingJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        self.assertEqual(ingest.fetches, [])
+        self.assertEqual(
+            [value[:4] for value in ingest.materialized],
+            [("musicbrainz", "track", "recording-1", "")],
+        )
+
     def test_job_refetches_a_cached_season_without_a_provider_title(self):
         self.db.execute(
             "INSERT INTO library_entities VALUES('season-1','library-1','season')"
@@ -934,6 +1010,95 @@ class JobMappingTest(unittest.TestCase):
             self.assertEqual(refresh["kind"], "metadata_refresh")
             self.assertFalse(refresh["enabled"])
             self.assertEqual(refresh["triggers"], [])
+        finally:
+            db.close()
+
+    def test_default_metadata_tasks_describe_movie_tv_and_music_media(self):
+        db, store = self._scheduler_store()
+        try:
+            store.ensure_defaults()
+
+            missing = store.by_key("metadata_missing")
+            upgrade = store.by_key("metadata_upgrade")
+            refresh = store.by_key("metadata_refresh")
+
+            self.assertEqual(missing["name"], "Find missing media metadata")
+            self.assertIn("album", missing["description"])
+            self.assertEqual(upgrade["name"], "Find metadata upgrades")
+            self.assertIn("track", upgrade["description"])
+            self.assertEqual(refresh["name"], "Refresh media metadata")
+            self.assertIn("album", refresh["description"])
+            self.assertEqual(
+                refresh["optionDefinitions"][0]["label"],
+                "Refresh all indexed media metadata",
+            )
+            self.assertIn("album", refresh["optionDefinitions"][0]["description"])
+        finally:
+            db.close()
+
+    def test_default_metadata_labels_upgrade_existing_builtins_without_overwriting_edits(
+        self,
+    ):
+        db, store = self._scheduler_store()
+        try:
+            old_definitions = [
+                (
+                    "metadata_missing",
+                    "Find missing metadata",
+                    "Fetch missing provider metadata, artwork, and credits for indexed IDs.",
+                    "metadata_missing",
+                    1,
+                ),
+                (
+                    "metadata_upgrade",
+                    "Find metadata upgrade",
+                    "Refetch provider metadata and repair existing metadata that can be improved.",
+                    "metadata_upgrade",
+                    1,
+                ),
+                (
+                    "metadata_refresh",
+                    "Custom metadata task",
+                    "Refresh indexed metadata and artwork using the configured sparse rules.",
+                    "metadata_refresh",
+                    0,
+                ),
+            ]
+            for index, (key, name, description, kind, enabled) in enumerate(
+                old_definitions
+            ):
+                db.execute(
+                    "INSERT INTO job_definitions(id,job_key,name,description,kind,enabled,config,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        f"definition-{index}",
+                        key,
+                        name,
+                        description,
+                        kind,
+                        enabled,
+                        "{}",
+                        "created",
+                        "updated",
+                    ),
+                )
+            store.ensure_defaults()
+
+            self.assertEqual(
+                store.by_key("metadata_missing")["name"],
+                "Find missing media metadata",
+            )
+            self.assertEqual(
+                store.by_key("metadata_upgrade")["name"],
+                "Find metadata upgrades",
+            )
+            self.assertEqual(
+                store.by_key("metadata_refresh")["name"],
+                "Custom metadata task",
+            )
+            self.assertEqual(
+                store.by_key("metadata_refresh")["description"],
+                "Refresh indexed movie, TV, album, and track metadata and artwork using the configured sparse rules.",
+            )
         finally:
             db.close()
 

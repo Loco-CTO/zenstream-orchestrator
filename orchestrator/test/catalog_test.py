@@ -2,6 +2,7 @@ import hashlib
 import json
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.catalog import Catalog, _CatalogReadContext
@@ -1671,6 +1672,158 @@ class CatalogTest(unittest.TestCase):
 
         self.assertEqual(metadata["overview"], "English overview")
 
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    @patch("app.catalog.MetadataReadService.resolve_public")
+    def test_preloaded_empty_projection_rehydrates_ready_artwork(
+        self, resolve_public, _languages
+    ):
+        account = self.account().create("projection-artwork", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.seed_item()
+        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT)")
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie",
+                "en",
+                json.dumps(
+                    {
+                        "title": "English",
+                        "images": {},
+                        "_catalogItemProjectionSchema": 2,
+                    }
+                ),
+            ),
+        )
+        resolve_public.return_value = {
+            "metadata": {
+                "images": {
+                    "Primary": {
+                        "url": "/api/catalog/items/movie/images/Primary?language=en&v=ready"
+                    }
+                }
+            }
+        }
+
+        catalog = self.catalog()
+        context = _CatalogReadContext(catalog, account["id"])
+        token = catalog._read_context.set(context)
+        try:
+            catalog._preload_projected_metadata(account["id"], ["movie"], "en")
+            metadata = catalog.metadata(account["id"], "movie", "en")["metadata"]
+        finally:
+            catalog._read_context.reset(token)
+
+        self.assertEqual(
+            metadata["images"]["Primary"]["url"],
+            "/api/catalog/items/movie/images/Primary?language=en&v=ready",
+        )
+        resolve_public.assert_called_once()
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    @patch("app.catalog.MetadataReadService.resolve_public")
+    def test_projected_audio_metadata_exposes_local_primary_artwork(
+        self, resolve_public, _languages
+    ):
+        account = self.account().create("local-audio-artwork", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "album",
+                "allowed",
+                None,
+                "release",
+                "Album",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT)")
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "album",
+                "en",
+                json.dumps(
+                    {
+                        "title": "Album",
+                        "images": {},
+                        "_catalogItemProjectionSchema": 2,
+                    }
+                ),
+            ),
+        )
+        resolve_public.return_value = {"metadata": {"images": {}}}
+        catalog = self.catalog()
+        with patch.object(
+            catalog,
+            "local_artwork",
+            return_value=(Path("cached-cover.webp"), "L5D@blur"),
+        ):
+            metadata = catalog.metadata(account["id"], "album", "en")["metadata"]
+
+        self.assertEqual(
+            metadata["images"]["Primary"]["url"],
+            "/api/catalog/items/album/images/Primary?language=en",
+        )
+        self.assertEqual(metadata["images"]["Primary"]["blurHash"], "L5D@blur")
+        resolve_public.assert_called_once()
+
+    def test_track_serialization_removes_numeric_filename_prefix_from_cached_title(
+        self,
+    ):
+        account = self.account().create("audio-title-prefix", "password-123")
+        row = (
+            "track",
+            "allowed",
+            None,
+            "track",
+            "Album/1.01. Track title.flac",
+            None,
+            None,
+            None,
+            "2026",
+            "2026",
+        )
+
+        value = self.catalog()._serialize(
+            account["id"],
+            row,
+            {
+                "title": "1.01. Track title",
+                "tracks": [{"title": "1.01. Track title"}],
+            },
+        )
+
+        self.assertEqual(value["name"], "Track title")
+        self.assertEqual(value["metadata"]["title"], "Track title")
+        self.assertEqual(value["metadata"]["tracks"][0]["title"], "Track title")
+
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
     def test_progress_marks_played_at_ninety_percent(self, _languages):
         account = self.account().create("progress", "password-123")
@@ -1709,6 +1862,134 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(
             self.db.read_execute(
                 "SELECT COUNT(*) FROM user_item_state WHERE user_id=?",
+                (account["id"],),
+            )[0][0],
+            0,
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_audio_play_start_counts_each_playback_instance_once(self, _languages):
+        account = self.account().create("audio-play-start", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.db.execute(
+            "CREATE TABLE user_play_events(user_id TEXT,entity_id TEXT,playback_instance_id TEXT,started_at TEXT,PRIMARY KEY(user_id,playback_instance_id))"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "artist-1",
+                "allowed",
+                None,
+                "artist",
+                "Artist",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "release-1",
+                "allowed",
+                "artist-1",
+                "release",
+                "Album",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "track-1",
+                "allowed",
+                "release-1",
+                "track",
+                "01.flac",
+                None,
+                1,
+                None,
+                1,
+                "2026",
+                "2026",
+            ),
+        )
+
+        catalog = self.catalog()
+        first = catalog.record_play_start(
+            account["id"], "track-1", {"playbackInstanceId": "instance-1"}
+        )
+        duplicate = catalog.record_play_start(
+            account["id"], "track-1", {"playbackInstanceId": "instance-1"}
+        )
+        replay = catalog.record_play_start(
+            account["id"], "track-1", {"playbackInstanceId": "instance-2"}
+        )
+
+        self.assertEqual(first["playCount"], 1)
+        self.assertEqual(duplicate["playCount"], 1)
+        self.assertEqual(replay["playCount"], 2)
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM user_play_events WHERE user_id=?",
+                (account["id"],),
+            )[0][0],
+            2,
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_audio_play_start_does_not_mutate_when_history_is_disabled(
+        self, _languages
+    ):
+        account = self.account().create("audio-play-disabled", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.db.execute(
+            "INSERT INTO account_preferences(user_id,watch_history_enabled) VALUES(?,0)",
+            (account["id"],),
+        )
+        self.db.execute(
+            "CREATE TABLE user_play_events(user_id TEXT,entity_id TEXT,playback_instance_id TEXT,started_at TEXT,PRIMARY KEY(user_id,playback_instance_id))"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "track-disabled",
+                "allowed",
+                None,
+                "track",
+                "01.flac",
+                None,
+                None,
+                None,
+                1,
+                "2026",
+                "2026",
+            ),
+        )
+
+        state = self.catalog().record_play_start(
+            account["id"], "track-disabled", {"playbackInstanceId": "instance-1"}
+        )
+
+        self.assertFalse(state["played"])
+        self.assertEqual(state["playCount"], 0)
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT COUNT(*) FROM user_play_events WHERE user_id=?",
                 (account["id"],),
             )[0][0],
             0,
@@ -2029,6 +2310,87 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(
             [item["id"] for item in catalog.home_continue_watching(user_id, "en")],
             ["movie-new", "movie-old"],
+        )
+
+    def test_music_artist_detail_includes_appearances_tracks_and_related_artists(self):
+        account = self.account().create("music-user", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.db.execute(
+            "CREATE TABLE music_artist_credits(track_id TEXT NOT NULL, artist_id TEXT NOT NULL, credit_order INTEGER NOT NULL, credited_name TEXT NOT NULL, PRIMARY KEY(track_id,artist_id))"
+        )
+
+        def insert_entity(entity_id, library_id, parent_id, entity_type, path):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    library_id,
+                    parent_id,
+                    entity_type,
+                    path,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+
+        insert_entity("artist-main", "allowed", None, "artist", "Main Artist")
+        insert_entity("artist-feature", "allowed", None, "artist", "Feature Artist")
+        insert_entity("artist-other", "allowed", None, "artist", "Other Artist")
+        insert_entity("artist-hidden", "hidden", None, "artist", "Hidden Artist")
+        insert_entity("release-main", "allowed", "artist-main", "release", "Main")
+        insert_entity(
+            "release-appears", "allowed", "artist-other", "release", "Appears"
+        )
+        insert_entity("track-main", "allowed", "release-main", "track", "Main/01.mp3")
+        insert_entity(
+            "track-appears", "allowed", "release-appears", "track", "Appears/01.mp3"
+        )
+        for values in (
+            ("track-main", "artist-main", 0, "Main Artist"),
+            ("track-main", "artist-feature", 1, "Feature Artist"),
+            ("track-appears", "artist-main", 0, "Main Artist"),
+            ("track-appears", "artist-feature", 1, "Feature Artist"),
+            ("track-appears", "artist-other", 2, "Other Artist"),
+            ("track-main", "artist-hidden", 2, "Hidden Artist"),
+        ):
+            self.db.execute("INSERT INTO music_artist_credits VALUES(?,?,?,?)", values)
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            ("artist-main", "musicbrainz", "artist", "mb-main", 1),
+        )
+
+        result = self.catalog().music_artist_detail(account["id"], "artist-main", "en")
+
+        self.assertEqual(result["artist"]["id"], "artist-main")
+        self.assertEqual([value["id"] for value in result["albums"]], ["release-main"])
+        self.assertEqual(
+            [value["id"] for value in result["appearsIn"]], ["release-appears"]
+        )
+        self.assertEqual(
+            {value["id"] for value in result["tracks"]},
+            {"track-main", "track-appears"},
+        )
+        self.assertEqual(
+            [value["id"] for value in result["relatedArtists"]],
+            ["artist-feature", "artist-other"],
+        )
+        self.assertNotIn(
+            "artist-hidden", {value["id"] for value in result["relatedArtists"]}
+        )
+        provider_id_result = self.catalog().music_artist_detail(
+            account["id"], "mb-main", "en"
+        )
+        self.assertEqual(provider_id_result["artist"]["id"], "artist-main")
+        self.assertEqual(
+            [value["id"] for value in provider_id_result["appearsIn"]],
+            ["release-appears"],
         )
 
 

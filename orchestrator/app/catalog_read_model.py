@@ -271,7 +271,9 @@ class CatalogReadModel:
                 )
                 if progress is not None:
                     progress("projections", len(values), len(entities) * len(locales))
-                if row[2] is None and row[3] in {"movie", "series", "collection"}:
+                if row[3] in {"artist", "release", "track"} or (
+                    row[2] is None and row[3] in {"movie", "series", "collection"}
+                ):
                     documents = [(locale, payload.get("title") or row[4] or row[3])]
                     original_title = payload.get("originalTitle")
                     if original_title:
@@ -1062,7 +1064,9 @@ class CatalogReadModel:
                         1,
                     )
                 )
-                if row[2] is None and row[3] in {"movie", "series", "collection"}:
+                if row[3] in {"artist", "release", "track"} or (
+                    row[2] is None and row[3] in {"movie", "series", "collection"}
+                ):
                     documents = [
                         (locale, payload_value.get("title") or row[4] or row[3])
                     ]

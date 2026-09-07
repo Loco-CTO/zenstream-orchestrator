@@ -11,7 +11,7 @@ from pathlib import Path
 from app.config import Config
 from app.foreground import active_requests
 from app.intro_outro import IntroOutroDetector
-from app.library import JobTerminated
+from app.library import JobTerminated, LibraryScanner, LibraryStore
 from app.library import runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.logging_config import get_logger
@@ -19,6 +19,7 @@ from app.metadata_domain import choose_artwork, language_family
 from app.metadata_refresh import MetadataRefreshJob
 from app.metadata_services import (
     FACT_FIELDS,
+    MUSICBRAINZ_NEUTRAL_ENTITY_TYPES,
     TEXT_FIELDS,
     MetadataIngestService,
     metadata_task_results,
@@ -166,37 +167,63 @@ def _fetch_upgrade_documents(
 ) -> dict[str, dict]:
     """Fetch and cache fresh documents without projecting unchanged upgrades."""
     service = ingest.metadata_service
-    fetch_locales = getattr(service, "fetch_locales", None)
-    if fetch_locales is not None:
+    neutral = (
+        provider == "musicbrainz" and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+    )
+    fetch_method = getattr(service, "fetch_locales", None)
+    provider_locales = [""] if neutral else locales
+    if fetch_method is not None:
         try:
-            return fetch_locales(
+            values = fetch_method(
                 provider,
                 entity_type,
                 provider_id,
-                locales,
+                provider_locales if neutral else locales,
                 force=True,
                 project=False,
             )
         except TypeError as error:
             if "project" not in str(error):
                 raise
-            return fetch_locales(
+            values = fetch_method(
                 provider,
                 entity_type,
                 provider_id,
-                locales,
+                provider_locales if neutral else locales,
                 force=True,
             )
-    return {
-        locale: service.fetch(
-            provider,
-            entity_type,
-            provider_id,
-            locale,
-            force=True,
-        )
-        for locale in locales
-    }
+    else:
+        values = {
+            locale: service.fetch(
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                force=True,
+            )
+            for locale in (provider_locales if neutral else locales)
+        }
+    if neutral:
+        normalized = values.get("") or next(iter(values.values()), None)
+        if not isinstance(normalized, dict):
+            return {}
+        return {
+            locale: dict(normalized)
+            for locale in (locales if locales != [""] else ingest.locales())
+        }
+    return values
+
+
+def _metadata_catalog_entity_type(provider: str, identifier_type: str) -> str:
+    if provider == "musicbrainz":
+        return {"recording": "track"}.get(identifier_type, identifier_type)
+    return identifier_type
+
+
+def _metadata_identity_type(provider: str, entity_type: str) -> str:
+    if provider == "musicbrainz" and entity_type == "track":
+        return "recording"
+    return entity_type
 
 
 def _metadata_document_gaps(
@@ -212,7 +239,7 @@ def _metadata_document_gaps(
         "SELECT ep.entity_id,e.library_id,ep.is_primary FROM entity_provider_ids ep "
         "JOIN library_entities e ON e.id=ep.entity_id "
         "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=?",
-        (provider, entity_type, provider_id),
+        (provider, _metadata_identity_type(provider, entity_type), provider_id),
     )
     entity_libraries = [(row[0], row[1]) for row in linked]
     if not entity_libraries:
@@ -639,11 +666,11 @@ class JobStore:
             return [
                 {
                     "key": "refreshAll",
-                    "label": "Refresh all indexed video metadata",
+                    "label": "Refresh all indexed media metadata",
                     "type": "boolean",
                     "default": False,
                     "manualOnly": True,
-                    "description": "Ignore sparse rules and refresh every indexed movie, series, season, and episode.",
+                    "description": "Ignore sparse rules and refresh every indexed movie, series, season, episode, album, and track.",
                 },
                 {
                     "key": "preserveCachedAssets",
@@ -793,14 +820,50 @@ class JobStore:
             )
         return self.definition(definition_id)  # type: ignore[return-value]
 
+    def _sync_default_definition_text(
+        self,
+        key: str,
+        name: str,
+        description: str,
+        previous_name: str,
+        previous_description: str,
+    ) -> None:
+        """Update labels from an older built-in definition without clobbering edits."""
+        rows = self.db.execute(
+            "SELECT id,name,description FROM job_definitions WHERE job_key=?",
+            (key,),
+        )
+        if not rows:
+            return
+        definition_id, current_name, current_description = rows[0]
+        next_name = name if current_name == previous_name else current_name
+        next_description = (
+            description
+            if current_description == previous_description
+            else current_description
+        )
+        if next_name == current_name and next_description == current_description:
+            return
+        self.db.execute(
+            "UPDATE job_definitions SET name=?,description=?,updated_at=? WHERE id=?",
+            (next_name, next_description, now(), definition_id),
+        )
+
     def ensure_defaults(self) -> None:
         definition = self.ensure(
             "metadata_missing",
-            "Find missing metadata",
-            "Fetch missing provider metadata, artwork, and credits for indexed IDs.",
+            "Find missing media metadata",
+            "Fetch missing provider metadata, artwork, and credits for indexed movie, TV, album, and track records.",
             "metadata_missing",
             1440,
             {"locales": ["en"], "batchSize": 50},
+        )
+        self._sync_default_definition_text(
+            "metadata_missing",
+            "Find missing media metadata",
+            "Fetch missing provider metadata, artwork, and credits for indexed movie, TV, album, and track records.",
+            "Find missing metadata",
+            "Fetch missing provider metadata, artwork, and credits for indexed IDs.",
         )
         if definition["lastRunAt"] is None:
             self.db.execute(
@@ -809,11 +872,18 @@ class JobStore:
             )
         upgrade = self.ensure(
             "metadata_upgrade",
-            "Find metadata upgrade",
-            "Refetch provider metadata and repair existing metadata that can be improved.",
+            "Find metadata upgrades",
+            "Refetch provider metadata and repair existing metadata for indexed movie, TV, album, and track records.",
             "metadata_upgrade",
             10080,
             {"locales": ["en"], "batchSize": 50},
+        )
+        self._sync_default_definition_text(
+            "metadata_upgrade",
+            "Find metadata upgrades",
+            "Refetch provider metadata and repair existing metadata for indexed movie, TV, album, and track records.",
+            "Find metadata upgrade",
+            "Refetch provider metadata and repair existing metadata that can be improved.",
         )
         if upgrade["lastRunAt"] is None:
             self.db.execute(
@@ -822,12 +892,19 @@ class JobStore:
             )
         self.ensure(
             "metadata_refresh",
-            "Refresh metadata",
-            "Refresh indexed metadata and artwork using the configured sparse rules.",
+            "Refresh media metadata",
+            "Refresh indexed movie, TV, album, and track metadata and artwork using the configured sparse rules.",
             "metadata_refresh",
             43200,
             {},
             enabled=False,
+        )
+        self._sync_default_definition_text(
+            "metadata_refresh",
+            "Refresh media metadata",
+            "Refresh indexed movie, TV, album, and track metadata and artwork using the configured sparse rules.",
+            "Refresh metadata",
+            "Refresh indexed metadata and artwork using the configured sparse rules.",
         )
         cleanup = self.ensure(
             "metadata_cleanup",
@@ -1592,10 +1669,27 @@ class MetadataMissingJob:
         rows = self.db.execute(
             "SELECT DISTINCT p.provider,p.identifier_type,p.provider_id "
             "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
-            "WHERE p.provider IN ('tmdb','tvdb','musicbrainz') ORDER BY p.provider,e.entity_type,p.provider_id"
+            "WHERE p.provider IN ('tmdb','tvdb','musicbrainz') "
+            # MusicBrainz release-group, release-track, and work IDs are
+            # supporting identities attached to an admitted release/track;
+            # they are not catalog metadata documents. Treating them as
+            # entity types here makes the repair job issue redundant or
+            # malformed requests for every configured locale.
+            "AND NOT (p.provider='musicbrainz' AND p.identifier_type IN "
+            "('release_group','release_track','work')) "
+            "ORDER BY p.provider,e.entity_type,p.provider_id"
         )
         items = list(rows)
-        total = len(items) * len(locales)
+        total = sum(
+            1
+            if (
+                provider == "musicbrainz"
+                and _metadata_catalog_entity_type(provider, identifier_type)
+                in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+            )
+            else len(locales)
+            for provider, identifier_type, _provider_id in items
+        )
         has_screen_assets = bool(
             self.db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='screen_extractor_assets'"
@@ -1649,7 +1743,7 @@ class MetadataMissingJob:
                 "SELECT ep.entity_id,e.library_id FROM entity_provider_ids ep "
                 "JOIN library_entities e ON e.id=ep.entity_id "
                 "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=?",
-                (provider, entity_type, provider_id),
+                (provider, _metadata_identity_type(provider, entity_type), provider_id),
             )
             timestamp = now()
             failures_by_locale = {
@@ -1693,49 +1787,85 @@ class MetadataMissingJob:
             )
 
         def process_item(item):
-            provider, entity_type, provider_id = item
+            provider, identifier_type, provider_id = item
+            entity_type = _metadata_catalog_entity_type(provider, identifier_type)
+            neutral = (
+                provider == "musicbrainz"
+                and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+            )
             item_failures = []
             fetch_locales = []
             documents: dict[str, dict] = {}
             worked_locales: set[str] = set()
             upgrade_locales: set[str] = set()
-            for locale in locales:
+            if neutral:
+                provider_locale = ""
                 cached = ingest.metadata_service.cache.get(
-                    provider, entity_type, provider_id, locale
+                    provider, entity_type, provider_id, provider_locale
                 )
-                if not cached:
-                    fetch_locales.append(locale)
-                    continue
-                cached = dict(cached)
-                cached.pop("_stale", None)
-                documents[locale] = cached
-                if force:
-                    fetch_locales.append(locale)
-                    continue
-                gaps, _linked = _metadata_document_gaps(
-                    self.db,
-                    provider,
-                    entity_type,
-                    provider_id,
-                    locale,
-                    cached,
-                )
-                if gaps:
-                    # A cache hit is normally replayed locally.  A missing
-                    # provider title is different: replaying the same
-                    # normalized document can never repair it, so request a
-                    # fresh localized document instead.
-                    if (
-                        provider == "tvdb"
-                        and entity_type == "season"
-                        and not _usable_metadata_value(cached.get("title"))
-                    ):
-                        fetch_locales.append(locale)
+                if not cached or force:
+                    fetch_locales.append(provider_locale)
+                else:
+                    cached = dict(cached)
+                    cached.pop("_stale", None)
+                    documents = {locale: dict(cached) for locale in locales}
+                    gaps, _linked = _metadata_document_gaps(
+                        self.db,
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locales[0],
+                        cached,
+                    )
+                    if gaps:
+                        fetch_locales.append(provider_locale)
                     else:
                         ingest.ingest_document(
-                            provider, entity_type, provider_id, locale, cached
+                            provider,
+                            entity_type,
+                            provider_id,
+                            provider_locale,
+                            cached,
                         )
-                        worked_locales.add(locale)
+                        worked_locales.add(provider_locale)
+            else:
+                for locale in locales:
+                    cached = ingest.metadata_service.cache.get(
+                        provider, entity_type, provider_id, locale
+                    )
+                    if not cached:
+                        fetch_locales.append(locale)
+                        continue
+                    cached = dict(cached)
+                    cached.pop("_stale", None)
+                    documents[locale] = cached
+                    if force:
+                        fetch_locales.append(locale)
+                        continue
+                    gaps, _linked = _metadata_document_gaps(
+                        self.db,
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        cached,
+                    )
+                    if gaps:
+                        # A cache hit is normally replayed locally. A missing
+                        # provider title is different: replaying the same
+                        # normalized document can never repair it, so request
+                        # a fresh localized document instead.
+                        if (
+                            provider == "tvdb"
+                            and entity_type == "season"
+                            and not _usable_metadata_value(cached.get("title"))
+                        ):
+                            fetch_locales.append(locale)
+                        else:
+                            ingest.ingest_document(
+                                provider, entity_type, provider_id, locale, cached
+                            )
+                            worked_locales.add(locale)
             if fetch_locales:
                 try:
                     if is_upgrade:
@@ -1780,7 +1910,7 @@ class MetadataMissingJob:
                             "provider": provider,
                             "entityType": entity_type,
                             "providerId": provider_id,
-                            "locale": locale,
+                            "locale": "" if neutral else locale,
                             "error": f"{type(error).__name__}: {error}",
                         }
                         for locale in fetch_locales
@@ -1795,7 +1925,7 @@ class MetadataMissingJob:
             failed_locales = {str(failure.get("locale")) for failure in item_failures}
             publish_ids: set[str] = set()
             for locale in locales:
-                if locale in failed_locales:
+                if ("" if neutral else locale) in failed_locales:
                     continue
                 document = documents.get(locale)
                 if not isinstance(document, dict):
@@ -1831,13 +1961,13 @@ class MetadataMissingJob:
                             "provider": provider,
                             "entityType": entity_type,
                             "providerId": provider_id,
-                            "locale": locale,
+                            "locale": "" if neutral else locale,
                             "missing": sorted(gaps),
                             "error": "Metadata materialization remains incomplete",
                         }
                     )
                 else:
-                    complete_repair(linked_ids, locale)
+                    complete_repair(linked_ids, "" if neutral else locale)
             queue_failures(provider, entity_type, provider_id, item_failures)
             if worked_locales and publish_ids:
                 from app.catalog_read_model import CatalogReadModel
@@ -1877,7 +2007,7 @@ class MetadataMissingJob:
                 upgraded_documents = len(upgrade_locales - incomplete_locales)
             else:
                 upgraded_documents = len(worked_locales)
-            return len(locales), item_failures, upgraded_documents
+            return (1 if neutral else len(locales)), item_failures, upgraded_documents
 
         completed = 0
         repaired = 0
@@ -2024,6 +2154,21 @@ class MetadataMissingJob:
                 CatalogReadModel(self.db).refresh_roots(sorted(roots))
         except Exception:
             logger.exception("screen extractor catalog refresh failed")
+        try:
+            # Metadata refreshes can discover new MusicBrainz track credits
+            # without traversing the media filesystem. Rebuild the durable
+            # artist entities/links from the documents just materialized so
+            # those credits are immediately navigable.
+            repair_store = LibraryStore.__new__(LibraryStore)
+            repair_store.db = self.db
+            repair_store._progress = {}
+            LibraryScanner(repair_store).repair_music_artist_credits(
+                ingest, run_id, should_terminate
+            )
+        except JobTerminated:
+            raise
+        except Exception:
+            logger.exception("music artist credit repair failed")
         if should_terminate():
             raise JobTerminated()
         if failures:
@@ -2514,8 +2659,8 @@ class JobScheduler:
         if not definition:
             definition = self.store.ensure(
                 "metadata_refresh",
-                "Refresh metadata",
-                "Refresh indexed metadata and artwork using the configured sparse rules.",
+                "Refresh media metadata",
+                "Refresh indexed movie, TV, album, and track metadata and artwork using the configured sparse rules.",
                 "metadata_refresh",
                 43200,
                 {},

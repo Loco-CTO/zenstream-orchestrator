@@ -33,7 +33,7 @@ const config: EditableConfig = {
     METADATA_PROVIDER_TIMEOUT_SECONDS: "20",
     METADATA_IMAGE_TIMEOUT_SECONDS: "20",
     METADATA_IMAGE_HOST_ALLOWLIST:
-      "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com",
+      "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org",
   },
   secretConfigured: true,
   startWithWindows: false,

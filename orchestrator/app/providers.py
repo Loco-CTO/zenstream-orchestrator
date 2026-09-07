@@ -304,11 +304,18 @@ class ProviderClient:
         try:
             logger.debug("provider request url=%s params=%s", url, request_params)
             verify = kwargs.pop("verify", True)
+            follow_redirects = kwargs.pop("follow_redirects", False)
+            retry_wait = kwargs.pop("retry_wait", None)
             client = self._http_client(verify)
             response = None
             for attempt in range(3):
                 try:
-                    response = client.get(url, timeout=self.timeout, **kwargs)
+                    response = client.get(
+                        url,
+                        timeout=self.timeout,
+                        follow_redirects=follow_redirects,
+                        **kwargs,
+                    )
                 except httpx.TransportError as error:
                     if attempt == 2:
                         raise
@@ -321,7 +328,10 @@ class ProviderClient:
                         attempt + 1,
                         error,
                     )
-                    time.sleep(delay)
+                    if retry_wait is not None:
+                        retry_wait(delay)
+                    else:
+                        time.sleep(delay)
                     continue
                 if response.status_code not in {429, 502, 503, 504} or attempt == 2:
                     break
@@ -343,7 +353,10 @@ class ProviderClient:
                     delay,
                     attempt + 1,
                 )
-                time.sleep(delay)
+                if retry_wait is not None:
+                    retry_wait(delay)
+                else:
+                    time.sleep(delay)
             assert response is not None
             if response.status_code == 404:
                 logger.info(
@@ -1363,15 +1376,31 @@ class TVDBClient(ProviderClient):
 
 class MusicBrainzClient(ProviderClient):
     base_url = "https://musicbrainz.org/ws/2"
+    _request_interval_seconds = 1.0
     _lock = threading.Lock()
     _last_request = 0.0
 
-    def _request(self, path: str, params: dict | None = None) -> dict:
-        with self._lock:
-            wait = 1.0 - (time.monotonic() - self._last_request)
+    @classmethod
+    def _wait_for_request_slot(cls, minimum_delay: float = 0.0) -> None:
+        """Throttle every MusicBrainz attempt, including retries.
+
+        MusicBrainz applies its request-rate limit to retries too.  The
+        generic provider retry loop used to sleep independently, allowing
+        concurrent workers to send retry attempts back-to-back even though
+        the initial requests were serialized.
+        """
+        with cls._lock:
+            elapsed = time.monotonic() - cls._last_request
+            wait = max(
+                max(0.0, float(minimum_delay)),
+                cls._request_interval_seconds - elapsed,
+            )
             if wait > 0:
                 time.sleep(wait)
-            self.__class__._last_request = time.monotonic()
+            cls._last_request = time.monotonic()
+
+    def _request(self, path: str, params: dict | None = None) -> dict:
+        self.__class__._wait_for_request_slot()
         params = dict(params or {})
         params["fmt"] = "json"
         return self._get(
@@ -1381,7 +1410,20 @@ class MusicBrainzClient(ProviderClient):
                 "User-Agent": f"ZenStream/{__version__}",
                 "Accept": "application/json",
             },
+            retry_wait=self.__class__._wait_for_request_slot,
         )
+
+    @staticmethod
+    def _lookup_includes(entity_type: str) -> str:
+        """Return only the include parameters supported by each MB resource."""
+        return {
+            "artist": "aliases+tags",
+            "release": "artist-credits+labels+recordings+release-groups+media+discids+isrcs+tags",
+            "release_group": "artist-credits+tags",
+            "track": "artist-credits+isrcs+tags",
+            "recording": "artist-credits+isrcs+tags",
+            "work": "aliases+tags",
+        }.get(entity_type, "tags")
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
         endpoint = {
@@ -1394,53 +1436,165 @@ class MusicBrainzClient(ProviderClient):
         }.get(entity_type, "release")
         payload = self._request(
             f"/{endpoint}/{quote(provider_id)}",
-            {
-                "inc": "artist-credits+aliases+releases+release-groups+recordings+relationships+tags+media"
-            },
+            {"inc": self._lookup_includes(entity_type)},
         )
         if endpoint in {"release", "release-group"}:
             try:
                 payload["_coverArt"] = self._get(
                     f"https://coverartarchive.org/{endpoint}/{quote(provider_id)}",
                     headers={"Accept": "application/json"},
+                    follow_redirects=True,
                 )
             except ProviderError:
                 payload["_coverArt"] = {}
         return payload
 
-    def search(self, entity_type: str, query: str) -> list[dict]:
-        endpoint = {
-            "artist": "artist",
-            "release": "release",
-            "track": "recording",
-            "recording": "recording",
-        }.get(entity_type, "release")
-        field = {
-            "artist": "artist",
-            "release": "release",
-            "track": "recording",
-            "recording": "recording",
-        }.get(entity_type, "release")
-        payload = self._request(
-            f"/{endpoint}", {"query": f'{field}:"{query}"', "limit": 10}
-        )
+    def details_all_locales(
+        self, entity_type: str, provider_id: str, locales: list[str]
+    ) -> dict[str, dict]:
+        """Fetch one locale-neutral MusicBrainz document for the batch.
+
+        MusicBrainz recording/release documents are not localized in the same
+        way as TMDB/TVDB documents.  Repeating the identical request for every
+        configured ZenStream locale both wastes the provider's one-request-per
+        second allowance and made large music scans appear stalled.
+        """
+        if not locales:
+            return {}
+        payload = self.details(entity_type, provider_id, locales[0])
+        return {locale: copy.deepcopy(payload) for locale in locales}
+
+    @staticmethod
+    def _escape_search_value(value: object) -> str:
+        """Escape one value for MusicBrainz's Lucene-style search syntax."""
+        text = str(value or "").strip()
+        # Keep the escaping deliberately small and explicit.  These are the
+        # Lucene operators accepted by MusicBrainz's indexed search syntax;
+        # escaping them prevents album names such as ``A+B (Live)`` from
+        # changing the meaning of the query.
+        return re.sub(r'([+\-\&\|!(){}\[\]^"~*?:\\/])', r"\\\1", text)
+
+    @classmethod
+    def _fielded_search_query(cls, fields: list[tuple[str, object]]) -> str:
+        values = []
+        for field, value in fields:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            values.append(f'{field}:"{cls._escape_search_value(text)}"')
+        return " AND ".join(values)
+
+    @staticmethod
+    def _search_artist_credits(value: dict) -> list[dict]:
+        credits = []
+        for credit in value.get("artist-credit", []) or []:
+            if not isinstance(credit, dict):
+                continue
+            artist = credit.get("artist") or {}
+            if not isinstance(artist, dict):
+                continue
+            if not artist.get("id") and not artist.get("name"):
+                continue
+            credits.append(
+                {
+                    "id": artist.get("id"),
+                    "name": artist.get("name"),
+                    "joinPhrase": credit.get("joinphrase"),
+                }
+            )
+        return credits
+
+    def _search(self, endpoint: str, query: str) -> list[dict]:
+        payload = self._request(f"/{endpoint}", {"query": query, "limit": 10})
         values = payload.get(f"{endpoint}s", []) or []
-        return [
-            {
+        results = []
+        for value in values:
+            if not isinstance(value, dict) or not value.get("id"):
+                continue
+            credits = self._search_artist_credits(value)
+            result = {
                 "provider": "musicbrainz",
-                "providerId": str(value.get("id")),
+                "providerId": str(value["id"]),
                 "title": value.get("name") or value.get("title"),
                 "year": str(value.get("first-release-date") or value.get("date") or "")[
                     :4
                 ]
                 or None,
+                "artists": credits,
+                "artistIds": [
+                    str(credit["id"]) for credit in credits if credit.get("id")
+                ],
+                "score": value.get("score"),
             }
-            for value in values
-            if value.get("id")
+            if endpoint == "release":
+                result["releaseGroupId"] = (value.get("release-group") or {}).get("id")
+            results.append(result)
+        return results
+
+    def search_releases(
+        self,
+        album: str,
+        artist: str | None = None,
+        year: str | None = None,
+    ) -> list[dict]:
+        """Search releases with separate album, artist, and year fields."""
+        query = self._fielded_search_query(
+            [("release", album), ("artistname", artist), ("date", year)]
+        )
+        return self._search("release", query)
+
+    def search_recordings(
+        self,
+        title: str,
+        artist: str | None = None,
+        album: str | None = None,
+        year: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> list[dict]:
+        """Search recordings using all trustworthy local track context."""
+        fields: list[tuple[str, object]] = [
+            ("recording", title),
+            ("artistname", artist),
+            ("release", album),
+            ("firstreleasedate", year),
         ]
+        if duration_seconds is not None:
+            try:
+                duration_ms = int(round(float(duration_seconds) * 1000))
+            except (TypeError, ValueError):
+                duration_ms = None
+            if duration_ms is not None and duration_ms >= 0:
+                fields.append(("dur", duration_ms))
+        return self._search("recording", self._fielded_search_query(fields))
+
+    def search(self, entity_type: str, query: str) -> list[dict]:
+        """Retain the generic provider interface for legacy callers.
+
+        Music-specific callers should use ``search_releases`` or
+        ``search_recordings`` so album and track context is represented as
+        independent indexed fields.
+        """
+        if entity_type == "release":
+            return self.search_releases(query)
+        if entity_type in {"track", "recording"}:
+            return self.search_recordings(query)
+        endpoint = "artist" if entity_type == "artist" else "release"
+        return self._search(
+            endpoint,
+            self._fielded_search_query(
+                [("artist" if endpoint == "artist" else "release", query)]
+            ),
+        )
 
     @staticmethod
     def normalize(entity_type: str, provider_id: str, payload: dict) -> dict:
+        def duration_seconds(value) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed / 1000.0 if parsed >= 0 else None
+
         images = []
         extra_images = []
         if entity_type in {"release", "release_group"}:
@@ -1515,38 +1669,163 @@ class MusicBrainzClient(ProviderClient):
             )
         date = payload.get("first-release-date") or payload.get("date")
         tags = _names(payload.get("tags"))
-        credits = []
-        for value in payload.get("artist-credit", []) or []:
-            artist = value.get("artist") or {}
-            if artist.get("id") or artist.get("name"):
-                credits.append(
-                    {
-                        "id": artist.get("id"),
-                        "name": artist.get("name"),
-                        "joinPhrase": value.get("joinphrase"),
-                    }
+        release_group = payload.get("release-group") or payload.get("release_group")
+        album_type = None
+        album_secondary_types: list[str] = []
+        if entity_type in {"release", "release_group"}:
+            type_sources = [
+                value for value in (release_group, payload) if isinstance(value, dict)
+            ]
+            for source in type_sources:
+                if not album_type:
+                    candidate = (
+                        source.get("primary-type")
+                        or source.get("primaryType")
+                        or source.get("type")
+                    )
+                    if candidate:
+                        album_type = str(candidate).strip() or None
+                secondary = source.get("secondary-types") or source.get(
+                    "secondaryTypes"
                 )
+                if isinstance(secondary, (list, tuple)):
+                    values = secondary
+                elif secondary:
+                    values = [secondary]
+                else:
+                    values = []
+                for value in values:
+                    normalized = str(value).strip()
+                    if normalized and normalized.casefold() not in {
+                        existing.casefold() for existing in album_secondary_types
+                    }:
+                        album_secondary_types.append(normalized)
+
+        def artist_credits(values) -> list[dict]:
+            credits = []
+            for value in values or []:
+                if not isinstance(value, dict):
+                    continue
+                artist = value.get("artist") or {}
+                if artist.get("id") or artist.get("name"):
+                    credits.append(
+                        {
+                            "id": artist.get("id"),
+                            "name": artist.get("name"),
+                            "joinPhrase": value.get("joinphrase"),
+                        }
+                    )
+            return credits
+
+        credits = artist_credits(payload.get("artist-credit"))
+
+        def work_ids(value) -> list[str]:
+            if not isinstance(value, dict):
+                return []
+            result = []
+            for work in value.get("works", []) or []:
+                if isinstance(work, dict) and work.get("id"):
+                    result.append(str(work["id"]))
+            for relation in value.get("relations", []) or value.get(
+                "relationships", []
+            ):
+                if not isinstance(relation, dict):
+                    continue
+                if str(relation.get("target-type") or "").lower() != "work":
+                    continue
+                target = relation.get("work") or relation.get("target")
+                if isinstance(target, dict) and target.get("id"):
+                    result.append(str(target["id"]))
+                elif isinstance(target, str) and target.strip():
+                    result.append(target.strip())
+            return list(dict.fromkeys(result))
+
         tracks = []
         for medium in payload.get("media", []) or []:
             for position, track in enumerate(medium.get("tracks", []) or [], start=1):
                 recording = track.get("recording") or {}
-                tracks.append(
-                    {
-                        "id": recording.get("id") or track.get("id"),
-                        "title": track.get("title") or recording.get("title"),
-                        "position": track.get("position") or position,
-                        "disc": medium.get("position"),
-                        "length": track.get("length") or recording.get("length"),
-                    }
+                length = track.get("length") or recording.get("length")
+                track_value = {
+                    "id": recording.get("id") or track.get("id"),
+                    "title": track.get("title") or recording.get("title"),
+                    "position": track.get("position") or position,
+                    "disc": medium.get("position"),
+                    "length": length,
+                    "durationSeconds": duration_seconds(length),
+                }
+                track_credits = artist_credits(
+                    recording.get("artist-credit") or track.get("artist-credit")
                 )
+                if track_credits:
+                    track_value["artists"] = track_credits
+                    track_value["contributingArtists"] = track_credits
+                track_work_ids = work_ids(recording) or work_ids(track)
+                if track_work_ids:
+                    track_value["workIds"] = track_work_ids
+                tracks.append(track_value)
         if entity_type == "track" and not tracks:
+            length = payload.get("length")
             tracks = [
                 {
                     "id": provider_id,
                     "title": payload.get("title") or payload.get("name"),
                     "position": payload.get("position"),
+                    "length": length,
+                    "durationSeconds": duration_seconds(length),
+                    "artists": credits,
+                    "contributingArtists": credits,
                 }
             ]
+        label_names = []
+        for label_info in payload.get("label-info", []) or []:
+            label = (
+                (label_info.get("label") or {}) if isinstance(label_info, dict) else {}
+            )
+            name = label.get("name") if isinstance(label, dict) else None
+            if name:
+                label_names.append(str(name))
+        primary_identifier_type = {
+            "artist": "artist",
+            "release": "release",
+            "release_group": "release_group",
+            "track": "recording",
+            "recording": "recording",
+            "work": "work",
+        }.get(entity_type, entity_type)
+        provider_ids = [
+            {
+                "provider": "musicbrainz",
+                "identifierType": primary_identifier_type,
+                "id": provider_id,
+            }
+        ]
+        if isinstance(release_group, dict) and release_group.get("id"):
+            provider_ids.append(
+                {
+                    "provider": "musicbrainz",
+                    "identifierType": "release_group",
+                    "id": str(release_group["id"]),
+                }
+            )
+        if entity_type in {"track", "recording"}:
+            provider_ids.extend(
+                {
+                    "provider": "musicbrainz",
+                    "identifierType": "work",
+                    "id": value,
+                }
+                for value in work_ids(payload)
+            )
+        provider_ids.extend(external_ids)
+        releases = payload.get("releases", []) or []
+        first_release = (
+            releases[0] if releases and isinstance(releases[0], dict) else {}
+        )
+        track_duration = (
+            tracks[0].get("durationSeconds")
+            if entity_type in {"track", "recording"} and tracks
+            else None
+        )
         return {
             "title": payload.get("name") or payload.get("title"),
             "overview": None,
@@ -1558,10 +1837,17 @@ class MusicBrainzClient(ProviderClient):
             "originalLanguage": None,
             "albumArtist": credits[0]["name"] if credits else None,
             "artists": credits,
+            "contributingArtists": credits,
+            "album": first_release.get("title") or first_release.get("name"),
+            "albumId": first_release.get("id"),
+            "albumType": album_type,
+            "albumSecondaryTypes": album_secondary_types,
+            "label": ", ".join(dict.fromkeys(label_names)) or None,
+            "durationSeconds": track_duration,
             "tracks": tracks,
             "provider": "musicbrainz",
             "providerId": provider_id,
-            "ids": external_ids,
+            "ids": provider_ids,
             "images": images,
             "extraImages": extra_images,
         }
@@ -2217,6 +2503,78 @@ def _select_match(candidates: list[dict], query: str, year: str | None = None) -
         or (len(scored) > 1 and scored[0][0] == scored[1][0])
     ):
         raise ProviderError(f"No unique high-confidence match for '{query}'")
+    return scored[0][1]
+
+
+def _music_match_text(value: object) -> str:
+    """Normalize MusicBrainz names without discarding non-Latin scripts."""
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).strip()
+
+
+def _music_candidate_artists(candidate: dict) -> list[str]:
+    values = candidate.get("artists") or candidate.get("artistCredits") or []
+    names = []
+    for value in values:
+        if isinstance(value, dict):
+            name = value.get("name")
+        else:
+            name = value
+        if name:
+            names.append(_music_match_text(name))
+    return names
+
+
+def _select_music_match(
+    candidates: list[dict],
+    title: str,
+    artist: str | None = None,
+    year: str | None = None,
+) -> str:
+    """Select one high-confidence album/recording result.
+
+    MusicBrainz returns a relevance score, but the local title and artist
+    context are still required here.  This prevents a popular album with the
+    same short title from replacing a playable local album.
+    """
+    wanted_title = _music_match_text(title)
+    wanted_artist = _music_match_text(artist)
+    scored: list[tuple[int, str]] = []
+    for candidate in candidates:
+        provider_id = str(candidate.get("providerId") or "")
+        candidate_title = _music_match_text(candidate.get("title"))
+        if not provider_id or not wanted_title or not candidate_title:
+            continue
+        if candidate_title == wanted_title:
+            score = 100
+        elif wanted_title in candidate_title or candidate_title in wanted_title:
+            score = 70
+        else:
+            continue
+        artists = _music_candidate_artists(candidate)
+        if wanted_artist:
+            if wanted_artist in artists:
+                score += 30
+            elif any(
+                wanted_artist in value or value in wanted_artist for value in artists
+            ):
+                score += 15
+        if (
+            year
+            and candidate.get("year")
+            and str(candidate["year"])[:4] == str(year)[:4]
+        ):
+            score += 10
+        scored.append((score, provider_id))
+    scored.sort(reverse=True)
+    if (
+        not scored
+        or scored[0][0] < 100
+        or (len(scored) > 1 and scored[0][0] == scored[1][0])
+    ):
+        raise ProviderError(
+            f"No unique high-confidence MusicBrainz match for '{title}'"
+        )
     return scored[0][1]
 
 

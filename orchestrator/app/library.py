@@ -9,11 +9,13 @@ import stat
 import threading
 import time
 import traceback
+import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable
 from concurrent.futures import Future, as_completed
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Empty
 
@@ -21,6 +23,7 @@ from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
 from app.language_registry import language_options, normalize_track_language
 from app.logging_config import get_logger
+from app.metadata_domain import clean_music_title, music_filename_parts
 from app.progress import WholeJobProgress
 from app.worker_config import configured_worker_limit
 
@@ -233,6 +236,19 @@ def _quick_fingerprint(path: Path, size: int | None = None) -> tuple[str, int]:
     return digest.hexdigest(), bytes_read
 
 
+def _audio_inventory_fingerprint(file_size: int, modified_ns: int) -> str:
+    """Create a no-I/O first-admission fingerprint for audio media.
+
+    A full audio quick fingerprint reads up to two MiB per file.  On a large
+    music library that is an unnecessary multi-gigabyte read because Mutagen
+    already opens the file for tags and later probes it for duration.  Size and
+    mtime still let the next watcher event trigger a real content check.
+    """
+    return hashlib.sha256(
+        f"audio-inventory:{int(file_size)}:{int(modified_ns)}".encode("ascii")
+    ).hexdigest()
+
+
 def _isolated_stat_worker(request_queue, response_queue) -> None:
     while True:
         request = request_queue.get()
@@ -399,6 +415,125 @@ def parse_nfo_ids(path: Path) -> list[tuple[str, str, str]]:
     return values
 
 
+_AUDIO_TAG_ALIASES = {
+    "NAM": "TITLE",
+    "TALB": "ALBUM",
+    "ALBUM": "ALBUM",
+    "ALB": "ALBUM",
+    "TPE1": "ARTIST",
+    "ARTIST": "ARTIST",
+    "ART": "ARTIST",
+    "ARTISTS": "ARTIST",
+    "PERFORMER": "ARTIST",
+    "PERFORMERS": "ARTIST",
+    "PERFORMER NAME": "ARTIST",
+    "VOCALIST": "ARTIST",
+    "SINGER": "ARTIST",
+    "TPE2": "ALBUMARTIST",
+    "ALBUMARTIST": "ALBUMARTIST",
+    "ALBUM ARTIST": "ALBUMARTIST",
+    "AART": "ALBUMARTIST",
+    "TIT2": "TITLE",
+    "TITLE": "TITLE",
+    "DAY": "DATE",
+    "TDRC": "DATE",
+    "TYER": "DATE",
+    "TDRL": "DATE",
+    "TDOR": "DATE",
+    "DATE": "DATE",
+    "YEAR": "DATE",
+    "DURATION": "DURATIONSECONDS",
+    "DURATIONSECONDS": "DURATIONSECONDS",
+    "LENGTH": "DURATIONSECONDS",
+    "TRCK": "TRACKNUMBER",
+    "TRKN": "TRACKNUMBER",
+    "TRACK": "TRACKNUMBER",
+    "TRACKNUMBER": "TRACKNUMBER",
+    "TPOS": "DISCNUMBER",
+    "DISK": "DISCNUMBER",
+    "DISC": "DISCNUMBER",
+    "DISCNUMBER": "DISCNUMBER",
+    "MUSICBRAINZ ARTIST ID": "MUSICBRAINZ_ARTISTID",
+    "MUSICBRAINZ ARTISTID": "MUSICBRAINZ_ARTISTID",
+    "MUSICBRAINZ ALBUM ARTIST ID": "MUSICBRAINZ_ALBUMARTISTID",
+    "MUSICBRAINZ ALBUM ARTISTID": "MUSICBRAINZ_ALBUMARTISTID",
+    "MUSICBRAINZ ALBUM ID": "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ ALBUMID": "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ RELEASE ID": "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ RELEASEID": "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ RELEASE GROUP ID": "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ RELEASE GROUPID": "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ RELEASEGROUPID": "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ TRACK ID": "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ TRACKID": "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ RECORDING ID": "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ RECORDINGID": "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ RELEASE TRACK ID": "MUSICBRAINZ_RELEASETRACKID",
+    "MUSICBRAINZ RELEASE TRACKID": "MUSICBRAINZ_RELEASETRACKID",
+    "MUSICBRAINZ RELEASETRACKID": "MUSICBRAINZ_RELEASETRACKID",
+    "MUSICBRAINZ WORK ID": "MUSICBRAINZ_WORKID",
+    "MUSICBRAINZ WORKID": "MUSICBRAINZ_WORKID",
+    "ALBUM TYPE": "ALBUMTYPE",
+    "ALBUMTYPE": "ALBUMTYPE",
+    "ALBUM TYPES": "ALBUMTYPES",
+    "ALBUMTYPES": "ALBUMTYPES",
+    "ALBUM SECONDARY TYPES": "ALBUMSECONDARYTYPES",
+    "ALBUMSECONDARYTYPES": "ALBUMSECONDARYTYPES",
+    "RELEASE TYPE": "ALBUMTYPE",
+    "RELEASETYPE": "ALBUMTYPE",
+    "RELEASE TYPES": "ALBUMTYPES",
+    "RELEASETYPES": "ALBUMTYPES",
+    "MUSICBRAINZ ALBUM TYPE": "ALBUMTYPE",
+    "MUSICBRAINZ ALBUMTYPE": "ALBUMTYPE",
+    "MUSICBRAINZ ALBUM TYPES": "ALBUMTYPES",
+    "MUSICBRAINZ ALBUMTYPES": "ALBUMTYPES",
+    "MUSICBRAINZ RELEASE TYPE": "ALBUMTYPE",
+    "MUSICBRAINZ RELEASETYPE": "ALBUMTYPE",
+    "MUSICBRAINZ RELEASE TYPES": "ALBUMTYPES",
+    "MUSICBRAINZ RELEASETYPES": "ALBUMTYPES",
+}
+_AUDIO_ID_TAGS = {
+    "MUSICBRAINZ_ARTISTID",
+    "MUSICBRAINZ_ALBUMARTISTID",
+    "MUSICBRAINZ_ALBUMID",
+    "MUSICBRAINZ_RELEASEGROUPID",
+    "MUSICBRAINZ_TRACKID",
+    "MUSICBRAINZ_RELEASETRACKID",
+    "MUSICBRAINZ_WORKID",
+}
+_AUDIO_MULTI_TAGS = {"ARTIST", "ALBUMARTIST", "ALBUMTYPES", "ALBUMSECONDARYTYPES"}
+
+
+def _audio_tag_key(raw_key: object) -> str:
+    key = str(raw_key).strip().upper()
+    if ":" in key:
+        # Mutagen exposes MP4 freeform tags as
+        # ``----:com.apple.iTunes:MusicBrainz ...``. The final component is
+        # the semantic tag name; the preceding namespace is not part of the
+        # catalog field.
+        key = key.rsplit(":", 1)[-1].strip()
+    key = key.replace("©", "")
+    key = re.sub(r"[._-]+", " ", key)
+    key = re.sub(r"\s+", " ", key).strip()
+    return _AUDIO_TAG_ALIASES.get(key, key.replace(" ", "_"))
+
+
+def _audio_tag_values(raw_value: object) -> list[str]:
+    value = getattr(raw_value, "text", raw_value)
+    if isinstance(value, (list, tuple)):
+        values = value
+    else:
+        values = [value]
+    result = []
+    for item in values:
+        if isinstance(item, bytes):
+            item = item.decode("utf-8", errors="replace")
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return list(dict.fromkeys(result))
+
+
 def parse_audio_tags(path: Path) -> dict[str, str]:
     try:
         from mutagen import File
@@ -408,13 +543,23 @@ def parse_audio_tags(path: Path) -> dict[str, str]:
             return {}
         tags: dict[str, str] = {}
         for raw_key, raw_value in audio.tags.items():
-            key = str(raw_key).upper()
-            if isinstance(raw_value, (list, tuple)):
-                value = str(raw_value[0]) if raw_value else ""
-            else:
-                value = str(raw_value)
-            if value:
-                tags[key] = value
+            key = _audio_tag_key(raw_key)
+            values = _audio_tag_values(raw_value)
+            if not values:
+                continue
+            tags[key] = (
+                ";".join(values)
+                if key in _AUDIO_ID_TAGS or key in _AUDIO_MULTI_TAGS
+                else values[0]
+            )
+        if "DURATIONSECONDS" not in tags:
+            length = getattr(getattr(audio, "info", None), "length", None)
+            if length is not None:
+                try:
+                    if float(length) >= 0:
+                        tags["DURATIONSECONDS"] = str(float(length))
+                except (TypeError, ValueError):
+                    pass
         return tags
     except Exception:
         return {}
@@ -954,6 +1099,7 @@ class LibraryScanner:
         self._scan_deferred_roots: set[str] = set()
         self._scan_access_errors: set[Path] = set()
         self._scan_refresh_root_ids: set[str] = set()
+        self._music_local_metadata: dict[str, dict] = {}
         self._scan_complete = False
         self._stage_lock = threading.RLock()
         self._stage = "idle"
@@ -965,6 +1111,13 @@ class LibraryScanner:
         self._publication_lock = threading.Lock()
         self._pending_publication_roots: dict[str, None] = {}
         self._last_publication_at = 0.0
+
+    def _has_table(self, name: str) -> bool:
+        return bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            )
+        )
 
     def _set_stage(
         self, job_id: str, stage: str, *, persist: bool = True, **context
@@ -1004,6 +1157,51 @@ class LibraryScanner:
                 progress_current_item=context.get("item"),
             )
             self._last_stage_persisted_at = time.monotonic()
+
+    def _update_stage_progress(
+        self,
+        job_id: str,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+        message: str | None = None,
+        **context,
+    ) -> None:
+        """Update a running stage without resetting its heartbeat timer.
+
+        Music libraries can contain many more roots/files than movie or TV
+        libraries.  Updating the stage context in place keeps the job useful
+        while a large root is being enumerated, without making every progress
+        update look like a brand-new stage.
+        """
+        with self._stage_lock:
+            stage = self._stage
+            merged_context = dict(self._stage_context)
+            merged_context.update(context)
+            if current is not None:
+                merged_context["current"] = current
+            if total is not None:
+                merged_context["total"] = total
+            self._stage_context = merged_context
+        values = {
+            "progress_current": current,
+            "progress_total": total,
+            "progress_phase": "processing",
+            "progress_label": stage,
+            "progress_stage_current": current,
+            "progress_stage_total": total,
+            "progress_stage_unit": merged_context.get("unit"),
+            "progress_current_item": merged_context.get("item"),
+        }
+        if message is not None:
+            values["message"] = message
+        else:
+            values["message"] = (
+                stage
+                if current is None or total is None
+                else f"{stage} · {current}/{total}"
+            )
+        self.store.update_job(job_id, **values)
 
     def _start_heartbeat(self, library_id: str, job_id: str) -> None:
         self._heartbeat_stop = threading.Event()
@@ -1110,15 +1308,24 @@ class LibraryScanner:
         self._scan_deferred_roots = set()
         self._scan_access_errors = set()
         self._scan_refresh_root_ids = set()
+        self._music_local_metadata = {}
         self._last_stage_persisted_at = 0.0
         self._scan_complete = False
         try:
             self._check_termination(should_terminate)
+            stage_context = {"root": str(root)}
+            if targets is not None:
+                stage_context["targetCount"] = len(targets)
+                # A watcher can coalesce thousands of top-level music roots.
+                # Keep the detailed list for small reconciles only; dumping it
+                # into the heartbeat makes the administrator job unreadable
+                # and needlessly inflates every progress update.
+                if len(targets) <= 8:
+                    stage_context["targets"] = sorted(targets)
             self._set_stage(
                 job_id,
                 f"Discovering {library['type']} roots",
-                root=str(root),
-                targets=sorted(targets) if targets else None,
+                **stage_context,
             )
             if library["type"] == "movies":
                 count = self._scan_movies(
@@ -1139,10 +1346,6 @@ class LibraryScanner:
                 )
             self._scan_complete = True
             if library["type"] == "music":
-                self._set_stage(job_id, "Resolving new or changed metadata")
-                self._resolve_and_seed(
-                    library_id, library["type"], job_id, should_terminate
-                )
                 self._set_stage(job_id, "Populating changed metadata locales")
                 self._fetch_seen_locales(should_terminate)
             self._set_stage(job_id, "Reconciling moved entities")
@@ -1930,6 +2133,38 @@ class LibraryScanner:
         for entity_id, entity_type, provider, identifier_type, provider_id in rows:
             if provider not in {"tmdb", "tvdb", "musicbrainz"}:
                 continue
+            if provider == "musicbrainz":
+                expected_identifier = {
+                    "artist": "artist",
+                    "release": "release",
+                    "track": "recording",
+                }.get(entity_type)
+                if expected_identifier != identifier_type:
+                    # Release-group, release-track, and work IDs are
+                    # supporting identities. They are not fetchable catalog
+                    # documents and must never be sent to /recording/{id}.
+                    continue
+                provider_locales = ingest.provider_locales(provider, entity_type)
+                provider_locale = provider_locales[0]
+                cached = ingest.metadata_service.cache.get(
+                    provider, entity_type, str(provider_id), provider_locale
+                )
+                if cached:
+                    if entity_id in self._music_local_metadata:
+                        continue
+                    cached.pop("_stale", None)
+                    ingest.ingest_document(
+                        provider,
+                        entity_type,
+                        str(provider_id),
+                        provider_locale,
+                        cached,
+                    )
+                    continue
+                tasks.setdefault((provider, entity_type, str(provider_id)), []).extend(
+                    provider_locales
+                )
+                continue
             for locale in locales:
                 cached = ingest.metadata_service.cache.get(
                     provider, entity_type, str(provider_id), locale
@@ -2038,6 +2273,14 @@ class LibraryScanner:
                 if value[0] == "tmdb" and value not in normalized_keys
             )
             normalized = list(dict.fromkeys(normalized))
+        if entity_type == "artist":
+            normalized_keys = set(normalized)
+            normalized.extend(
+                value
+                for value in current
+                if value[0] == "local" and value not in normalized_keys
+            )
+            normalized = list(dict.fromkeys(normalized))
         if set(normalized) != set(current):
             self.db.execute(
                 "DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,)
@@ -2062,6 +2305,229 @@ class LibraryScanner:
                 (now(), entity_id),
             )
 
+    def _music_provider_document(
+        self, entity_id: str, entity_type: str, provider_id: str | None
+    ) -> dict | None:
+        document = self._music_local_metadata.get(entity_id)
+        if not document:
+            return None
+        value = deepcopy(document)
+        if provider_id:
+            provider_id = str(provider_id)
+            value["provider"] = "musicbrainz"
+            value["providerId"] = provider_id
+            value["ids"] = [
+                {
+                    "provider": "musicbrainz",
+                    "identifierType": (
+                        "recording" if entity_type == "track" else entity_type
+                    ),
+                    "id": provider_id,
+                }
+            ]
+            if entity_type == "track":
+                value["tracks"] = [
+                    {
+                        "id": provider_id,
+                        "title": value.get("title"),
+                        "position": value.get("trackNumber"),
+                        "disc": value.get("discNumber"),
+                        "durationSeconds": value.get("durationSeconds"),
+                    }
+                ]
+        return value
+
+    def _seed_music_provider_document(
+        self,
+        entity_id: str,
+        entity_type: str,
+        provider_id: str | None,
+        ingest,
+    ) -> bool:
+        """Project local music metadata without blocking on MusicBrainz."""
+        if not provider_id:
+            return False
+        document = self._music_provider_document(entity_id, entity_type, provider_id)
+        if document is None:
+            return False
+        locales = ingest.locales()
+        complete_batch = len(locales) == 1
+        try:
+            for locale in locales:
+                ingest.ingest_document(
+                    "musicbrainz",
+                    entity_type,
+                    str(provider_id),
+                    locale,
+                    deepcopy(document),
+                    force_assets=False,
+                    complete_batch=complete_batch,
+                )
+        except Exception:
+            logger.exception(
+                "local music metadata projection failed entity_id=%s type=%s provider_id=%s",
+                entity_id,
+                entity_type,
+                provider_id,
+            )
+            return False
+        return True
+
+    def _music_release_documents(
+        self,
+        release_id: str,
+        release_documents: dict[str, dict[str, dict]],
+        service,
+        locales: list[str],
+    ) -> dict[str, dict]:
+        cached = release_documents.get(release_id)
+        if cached is not None:
+            return cached
+        provider_rows = self.db.execute(
+            "SELECT provider_id FROM entity_provider_ids "
+            "WHERE entity_id=? AND provider='musicbrainz' "
+            "ORDER BY CASE WHEN identifier_type='release' THEN 0 ELSE 1 END, is_primary DESC, provider_id",
+            (release_id,),
+        )
+        if not provider_rows:
+            release_documents[release_id] = {}
+            return {}
+        cache = getattr(service, "cache", None)
+        get_cached = getattr(cache, "get", None)
+        if get_cached is None:
+            release_documents[release_id] = {}
+            return {}
+        values: dict[str, dict] = {}
+        for locale in locales:
+            try:
+                document = get_cached(
+                    "musicbrainz", "release", str(provider_rows[0][0]), ""
+                )
+                if document is None and locale:
+                    document = get_cached(
+                        "musicbrainz", "release", str(provider_rows[0][0]), locale
+                    )
+            except Exception:
+                document = None
+            if isinstance(document, dict):
+                document = deepcopy(document)
+                document.pop("_stale", None)
+                values[locale] = document
+        release_documents[release_id] = values
+        return values
+
+    def _music_track_documents(
+        self,
+        entity_id: str,
+        release_id: str | None,
+        provider_id: str | None,
+        release_documents: dict[str, dict[str, dict]],
+        service,
+        locales: list[str],
+    ) -> dict[str, dict]:
+        if not provider_id:
+            return {}
+        release_documents_by_locale: dict[str, dict] = {}
+        if release_id:
+            release_documents_by_locale = self._music_release_documents(
+                release_id, release_documents, service, locales
+            )
+        local = self._music_provider_document(entity_id, "track", provider_id)
+        track_number = local.get("trackNumber") if local else None
+        disc_number = local.get("discNumber") if local else None
+        values: dict[str, dict] = {}
+        for locale in locales:
+            release_document = release_documents_by_locale.get(locale)
+            candidate = None
+            for track in (release_document or {}).get("tracks", []) or []:
+                if not isinstance(track, dict):
+                    continue
+                if str(track.get("id") or "") == str(provider_id):
+                    candidate = track
+                    break
+                if (
+                    candidate is None
+                    and track_number is not None
+                    and str(track.get("position") or "") == str(track_number)
+                    and (
+                        disc_number is None
+                        or track.get("disc") is None
+                        or str(track.get("disc")) == str(disc_number)
+                    )
+                ):
+                    candidate = track
+            cached_track = None
+            if candidate is None:
+                cache = getattr(service, "cache", None)
+                get_cached = getattr(cache, "get", None)
+                if get_cached is not None:
+                    try:
+                        cached_track = get_cached(
+                            "musicbrainz", "track", str(provider_id), ""
+                        )
+                        if cached_track is None and locale:
+                            cached_track = get_cached(
+                                "musicbrainz", "track", str(provider_id), locale
+                            )
+                    except Exception:
+                        cached_track = None
+                cached_tracks = (
+                    cached_track.get("tracks", [])
+                    if isinstance(cached_track, dict)
+                    else []
+                )
+                if cached_tracks and isinstance(cached_tracks[0], dict):
+                    candidate = deepcopy(cached_tracks[0])
+            if candidate is not None and (
+                release_document is not None or isinstance(cached_track, dict)
+            ):
+                value = deepcopy(release_document or cached_track)
+                value["title"] = clean_music_title(
+                    candidate.get("title") or (local.get("title") if local else None)
+                )
+                value["album"] = (release_document or {}).get("title") or value.get(
+                    "album"
+                )
+                value["albumId"] = (release_document or {}).get(
+                    "providerId"
+                ) or value.get("albumId")
+                value["provider"] = "musicbrainz"
+                value["providerId"] = str(provider_id)
+                value["ids"] = [
+                    {
+                        "provider": "musicbrainz",
+                        "identifierType": "recording",
+                        "id": str(provider_id),
+                    }
+                ]
+                value["discNumber"] = candidate.get("disc") or disc_number
+                value["trackNumber"] = candidate.get("position") or track_number
+                value["durationSeconds"] = candidate.get("durationSeconds")
+                value["tracks"] = [candidate]
+                local_artists = (
+                    local.get("artists") if isinstance(local, dict) else None
+                )
+                candidate_artists = candidate.get("artists")
+                if not isinstance(candidate_artists, list):
+                    candidate_artists = candidate.get("contributingArtists")
+                track_artists = (
+                    local_artists
+                    if isinstance(local_artists, list) and local_artists
+                    else candidate_artists
+                )
+                if isinstance(track_artists, list) and track_artists:
+                    value["artists"] = deepcopy(track_artists)
+                    value["contributingArtists"] = deepcopy(track_artists)
+                # Track artwork is inherited from the release by catalog
+                # serialization. Avoid one image/credit asset job per track.
+                value["images"] = []
+                value["extraImages"] = []
+                value["credits"] = []
+                values[locale] = value
+            elif local is not None:
+                values[locale] = deepcopy(local)
+        return values
+
     def _resolve_and_seed(
         self,
         library_id: str,
@@ -2070,6 +2536,7 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
     ) -> None:
         """Resolve top-level inventory entities and seed English/common metadata."""
+        from app.metadata_services import MetadataIngestService
         from app.providers import MetadataService, ProviderError
 
         entity_types = {
@@ -2103,6 +2570,11 @@ class LibraryScanner:
             message="Resolving provider metadata",
         )
         service = MetadataService()
+        ingest = (
+            MetadataIngestService(service, background_assets=False)
+            if library_type == "music"
+            else None
+        )
         if library_type == "movies" and rows:
             self._resolve_movies_parallel(library_id, rows, job_id, should_terminate)
             return
@@ -2126,17 +2598,83 @@ class LibraryScanner:
                 len(rows),
             )
             explicit = [
-                {"provider": row[0], "id": row[2]}
+                {
+                    "provider": row[0],
+                    "identifierType": row[1],
+                    "id": row[2],
+                }
                 for row in self.db.execute(
                     "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
                     (entity_id,),
                 )
             ]
+            if library_type == "music" and not explicit:
+                # Untagged local music is still valid inventory. Do not turn
+                # every artist folder into a MusicBrainz title search; the
+                # metadata repair job can enrich it later if desired.
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                    (now(), entity_id),
+                )
+                self.store.update_job(
+                    job_id,
+                    progress_current=index,
+                    message=f"Kept local metadata for {query}",
+                )
+                continue
+            music_provider_id = next(
+                (
+                    str(value["id"])
+                    for value in explicit
+                    if value.get("provider") == "musicbrainz"
+                    and value.get("id")
+                    and value.get("identifierType")
+                    == {
+                        "artist": "artist",
+                        "release": "release",
+                        "track": "recording",
+                    }.get(entity_type)
+                ),
+                None,
+            )
             try:
                 result = service.resolve_inventory_entity(
                     entity_type, query, year, explicit
                 )
             except ProviderError:
+                if library_type == "music":
+                    seeded = bool(
+                        ingest
+                        and self._seed_music_provider_document(
+                            entity_id, entity_type, music_provider_id, ingest
+                        )
+                    )
+                    if seeded or entity_id in self._music_local_metadata:
+                        self.db.execute(
+                            "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                            (now(), entity_id),
+                        )
+                    if music_provider_id:
+                        self._queue_metadata_repair(
+                            entity_id,
+                            library_id,
+                            job_id,
+                            "MusicBrainz unavailable; local music metadata retained",
+                            ingest.locales() if ingest else None,
+                        )
+                        self.store.update_job(
+                            job_id,
+                            progress_current=index,
+                            message=f"Kept local metadata for {query}; queued repair",
+                        )
+                        continue
+                    if entity_id in self._music_local_metadata:
+                        self.store.update_job(
+                            job_id,
+                            progress_current=index,
+                            message=f"Kept local metadata for {query}",
+                        )
+                        continue
                 self.db.execute(
                     "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
                     (now(), entity_id),
@@ -2173,16 +2711,44 @@ class LibraryScanner:
                     value["provider"],
                     value["id"],
                 )
-                self._fetch_configured_locales(
-                    service,
-                    value["provider"],
-                    entity_type,
-                    str(value["id"]),
-                    required=True,
-                    progress=lambda message: self.store.update_job(
-                        job_id, message=message
-                    ),
-                )
+                try:
+                    self._fetch_configured_locales(
+                        service,
+                        value["provider"],
+                        entity_type,
+                        str(value["id"]),
+                        required=True,
+                        progress=lambda message: self.store.update_job(
+                            job_id, message=message
+                        ),
+                    )
+                except Exception as error:
+                    if library_type != "music":
+                        raise
+                    seeded = bool(
+                        ingest
+                        and self._seed_music_provider_document(
+                            entity_id, entity_type, str(value["id"]), ingest
+                        )
+                    )
+                    if seeded or entity_id in self._music_local_metadata:
+                        self.db.execute(
+                            "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                            (now(), entity_id),
+                        )
+                    self._queue_metadata_repair(
+                        entity_id,
+                        library_id,
+                        job_id,
+                        f"MusicBrainz metadata unavailable: {type(error).__name__}: {error}",
+                        ingest.locales() if ingest else None,
+                    )
+                    logger.warning(
+                        "music root metadata deferred entity_id=%s provider_id=%s error=%s",
+                        entity_id,
+                        value["id"],
+                        error,
+                    )
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='scan_resolution',updated_at=? WHERE id=?",
                 (now(), entity_id),
@@ -2271,18 +2837,20 @@ class LibraryScanner:
         entity_type: str,
         should_terminate: Callable[[], bool],
     ) -> None:
-        if entity_type not in {"movie", "episode"}:
+        if entity_type not in {"movie", "episode", "artist", "release", "track"}:
             return
         try:
             from app.metadata_services import reproject_entity_artwork
-            from app.screen_extractor import extract_entity
 
-            extract_entity(
-                self.db,
-                entity_id,
-                entity_type,
-                should_terminate=should_terminate,
-            )
+            if entity_type in {"movie", "episode"}:
+                from app.screen_extractor import extract_entity
+
+                extract_entity(
+                    self.db,
+                    entity_id,
+                    entity_type,
+                    should_terminate=should_terminate,
+                )
             reproject_entity_artwork(self.db, entity_id)
         except Exception as error:
             logger.warning(
@@ -2758,6 +3326,7 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
         parent_id: str | None = None,
         season_id: str | None = None,
+        release_documents: dict[str, dict[str, dict]] | None = None,
     ) -> None:
         """Fetch common metadata and IDs for every season, episode, release, and track."""
         from app.metadata_services import MetadataIngestService
@@ -2792,10 +3361,21 @@ class LibraryScanner:
                 return True
             if self._needs_metadata(entity_id):
                 return True
-            provider_rows = self.db.execute(
-                "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=?",
+            provider_identity_rows = self.db.execute(
+                "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=?",
                 (entity_id,),
             )
+            expected_identifier = {
+                "release": "release",
+                "track": "recording",
+            }.get(entity_type)
+            provider_rows = [
+                (provider, provider_id)
+                for provider, identifier_type, provider_id in provider_identity_rows
+                if provider != "musicbrainz"
+                or expected_identifier is None
+                or identifier_type == expected_identifier
+            ]
             priorities = {
                 "season": ["tvdb", "tmdb"],
                 "episode": ["tvdb", "tmdb"],
@@ -2809,18 +3389,29 @@ class LibraryScanner:
                 )
                 if not provider_id:
                     continue
+                cache_locales = ingest.provider_locales(provider, entity_type)
                 if any(
                     not self.db.execute(
                         "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
                         (provider, entity_type, str(provider_id), locale),
                     )
-                    for locale in ingest.locales()
+                    for locale in cache_locales
                 ):
                     return True
             return False
 
         def needs_artwork_reconciliation(row: tuple) -> bool:
-            if row[1] not in {"movie", "episode"} or row[0] not in self._scan_seen_ids:
+            if (
+                row[1]
+                not in {
+                    "movie",
+                    "episode",
+                    "artist",
+                    "release",
+                    "track",
+                }
+                or row[0] not in self._scan_seen_ids
+            ):
                 return False
             if needs_localized_metadata(row):
                 return True
@@ -2848,6 +3439,8 @@ class LibraryScanner:
             progress_current=0,
             message="Seeding child metadata",
         )
+        release_documents = release_documents if release_documents is not None else {}
+        music_locales = ingest.locales()
         for index, (
             entity_id,
             entity_type,
@@ -2866,11 +3459,91 @@ class LibraryScanner:
                 index,
                 len(rows),
             )
-            provider_rows = self.db.execute(
-                "SELECT provider,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
+            provider_identity_rows = self.db.execute(
+                "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY is_primary DESC,provider",
                 (entity_id,),
             )
+            expected_identifier = {
+                "release": "release",
+                "track": "recording",
+            }.get(entity_type)
+            provider_rows = [
+                (provider, provider_id)
+                for provider, identifier_type, provider_id in provider_identity_rows
+                if provider != "musicbrainz"
+                or expected_identifier is None
+                or identifier_type == expected_identifier
+            ]
+            music_provider_id = next(
+                (
+                    str(value[1])
+                    for value in provider_rows
+                    if value[0] == "musicbrainz" and value[1]
+                ),
+                None,
+            )
+            if entity_type == "track":
+                local_documents = self._music_track_documents(
+                    entity_id,
+                    row_parent_id,
+                    music_provider_id,
+                    release_documents,
+                    service,
+                    music_locales,
+                )
+                if local_documents:
+                    try:
+                        for locale, normalized in local_documents.items():
+                            ingest.ingest_document(
+                                "musicbrainz",
+                                "track",
+                                music_provider_id,
+                                locale,
+                                normalized,
+                                force_assets=False,
+                                complete_batch=True,
+                            )
+                            self._persist_normalized_ids(
+                                entity_id, entity_type, normalized
+                            )
+                    except Exception as error:
+                        logger.warning(
+                            "local music track projection deferred entity_id=%s path=%s error=%s",
+                            entity_id,
+                            relative_path,
+                            error,
+                        )
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                        (now(), entity_id),
+                    )
+                    self._extract_and_reproject(
+                        entity_id, entity_type, should_terminate
+                    )
+                    self.store.update_job(
+                        job_id,
+                        progress_current=index,
+                        message=f"Seeded local track {relative_path}",
+                    )
+                    continue
             if not provider_rows:
+                if (
+                    entity_type in {"release", "track"}
+                    and entity_id in self._music_local_metadata
+                ):
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                        (now(), entity_id),
+                    )
+                    self._extract_and_reproject(
+                        entity_id, entity_type, should_terminate
+                    )
+                    self.store.update_job(
+                        job_id,
+                        progress_current=index,
+                        message=f"Kept local metadata for {relative_path}",
+                    )
+                    continue
                 if entity_type in {"season", "episode"} and (parent_id or season_id):
                     logger.warning(
                         "No TVDB provider ID was aggregated; leaving file unresolved type=%s path=%s",
@@ -2944,7 +3617,11 @@ class LibraryScanner:
                 )
                 if not provider_id:
                     continue
-                locales = ingest.locales()
+                locales = (
+                    ingest.provider_locales(provider, entity_type)
+                    if provider == "musicbrainz"
+                    else ingest.locales()
+                )
                 self.store.update_job(
                     job_id,
                     message=(
@@ -2964,6 +3641,11 @@ class LibraryScanner:
                     normalized_by_locale = ingest.ingest_locales(
                         provider, entity_type, provider_id, locales, force=False
                     )
+                    if entity_type == "release" and provider == "musicbrainz":
+                        release_documents[entity_id] = {
+                            locale: deepcopy(normalized)
+                            for locale, normalized in normalized_by_locale.items()
+                        }
                     for locale, normalized in normalized_by_locale.items():
                         fetched = True
                         if provider == required:
@@ -3002,7 +3684,13 @@ class LibraryScanner:
                     (now(), entity_id),
                 )
                 self._queue_metadata_repair(
-                    entity_id, library_id, job_id, failure, ingest.locales()
+                    entity_id,
+                    library_id,
+                    job_id,
+                    failure,
+                    ingest.provider_locales(required, entity_type)
+                    if required == "musicbrainz"
+                    else ingest.locales(),
                 )
                 logger.warning(
                     "metadata child failed; continuing entity_id=%s type=%s index=%s/%s error=%s",
@@ -3052,7 +3740,11 @@ class LibraryScanner:
             return
 
         ingest = MetadataIngestService(service, background_assets=False)
-        locales = ingest.locales()
+        locales = (
+            ingest.provider_locales(provider, entity_type)
+            if provider == "musicbrainz"
+            else ingest.locales()
+        )
         if progress:
             progress(
                 f"Fetching {provider} {entity_type} {provider_id} metadata ({len(locales)} locales)"
@@ -3110,6 +3802,13 @@ class LibraryScanner:
 
     def _persist_child_ids(self, parent_id: str, normalized: dict) -> None:
         """Attach provider child IDs to inventory children by stable numbers."""
+
+        def number(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         tracks = [
             value for value in normalized.get("tracks", []) or [] if value.get("id")
         ]
@@ -3125,15 +3824,24 @@ class LibraryScanner:
                     value
                     for value in tracks
                     if track_number is not None
-                    and int(value.get("position") or 0) == int(track_number)
+                    and (
+                        value.get("disc") is None
+                        or disc_number is None
+                        or number(value.get("disc")) == number(disc_number)
+                    )
+                    and number(value.get("position")) == number(track_number)
                 ),
                 None,
             )
             candidate = candidate or (tracks[index] if index < len(tracks) else None)
             if candidate and candidate.get("id"):
-                self._ids(
-                    entity_id, [("musicbrainz", "recording", str(candidate["id"]))]
+                identities = [("musicbrainz", "recording", str(candidate["id"]))]
+                identities.extend(
+                    ("musicbrainz", "work", str(work_id))
+                    for work_id in candidate.get("workIds", []) or []
+                    if work_id
                 )
+                self._ids(entity_id, identities)
 
     def _derive_tmdb_child_ids(
         self, series_id: str, season_id: str | None = None
@@ -3454,7 +4162,13 @@ class LibraryScanner:
                 file_size,
             )
             try:
-                quick_fingerprint, bytes_read = _quick_fingerprint(path, file_size)
+                if not old and path.suffix.lower() in AUDIO_EXTENSIONS:
+                    quick_fingerprint = _audio_inventory_fingerprint(
+                        file_size, modified_ns
+                    )
+                    bytes_read = 0
+                else:
+                    quick_fingerprint, bytes_read = _quick_fingerprint(path, file_size)
             except OSError:
                 logger.warning(
                     "library scan file fingerprint deferred entity_id=%s path=%s duration_seconds=%.1f",
@@ -3636,9 +4350,11 @@ class LibraryScanner:
                 Path(getattr(error, "filename", None) or directory)
             )
 
-        for current, _directories, filenames in os.walk(
+        for current, directories, filenames in os.walk(
             directory, onerror=traversal_error
         ):
+            directories.sort(key=str.casefold)
+            filenames.sort(key=str.casefold)
             current_path = Path(current)
             for name in filenames:
                 path = current_path / name
@@ -3650,7 +4366,7 @@ class LibraryScanner:
                         yield path, None
                         continue
                 except OSError:
-                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                    if path.suffix.lower() in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
                         self._record_access_error(path)
                     yield path, None
                     continue
@@ -3658,7 +4374,7 @@ class LibraryScanner:
                 try:
                     file_stat = path.stat()
                 except OSError:
-                    if path.suffix.lower() in VIDEO_EXTENSIONS:
+                    if path.suffix.lower() in VIDEO_EXTENSIONS | AUDIO_EXTENSIONS:
                         self._record_access_error(path)
                     yield path, None
                     continue
@@ -4289,6 +5005,1046 @@ class LibraryScanner:
         self._scan_complete = True
         return series_count
 
+    def _music_entity_by_provider_id(
+        self,
+        library_id: str,
+        entity_type: str,
+        identifier_type: str,
+        provider_id: str,
+    ) -> str | None:
+        rows = self.db.execute(
+            "SELECT e.id FROM library_entities e "
+            "JOIN entity_provider_ids p ON p.entity_id=e.id "
+            "WHERE e.library_id=? AND e.entity_type=? AND p.provider='musicbrainz' "
+            "AND p.identifier_type=? AND p.provider_id=? "
+            "ORDER BY e.id LIMIT 1",
+            (library_id, entity_type, identifier_type, str(provider_id)),
+        )
+        if not rows:
+            return None
+        entity_id = str(rows[0][0])
+        self._scan_seen_ids.add(entity_id)
+        return entity_id
+
+    def _music_artist_by_name(self, library_id: str, name: str) -> str | None:
+        normalized = _music_normalize(name)
+        if not normalized:
+            return None
+        rows = self.db.execute(
+            "SELECT id,relative_path FROM library_entities "
+            "WHERE library_id=? AND entity_type='artist' AND parent_id IS NULL "
+            "ORDER BY id",
+            (library_id,),
+        )
+        for entity_id, relative_path in rows:
+            if _music_normalize(relative_path) == normalized:
+                entity_id = str(entity_id)
+                self._scan_seen_ids.add(entity_id)
+                return entity_id
+        return None
+
+    def _persist_music_local_artist(
+        self, artist_id: str, name: str, ingest=None
+    ) -> None:
+        """Keep providerless artist metadata durable and projection-readable."""
+        display_name = _music_display_value(name)
+        if not display_name:
+            return
+        document = _music_local_artist_document(display_name, artist_id)
+        self._music_local_metadata[artist_id] = document
+        self.db.execute(
+            "INSERT OR IGNORE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
+            (artist_id, "local", "artist", artist_id),
+        )
+        if self._has_table("metadata_cache"):
+            from app.metadata_services import MetadataSearchProjection
+            from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
+
+            payload = dict(document)
+            payload["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
+            payload["_metadataLocale"] = ""
+            fetched_at = datetime.now(timezone.utc)
+            cache_values = (
+                json.dumps(payload, ensure_ascii=False),
+                fetched_at.isoformat(),
+                (fetched_at + timedelta(days=7)).isoformat(),
+            )
+            cache_key = ("local", "artist", artist_id, "")
+            if self.db.execute(
+                "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
+                cache_key,
+            ):
+                self.db.execute(
+                    "UPDATE metadata_cache SET payload=?,fetched_at=?,expires_at=? WHERE provider=? AND entity_type=? AND provider_id=? AND locale=?",
+                    (*cache_values, *cache_key),
+                )
+            else:
+                self.db.execute(
+                    "INSERT INTO metadata_cache(provider,entity_type,provider_id,locale,payload,fetched_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+                    (*cache_key, *cache_values),
+                )
+            for locale in getattr(ingest, "locales", lambda: ["en"])():
+                MetadataSearchProjection(self.db).project(
+                    "local", "artist", artist_id, locale, document
+                )
+
+    def _music_mark_identity_changed(self, entity_id: str) -> None:
+        if entity_id not in self._scan_created_ids:
+            self._scan_provider_identity_changed.add(entity_id)
+
+    @staticmethod
+    def _music_release_track_candidate(
+        local: dict,
+        tracks: list[dict],
+        used_ids: set[str],
+    ) -> dict | None:
+        """Match one local track to a release medium without guessing freely."""
+        title = _music_normalize(local.get("title"))
+        track_number = local.get("trackNumber")
+        disc_number = local.get("discNumber")
+        duration = local.get("durationSeconds")
+        scored: list[tuple[int, str, dict]] = []
+        for index, candidate in enumerate(tracks):
+            if not isinstance(candidate, dict):
+                continue
+            provider_id = str(candidate.get("id") or "")
+            if provider_id and provider_id in used_ids:
+                continue
+            candidate_title = _music_normalize(candidate.get("title"))
+            score = 0
+            if title and candidate_title == title:
+                score += 100
+            elif title and (title in candidate_title or candidate_title in title):
+                score += 55
+            if track_number is not None and str(candidate.get("position") or "") == str(
+                track_number
+            ):
+                score += 45
+            if disc_number is not None and candidate.get("disc") is not None:
+                if str(candidate.get("disc")) == str(disc_number):
+                    score += 25
+                else:
+                    score -= 40
+            candidate_duration = candidate.get("durationSeconds")
+            if duration is not None and candidate_duration is not None:
+                try:
+                    difference = abs(float(duration) - float(candidate_duration))
+                except (TypeError, ValueError):
+                    difference = None
+                if difference is not None:
+                    score += (
+                        15 if difference <= max(2.0, float(duration) * 0.03) else -10
+                    )
+            if score:
+                scored.append((score, provider_id or str(index), candidate))
+        scored.sort(key=lambda value: (value[0], value[1]), reverse=True)
+        if not scored or scored[0][0] < 90:
+            return None
+        if len(scored) > 1 and scored[0][0] == scored[1][0]:
+            return None
+        candidate = deepcopy(scored[0][2])
+        if candidate.get("id"):
+            used_ids.add(str(candidate["id"]))
+        return candidate
+
+    def _index_music_group(
+        self,
+        library_id: str,
+        root: Path,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        group_entries: list[tuple[Path, dict[str, str]]],
+        artist_entities: dict[str, str],
+        release_entities: dict[tuple[str, ...], str],
+    ) -> tuple[str, str, list[dict], int]:
+        first_path, first_tags = group_entries[0]
+        relative_first = Path(relative(str(root), str(first_path)))
+        artist_name = (
+            _music_display_value(first_tags.get("ALBUMARTIST"))
+            or _music_display_value(first_tags.get("ARTIST"))
+            or (
+                relative_first.parts[0]
+                if relative_first.parts
+                else first_path.parent.name
+            )
+        )
+        artist_key = _music_normalize(artist_name)
+        embedded_artist_ids = []
+        for _, tags in group_entries:
+            embedded_artist_ids.extend(_music_ids(tags, "artist"))
+        artist = None
+        for value in embedded_artist_ids:
+            artist = self._music_entity_by_provider_id(
+                library_id, "artist", "artist", value[2]
+            )
+            if artist:
+                break
+        artist = (
+            artist
+            or artist_entities.get(artist_key)
+            or self._music_artist_by_name(library_id, artist_name)
+        )
+        if not artist:
+            artist = self._entity(library_id, None, "artist", artist_name)
+        artist_entities[artist_key] = artist
+        self._music_local_metadata[artist] = _music_local_document(
+            first_path,
+            first_tags,
+            "artist",
+            artist_name=artist_name,
+        )
+        if embedded_artist_ids:
+            self._replace_ids(artist, list(dict.fromkeys(embedded_artist_ids)))
+
+        release_ids = []
+        for _, tags in group_entries:
+            release_ids.extend(_music_ids(tags, "release"))
+        release_id = next(
+            (value[2] for value in release_ids if value[1] == "release"), None
+        )
+        album_dirs = [path.parent for path, _ in group_entries]
+        try:
+            album_dir = Path(os.path.commonpath([str(value) for value in album_dirs]))
+        except (ValueError, OSError):
+            album_dir = first_path.parent
+        if album_dir == root:
+            album_dir = first_path.parent
+        album_path = relative(str(root), str(album_dir))
+        album_name = _music_display_value(first_tags.get("ALBUM")) or album_dir.name
+        release_key = (
+            ("id", str(release_id))
+            if release_id
+            else ("name", artist_key, _music_normalize(album_name))
+        )
+        release = release_entities.get(release_key)
+        if not release and release_id:
+            release = self._music_entity_by_provider_id(
+                library_id, "release", "release", release_id
+            )
+        if not release:
+            release = self._entity(library_id, artist, "release", album_path)
+        release_entities[release_key] = release
+        release_tags = dict(first_tags)
+        for key in ("ALBUMTYPE", "ALBUMTYPES", "ALBUMSECONDARYTYPES"):
+            values: list[str] = []
+            for _, tags in group_entries:
+                values.extend(_music_tag_values(tags, key))
+            if values:
+                release_tags[key] = ";".join(dict.fromkeys(values))
+        self._music_local_metadata[release] = _music_local_document(
+            first_path,
+            release_tags,
+            "release",
+            artist_name=artist_name,
+            album_name=album_name,
+        )
+        if release_ids:
+            self._replace_ids(release, list(dict.fromkeys(release_ids)))
+            self._music_mark_identity_changed(release)
+
+        ordered_entries = sorted(
+            group_entries,
+            key=lambda value: (
+                _int_tag(value[1].get("DISCNUMBER"))
+                or _music_filename_parts(value[0])[1]
+                or 0,
+                _int_tag(value[1].get("TRACKNUMBER"))
+                or _music_filename_parts(value[0])[2]
+                or 10**9,
+                relative(str(root), str(value[0])).casefold(),
+            ),
+        )
+        tracks = []
+        for track, tags in ordered_entries:
+            self._check_termination(should_terminate)
+            track_number = _int_tag(tags.get("TRACKNUMBER"))
+            disc_number = _int_tag(tags.get("DISCNUMBER"))
+            _, filename_disc_number, filename_track_number = _music_filename_parts(
+                track
+            )
+            if disc_number is None:
+                disc_number = filename_disc_number
+            if track_number is None:
+                track_number = filename_track_number
+            entity = self._entity(
+                library_id,
+                release,
+                "track",
+                relative(str(root), str(track)),
+                disc_number=disc_number,
+                track_number=track_number,
+            )
+            local = _music_local_document(
+                track,
+                tags,
+                "track",
+                artist_name=artist_name,
+                album_name=album_name,
+                disc_number=disc_number,
+                track_number=track_number,
+            )
+            self._music_local_metadata[entity] = local
+            music_ids = _music_ids(tags, "track")
+            if music_ids:
+                self._replace_ids(entity, music_ids)
+                self._music_mark_identity_changed(entity)
+            sidecars = []
+            try:
+                sidecars = [
+                    sidecar
+                    for sidecar in track.parent.iterdir()
+                    if sidecar.is_file()
+                    and sidecar.stem.startswith(track.stem)
+                    and sidecar != track
+                ]
+            except OSError:
+                self._defer_root(
+                    relative(str(root), str(track.parent)),
+                    "track sidecars are inaccessible",
+                )
+            self._files(entity, root, [track, *sidecars], job_id=job_id)
+            tracks.append(
+                {
+                    "entity_id": entity,
+                    "path": track,
+                    "tags": tags,
+                    "local": local,
+                    "music_ids": music_ids,
+                }
+            )
+
+        artwork_accessible = True
+        try:
+            image_paths = [
+                path
+                for path in album_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+            ]
+        except OSError:
+            image_paths = []
+            artwork_accessible = False
+            self._defer_root(
+                relative(str(root), str(album_dir)),
+                "album artwork directory is inaccessible",
+            )
+        if artwork_accessible:
+            self._files(release, root, image_paths, job_id=job_id)
+        return artist, release, tracks, len(tracks)
+
+    def _resolve_music_group(
+        self,
+        library_id: str,
+        root: Path,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        artist: str,
+        release: str,
+        tracks: list[dict],
+        service,
+        ingest,
+    ) -> None:
+        from app.providers import _select_music_match
+
+        self._check_termination(should_terminate)
+        locales = ingest.provider_locales("musicbrainz", "release")
+        release_local = self._music_local_metadata.get(release) or {}
+        album_name = _music_display_value(release_local.get("title"))
+        artist_local = self._music_local_metadata.get(artist) or {}
+        artist_name = _music_display_value(
+            release_local.get("albumArtist")
+        ) or _music_display_value(artist_local.get("title"))
+        year = str(release_local.get("year") or "")[:4] or None
+        provider_rows = self.db.execute(
+            "SELECT identifier_type,provider_id FROM entity_provider_ids "
+            "WHERE entity_id=? AND provider='musicbrainz' "
+            "ORDER BY CASE WHEN identifier_type='release' THEN 0 ELSE 1 END, provider_id",
+            (release,),
+        )
+        release_id = next(
+            (str(row[1]) for row in provider_rows if row[0] == "release"), None
+        )
+        client = service.client("musicbrainz")
+        release_documents: dict[str, dict] = {}
+        release_error: Exception | None = None
+        if (
+            not release_id
+            and album_name
+            and (release_local.get("album") or release_local.get("albumArtist"))
+        ):
+            try:
+                candidates = client.search_releases(album_name, artist_name, year)
+                release_id = _select_music_match(
+                    candidates, album_name, artist_name, year
+                )
+                self._replace_ids(release, [("musicbrainz", "release", release_id)])
+                self._music_mark_identity_changed(release)
+            except Exception as error:
+                release_error = error
+        if release_id:
+            try:
+                release_documents = ingest.ingest_locales(
+                    "musicbrainz",
+                    "release",
+                    release_id,
+                    locales,
+                    force=False,
+                )
+                for normalized in release_documents.values():
+                    self._persist_normalized_ids(release, "release", normalized)
+                    self._persist_child_ids(release, normalized)
+            except Exception as error:
+                release_error = error
+                release_documents = {}
+
+        if release_documents:
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_release',updated_at=? WHERE id=?",
+                (now(), release),
+            )
+        else:
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                (now(), release),
+            )
+            self._queue_metadata_repair(
+                release,
+                library_id,
+                job_id,
+                "MusicBrainz release matching failed; local music metadata retained"
+                + (f": {release_error}" if release_error else ""),
+                locales,
+            )
+
+        release_document_values = list(release_documents.values())
+        release_tracks = []
+        if release_document_values:
+            release_tracks = list(release_document_values[0].get("tracks", []) or [])
+        used_release_track_ids: set[str] = set()
+        artist_ids = []
+        for document in release_document_values:
+            for value in document.get("artists", []) or []:
+                if isinstance(value, dict) and value.get("id"):
+                    artist_ids.append(str(value["id"]))
+        if artist_ids:
+            album_artist_id = artist_ids[0]
+            self._replace_ids(artist, [("musicbrainz", "artist", album_artist_id)])
+            self._music_mark_identity_changed(artist)
+            try:
+                ingest.ingest_locales(
+                    "musicbrainz", "artist", album_artist_id, locales, force=False
+                )
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
+                    (now(), artist),
+                )
+            except Exception as error:
+                self._queue_metadata_repair(
+                    artist,
+                    library_id,
+                    job_id,
+                    f"MusicBrainz artist metadata unavailable: {error}",
+                    locales,
+                )
+        elif not self.db.execute(
+            "SELECT 1 FROM entity_provider_ids WHERE entity_id=? LIMIT 1",
+            (artist,),
+        ):
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                (now(), artist),
+            )
+
+        for track in tracks:
+            self._check_termination(should_terminate)
+            entity_id = track["entity_id"]
+            local = track["local"]
+            explicit_id = next(
+                (value[2] for value in track["music_ids"] if value[1] == "recording"),
+                None,
+            )
+            candidate = None
+            if explicit_id:
+                candidate = next(
+                    (
+                        value
+                        for value in release_tracks
+                        if str(value.get("id") or "") == str(explicit_id)
+                    ),
+                    None,
+                )
+            if candidate is None and release_tracks and not explicit_id:
+                candidate = self._music_release_track_candidate(
+                    local, release_tracks, used_release_track_ids
+                )
+            if candidate is None and explicit_id:
+                try:
+                    track_documents = ingest.ingest_locales(
+                        "musicbrainz",
+                        "track",
+                        str(explicit_id),
+                        locales,
+                        force=False,
+                    )
+                    candidate = next(
+                        (
+                            value
+                            for document in track_documents.values()
+                            for value in document.get("tracks", []) or []
+                            if isinstance(value, dict)
+                        ),
+                        None,
+                    )
+                except Exception as error:
+                    self._queue_metadata_repair(
+                        entity_id,
+                        library_id,
+                        job_id,
+                        f"MusicBrainz recording metadata unavailable: {error}",
+                        locales,
+                    )
+            if candidate is None and release_documents:
+                try:
+                    track_artists = local.get("artists") or []
+                    track_artist = (
+                        track_artists[0].get("name")
+                        if track_artists and isinstance(track_artists[0], dict)
+                        else None
+                    )
+                    recording_candidates = client.search_recordings(
+                        local.get("title") or "",
+                        track_artist or artist_name,
+                        album_name,
+                        year,
+                        local.get("durationSeconds"),
+                    )
+                    recording_id = _select_music_match(
+                        recording_candidates,
+                        local.get("title") or "",
+                        track_artist or artist_name,
+                        year,
+                    )
+                    self._replace_ids(
+                        entity_id, [("musicbrainz", "recording", recording_id)]
+                    )
+                    self._music_mark_identity_changed(entity_id)
+                    track_documents = ingest.ingest_locales(
+                        "musicbrainz",
+                        "track",
+                        recording_id,
+                        locales,
+                        force=False,
+                    )
+                    candidate = next(
+                        (
+                            value
+                            for document in track_documents.values()
+                            for value in document.get("tracks", []) or []
+                            if isinstance(value, dict)
+                        ),
+                        None,
+                    )
+                except Exception as error:
+                    self._queue_metadata_repair(
+                        entity_id,
+                        library_id,
+                        job_id,
+                        f"MusicBrainz recording matching failed; local metadata retained: {error}",
+                        locales,
+                    )
+            if candidate is not None:
+                candidate = deepcopy(candidate)
+                track["resolved_artists"] = deepcopy(
+                    candidate.get("artists")
+                    or candidate.get("contributingArtists")
+                    or []
+                )
+                candidate.setdefault("position", local.get("trackNumber"))
+                candidate.setdefault("disc", local.get("discNumber"))
+                candidate_id = candidate.get("id")
+                if candidate_id and not explicit_id:
+                    identities = [("musicbrainz", "recording", str(candidate_id))]
+                    identities.extend(
+                        ("musicbrainz", "work", str(work_id))
+                        for work_id in candidate.get("workIds", []) or []
+                        if work_id
+                    )
+                    self._replace_ids(
+                        entity_id,
+                        identities,
+                    )
+                    self._music_mark_identity_changed(entity_id)
+                if candidate_id:
+                    used_release_track_ids.add(str(candidate_id))
+                    for document in release_documents.values():
+                        document_tracks = document.setdefault("tracks", [])
+                        if not any(
+                            str(value.get("id") or "") == str(candidate_id)
+                            for value in document_tracks
+                            if isinstance(value, dict)
+                        ):
+                            document_tracks.append(deepcopy(candidate))
+
+        self._materialize_music_artist_credits(
+            library_id,
+            artist,
+            release,
+            tracks,
+            release_documents,
+            ingest,
+            job_id,
+            should_terminate,
+        )
+        self._extract_and_reproject(release, "release", should_terminate)
+        self._seed_all_children(
+            library_id,
+            service,
+            job_id,
+            should_terminate,
+            parent_id=release,
+            release_documents={release: release_documents},
+        )
+        self._extract_and_reproject(artist, "artist", should_terminate)
+        self._scan_refresh_root_ids.add(artist)
+        self._publish_root(artist)
+        self._flush_publications()
+
+    def _materialize_music_artist_credits(
+        self,
+        library_id: str,
+        album_artist_id: str,
+        release_id: str,
+        tracks: list[dict],
+        release_documents: dict[str, dict] | None,
+        ingest,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        *,
+        resolve_provider_metadata: bool = True,
+    ) -> None:
+        """Materialize every credited artist and rewrite this group's links."""
+        if not self._has_table("music_artist_credits"):
+            return
+
+        def values_from(source) -> list[dict]:
+            if not isinstance(source, list):
+                return []
+            values = []
+            for value in source:
+                if isinstance(value, dict):
+                    name = _music_display_value(value.get("name") or value.get("title"))
+                    provider_id = value.get("id") or value.get("providerId")
+                else:
+                    name = _music_display_value(value)
+                    provider_id = None
+                if name:
+                    values.append(
+                        {
+                            "name": name,
+                            "id": str(provider_id).strip()
+                            if provider_id is not None and str(provider_id).strip()
+                            else None,
+                        }
+                    )
+            return values
+
+        release_values: list[dict] = []
+        local_release = self._music_local_metadata.get(release_id) or {}
+        release_values.extend(values_from(local_release.get("artists")))
+        release_values.extend(values_from(local_release.get("contributingArtists")))
+        for document in (release_documents or {}).values():
+            if not isinstance(document, dict):
+                continue
+            release_values.extend(values_from(document.get("artists")))
+            release_values.extend(values_from(document.get("contributingArtists")))
+
+        artist_local = self._music_local_metadata.get(album_artist_id) or {}
+        album_artist_name = _music_display_value(
+            local_release.get("albumArtist")
+            or artist_local.get("title")
+            or artist_local.get("albumArtist")
+        )
+        parent_id_rows = self.db.execute(
+            "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? "
+            "AND provider='musicbrainz' AND identifier_type='artist' "
+            "ORDER BY is_primary DESC,provider_id LIMIT 1",
+            (album_artist_id,),
+        )
+        album_artist_provider_id = str(parent_id_rows[0][0]) if parent_id_rows else None
+        parent_credit = {
+            "name": album_artist_name,
+            "id": album_artist_provider_id,
+        }
+        attempted_provider_ids: set[str] = set()
+        materialized_artists: set[str] = set()
+        artist_entities = getattr(self, "_music_artist_entities", {})
+
+        def dedupe(values: list[dict]) -> list[dict]:
+            result: list[dict] = []
+            by_id: dict[str, int] = {}
+            by_name: dict[str, int] = {}
+            for value in values:
+                name = _music_display_value(value.get("name"))
+                if not name:
+                    continue
+                provider_id = value.get("id")
+                provider_id = (
+                    str(provider_id).strip() if provider_id is not None else None
+                ) or None
+                name_key = _music_normalize(name)
+                if provider_id and provider_id in by_id:
+                    existing = result[by_id[provider_id]]
+                    if not existing.get("name"):
+                        existing["name"] = name
+                    continue
+                if name_key in by_name:
+                    index = by_name[name_key]
+                    existing = result[index]
+                    if provider_id and not existing.get("id"):
+                        existing["id"] = provider_id
+                        by_id[provider_id] = index
+                    continue
+                index = len(result)
+                result.append({"name": name, "id": provider_id})
+                by_name[name_key] = index
+                if provider_id:
+                    by_id[provider_id] = index
+            return result
+
+        def resolve_artist(credit: dict) -> str:
+            name = credit["name"]
+            provider_id = credit.get("id")
+            entity = None
+            normalized_name = _music_normalize(name)
+            if normalized_name == _music_normalize(album_artist_name):
+                entity = album_artist_id
+            elif provider_id:
+                entity = self._music_entity_by_provider_id(
+                    library_id, "artist", "artist", provider_id
+                )
+            entity = entity or artist_entities.get(normalized_name)
+            entity = entity or self._music_artist_by_name(library_id, name)
+            if not entity:
+                entity = self._entity(library_id, None, "artist", name)
+            self._scan_seen_ids.add(entity)
+            artist_entities[normalized_name] = entity
+            self._persist_music_local_artist(entity, name, ingest)
+            if provider_id:
+                self._replace_ids(entity, [("musicbrainz", "artist", provider_id)])
+                self._music_mark_identity_changed(entity)
+                if not resolve_provider_metadata:
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
+                        (now(), entity),
+                    )
+                elif provider_id not in attempted_provider_ids:
+                    attempted_provider_ids.add(provider_id)
+                    try:
+                        ingest.ingest_locales(
+                            "musicbrainz",
+                            "artist",
+                            provider_id,
+                            ingest.provider_locales("musicbrainz", "artist"),
+                            force=False,
+                        )
+                        self.db.execute(
+                            "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
+                            (now(), entity),
+                        )
+                    except Exception as error:
+                        self.db.execute(
+                            "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                            (now(), entity),
+                        )
+                        self._queue_metadata_repair(
+                            entity,
+                            library_id,
+                            job_id,
+                            f"MusicBrainz artist metadata unavailable; local artist retained: {error}",
+                            ingest.provider_locales("musicbrainz", "artist"),
+                        )
+            else:
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
+                    (now(), entity),
+                )
+            materialized_artists.add(entity)
+            return entity
+
+        for track in tracks:
+            self._check_termination(should_terminate)
+            local = track.get("local") or {}
+            candidates = [parent_credit]
+            candidates.extend(release_values)
+            candidates.extend(values_from(local.get("artists")))
+            candidates.extend(values_from(local.get("contributingArtists")))
+            candidates.extend(values_from(track.get("resolved_artists")))
+            credits = dedupe(candidates)
+            rows = []
+            for order, credit in enumerate(credits):
+                artist_entity = resolve_artist(credit)
+                rows.append(
+                    (
+                        track["entity_id"],
+                        artist_entity,
+                        order,
+                        credit["name"],
+                    )
+                )
+            self.db.execute(
+                "DELETE FROM music_artist_credits WHERE track_id=?",
+                (track["entity_id"],),
+            )
+            if rows:
+                self.db.write_many(
+                    (
+                        "INSERT INTO music_artist_credits(track_id,artist_id,credit_order,credited_name) VALUES(?,?,?,?)",
+                        row,
+                    )
+                    for row in rows
+                )
+
+        for entity in materialized_artists:
+            self._scan_refresh_root_ids.add(entity)
+            self._publish_root(entity)
+        self._flush_publications()
+
+    def _music_document(self, entity_id: str, entity_type: str) -> dict:
+        """Read one cached/projected music document without contacting a provider."""
+        projected_document = None
+        if self._has_table("catalog_item_projection"):
+            rows = self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id=? "
+                "ORDER BY CASE locale WHEN '' THEN 0 WHEN 'en' THEN 1 ELSE 2 END,locale",
+                (entity_id,),
+            )
+            for row in rows:
+                try:
+                    document = json.loads(row[0] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(document, dict):
+                    projected_document = document
+                    if (
+                        entity_type == "artist"
+                        or (
+                            entity_type == "release"
+                            and isinstance(document.get("tracks"), list)
+                        )
+                        or (
+                            entity_type == "track"
+                            and self._music_document_credits(document)
+                        )
+                    ):
+                        return document
+
+        if not self._has_table("metadata_cache"):
+            return projected_document or {}
+        identifier_type = "recording" if entity_type == "track" else entity_type
+        rows = self.db.execute(
+            "SELECT cache.payload FROM metadata_cache cache "
+            "JOIN entity_provider_ids identity ON identity.provider='musicbrainz' "
+            "AND identity.identifier_type=? AND identity.provider_id=cache.provider_id "
+            "WHERE identity.entity_id=? AND cache.provider='musicbrainz' "
+            "AND cache.entity_type=? ORDER BY cache.locale",
+            (identifier_type, entity_id, entity_type),
+        )
+        for row in rows:
+            try:
+                document = json.loads(row[0] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(document, dict):
+                return document
+        return projected_document or {}
+
+    @staticmethod
+    def _music_document_credits(document: dict) -> list[dict]:
+        """Combine primary and contributing credits from a cached document."""
+        values: list[dict] = []
+        for key in ("artists", "contributingArtists"):
+            source = document.get(key)
+            if isinstance(source, list):
+                values.extend(value for value in source if isinstance(value, dict))
+        return values
+
+    @staticmethod
+    def _music_release_track_document(
+        release_document: dict,
+        recording_id: str | None,
+        disc_number,
+        track_number,
+    ) -> dict:
+        candidates = release_document.get("tracks")
+        if not isinstance(candidates, list):
+            return {}
+        for candidate in candidates:
+            if (
+                isinstance(candidate, dict)
+                and recording_id
+                and str(candidate.get("id") or "") == str(recording_id)
+            ):
+                return candidate
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if track_number is not None and str(candidate.get("position") or "") != str(
+                track_number
+            ):
+                continue
+            candidate_disc = candidate.get("disc")
+            if disc_number is not None and candidate_disc is not None:
+                if str(candidate_disc) != str(disc_number):
+                    continue
+            return candidate
+        return {}
+
+    def repair_music_artist_credits(
+        self,
+        ingest,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> int:
+        """Backfill credited artist entities from already indexed music metadata."""
+        if not self._has_table("music_artist_credits") or not self._has_table(
+            "library_entities"
+        ):
+            return 0
+
+        self._music_local_metadata = {}
+        self._music_artist_entities = {}
+        release_rows = self.db.execute(
+            "SELECT id,library_id,parent_id FROM library_entities "
+            "WHERE entity_type='release' AND parent_id IS NOT NULL "
+            "ORDER BY library_id,id"
+        )
+        repaired = 0
+        for release_id, library_id, album_artist_id in release_rows:
+            self._check_termination(should_terminate)
+            release_document = self._music_document(str(release_id), "release")
+            artist_document = self._music_document(str(album_artist_id), "artist")
+            artist_row = self.db.execute(
+                "SELECT relative_path FROM library_entities WHERE id=? AND entity_type='artist'",
+                (album_artist_id,),
+            )
+            artist_name = _music_display_value(
+                (artist_document or {}).get("title")
+                or (release_document or {}).get("albumArtist")
+                or (artist_row[0][0] if artist_row else "")
+            )
+            if not isinstance(release_document, dict):
+                release_document = {}
+            release_document = deepcopy(release_document)
+            if artist_name:
+                release_document.setdefault("albumArtist", artist_name)
+                if not release_document.get("artists"):
+                    release_document["artists"] = [{"name": artist_name}]
+            self._music_local_metadata[str(release_id)] = release_document
+            if artist_document:
+                self._music_local_metadata[str(album_artist_id)] = artist_document
+
+            track_columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(library_entities)")
+            }
+            disc_expression = (
+                "disc_number" if "disc_number" in track_columns else "NULL"
+            )
+            track_expression = (
+                "track_number" if "track_number" in track_columns else "NULL"
+            )
+            tracks = self.db.execute(
+                "SELECT id,relative_path,"
+                + disc_expression
+                + ","
+                + track_expression
+                + " "
+                "FROM library_entities WHERE parent_id=? AND entity_type='track' "
+                "ORDER BY "
+                + disc_expression
+                + " IS NULL,"
+                + disc_expression
+                + ","
+                + track_expression
+                + " IS NULL,"
+                + track_expression
+                + ",relative_path COLLATE NOCASE,id",
+                (release_id,),
+            )
+            materialized_tracks = []
+            for track_id, relative_path, disc_number, track_number in tracks:
+                self._check_termination(should_terminate)
+                document = self._music_document(str(track_id), "track")
+                if not isinstance(document, dict):
+                    document = {}
+                document = deepcopy(document)
+                recording_rows = self.db.execute(
+                    "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? "
+                    "AND provider='musicbrainz' AND identifier_type='recording' "
+                    "ORDER BY is_primary DESC,provider_id LIMIT 1",
+                    (track_id,),
+                )
+                recording_id = str(recording_rows[0][0]) if recording_rows else None
+                release_track = self._music_release_track_document(
+                    release_document, recording_id, disc_number, track_number
+                )
+                if not self._music_document_credits(document):
+                    credits = self._music_document_credits(release_track)
+                    if credits:
+                        document["artists"] = deepcopy(credits)
+                        document["contributingArtists"] = deepcopy(credits)
+                document.setdefault("discNumber", disc_number)
+                document.setdefault("trackNumber", track_number)
+                if not document.get("title") and relative_path:
+                    document["title"] = clean_music_title(Path(relative_path).stem)
+                materialized_tracks.append(
+                    {
+                        "entity_id": str(track_id),
+                        "local": document,
+                        "resolved_artists": self._music_document_credits(release_track),
+                    }
+                )
+            if not materialized_tracks:
+                continue
+            self._materialize_music_artist_credits(
+                str(library_id),
+                str(album_artist_id),
+                str(release_id),
+                materialized_tracks,
+                {"": release_document},
+                ingest,
+                job_id,
+                should_terminate,
+                resolve_provider_metadata=False,
+            )
+            repaired += 1
+        return repaired
+
+    def _remove_orphan_music_artists(self, library_id: str) -> None:
+        if not self._has_table("music_artist_credits"):
+            return
+        rows = self.db.execute(
+            "SELECT artist.id FROM library_entities artist "
+            "WHERE artist.library_id=? AND artist.entity_type='artist' "
+            "AND NOT EXISTS (SELECT 1 FROM library_entities release "
+            "WHERE release.parent_id=artist.id AND release.entity_type='release') "
+            "AND NOT EXISTS (SELECT 1 FROM music_artist_credits credit "
+            "WHERE credit.artist_id=artist.id)",
+            (library_id,),
+        )
+        orphan_ids = [str(row[0]) for row in rows]
+        if not orphan_ids:
+            return
+        from app.library_cleanup import cleanup_entities
+
+        cleanup_entities(self.db, orphan_ids)
+        self._scan_delta["removed"].update(orphan_ids)
+        self._scan_seen_ids.difference_update(orphan_ids)
+        self._scan_refresh_root_ids.difference_update(orphan_ids)
+        self._scan_created_ids = [
+            entity_id
+            for entity_id in self._scan_created_ids
+            if entity_id not in orphan_ids
+        ]
+
     def _scan_music(
         self,
         library_id: str,
@@ -4297,83 +6053,236 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
         targets: set[str] | None = None,
     ) -> int:
-        album_dirs = []
-
-        def traversal_error(error):
-            raise error
-
+        self._music_local_metadata = {}
+        self._music_artist_entities: dict[str, str] = {}
+        self._music_release_entities: dict[tuple[str, ...], str] = {}
         scan_roots = [root] if targets is None else self._target_entries(root, targets)
-        for scan_root in scan_roots:
-            if not scan_root.is_dir():
-                continue
-            for directory, _, filenames in os.walk(scan_root, onerror=traversal_error):
-                if any(
-                    Path(name).suffix.lower() in AUDIO_EXTENSIONS for name in filenames
-                ):
-                    album_dirs.append(Path(directory))
-        self.store.update_job(job_id, progress_total=len(album_dirs))
+        self._set_stage(
+            job_id,
+            "Discovering music albums",
+            root=str(root),
+            targetCount=len(scan_roots),
+            current=0,
+            total=len(scan_roots),
+            unit="roots",
+        )
+        inspected_files = 0
+        group_count = 0
         count = 0
-        artists: dict[str, str] = {}
-        for album_dir in album_dirs:
+        active_key: tuple[str, ...] | None = None
+        group_entries: list[tuple[Path, dict[str, str]]] = []
+        service = None
+        ingest = None
+        last_progress = time.monotonic()
+
+        def flush_group() -> None:
+            nonlocal active_key, group_entries, group_count, count, service, ingest
+            if not group_entries:
+                return
             self._check_termination(should_terminate)
-            artist_name = (
-                album_dir.relative_to(root).parts[0]
-                if album_dir.relative_to(root).parts
-                else album_dir.name
+            if service is None:
+                from app.metadata_services import MetadataIngestService
+                from app.providers import MetadataService
+
+                service = MetadataService()
+                ingest = MetadataIngestService(service, background_assets=False)
+            artist, release, tracks, indexed_count = self._index_music_group(
+                library_id,
+                root,
+                job_id,
+                should_terminate,
+                group_entries,
+                self._music_artist_entities,
+                self._music_release_entities,
             )
-            artist = artists.get(artist_name)
-            if not artist:
-                artist = self._entity(library_id, None, "artist", artist_name)
-                artists[artist_name] = artist
-            release = self._entity(
-                library_id, artist, "release", relative(str(root), str(album_dir))
+            artist_local = self._music_local_metadata.get(artist) or {}
+            self._persist_music_local_artist(
+                artist,
+                _music_display_value(artist_local.get("title"))
+                or _music_display_value(artist_local.get("albumArtist")),
+                ingest,
             )
-            tracks = [
-                path
-                for path in album_dir.iterdir()
-                if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS
-            ]
-            for track in sorted(tracks):
-                self._check_termination(should_terminate)
-                tags = parse_audio_tags(track)
-                track_number = _int_tag(tags.get("TRACKNUMBER") or tags.get("TRACK"))
-                disc_number = _int_tag(tags.get("DISCNUMBER") or tags.get("DISC"))
-                entity = self._entity(
+            has_metadata_context = any(
+                tags.get("ALBUM")
+                or tags.get("ALBUMARTIST")
+                or _music_ids(tags, "release")
+                or _music_ids(tags, "track")
+                for _, tags in group_entries
+            )
+            try:
+                if has_metadata_context:
+                    self._set_stage(
+                        job_id,
+                        f"Resolving music album {group_count + 1}",
+                        entityId=release,
+                        current=group_count,
+                        total=max(group_count + 1, 1),
+                    )
+                    self._resolve_music_group(
+                        library_id,
+                        root,
+                        job_id,
+                        should_terminate,
+                        artist,
+                        release,
+                        tracks,
+                        service,
+                        ingest,
+                    )
+                else:
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
+                        (now(), artist, release),
+                    )
+                    self._materialize_music_artist_credits(
+                        library_id,
+                        artist,
+                        release,
+                        tracks,
+                        None,
+                        ingest,
+                        job_id,
+                        should_terminate,
+                    )
+                    self._seed_all_children(
+                        library_id,
+                        service,
+                        job_id,
+                        should_terminate,
+                        parent_id=release,
+                    )
+                    self._extract_and_reproject(release, "release", should_terminate)
+                    self._extract_and_reproject(artist, "artist", should_terminate)
+                    self._scan_refresh_root_ids.add(artist)
+                    self._publish_root(artist)
+                    self._flush_publications()
+            except JobTerminated:
+                raise
+            except Exception as error:
+                # Admission must remain independent from provider availability.
+                # The album and its tracks are already playable at this point;
+                # retain their local documents and let repair retry metadata.
+                logger.warning(
+                    "music album metadata failed; continuing library_id=%s release_id=%s error=%s",
                     library_id,
                     release,
-                    "track",
-                    relative(str(root), str(track)),
-                    disc_number=disc_number,
-                    track_number=track_number,
+                    error,
+                    exc_info=True,
                 )
-                music_ids = _music_ids(tags)
-                if music_ids:
-                    self._replace_ids(entity, music_ids)
-                self._files(
-                    entity,
-                    root,
-                    [track]
-                    + [
-                        sidecar
-                        for sidecar in track.parent.iterdir()
-                        if sidecar.is_file()
-                        and sidecar.stem.startswith(track.stem)
-                        and sidecar != track
-                    ],
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
+                    (now(), artist, release),
                 )
-                count += 1
-            self._files(
-                release,
-                root,
-                [
-                    path
-                    for path in album_dir.iterdir()
-                    if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
-                ],
-            )
+                try:
+                    self._materialize_music_artist_credits(
+                        library_id,
+                        artist,
+                        release,
+                        tracks,
+                        None,
+                        ingest,
+                        job_id,
+                        should_terminate,
+                    )
+                except Exception:
+                    logger.exception(
+                        "local music artist credit materialization failed release_id=%s",
+                        release,
+                    )
+                self._queue_metadata_repair(
+                    release,
+                    library_id,
+                    job_id,
+                    f"MusicBrainz album resolution failed; local metadata retained: {error}",
+                    ingest.locales() if ingest else None,
+                )
+                self._seed_all_children(
+                    library_id,
+                    service,
+                    job_id,
+                    should_terminate,
+                    parent_id=release,
+                )
+                self._extract_and_reproject(release, "release", should_terminate)
+                self._extract_and_reproject(artist, "artist", should_terminate)
+                self._scan_refresh_root_ids.add(artist)
+                self._publish_root(artist)
+                self._flush_publications()
+            group_count += 1
+            count += indexed_count
             self.store.update_job(
-                job_id, progress_current=count, message=f"Indexed {album_dir.name}"
+                job_id,
+                progress_current=group_count,
+                progress_total=max(group_count, 1),
+                message=f"Indexed music album {group_count}",
             )
+            active_key = None
+            group_entries = []
+
+        for root_index, scan_root in enumerate(scan_roots, start=1):
+            self._check_termination(should_terminate)
+            try:
+                is_directory = scan_root.is_dir()
+            except OSError:
+                is_directory = False
+            if not is_directory:
+                self._defer_root(
+                    relative(str(root), str(scan_root)),
+                    "music root is inaccessible",
+                )
+                continue
+            try:
+                for path, file_stat in self._walk_file_entries(scan_root):
+                    self._check_termination(should_terminate)
+                    if (
+                        path.suffix.lower() not in AUDIO_EXTENSIONS
+                        or file_stat is None
+                        or not stat.S_ISREG(file_stat.st_mode)
+                    ):
+                        continue
+                    inspected_files += 1
+                    tags = parse_audio_tags(path)
+                    key = _music_group_key(root, path, tags)
+                    if active_key is not None and key != active_key:
+                        flush_group()
+                    active_key = key
+                    group_entries.append((path, tags))
+                    if (
+                        inspected_files % 250 == 0
+                        or time.monotonic() - last_progress >= 2.0
+                    ):
+                        self._update_stage_progress(
+                            job_id,
+                            current=root_index,
+                            total=len(scan_roots),
+                            item=path.name,
+                            files=inspected_files,
+                            message=f"Discovered {inspected_files} music files",
+                        )
+                        last_progress = time.monotonic()
+            except OSError:
+                self._record_access_error(scan_root)
+            for inaccessible in list(self._scan_access_errors):
+                try:
+                    inaccessible.relative_to(scan_root)
+                except (ValueError, RuntimeError):
+                    continue
+                self._defer_root(
+                    relative(str(root), str(inaccessible)),
+                    "music path could not be inspected",
+                )
+
+            flush_group()
+            self._update_stage_progress(
+                job_id,
+                current=root_index,
+                total=len(scan_roots),
+                item=scan_root.name,
+                files=inspected_files,
+                message=f"Discovered {inspected_files} music files",
+            )
+        flush_group()
+        self._remove_orphan_music_artists(library_id)
         self._scan_complete = True
         return count
 
@@ -4805,11 +6714,27 @@ class LibraryScanner:
             self.store.end_progress(job_id)
 
 
+def _music_filename_parts(path: Path) -> tuple[str, int | None, int | None]:
+    """Return a clean title and numeric positions from a music filename.
+
+    Music libraries commonly omit embedded tags and use either ``01. Title``
+    or ``1.01. Title``.  The numeric prefix is inventory metadata, not part of
+    the track title.  Keep other filenames unchanged so the fallback remains
+    deterministic and does not reinterpret ordinary titles.
+    """
+    return music_filename_parts(path)
+
+
 def _inventory_query(relative_path: str) -> tuple[str, str | None]:
     path = Path(relative_path)
     raw = path.stem if path.suffix else path.name
+    filename_title = raw
+    if path.suffix.lower() in AUDIO_EXTENSIONS:
+        filename_title, _, _ = _music_filename_parts(path)
     parsed = guess_media(path)
-    query = str(parsed.get("title") or raw)
+    query = str(parsed.get("title") or filename_title)
+    if filename_title != raw:
+        query = filename_title
     query = re.sub(r"\[[^\]]+\]", " ", query)
     query = re.sub(r"\s+", " ", query).strip(" .-_[]")
     year = str(parsed.get("year") or "")[:4] or None
@@ -4826,7 +6751,210 @@ def _int_tag(value: str | None) -> int | None:
     return int(match.group(0)) if match else None
 
 
-def _music_ids(tags: dict[str, str]) -> list[tuple[str, str, str]]:
+def _music_tag_values(tags: dict[str, str], key: str) -> list[str]:
+    return [
+        value.strip()
+        for value in re.split(r"[;\x00]", str(tags.get(key) or ""))
+        if value.strip()
+    ]
+
+
+def _music_display_value(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _music_album_type_values(tags: dict[str, str]) -> tuple[str | None, list[str]]:
+    primary_values = _music_tag_values(tags, "ALBUMTYPE")
+    all_values = _music_tag_values(tags, "ALBUMTYPES")
+    secondary_values = _music_tag_values(tags, "ALBUMSECONDARYTYPES")
+    primary = _music_display_value(primary_values[0]) if primary_values else None
+    if not primary and all_values:
+        primary = _music_display_value(all_values.pop(0))
+    secondary = [*all_values, *secondary_values]
+    unique_secondary: list[str] = []
+    for value in secondary:
+        normalized = _music_display_value(value)
+        if normalized and normalized.casefold() != (primary or "").casefold():
+            if normalized.casefold() not in {
+                existing.casefold() for existing in unique_secondary
+            }:
+                unique_secondary.append(normalized)
+    return primary, unique_secondary
+
+
+def _music_normalize(value: str | None) -> str:
+    normalized = unicodedata.normalize("NFKC", _music_display_value(value))
+    return re.sub(r"\s+", " ", normalized).casefold()
+
+
+def _music_group_key(root: Path, path: Path, tags: dict[str, str]) -> tuple[str, ...]:
+    """Return the existing stable grouping key for one admitted track."""
+    release_id = next(iter(_music_tag_values(tags, "MUSICBRAINZ_ALBUMID")), None)
+    relative_path = Path(relative(str(root), str(path)))
+    top_level = relative_path.parts[0] if relative_path.parts else path.parent.name
+    album = _music_display_value(tags.get("ALBUM")) or path.parent.name
+    album_artist = (
+        _music_display_value(tags.get("ALBUMARTIST"))
+        or _music_display_value(tags.get("ARTIST"))
+        or top_level
+    )
+    if release_id:
+        return ("id", release_id)
+    return (
+        "tag",
+        top_level,
+        _music_normalize(album_artist),
+        _music_normalize(album),
+    )
+
+
+def _music_local_document(
+    path: Path,
+    tags: dict[str, str],
+    entity_type: str,
+    *,
+    artist_name: str | None = None,
+    album_name: str | None = None,
+    disc_number: int | None = None,
+    track_number: int | None = None,
+) -> dict:
+    """Build a provider-shaped, artwork-free document from admitted tags.
+
+    This is intentionally only a local inventory fallback.  It gives the
+    catalog a stable title/relationship while MusicBrainz is unavailable or
+    being repaired; provider artwork still comes from release metadata.
+    """
+    artists = _music_tag_values(tags, "ARTIST")
+    if not artists and artist_name:
+        fallback_artist = _music_display_value(artist_name)
+        if fallback_artist:
+            artists = [fallback_artist]
+    album_artist = (
+        _music_display_value(tags.get("ALBUMARTIST"))
+        or _music_display_value(artist_name)
+        or (artists[0] if artists else None)
+    )
+    filename_title, filename_disc_number, filename_track_number = _music_filename_parts(
+        path
+    )
+    if disc_number is None:
+        disc_number = filename_disc_number
+    if track_number is None:
+        track_number = filename_track_number
+    album = _music_display_value(album_name) or _music_display_value(tags.get("ALBUM"))
+    title = clean_music_title(_music_display_value(tags.get("TITLE"))) or filename_title
+    date = _music_display_value(tags.get("DATE")) or None
+    duration_seconds = None
+    try:
+        parsed_duration = float(tags.get("DURATIONSECONDS") or "")
+        if parsed_duration >= 0:
+            duration_seconds = parsed_duration
+    except (TypeError, ValueError):
+        pass
+    genres = []
+    for key in ("GENRE", "STYLE", "MOOD"):
+        genres.extend(_music_tag_values(tags, key))
+    genres = list(dict.fromkeys(genres))
+    artist_ids = _music_tag_values(tags, "MUSICBRAINZ_ARTISTID")
+    artist_credits = [
+        {
+            **({"id": artist_ids[index]} if index < len(artist_ids) else {}),
+            "name": value,
+        }
+        for index, value in enumerate(artists)
+    ]
+    if entity_type == "artist":
+        title = _music_display_value(artist_name) or title
+    elif entity_type == "release":
+        title = album or title
+    album_type, album_secondary_types = _music_album_type_values(tags)
+
+    values = {
+        "title": title,
+        "overview": None,
+        "description": None,
+        "date": date,
+        "releaseDate": date,
+        "year": str(date or "")[:4] or None,
+        "tags": genres,
+        "originalLanguage": None,
+        "albumArtist": album_artist,
+        "artists": artist_credits,
+        "contributingArtists": deepcopy(artist_credits),
+        "album": album or None,
+        "albumId": None,
+        "albumType": album_type,
+        "albumSecondaryTypes": album_secondary_types,
+        "label": _music_display_value(
+            tags.get("LABEL") or tags.get("ORGANIZATION") or tags.get("PUBLISHER")
+        )
+        or None,
+        "durationSeconds": duration_seconds,
+        "discNumber": disc_number,
+        "trackNumber": track_number,
+        "tracks": [],
+        "provider": "musicbrainz",
+        "providerId": None,
+        "ids": [],
+        "images": [],
+        "extraImages": [],
+        # Do not make a provider credit/artwork task for every track in a
+        # large local library.  Track cards inherit release artwork in the
+        # catalog serializer, while contributingArtists remains available.
+        "credits": [],
+    }
+    if entity_type == "track":
+        values["tracks"] = [
+            {
+                "title": title,
+                "position": track_number,
+                "disc": disc_number,
+                "durationSeconds": duration_seconds,
+            }
+        ]
+    return values
+
+
+def _music_local_artist_document(name: str, artist_id: str) -> dict:
+    return {
+        "title": name,
+        "overview": None,
+        "description": None,
+        "date": None,
+        "releaseDate": None,
+        "year": None,
+        "tags": [],
+        "originalLanguage": None,
+        "albumArtist": name,
+        "artists": [{"name": name}],
+        "contributingArtists": [{"name": name}],
+        "album": None,
+        "albumId": None,
+        "albumType": None,
+        "albumSecondaryTypes": [],
+        "label": None,
+        "durationSeconds": None,
+        "discNumber": None,
+        "trackNumber": None,
+        "tracks": [],
+        "provider": "local",
+        "providerId": artist_id,
+        "ids": [
+            {
+                "provider": "local",
+                "identifierType": "artist",
+                "id": artist_id,
+            }
+        ],
+        "images": [],
+        "extraImages": [],
+        "credits": [],
+    }
+
+
+def _music_ids(
+    tags: dict[str, str], entity_type: str | None = None
+) -> list[tuple[str, str, str]]:
     ids: list[tuple[str, str, str]] = []
     mapping = {
         "MUSICBRAINZ_ARTISTID": "artist",
@@ -4837,10 +6965,30 @@ def _music_ids(tags: dict[str, str]) -> list[tuple[str, str, str]]:
         "MUSICBRAINZ_RELEASETRACKID": "release_track",
         "MUSICBRAINZ_WORKID": "work",
     }
+    if entity_type == "artist":
+        # The parent artist represents the album artist.  Contributing artist
+        # IDs remain structured metadata on the track rather than being
+        # incorrectly attached to that parent entity.
+        artist_values = _music_tag_values(tags, "MUSICBRAINZ_ALBUMARTISTID")
+        if not artist_values:
+            artist_values = _music_tag_values(tags, "MUSICBRAINZ_ARTISTID")
+        return [("musicbrainz", "artist", value) for value in artist_values]
     for key, identifier_type in mapping.items():
-        for value in (tags.get(key) or "").split(";"):
-            if value.strip():
-                ids.append(("musicbrainz", identifier_type, value.strip()))
+        if entity_type == "artist" and identifier_type != "artist":
+            continue
+        if entity_type == "release" and identifier_type not in {
+            "release",
+            "release_group",
+        }:
+            continue
+        if entity_type == "track" and identifier_type not in {
+            "recording",
+            "release_track",
+            "work",
+        }:
+            continue
+        for value in _music_tag_values(tags, key):
+            ids.append(("musicbrainz", identifier_type, value))
     return ids
 
 

@@ -1,13 +1,44 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pycountry
 
 ARTWORK_CATEGORIES = ("Primary", "Backdrop", "Logo", "Banner")
 ARTWORK_CATEGORY_SET = frozenset(ARTWORK_CATEGORIES)
+
+_MUSIC_FILENAME_RE = re.compile(
+    r"^\s*(?:(?P<disc>\d{1,3})\s*\.\s*)?"
+    r"(?P<track>\d{1,3})\s*\.\s*(?P<title>.+?)\s*$"
+)
+
+
+def music_title_parts(value: object) -> tuple[str, int | None, int | None]:
+    """Split a numeric music filename/title prefix from its display title."""
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    match = _MUSIC_FILENAME_RE.fullmatch(normalized)
+    if not match:
+        return normalized, None, None
+    title = re.sub(r"\s+", " ", match.group("title")).strip()
+    if not title:
+        return normalized, None, None
+    disc = match.group("disc")
+    return title, int(disc) if disc else None, int(match.group("track"))
+
+
+def music_filename_parts(path: Path) -> tuple[str, int | None, int | None]:
+    """Return a clean title and numeric positions from an audio filename."""
+    raw = path.stem if path.suffix else path.name
+    return music_title_parts(raw)
+
+
+def clean_music_title(value: object) -> str:
+    """Remove a structural ``01.`` or ``1.01.`` prefix from a track title."""
+    return music_title_parts(value)[0]
 
 
 def language_family(value: str | None) -> str:

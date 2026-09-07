@@ -16,6 +16,11 @@ from app.library import (
     LibraryRuntime,
     LibraryScanner,
     LibraryStore,
+    _audio_inventory_fingerprint,
+    _audio_tag_key,
+    _inventory_query,
+    _music_filename_parts,
+    _music_local_document,
     _quick_fingerprint,
     _SidecarStatWorker,
     _top_level_key,
@@ -749,6 +754,14 @@ class LibraryMetadataTest(unittest.TestCase):
             path.write_bytes(data)
             last_fingerprint, _ = _quick_fingerprint(path)
             self.assertNotEqual(last_fingerprint, first_fingerprint)
+
+    def test_new_audio_inventory_fingerprint_does_not_depend_on_file_contents(self):
+        first = _audio_inventory_fingerprint(123, 456)
+        second = _audio_inventory_fingerprint(123, 456)
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, _audio_inventory_fingerprint(124, 456))
+        self.assertNotEqual(first, _audio_inventory_fingerprint(123, 457))
 
     def test_sidecar_display_titles_preserve_descriptors_and_ignore_flags(self):
         media_paths = ["5 Centimeters per Second/5 Centimeters per Second.mkv"]
@@ -1893,6 +1906,221 @@ class LibraryMetadataTest(unittest.TestCase):
                 )
         finally:
             db.close()
+
+    def test_music_filename_fallback_removes_numeric_track_prefixes(self):
+        self.assertEqual(
+            _music_filename_parts(Path("01. Track name.flac")),
+            ("Track name", None, 1),
+        )
+        self.assertEqual(
+            _music_filename_parts(Path("2.03. Track name.flac")),
+            ("Track name", 2, 3),
+        )
+        self.assertEqual(
+            _music_filename_parts(Path("Track name.flac")),
+            ("Track name", None, None),
+        )
+        self.assertEqual(
+            _inventory_query("Artist/2.03. Track name.flac")[0],
+            "Track name",
+        )
+        self.assertEqual(
+            _music_local_document(
+                Path("1.01. Tagged title.flac"),
+                {"TITLE": "1.01. Tagged title"},
+                "track",
+            )["title"],
+            "Tagged title",
+        )
+
+    def test_music_local_metadata_keeps_track_artists_and_common_tag_aliases(self):
+        self.assertEqual(_audio_tag_key("PERFORMER"), "ARTIST")
+        self.assertEqual(_audio_tag_key("ARTISTS"), "ARTIST")
+        document = _music_local_document(
+            Path("1.01. Track.flac"),
+            {"ARTIST": "Track Artist;Featured Artist", "ALBUMARTIST": "Album Artist"},
+            "track",
+            artist_name="Album Artist",
+        )
+        self.assertEqual(
+            document["artists"],
+            [{"name": "Track Artist"}, {"name": "Featured Artist"}],
+        )
+        self.assertEqual(document["contributingArtists"], document["artists"])
+
+        fallback = _music_local_document(
+            Path("1.02. Track.flac"),
+            {},
+            "track",
+            artist_name="Album Artist",
+        )
+        self.assertEqual(fallback["artists"], [{"name": "Album Artist"}])
+
+    def test_music_local_metadata_keeps_album_type_tags(self):
+        self.assertEqual(_audio_tag_key("MUSICBRAINZ ALBUM TYPE"), "ALBUMTYPE")
+        document = _music_local_document(
+            Path("1.01. Track.flac"),
+            {
+                "ALBUM": "Live EP",
+                "ALBUMTYPE": "EP",
+                "ALBUMTYPES": "EP;Live",
+            },
+            "release",
+        )
+
+        self.assertEqual(document["albumType"], "EP")
+        self.assertEqual(document["albumSecondaryTypes"], ["Live"])
+
+    def test_music_track_documents_prefer_track_artists_over_release_artists(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._music_local_metadata = {
+            "track-1": {
+                "title": "Track",
+                "artists": [{"name": "Track Artist"}],
+                "contributingArtists": [{"name": "Track Artist"}],
+                "trackNumber": 1,
+                "discNumber": 1,
+            }
+        }
+        release_documents = {
+            "release-1": {
+                "providerId": "release-mbid",
+                "title": "Album",
+                "artists": [{"name": "Album Artist"}],
+                "contributingArtists": [{"name": "Album Artist"}],
+                "tracks": [
+                    {
+                        "id": "track-1",
+                        "title": "Track",
+                        "position": 1,
+                        "disc": 1,
+                    }
+                ],
+            }
+        }
+
+        values = scanner._music_track_documents(
+            "track-1",
+            "release-1",
+            "track-1",
+            release_documents,
+            MagicMock(),
+            ["en"],
+        )
+
+        self.assertEqual(values["en"]["artists"], [{"name": "Track Artist"}])
+        self.assertEqual(
+            values["en"]["contributingArtists"], [{"name": "Track Artist"}]
+        )
+
+    def test_music_scan_uses_filename_numbers_and_title_fallback(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                album = root / "Artist" / "Album"
+                album.mkdir(parents=True)
+                (album / "1.01. ラケナリアの夢.flac").touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                (track_id,) = db.execute(
+                    "SELECT id FROM library_entities WHERE entity_type='track'"
+                )[0]
+                self.assertEqual(
+                    db.execute(
+                        "SELECT disc_number,track_number FROM library_entities WHERE id=?",
+                        (track_id,),
+                    ),
+                    [(1, 1)],
+                )
+                self.assertEqual(
+                    scanner._music_local_metadata[track_id]["title"],
+                    "ラケナリアの夢",
+                )
+                self.assertEqual(
+                    scanner._music_local_metadata[track_id]["tracks"][0]["title"],
+                    "ラケナリアの夢",
+                )
+        finally:
+            db.close()
+
+    def test_music_scan_resolves_each_album_before_discovering_the_next(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first = root / "Artist" / "Album A"
+                second = root / "Artist" / "Album B"
+                first.mkdir(parents=True)
+                second.mkdir(parents=True)
+                first_track = first / "01. First.flac"
+                second_track = second / "01. Second.flac"
+                first_track.touch()
+                second_track.touch()
+                tags = {
+                    first_track: {
+                        "TITLE": "First",
+                        "ALBUM": "Album A",
+                        "ALBUMARTIST": "Artist",
+                    },
+                    second_track: {
+                        "TITLE": "Second",
+                        "ALBUM": "Album B",
+                        "ALBUMARTIST": "Artist",
+                    },
+                }
+                resolved = []
+
+                def resolve(*args):
+                    resolved.append(args[6][0]["local"]["title"])
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", side_effect=tags.get),
+                    patch.object(scanner, "_resolve_music_group", side_effect=resolve),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                self.assertEqual(resolved, ["First", "Second"])
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM library_entities WHERE entity_type='release'"
+                    )[0][0],
+                    2,
+                )
+        finally:
+            db.close()
+
+    def test_music_release_track_matching_uses_disc_position_title_and_duration(self):
+        local = {
+            "title": "Track",
+            "discNumber": 2,
+            "trackNumber": 3,
+            "durationSeconds": 120.0,
+        }
+        candidate = LibraryScanner._music_release_track_candidate(
+            local,
+            [
+                {
+                    "id": "wrong",
+                    "title": "Track",
+                    "disc": 1,
+                    "position": 3,
+                    "durationSeconds": 120.0,
+                },
+                {
+                    "id": "right",
+                    "title": "Track",
+                    "disc": 2,
+                    "position": 3,
+                    "durationSeconds": 121.0,
+                },
+            ],
+            set(),
+        )
+        self.assertEqual(candidate["id"], "right")
 
     def test_jellyfin_style_provider_ids_are_extracted(self):
         self.assertEqual(

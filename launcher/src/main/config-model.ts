@@ -7,7 +7,7 @@ import {
 } from "../shared";
 
 export const DEFAULT_IMAGE_HOST_ALLOWLIST =
-  "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com";
+  "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org";
 
 export function defaultEnvironment(localAppData: string): EnvironmentConfig {
   return {

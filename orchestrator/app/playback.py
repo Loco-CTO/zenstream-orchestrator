@@ -19,8 +19,14 @@ from app.catalog import Catalog
 from app.client_auth import issue_ticket
 from app.config import Config
 from app.language_registry import normalize_track_language
-from app.library import language_name, sidecar_display_title, sidecar_media_path
+from app.library import (
+    AUDIO_EXTENSIONS,
+    language_name,
+    sidecar_display_title,
+    sidecar_media_path,
+)
 from app.logging_config import get_logger
+from app.lyrics import choose_lyrics, embedded_lyrics, parse_lyrics_text
 from app.media_probe import first_audio_stream, select_usable_video_stream
 from app.models.playback_settings import PlaybackSettings
 from app.models.playback_viewer import PlaybackViewerStore
@@ -63,6 +69,85 @@ def ffmpeg_path() -> str | None:
 
 def ffprobe_path() -> str | None:
     return _media_tool_path("ffprobe")
+
+
+def _mutagen_audio_probe(path: Path) -> dict | None:
+    """Return the playback probe shape for an audio-only file.
+
+    Library scans already open audio files with Mutagen for tags.  Reusing its
+    container metadata avoids starting one FFprobe process per track.  FFprobe
+    remains the fallback for malformed/unsupported files and all video media.
+    """
+    try:
+        from mutagen import File
+
+        audio = File(path, easy=False)
+        info = getattr(audio, "info", None) if audio is not None else None
+        if info is None:
+            return None
+        suffix = path.suffix.lower().lstrip(".")
+        raw_codec = (
+            str(getattr(info, "codec", None) or getattr(info, "codec_name", None) or "")
+            .strip()
+            .lower()
+        )
+        info_type = type(info).__name__.casefold()
+        if raw_codec.startswith("mp4a") or raw_codec in {"aac", "aac lc"}:
+            codec = "aac"
+        elif "mpeg" in raw_codec or suffix == "mp3":
+            codec = "mp3"
+        elif "flac" in raw_codec or suffix == "flac":
+            codec = "flac"
+        elif "opus" in raw_codec or "opus" in info_type or suffix == "opus":
+            codec = "opus"
+        elif "vorbis" in raw_codec or "vorbis" in info_type or suffix in {"ogg", "oga"}:
+            codec = "vorbis"
+        elif suffix == "aac":
+            codec = "aac"
+        elif suffix in {"wav", "wave"}:
+            codec = "pcm_s16le"
+        elif suffix in {"aiff", "aif"}:
+            codec = "pcm_s16be"
+        elif suffix == "wma":
+            codec = "wmav2"
+        elif suffix == "ape":
+            codec = "ape"
+        elif suffix == "wv":
+            codec = "wavpack"
+        else:
+            codec = raw_codec or suffix
+
+        def number(value, default=0):
+            try:
+                return float(value or default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        duration = max(0.0, number(getattr(info, "length", 0)))
+        bitrate = max(0, int(number(getattr(info, "bitrate", 0))))
+        sample_rate = int(number(getattr(info, "sample_rate", 0)))
+        channels = int(number(getattr(info, "channels", 0)))
+        stream = {
+            "index": 0,
+            "codec_type": "audio",
+            "codec_name": codec,
+            "duration": duration,
+            "bit_rate": bitrate,
+            "sample_rate": str(sample_rate) if sample_rate else None,
+            "channels": channels or None,
+            "tags": {},
+        }
+        return {
+            "format": {
+                "format_name": suffix,
+                "duration": duration,
+                "bit_rate": bitrate,
+            },
+            "streams": [stream],
+        }
+    except Exception as error:
+        logger.debug("mutagen audio probe failed path=%s error=%s", path, error)
+        return None
 
 
 class PlaybackManager:
@@ -342,8 +427,6 @@ class PlaybackManager:
 
     def probe_entity(self, entity_id: str) -> list[dict]:
         executable = ffprobe_path()
-        if not executable:
-            return []
         rows = self.db.execute(
             "SELECT f.id,l.directory,f.relative_path FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.entity_id=? AND f.role=?",
             (entity_id, PLAYABLE_ROLE),
@@ -365,28 +448,44 @@ class PlaybackManager:
                 continue
             if path.is_symlink() or not resolved.is_file():
                 continue
-            try:
-                completed = subprocess.run(
-                    [
-                        executable,
-                        "-v",
-                        "error",
-                        "-show_format",
-                        "-show_streams",
-                        "-of",
-                        "json",
-                        str(resolved),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=60,
-                    check=True,
+            payload = (
+                _mutagen_audio_probe(resolved)
+                if resolved.suffix.lower() in AUDIO_EXTENSIONS
+                else None
+            )
+            if payload is None and not executable:
+                logger.warning(
+                    "playback probe unavailable entity_id=%s media_file_id=%s path=%s",
+                    entity_id,
+                    media_file_id,
+                    resolved,
                 )
-                if not completed.stdout or not isinstance(completed.stdout, str):
-                    raise json.JSONDecodeError("FFprobe returned no JSON output", "", 0)
-                payload = json.loads(completed.stdout)
+                continue
+            try:
+                if payload is None:
+                    completed = subprocess.run(
+                        [
+                            executable,
+                            "-v",
+                            "error",
+                            "-show_format",
+                            "-show_streams",
+                            "-of",
+                            "json",
+                            str(resolved),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=60,
+                        check=True,
+                    )
+                    if not completed.stdout or not isinstance(completed.stdout, str):
+                        raise json.JSONDecodeError(
+                            "FFprobe returned no JSON output", "", 0
+                        )
+                    payload = json.loads(completed.stdout)
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
                 logger.warning(
                     "playback probe failed entity_id=%s media_file_id=%s error=%s",
@@ -571,6 +670,94 @@ class PlaybackManager:
             "streams": source.get("streams") or [],
         }
 
+    def lyrics(self, user_id: str, entity_id: str) -> dict:
+        """Return the best local lyrics candidate for one accessible track."""
+        self.catalog.require_entity(user_id, entity_id)
+        rows = self.db.execute(
+            "SELECT f.id,f.relative_path,f.language,f.role,l.directory "
+            "FROM media_files f "
+            "JOIN library_entities e ON e.id=f.entity_id "
+            "JOIN libraries l ON l.id=e.library_id "
+            "WHERE f.entity_id=? AND f.role IN ('media','lyrics') "
+            "ORDER BY f.role DESC,f.relative_path COLLATE NOCASE",
+            (entity_id,),
+        )
+        if not rows:
+            return {"trackId": entity_id, "lyrics": None}
+
+        duration_rows = self.db.execute(
+            "SELECT media_file_id,MAX(duration_seconds) "
+            "FROM media_sources WHERE entity_id=? GROUP BY media_file_id",
+            (entity_id,),
+        )
+        durations = {
+            row[0]: float(row[1]) for row in duration_rows if row[1] is not None
+        }
+        media_rows = [row for row in rows if row[3] == "media"]
+        sidecar_rows = [row for row in rows if row[3] == "lyrics"]
+        media_paths = [row[1] for row in media_rows]
+        candidates: list[dict] = []
+
+        def resolve_file(directory: str, relative_path: str) -> Path | None:
+            root = Path(directory).resolve()
+            path = root / relative_path
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(root)
+            except (OSError, RuntimeError, ValueError):
+                return None
+            if path.is_symlink() or not resolved.is_file():
+                return None
+            return resolved
+
+        for media_index, row in enumerate(media_rows):
+            media_id, media_path, _language, _role, directory = row
+            source = resolve_file(directory, media_path)
+            if source is None:
+                continue
+            duration = durations.get(media_id)
+            for candidate_index, candidate in enumerate(
+                embedded_lyrics(source, duration)
+            ):
+                candidate["_order"] = media_index * 100 + candidate_index
+                candidates.append(candidate)
+
+            matching_sidecars = [
+                sidecar
+                for sidecar in sidecar_rows
+                if self._sidecar_matches_media(sidecar[1], media_path, media_paths)
+            ]
+            for sidecar_index, sidecar in enumerate(matching_sidecars):
+                sidecar_source = resolve_file(sidecar[4], sidecar[1])
+                if sidecar_source is None:
+                    continue
+                try:
+                    with sidecar_source.open(
+                        "r", encoding="utf-8-sig", errors="replace"
+                    ) as handle:
+                        parsed = parse_lyrics_text(handle.read(2_000_000), duration)
+                except OSError:
+                    continue
+                if not parsed:
+                    continue
+                candidates.append(
+                    {
+                        "source": "sidecar",
+                        "timed": bool(parsed["timed"]),
+                        "language": sidecar[2] or None,
+                        "lines": parsed["lines"],
+                        "_order": 10_000 + media_index * 100 + sidecar_index,
+                    }
+                )
+
+        selected = choose_lyrics(candidates)
+        if selected is None:
+            return {"trackId": entity_id, "lyrics": None}
+        return {
+            "trackId": entity_id,
+            "lyrics": selected,
+        }
+
     def refresh_access(
         self,
         user_id: str,
@@ -669,13 +856,31 @@ class PlaybackManager:
                 continue
         return {}
 
+    @staticmethod
+    def _source_has_video(source: dict) -> bool:
+        return bool(
+            any(
+                str(stream.get("codec_type") or "").lower() == "video"
+                for stream in source.get("streams", [])
+            )
+            or source.get("width")
+            or source.get("height")
+            or source.get("videoCodec")
+        )
+
     @classmethod
     def _playback_mode(cls, source: dict, profile: dict) -> str:
         if profile.get("forceTranscoding") is True:
-            return "video-transcode"
+            return (
+                "video-transcode"
+                if cls._source_has_video(source)
+                else "audio-transcode"
+            )
         requested_mode = str(profile.get("requestedMode") or "").lower()
         if requested_mode == "video-transcode":
-            return requested_mode
+            return (
+                requested_mode if cls._source_has_video(source) else "audio-transcode"
+            )
         containers = cls._profile_values(profile, "containers", {"mp4", "webm"})
         video = {
             codec
@@ -698,12 +903,7 @@ class PlaybackManager:
             for stream in source.get("streams", [])
             if str(stream.get("codec_type") or "").lower() == "video"
         ]
-        has_video = bool(
-            video_streams
-            or source.get("width")
-            or source.get("height")
-            or source.get("videoCodec")
-        )
+        has_video = bool(video_streams) or cls._source_has_video(source)
         video_codec = next(iter(cls._codec_values(source.get("videoCodec"))), "")
         audio_stream = cls._stream_for_profile(source, profile)
         audio_codec = next(
@@ -947,12 +1147,35 @@ class PlaybackManager:
     @staticmethod
     def _mime(source: dict) -> str:
         container = str(source.get("container") or "").split(",", 1)[0].lower()
+        has_video = PlaybackManager._source_has_video(source)
+        if has_video:
+            return {
+                "matroska": "video/x-matroska",
+                "mkv": "video/x-matroska",
+                "webm": "video/webm",
+                "mov": "video/mp4",
+                "mp4": "video/mp4",
+            }.get(container, "application/octet-stream")
         return {
-            "matroska": "video/x-matroska",
-            "mkv": "video/x-matroska",
-            "webm": "video/webm",
-            "mov": "video/mp4",
-            "mp4": "video/mp4",
+            "mp3": "audio/mpeg",
+            "flac": "audio/flac",
+            "ogg": "audio/ogg",
+            "oga": "audio/ogg",
+            "opus": "audio/ogg",
+            "wav": "audio/wav",
+            "aac": "audio/aac",
+            "adts": "audio/aac",
+            "m4a": "audio/mp4",
+            "mp4": "audio/mp4",
+            "mov": "audio/mp4",
+            "aiff": "audio/aiff",
+            "aif": "audio/aiff",
+            "wma": "audio/x-ms-wma",
+            "ape": "audio/x-ape",
+            "wv": "audio/wavpack",
+            "webm": "audio/webm",
+            "matroska": "audio/x-matroska",
+            "mkv": "audio/x-matroska",
         }.get(container, "application/octet-stream")
 
     def _transcode(
@@ -1203,10 +1426,7 @@ class PlaybackManager:
             and selected_audio_codec == "aac"
             and selected_audio_channels <= 2
         )
-        has_video = any(
-            str(stream.get("codec_type") or "").lower() == "video"
-            for stream in source.get("streams", [])
-        ) or bool(source.get("width") or source.get("height"))
+        has_video = self._source_has_video(source)
         command = [
             spec["executable"],
             "-hide_banner",
@@ -1245,7 +1465,7 @@ class PlaybackManager:
                     str(int(maximum_bitrate) * 2),
                 ]
             )
-        if mode == "video-transcode":
+        if mode == "video-transcode" and has_video:
             command.extend(
                 [
                     "-pix_fmt",
@@ -2084,6 +2304,47 @@ class PlaybackManager:
                 raise HTTPException(404, "Media source not found.")
             media_file_id = rows[0][0]
         return self._file_path(entity_id, media_file_id)[1]
+
+    def direct_path_and_metadata(
+        self, user_id: str, entity_id: str, media_source_id: str | None = None
+    ) -> tuple[Path, int, str]:
+        """Resolve a direct source with the MIME type implied by its probe metadata."""
+        self.catalog.require_entity(user_id, entity_id)
+        media_file_id = None
+        source: dict = {}
+        if media_source_id:
+            rows = self.db.execute(
+                "SELECT media_file_id,container,width,height,video_codec,audio_codec FROM media_sources WHERE id=? AND entity_id=?",
+                (media_source_id, entity_id),
+            )
+            if not rows:
+                raise HTTPException(404, "Media source not found.")
+            media_file_id, container, width, height, video_codec, audio_codec = rows[0]
+            source = {
+                "container": container,
+                "width": width,
+                "height": height,
+                "videoCodec": video_codec,
+                "audioCodec": audio_codec,
+            }
+        media_file_id, path = self._file_path(entity_id, media_file_id)
+        if not source:
+            rows = self.db.execute(
+                "SELECT container,width,height,video_codec,audio_codec FROM media_sources WHERE entity_id=? AND media_file_id=? ORDER BY id LIMIT 1",
+                (entity_id, media_file_id),
+            )
+            if rows:
+                container, width, height, video_codec, audio_codec = rows[0]
+                source = {
+                    "container": container,
+                    "width": width,
+                    "height": height,
+                    "videoCodec": video_codec,
+                    "audioCodec": audio_codec,
+                }
+        if not source:
+            source = {"container": path.suffix.lower().lstrip(".")}
+        return path, path.stat().st_size, self._mime(source)
 
     def session_file(self, user_id: str, session_id: str, filename: str) -> Path:
         self._cleanup_expired()

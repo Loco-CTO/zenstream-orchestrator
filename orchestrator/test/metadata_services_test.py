@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -734,6 +735,38 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(value["overview"], "English overview")
         self.assertEqual(value["images"][0]["url"], "neutral.jpg")
 
+    def test_read_preserves_music_release_types(self):
+        self.db.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+            (
+                "musicbrainz",
+                "release",
+                "release-1",
+                "",
+                json.dumps(
+                    {
+                        "_imageLanguageSchema": 3,
+                        "albumType": "EP",
+                        "albumSecondaryTypes": ["Live", "Remix"],
+                    }
+                ),
+                "now",
+                "later",
+            ),
+        )
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en"]),
+        ):
+            value = MetadataReadService(self.db).resolve_raw(
+                "release",
+                [{"provider": "musicbrainz", "id": "release-1"}],
+                "en",
+            )
+
+        self.assertEqual(value["albumType"], "EP")
+        self.assertEqual(value["albumSecondaryTypes"], ["Live", "Remix"])
+
     def test_read_fallback_ignores_language_code_overview_placeholders(self):
         self._cache(
             "ja", {"title": "Japanese", "overview": "eng", "originalLanguage": "ja"}
@@ -789,6 +822,45 @@ class MetadataServicesTest(unittest.TestCase):
             "LEHV6nWB2yk8pyo0adR*.7kCMdnj",
         )
 
+    def test_public_artwork_does_not_cache_empty_selection(self):
+        service = MetadataReadService(self.db)
+        service.resolve_raw = MagicMock(
+            side_effect=[
+                {"images": [], "originalLanguage": "en"},
+                {"images": [{"type": "Primary", "url": "poster.jpg"}]},
+            ]
+        )
+
+        def ready_artwork(
+            _entity_type,
+            _provider_ids,
+            _images,
+            _requested,
+            image_type,
+            *_args,
+            **_kwargs,
+        ):
+            if image_type == "Primary" and service.resolve_raw.call_count > 1:
+                return {
+                    "provider": "tmdb",
+                    "url": "poster.jpg",
+                    "language": "en",
+                }
+            return None
+
+        service.ready_artwork = MagicMock(side_effect=ready_artwork)
+        provider_ids = [{"provider": "tmdb", "id": "10"}]
+
+        first = service.resolve_public("entity", "movie", provider_ids, "en")
+        second = service.resolve_public("entity", "movie", provider_ids, "en")
+
+        self.assertEqual(first["metadata"]["images"], {})
+        self.assertEqual(
+            second["metadata"]["images"]["Primary"]["url"],
+            "/api/catalog/items/entity/images/Primary?language=en",
+        )
+        self.assertEqual(service.resolve_raw.call_count, 2)
+
     def test_original_language_provider_codes_match_canonical_cache_locales(self):
         self._cache("en", {"title": "English", "originalLanguage": "eng"})
         service = MetadataReadService(self.db)
@@ -812,6 +884,20 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(len(fetcher.bulk_calls), 1)
         self.assertEqual(fetcher.bulk_calls[0][3], ("en", "ja", "zh-TW"))
         self.assertEqual([value["title"] for value in values], ["en", "ja", "zh-TW"])
+
+    def test_musicbrainz_ingest_fetches_one_neutral_document_for_all_catalog_locales(
+        self,
+    ):
+        fetcher = _BulkFetcher()
+        ingest = MetadataIngestService(fetcher, _Settings(["en", "ja", "zh-TW"]))
+
+        values = ingest.ingest_locales(
+            "musicbrainz", "release", "release-id", ["en", "ja", "zh-TW"]
+        )
+
+        self.assertEqual(fetcher.bulk_calls[0][3], ("",))
+        self.assertEqual(set(values), {"en", "ja", "zh-TW"})
+        self.assertEqual({value["title"] for value in values.values()}, {""})
 
     def test_ingest_locale_rejects_unconfigured_language(self):
         fetcher = _Fetcher()
@@ -1188,6 +1274,21 @@ class MetadataServicesTest(unittest.TestCase):
                 "https://images.example/redirected-poster.jpg",
             ],
         )
+
+    def test_cover_art_archive_redirect_host_is_allowlisted(self):
+        with (
+            patch.dict(
+                os.environ,
+                {"METADATA_IMAGE_HOST_ALLOWLIST": "coverartarchive.org,archive.org"},
+            ),
+            patch(
+                "app.metadata_services.socket.getaddrinfo",
+                return_value=[(None, None, None, None, ("8.8.8.8", 443))],
+            ),
+        ):
+            MetadataImageIngestService._validate_provider_url(
+                "https://archive.org/download/mbid-id/front.jpg"
+            )
 
     def test_ingest_document_materializes_aggregated_series(self):
         cache = _ImageCache(self.db)

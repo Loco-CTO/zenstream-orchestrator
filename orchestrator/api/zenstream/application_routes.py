@@ -1299,7 +1299,9 @@ async def syncplay_remove_member(group_id: str, member_id: str, request: Request
             "DELETE FROM syncplay_members WHERE group_id=? AND user_id=?",
             (group_id, member_id),
         )
-        group.reconcile_readiness(cursor, state)
+        group.reconcile_readiness(
+            cursor, state, member_changed=cursor.rowcount > 0
+        )
 
     try:
         state = await run_control(
@@ -1457,12 +1459,15 @@ async def syncplay_presence(group_id: str, request: Request):
     if not isinstance(pause_room, bool):
         raise HTTPException(400, "pauseRoom must be boolean.")
 
+    changed = False
+
     def apply(cursor, state):
+        nonlocal changed
         # A presence request can spend longer in the network than the seek or
         # playback transition that superseded it. Media generation protects
         # item changes; timeline revision protects seeks and play/pause changes
         # within the same item.
-        group.apply_presence(
+        changed = group.apply_presence(
             cursor,
             state,
             user,
@@ -1476,7 +1481,8 @@ async def syncplay_presence(group_id: str, request: Request):
         )
 
     state = await run_control(group.mutate, user, None, data.get("operationId"), apply)
-    await hub.broadcast({"version": 1, "type": "group", "group": state})
+    if changed:
+        await hub.broadcast({"version": 1, "type": "group", "group": state})
     return state
 
 

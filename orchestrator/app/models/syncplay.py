@@ -312,8 +312,14 @@ class SyncplayGroup:
             for _viewing, loading, ready_generation in cursor.fetchall()
         )
 
-    def reconcile_readiness(self, cursor, state):
-        """Pause for opted-in buffering members and resume when all are ready."""
+    def reconcile_readiness(self, cursor, state, member_changed=False):
+        """Pause for opted-in buffering members and resume when all are ready.
+
+        A presence heartbeat can update its ordering sequence without changing
+        anything exposed in the group snapshot. Do not advance the group
+        revision for that no-op case, but let callers request a revision when
+        they changed member state without changing the playback timeline.
+        """
         waiting = self.waiting_for_members(cursor, state["mediaGeneration"])
         if waiting and (state["playing"] or state["playbackState"] == "playing"):
             now = time.time()
@@ -331,15 +337,30 @@ class SyncplayGroup:
                 playback_state="paused",
                 pause_reason="buffering",
             )
+            return True
         elif (
             not waiting
             and state["resumeWhenReady"]
             and state["pauseReason"] != "command"
         ):
             schedule(self, cursor, state, projected_position(state), "buffering")
-        else:
+            return True
+        elif member_changed:
             self.transition(cursor, state)
-        return waiting
+            return True
+        return False
+
+    def pause_for_background(self, cursor, state):
+        """Pause once for a background transition when playback is active."""
+        if (
+            not state["playing"]
+            and state["playbackState"] == "paused"
+            and not state["resumeWhenReady"]
+            and state["pauseReason"] == "background"
+        ):
+            return False
+        pause(self, cursor, state, "background")
+        return True
 
     def apply_presence(
         self,
@@ -362,7 +383,7 @@ class SyncplayGroup:
         ):
             return False
         cursor.execute(
-            "SELECT presence_sequence,watching_together FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+            "SELECT presence_sequence,watching_together,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
             (self.id, user_id, participant_id),
         )
         row = cursor.fetchone()
@@ -373,12 +394,18 @@ class SyncplayGroup:
             if pause_room
             else bool(viewing and loading)
         )
+        ready_generation = generation if viewing and not loading else -1
+        member_changed = row[2:] != (
+            int(bool(viewing)),
+            int(loading),
+            ready_generation,
+        )
         cursor.execute(
             "UPDATE syncplay_members SET viewing=?,loading=?,ready_generation=?,presence_sequence=? WHERE group_id=? AND user_id=? AND participant_id=?",
             (
                 int(bool(viewing)),
                 int(loading),
-                generation if viewing and not loading else -1,
+                ready_generation,
                 sequence,
                 self.id,
                 user_id,
@@ -386,15 +413,27 @@ class SyncplayGroup:
             ),
         )
         if pause_room and state["itemId"] is not None:
-            pause(self, cursor, state, "background")
+            playback_changed = self.pause_for_background(cursor, state)
+            if not playback_changed and member_changed:
+                self.transition(cursor, state)
+                return True
+            return playback_changed
         else:
-            self.reconcile_readiness(cursor, state)
+            playback_changed = self.reconcile_readiness(
+                cursor, state, member_changed=member_changed
+            )
+            return member_changed or playback_changed
         return True
 
     def set_participation(self, user_id, participant_id, watching, operation_id=None):
         """Update durable viewing intent without trusting a caller-supplied identity."""
 
         def apply(cursor, state):
+            cursor.execute(
+                "SELECT watching_together,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+                (self.id, user_id, participant_id),
+            )
+            before = cursor.fetchone()
             loading = int(
                 watching and state["itemId"] is not None and state["resumeWhenReady"]
             )
@@ -402,7 +441,10 @@ class SyncplayGroup:
                 "UPDATE syncplay_members SET watching_together=?,viewing=0,loading=?,ready_generation=-1,presence_sequence=0 WHERE group_id=? AND user_id=? AND participant_id=?",
                 (int(watching), loading, self.id, user_id, participant_id),
             )
-            self.reconcile_readiness(cursor, state)
+            member_changed = before != (int(watching), 0, loading, -1)
+            self.reconcile_readiness(
+                cursor, state, member_changed=member_changed
+            )
 
         return self.mutate(user_id, None, operation_id, apply)
 
@@ -499,7 +541,7 @@ class SyncplayGroup:
                 "DELETE FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
                 (self.id, user_id, participant_id),
             )
-            self.reconcile_readiness(cursor, state)
+            self.reconcile_readiness(cursor, state, member_changed=True)
             return self._state(cursor, include_ended=True)
 
     def deactivate_member(self, user_id, participant_id="legacy"):
@@ -515,10 +557,19 @@ class SyncplayGroup:
             if not cursor.fetchone():
                 return None
             cursor.execute(
+                "SELECT viewing,loading,ready_generation FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+                (self.id, user_id, participant_id),
+            )
+            before = cursor.fetchone()
+            cursor.execute(
                 "UPDATE syncplay_members SET viewing=0,loading=0,ready_generation=-1 WHERE group_id=? AND user_id=? AND participant_id=?",
                 (self.id, user_id, participant_id),
             )
-            self.reconcile_readiness(cursor, state)
+            self.reconcile_readiness(
+                cursor,
+                state,
+                member_changed=before != (0, 0, -1),
+            )
             return self._state(cursor, include_ended=True)
 
     def mark_member_backgrounded(self, user_id, participant_id="legacy"):
@@ -528,7 +579,7 @@ class SyncplayGroup:
             if not state:
                 return None
             cursor.execute(
-                "SELECT watching_together FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
+                "SELECT watching_together,viewing,loading,ready_generation FROM syncplay_members WHERE group_id=? AND user_id=? AND participant_id=?",
                 (self.id, user_id, participant_id),
             )
             row = cursor.fetchone()
@@ -540,7 +591,13 @@ class SyncplayGroup:
                 (loading, self.id, user_id, participant_id),
             )
             if loading:
-                pause(self, cursor, state, "background")
+                playback_changed = self.pause_for_background(cursor, state)
+                if not playback_changed and row[1:] != (0, loading, -1):
+                    self.transition(cursor, state)
             else:
-                self.reconcile_readiness(cursor, state)
+                self.reconcile_readiness(
+                    cursor,
+                    state,
+                    member_changed=row[1:] != (0, 0, -1),
+                )
             return self._state(cursor, include_ended=True)

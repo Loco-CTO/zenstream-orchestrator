@@ -4377,6 +4377,204 @@ class LibraryScanner:
         self._scan_complete = True
         return count
 
+    def _collection_source_rows(
+        self,
+        sources: Iterable[str],
+        provider: str,
+        identifier_types: Iterable[str],
+    ) -> list[tuple[str, str, str]]:
+        source_ids = list(dict.fromkeys(sources))
+        types = list(dict.fromkeys(identifier_types))
+        if not source_ids or not types:
+            return []
+        source_placeholders = ",".join("?" for _ in source_ids)
+        type_placeholders = ",".join("?" for _ in types)
+        return self.db.execute(
+            "SELECT e.id,e.entity_type,p.provider_id "
+            "FROM library_entities e "
+            "JOIN entity_provider_ids p ON p.entity_id=e.id "
+            f"WHERE e.library_id IN ({source_placeholders}) "
+            "AND p.provider=? "
+            f"AND p.identifier_type IN ({type_placeholders}) "
+            "ORDER BY e.id,p.provider_id",
+            [*source_ids, provider, *types],
+        )
+
+    def _discover_tvdb_collections(
+        self,
+        client,
+        source_rows: Iterable[tuple[str, str, str]],
+        should_terminate: Callable[[], bool],
+    ) -> tuple[dict[str, dict], int]:
+        from app.providers import ProviderError
+
+        if not callable(getattr(client, "lists", None)) or not callable(
+            getattr(client, "list_details", None)
+        ):
+            raise ProviderError("TheTVDB collection endpoints are unavailable")
+        by_id = {(row[1], str(row[2])): row[0] for row in source_rows}
+        lists: dict[str, dict] = {}
+        # Lists are paged; stop at the first short page to avoid unbounded calls.
+        for page in range(50):
+            self._check_termination(should_terminate)
+            page_values = list(client.lists(page) or [])
+            for value in page_values:
+                if not isinstance(value, dict) or not value.get("isOfficial"):
+                    continue
+                list_id = value.get("id")
+                if list_id is not None:
+                    lists[str(list_id)] = value
+            if len(page_values) < 100:
+                break
+
+        discovered: dict[str, dict] = {}
+        for list_id, base in lists.items():
+            self._check_termination(should_terminate)
+            payload = client.list_details(list_id)
+            data = payload.get("data", payload) if isinstance(payload, dict) else {}
+            if not isinstance(data, dict):
+                data = {}
+            members = []
+            for entity in data.get("entities", []) or []:
+                if not isinstance(entity, dict):
+                    continue
+                movie_id = entity.get("movieId")
+                series_id = entity.get("seriesId")
+                key = (
+                    ("movie", str(movie_id))
+                    if movie_id is not None
+                    else (("series", str(series_id)) if series_id is not None else None)
+                )
+                if key and key in by_id:
+                    members.append(by_id[key])
+            members = list(dict.fromkeys(members))
+            if len(members) < 2:
+                continue
+            title = base.get("name") or data.get("name") or f"Collection {list_id}"
+            discovered[list_id] = {"members": members, "title": title, "data": data}
+        return discovered, len(lists)
+
+    def _discover_tmdb_collections(
+        self,
+        service,
+        client,
+        source_rows: Iterable[tuple[str, str, str]],
+        locales: list[str],
+        should_terminate: Callable[[], bool],
+    ) -> tuple[dict[str, dict], int]:
+        from app.metadata_services import metadata_task_results
+        from app.providers import ProviderError
+
+        if not callable(getattr(client, "collection_details", None)) and not callable(
+            getattr(client, "details", None)
+        ):
+            raise ProviderError("TMDB collection endpoints are unavailable")
+        movie_entities: dict[str, list[str]] = {}
+        for entity_id, _entity_type, provider_id in source_rows:
+            movie_entities.setdefault(str(provider_id), []).append(entity_id)
+        if not movie_entities:
+            return {}, 0
+        if not locales:
+            raise ProviderError("No metadata language is configured")
+
+        discovery_locale = locales[0]
+        missing_references = []
+        for provider_id in movie_entities:
+            cached = service.cache.get_locales("tmdb", "movie", provider_id)
+            document = cached.get(discovery_locale)
+            if not document or "collectionRef" not in document:
+                missing_references.append(provider_id)
+
+        def backfill_reference(provider_id: str):
+            # The collection relationship is language-independent. Backfill
+            # only the first configured locale so legacy caches become usable
+            # without refetching every movie's complete localized metadata.
+            return service.fetch_locales(
+                "tmdb",
+                "movie",
+                provider_id,
+                [discovery_locale],
+                force=True,
+                project=False,
+            )
+
+        errors = []
+        for provider_id, _result, error in metadata_task_results(
+            sorted(missing_references), backfill_reference, should_terminate
+        ):
+            self._check_termination(should_terminate)
+            if error is not None:
+                errors.append((provider_id, error))
+        self._check_termination(should_terminate)
+        if errors:
+            provider_id, error = errors[0]
+            raise ProviderError(
+                f"TMDB movie collection-reference backfill failed for "
+                f"{len(errors)} movie(s); first provider_id={provider_id}: {error}"
+            )
+
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        for provider_id, entity_ids in movie_entities.items():
+            cached = service.cache.get_locales("tmdb", "movie", provider_id)
+            document = cached.get(discovery_locale)
+            if not document or "collectionRef" not in document:
+                raise ProviderError(
+                    f"TMDB movie collection-reference cache missing provider_id={provider_id}"
+                )
+            reference = document.get("collectionRef")
+            if not isinstance(reference, dict):
+                continue
+            collection_id = reference.get("id")
+            if collection_id is None or not str(collection_id).strip():
+                continue
+            grouped.setdefault(str(collection_id), []).extend(
+                (provider_id, entity_id) for entity_id in entity_ids
+            )
+
+        self._check_termination(should_terminate)
+        details = getattr(client, "collection_details", None)
+        if not callable(details):
+            details = lambda provider_id, locale: client.details(
+                "collection", provider_id, locale
+            )
+        discovered: dict[str, dict] = {}
+        for collection_id, local_members in grouped.items():
+            self._check_termination(should_terminate)
+            payload = details(collection_id, discovery_locale)
+            if not isinstance(payload, dict):
+                raise ProviderError(
+                    f"TMDB collection details returned an invalid payload "
+                    f"provider_id={collection_id}"
+                )
+            by_movie_id: dict[str, list[str]] = {}
+            for movie_id, entity_id in local_members:
+                by_movie_id.setdefault(movie_id, []).append(entity_id)
+            ordered_members = []
+            seen_entities = set()
+            for part in payload.get("parts", []) or []:
+                if not isinstance(part, dict) or part.get("id") is None:
+                    continue
+                for entity_id in by_movie_id.get(str(part["id"]), []):
+                    if entity_id not in seen_entities:
+                        seen_entities.add(entity_id)
+                        ordered_members.append(entity_id)
+            # Keep locally indexed movies that TMDB has not yet included in
+            # its parts response, with a deterministic fallback order.
+            for movie_id in sorted(by_movie_id):
+                for entity_id in by_movie_id[movie_id]:
+                    if entity_id not in seen_entities:
+                        seen_entities.add(entity_id)
+                        ordered_members.append(entity_id)
+            if len(ordered_members) < 2:
+                continue
+            title = payload.get("name") or f"Collection {collection_id}"
+            discovered[collection_id] = {
+                "members": ordered_members,
+                "title": title,
+                "data": payload,
+            }
+        return discovered, len(grouped)
+
     def derive_collection(
         self,
         library_id: str,
@@ -4405,72 +4603,82 @@ class LibraryScanner:
         self._scan_complete = False
         try:
             from app.library_cleanup import cleanup_entities
-            from app.providers import MetadataService, ProviderError, TVDBClient
+            from app.metadata_services import MetadataIngestService
+            from app.providers import MetadataService, ProviderError
 
             service = MetadataService()
-            client = service.client("tvdb")
-            if not isinstance(client, TVDBClient):
-                raise ProviderError("TheTVDB is not configured")
-            source_rows = (
-                self.db.execute(
-                    "SELECT e.id,e.entity_type,p.provider_id FROM library_entities e JOIN entity_provider_ids p ON p.entity_id=e.id WHERE e.library_id IN ({}) AND p.provider='tvdb' AND p.identifier_type IN ('series','movie')".format(
-                        ",".join("?" * len(sources))
-                    ),
-                    sources,
-                )
-                if sources
-                else []
+            collection_locales = MetadataIngestService(service).locales()
+            tvdb_source_rows = self._collection_source_rows(
+                sources, "tvdb", ("series", "movie")
             )
-            by_id = {(row[1], str(row[2])): row[0] for row in source_rows}
-            lists: dict[str, dict] = {}
-            # Lists are paged; stop at the first short page to avoid unbounded calls.
-            for page in range(50):
-                self._check_termination(should_terminate)
-                page_values = client.lists(page)
-                for value in page_values:
-                    if value.get("isOfficial"):
-                        lists[str(value.get("id"))] = value
-                if len(page_values) < 100:
-                    break
-            self.store.update_job(job_id, progress_total=len(lists))
-            discovered: dict[str, dict] = {}
-            for list_id, base in lists.items():
-                self._check_termination(should_terminate)
-                payload = client.list_details(list_id)
-                data = payload.get("data", payload)
-                members = []
-                for entity in data.get("entities", []) or []:
-                    key = (
-                        ("movie", str(entity.get("movieId")))
-                        if entity.get("movieId")
-                        else (
-                            ("series", str(entity.get("seriesId")))
-                            if entity.get("seriesId")
-                            else None
-                        )
+            tmdb_source_rows = self._collection_source_rows(sources, "tmdb", ("movie",))
+            discovered: list[tuple[str, str, dict]] = []
+            successful_providers = set()
+            provider_errors = []
+            progress_total = 0
+
+            for provider, discover in (
+                (
+                    "tvdb",
+                    lambda client: self._discover_tvdb_collections(
+                        client, tvdb_source_rows, should_terminate
+                    ),
+                ),
+                (
+                    "tmdb",
+                    lambda client: self._discover_tmdb_collections(
+                        service,
+                        client,
+                        tmdb_source_rows,
+                        collection_locales,
+                        should_terminate,
+                    ),
+                ),
+            ):
+                try:
+                    result, provider_total = discover(service.client(provider))
+                except JobTerminated:
+                    raise
+                except Exception as error:
+                    provider_errors.append((provider, error))
+                    logger.warning(
+                        "collection provider enumeration failed provider=%s",
+                        provider,
+                        exc_info=True,
                     )
-                    if key and key in by_id:
-                        members.append(by_id[key])
-                members = list(dict.fromkeys(members))
-                if len(members) < 2:
                     continue
-                title = base.get("name") or data.get("name") or f"Collection {list_id}"
-                discovered[list_id] = {"members": members, "title": title, "data": data}
+                successful_providers.add(provider)
+                progress_total += provider_total
+                discovered.extend(
+                    (provider, provider_id, value)
+                    for provider_id, value in result.items()
+                )
+
+            if not successful_providers:
+                reasons = ", ".join(
+                    f"{provider}: {type(error).__name__}"
+                    for provider, error in provider_errors
+                )
+                suffix = f" ({reasons})" if reasons else ""
+                raise ProviderError(
+                    f"No collection provider could be enumerated{suffix}"
+                )
 
             # Provider enumeration is complete at this point. Only now mutate
             # the collection inventory, so a partial/failing provider response
-            # cannot erase the previous catalog.
-            from app.metadata_services import MetadataIngestService
-
+            # cannot erase the previous catalog for that provider.
             ingest = MetadataIngestService(service)
             count = 0
-            for list_id, value in discovered.items():
+            for provider, provider_id, value in discovered:
                 self._check_termination(should_terminate)
-                collection = self._entity(
-                    library_id, None, "collection", f"tvdb-list-{list_id}"
+                path = (
+                    f"tvdb-list-{provider_id}"
+                    if provider == "tvdb"
+                    else f"tmdb-collection-{provider_id}"
                 )
+                collection = self._entity(library_id, None, "collection", path)
                 self._scan_refresh_root_ids.add(collection)
-                self._replace_ids(collection, [("tvdb", "collection", list_id)])
+                self._replace_ids(collection, [(provider, "collection", provider_id)])
                 current_members = [
                     (row[0], row[1])
                     for row in self.db.execute(
@@ -4493,12 +4701,11 @@ class LibraryScanner:
                             (collection, source_entity, position),
                         )
                     self._mark_changed(collection)
-                collection_locales = ingest.locales()
                 try:
                     ingest.ingest_locales(
-                        "tvdb",
+                        provider,
                         "collection",
-                        list_id,
+                        provider_id,
                         collection_locales,
                         force=False,
                     )
@@ -4507,30 +4714,33 @@ class LibraryScanner:
                         normalized = {
                             "title": value["title"],
                             "overview": value["data"].get("overview"),
-                            "provider": "tvdb",
-                            "providerId": list_id,
+                            "provider": provider,
+                            "providerId": provider_id,
                             "images": [],
                         }
                         service.cache.put(
-                            "tvdb", "collection", list_id, locale, normalized
+                            provider, "collection", provider_id, locale, normalized
                         )
                 count += 1
                 self.store.update_job(
                     job_id, progress_current=count, message=f"Derived {value['title']}"
                 )
+            provider_placeholders = ",".join("?" for _ in successful_providers)
+            stale_params = [library_id, *sorted(successful_providers)]
+            stale_filter = ""
+            if self._scan_seen_ids:
+                seen_placeholders = ",".join("?" for _ in self._scan_seen_ids)
+                stale_filter = f" AND e.id NOT IN ({seen_placeholders})"
+                stale_params.extend(sorted(self._scan_seen_ids))
             stale = [
                 row[0]
                 for row in self.db.execute(
-                    "SELECT e.id FROM library_entities e WHERE e.library_id=? AND e.entity_type='collection' AND e.id NOT IN ({})".format(
-                        ",".join("?" * len(self._scan_seen_ids))
-                        if self._scan_seen_ids
-                        else "SELECT NULL"
-                    ),
-                    (
-                        [library_id, *self._scan_seen_ids]
-                        if self._scan_seen_ids
-                        else [library_id]
-                    ),
+                    "SELECT DISTINCT e.id FROM library_entities e "
+                    "JOIN entity_provider_ids p ON p.entity_id=e.id "
+                    "WHERE e.library_id=? AND e.entity_type='collection' "
+                    "AND p.identifier_type='collection' "
+                    f"AND p.provider IN ({provider_placeholders}){stale_filter}",
+                    stale_params,
                 )
             ]
             if stale:
@@ -4542,9 +4752,18 @@ class LibraryScanner:
                 job_id,
                 state="completed",
                 progress_current=count,
-                progress_total=len(lists),
+                progress_total=progress_total,
                 finished_at=now(),
-                message=f"Derived {count} official collections",
+                message=(
+                    f"Derived {count} collections"
+                    + (
+                        "; preserved "
+                        + ", ".join(provider.upper() for provider, _ in provider_errors)
+                        + " inventory after provider failure"
+                        if provider_errors
+                        else ""
+                    )
+                ),
             )
             self.store.set_scan_state(library_id, "ready", finished=now())
         except JobTerminated:

@@ -1226,6 +1226,19 @@ class CatalogTest(unittest.TestCase):
                 "2026",
                 "2026",
             ),
+            (
+                "collection",
+                "allowed",
+                None,
+                "collection",
+                "Collection",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
         ):
             self.db.execute(
                 "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)", row
@@ -1243,6 +1256,7 @@ class CatalogTest(unittest.TestCase):
         for entity_id, entity_type, added_ns, last_added_ns in (
             ("series", "series", 100, 300),
             ("movie", "movie", 250, 250),
+            ("collection", "collection", 275, 275),
         ):
             self.db.execute(
                 "INSERT INTO catalog_entity_summary VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",

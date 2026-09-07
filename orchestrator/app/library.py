@@ -589,8 +589,7 @@ def parse_audio_tags(path: Path) -> dict[str, str]:
                     selected = [
                         values
                         for raw_name, values in entries
-                        if _AUDIO_ARTIST_TAG_PRIORITIES.get(raw_name, 2)
-                        == priority
+                        if _AUDIO_ARTIST_TAG_PRIORITIES.get(raw_name, 2) == priority
                     ]
                 elif key == "ALBUMARTIST":
                     priority = min(
@@ -5255,9 +5254,7 @@ class LibraryScanner:
             artist_name=artist_name,
         )
         if embedded_artist_id:
-            self._replace_ids(
-                artist, [("musicbrainz", "artist", embedded_artist_id)]
-            )
+            self._replace_ids(artist, [("musicbrainz", "artist", embedded_artist_id)])
 
         release_ids = []
         for _, tags in group_entries:
@@ -5536,7 +5533,9 @@ class LibraryScanner:
             "ORDER BY is_primary DESC,provider_id LIMIT 1",
             (artist,),
         )
-        artist_provider_id = str(artist_provider_rows[0][0]) if artist_provider_rows else None
+        artist_provider_id = (
+            str(artist_provider_rows[0][0]) if artist_provider_rows else None
+        )
         if not artist_provider_id:
             # If the local parent has no identity yet, only attach a provider
             # credit whose name matches that explicit parent. Never use the
@@ -6170,10 +6169,7 @@ class LibraryScanner:
                     if provider_id and not existing.get("id"):
                         existing["id"] = provider_id
                         by_id[provider_id] = index
-                    if (
-                        "joinPhrase" not in existing
-                        and "joinPhrase" in value
-                    ):
+                    if "joinPhrase" not in existing and "joinPhrase" in value:
                         existing["joinPhrase"] = value["joinPhrase"]
         atomic_sources: list[list[dict]] = []
         for source in sources:
@@ -6335,9 +6331,9 @@ class LibraryScanner:
                         and primary_credit.get("id")
                         and str(credit["id"]) == str(primary_credit["id"])
                     )
-                    same_name = _music_normalize(credit.get("name")) == _music_normalize(
-                        artist_name
-                    )
+                    same_name = _music_normalize(
+                        credit.get("name")
+                    ) == _music_normalize(artist_name)
                     if same_provider_id or same_name:
                         continue
                     ordered_credits.append(credit)
@@ -6363,11 +6359,11 @@ class LibraryScanner:
             ) == _music_normalize(artist_name):
                 target_artist_id = old_album_artist_id
             if target_artist_id is None:
-                target_artist_id = self._entity(
-                    library_id, None, "artist", artist_name
-                )
+                target_artist_id = self._entity(library_id, None, "artist", artist_name)
             self._scan_seen_ids.add(target_artist_id)
-            self._music_artist_entities[_music_normalize(artist_name)] = target_artist_id
+            self._music_artist_entities[_music_normalize(artist_name)] = (
+                target_artist_id
+            )
             self._persist_music_local_artist(target_artist_id, artist_name, ingest)
             if primary_provider_id:
                 self._replace_ids(

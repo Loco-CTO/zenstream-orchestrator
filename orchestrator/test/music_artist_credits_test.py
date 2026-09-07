@@ -375,12 +375,8 @@ class MusicArtistCreditsTest(unittest.TestCase):
                 "en",
                 json.dumps(
                     {
-                        "artists": [
-                            {"name": "Aiobahn feat. ヰ世界情緒"}
-                        ],
-                        "contributingArtists": [
-                            {"name": "Aiobahn feat. ヰ世界情緒"}
-                        ],
+                        "artists": [{"name": "Aiobahn feat. ヰ世界情緒"}],
+                        "contributingArtists": [{"name": "Aiobahn feat. ヰ世界情緒"}],
                     },
                     ensure_ascii=False,
                 ),

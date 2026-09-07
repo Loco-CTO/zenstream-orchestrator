@@ -1977,9 +1977,7 @@ class LibraryMetadataTest(unittest.TestCase):
             _music_primary_artist_credit(tags),
             {"name": "Aiobahn", "id": "mb-aiobahn"},
         )
-        document = _music_local_document(
-            Path("1.01. new world.flac"), tags, "release"
-        )
+        document = _music_local_document(Path("1.01. new world.flac"), tags, "release")
         self.assertEqual(document["albumArtist"], "Aiobahn")
         self.assertEqual(
             document["artists"],
@@ -2003,9 +2001,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     _music_primary_artist_credit(tags),
                     {"name": "ヰ世界情緒", "id": "mb-uisekai"},
                 )
-                document = _music_local_document(
-                    Path(f"{album}.flac"), tags, "release"
-                )
+                document = _music_local_document(Path(f"{album}.flac"), tags, "release")
                 self.assertEqual(document["albumArtist"], "ヰ世界情緒")
                 self.assertEqual(
                     [credit["name"] for credit in document["artists"]],

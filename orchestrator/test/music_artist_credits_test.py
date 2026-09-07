@@ -299,6 +299,22 @@ class MusicArtistCreditsTest(unittest.TestCase):
             ],
         )
 
+    def test_credit_normalization_keeps_atomic_credits_with_same_name_and_ids(self):
+        document = {
+            "artists": [
+                {"id": "mb-one", "name": "Shared Name", "joinPhrase": " & "},
+                {"id": "mb-two", "name": "Shared Name", "joinPhrase": ""},
+            ]
+        }
+
+        self.assertEqual(
+            self.scanner._music_document_credits(document),
+            [
+                {"id": "mb-one", "name": "Shared Name", "joinPhrase": " & "},
+                {"id": "mb-two", "name": "Shared Name", "joinPhrase": ""},
+            ],
+        )
+
     def test_repair_reparents_release_to_primary_and_removes_joined_parent(self):
         old_artist = self.scanner._entity("library-1", None, "artist", "ヰ世界情緒")
         primary_artist = self.scanner._entity("library-1", None, "artist", "Aiobahn")

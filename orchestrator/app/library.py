@@ -5787,24 +5787,20 @@ class LibraryScanner:
                 return None
             document_name = _music_display_value(document.get("albumArtist"))
             document_credits = self._music_document_credits(document)
-            if document_name:
-                matching = next(
-                    (
-                        credit
-                        for credit in document_credits
-                        if _music_normalize(credit["name"])
-                        == _music_normalize(document_name)
-                    ),
-                    None,
-                )
-                if matching:
-                    return dict(matching)
+            if document_credits:
+                first_credit = document_credits[0]
+                if document_name and _music_normalize(
+                    first_credit["name"]
+                ) == _music_normalize(document_name):
+                    return dict(first_credit)
                 if len(document_credits) > 1:
-                    # A joined scalar albumArtist is not a safe credit name;
-                    # the first structured credit provides the boundary.
-                    return dict(document_credits[0])
-                return {"name": document_name}
-            return dict(document_credits[0]) if document_credits else None
+                    # A scalar albumArtist that names a later credit is not
+                    # an ownership signal once ordered atomic credits exist.
+                    return dict(first_credit)
+                if document_name:
+                    return {"name": document_name}
+                return dict(first_credit)
+            return {"name": document_name} if document_name else None
 
         primary_credit = primary_from_document(local_release)
         if primary_credit is None:
@@ -5826,56 +5822,7 @@ class LibraryScanner:
         artist_entities = getattr(self, "_music_artist_entities", {})
 
         def dedupe(values: list[dict]) -> list[dict]:
-            result: list[dict] = []
-            by_id: dict[str, int] = {}
-            by_name: dict[str, int] = {}
-            for value in values:
-                name = _music_display_value(value.get("name"))
-                if not name:
-                    continue
-                provider_id = value.get("id")
-                provider_id = (
-                    str(provider_id).strip() if provider_id is not None else None
-                ) or None
-                name_key = _music_normalize(name)
-                if provider_id and provider_id in by_id:
-                    existing = result[by_id[provider_id]]
-                    if not existing.get("name"):
-                        existing["name"] = name
-                    if (
-                        "joinPhrase" not in existing
-                        and value.get("joinPhrase") is not None
-                    ):
-                        existing["joinPhrase"] = value["joinPhrase"]
-                    continue
-                if name_key in by_name:
-                    index = by_name[name_key]
-                    existing = result[index]
-                    if provider_id and not existing.get("id"):
-                        existing["id"] = provider_id
-                        by_id[provider_id] = index
-                    if (
-                        "joinPhrase" not in existing
-                        and value.get("joinPhrase") is not None
-                    ):
-                        existing["joinPhrase"] = value["joinPhrase"]
-                    continue
-                index = len(result)
-                result.append(
-                    {
-                        "name": name,
-                        "id": provider_id,
-                        **(
-                            {"joinPhrase": value["joinPhrase"]}
-                            if value.get("joinPhrase") is not None
-                            else {}
-                        ),
-                    }
-                )
-                by_name[name_key] = index
-                if provider_id:
-                    by_id[provider_id] = index
-            return result
+            return self._music_document_credits({"artists": values})
 
         def resolve_artist(credit: dict, *, primary: bool = False) -> str:
             name = credit["name"]
@@ -6136,7 +6083,7 @@ class LibraryScanner:
         """Combine primary and contributing credits from a cached document."""
         values: list[dict] = []
         by_id: dict[str, int] = {}
-        by_name: dict[str, int] = {}
+        by_name: dict[str, list[int]] = {}
         sources: list[list[dict]] = []
         for key in ("artists", "contributingArtists"):
             source = LibraryScanner._music_credit_source(document.get(key))
@@ -6148,7 +6095,17 @@ class LibraryScanner:
                     name_key = _music_normalize(name)
                     index = by_id.get(provider_id) if provider_id else None
                     if index is None:
-                        index = by_name.get(name_key)
+                        name_indices = by_name.get(name_key, [])
+                        index = next(
+                            (
+                                candidate
+                                for candidate in name_indices
+                                if not values[candidate].get("id")
+                            ),
+                            None,
+                        )
+                        if index is None and not provider_id and name_indices:
+                            index = name_indices[0]
                     if index is None:
                         index = len(values)
                         values.append(
@@ -6162,7 +6119,7 @@ class LibraryScanner:
                                 ),
                             }
                         )
-                        by_name[name_key] = index
+                        by_name.setdefault(name_key, []).append(index)
                         if provider_id:
                             by_id[provider_id] = index
                         continue
@@ -6301,25 +6258,22 @@ class LibraryScanner:
                 release_document.get("albumArtist")
             )
             primary_credit = None
-            if explicit_album_artist:
-                primary_credit = next(
-                    (
-                        credit
-                        for credit in release_credits
-                        if _music_normalize(credit.get("name"))
-                        == _music_normalize(explicit_album_artist)
-                    ),
-                    None,
-                )
-                if primary_credit is None and len(release_credits) > 1:
-                    # A legacy joined albumArtist is replaced by the first
-                    # structured provider credit, which supplies the safe
-                    # atomic boundary.
-                    primary_credit = release_credits[0]
-                if primary_credit is None:
+            if release_credits:
+                first_credit = release_credits[0]
+                if explicit_album_artist and _music_normalize(
+                    first_credit.get("name")
+                ) == _music_normalize(explicit_album_artist):
+                    primary_credit = first_credit
+                elif len(release_credits) > 1:
+                    # A legacy scalar albumArtist that names a later credit
+                    # is superseded by the ordered atomic credit list.
+                    primary_credit = first_credit
+                elif explicit_album_artist:
                     primary_credit = {"name": explicit_album_artist}
-            elif release_credits:
-                primary_credit = release_credits[0]
+                else:
+                    primary_credit = first_credit
+            elif explicit_album_artist:
+                primary_credit = {"name": explicit_album_artist}
             if primary_credit is None and current_artist_name:
                 primary_credit = {"name": current_artist_name}
             if primary_credit is None:
@@ -7285,15 +7239,29 @@ def _music_primary_artist_credit(
 
     if album_artist_ids:
         primary_id = album_artist_ids[0]
+        if len(album_artist_names) > 1:
+            # Plural album-artist tags establish the ordered name boundary;
+            # pair the first one with the first ordered embedded ID.
+            return {"name": album_artist_names[0], "id": primary_id}
         matching = next(
             (credit for credit in credits if credit.get("id") == primary_id), None
         )
         if matching:
             return dict(matching)
-        if len(album_artist_names) > 1 or (
-            len(album_artist_names) == 1 and len(album_artist_ids) == 1
-        ):
-            return {"name": album_artist_names[0], "id": primary_id}
+        if album_artist_names:
+            named = next(
+                (
+                    credit
+                    for credit in credits
+                    if _music_normalize(credit.get("name"))
+                    == _music_normalize(album_artist_names[0])
+                ),
+                None,
+            )
+            if named:
+                named = dict(named)
+                named["id"] = primary_id
+                return named
         if credits:
             # The ordered album-artist ID establishes which structured name
             # is primary even when the local name and ID fields were written
@@ -7306,6 +7274,11 @@ def _music_primary_artist_credit(
     # first entry over an otherwise ambiguous joined album-artist scalar.
     if len(credits) > 1:
         return dict(credits[0])
+
+    if len(album_artist_names) > 1:
+        # A structured plural album-artist field can disambiguate a joined
+        # scalar artist field even when the file has no provider IDs.
+        return {"name": album_artist_names[0]}
 
     if album_artist_names:
         primary_name = album_artist_names[0]

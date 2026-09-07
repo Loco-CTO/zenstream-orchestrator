@@ -180,6 +180,73 @@ class MusicBrainzLookupTest(unittest.TestCase):
         )
         self.assertEqual(value["contributingArtists"], value["artists"])
 
+    def test_release_normalization_keeps_release_and_track_join_phrases(self):
+        value = MusicBrainzClient.normalize(
+            "release",
+            "release-id",
+            {
+                "id": "release-id",
+                "title": "Credits",
+                "artist-credit": [
+                    {
+                        "artist": {"id": "artist-one", "name": "Artist One"},
+                        "joinphrase": "×",
+                    },
+                    {
+                        "artist": {"id": "artist-two", "name": "Artist Two"},
+                        "joinphrase": " & ",
+                    },
+                    {
+                        "artist": {"id": "artist-three", "name": "Artist Three"},
+                        "joinphrase": "",
+                    },
+                ],
+                "media": [
+                    {
+                        "position": 1,
+                        "tracks": [
+                            {
+                                "position": 1,
+                                "title": "Track",
+                                "recording": {
+                                    "id": "recording-id",
+                                    "title": "Track",
+                                    "artist-credit": [
+                                        {
+                                            "artist": {
+                                                "id": "track-one",
+                                                "name": "Track One",
+                                            },
+                                            "joinphrase": " feat. ",
+                                        },
+                                        {
+                                            "artist": {
+                                                "id": "track-two",
+                                                "name": "Track Two",
+                                            },
+                                            "joinphrase": "",
+                                        },
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(
+            [credit["joinPhrase"] for credit in value["artists"]],
+            ["×", " & ", ""],
+        )
+        self.assertEqual(
+            value["tracks"][0]["artists"],
+            [
+                {"id": "track-one", "name": "Track One", "joinPhrase": " feat. "},
+                {"id": "track-two", "name": "Track Two", "joinPhrase": ""},
+            ],
+        )
+
     def test_release_normalization_keeps_release_group_types(self):
         value = MusicBrainzClient.normalize(
             "release",

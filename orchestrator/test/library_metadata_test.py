@@ -2012,6 +2012,32 @@ class LibraryMetadataTest(unittest.TestCase):
                     ["ヰ世界情緒", "春猿火"],
                 )
 
+    def test_music_primary_artist_ignores_joined_album_scalar_when_structured(self):
+        tags = {
+            "ARTIST": "Aiobahn;ヰ世界情緒",
+            "ALBUMARTIST": "Aiobahn feat. ヰ世界情緒",
+            "MUSICBRAINZ_ARTISTID": "mb-aiobahn;mb-uisekai",
+            "MUSICBRAINZ_ALBUMARTISTID": "mb-aiobahn",
+        }
+
+        self.assertEqual(
+            _music_primary_artist_credit(tags),
+            {"name": "Aiobahn", "id": "mb-aiobahn"},
+        )
+
+    def test_music_primary_artist_uses_ordered_plural_album_artist_names(self):
+        tags = {
+            "ARTIST": "Aiobahn feat. ヰ世界情緒",
+            "ALBUMARTIST": "Aiobahn;ヰ世界情緒",
+            "MUSICBRAINZ_ARTISTID": "mb-aiobahn;mb-uisekai",
+            "MUSICBRAINZ_ALBUMARTISTID": "mb-aiobahn;mb-uisekai",
+        }
+
+        self.assertEqual(
+            _music_primary_artist_credit(tags),
+            {"name": "Aiobahn", "id": "mb-aiobahn"},
+        )
+
     def test_music_rescan_refreshes_parent_for_existing_release_identity(self):
         db, scanner = self._scanner_db()
         try:

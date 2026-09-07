@@ -103,6 +103,7 @@ class _CatalogReadContext:
         self.selected_rows = 0
         self.query_count = 0
         self.read_model_ready: bool | None = None
+        self.table_columns: dict[str, set[str]] = {}
 
     def measure(self, stage: str, action):
         started = time.perf_counter()
@@ -257,6 +258,15 @@ class Catalog:
     def _has_table(self, name: str) -> bool:
         return self._table_exists(name)
 
+    def _table_columns(self, name: str) -> set[str]:
+        context = self._read_context.get()
+        if context and name in context.table_columns:
+            return context.table_columns[name]
+        columns = {value[1] for value in self.db.execute(f"PRAGMA table_info({name})")}
+        if context:
+            context.table_columns[name] = columns
+        return columns
+
     def _library_sort_order_sql(self, alias: str | None = None) -> str:
         """Use the persisted order when available, with a legacy-schema fallback."""
         cache_name = "_library_has_sort_order"
@@ -281,6 +291,8 @@ class Catalog:
             "catalog_library_summary",
             "catalog_root_search_grams",
             "catalog_artwork_selection",
+            "entity_person_credits",
+            "entity_provider_ids",
         }
         placeholders = ",".join("?" for _ in tracked)
         present = {
@@ -515,6 +527,46 @@ class Catalog:
             raise HTTPException(404, "Item not found.")
         return row
 
+    def _preload_provider_ids(self, entity_ids: list[str]) -> None:
+        context = self._read_context.get()
+        if context is None:
+            return
+        missing = list(
+            dict.fromkeys(
+                entity_id
+                for entity_id in entity_ids
+                if entity_id not in context.provider_ids
+            )
+        )
+        if not missing:
+            return
+        if not self._has_table("entity_provider_ids"):
+            context.provider_ids.update({entity_id: [] for entity_id in missing})
+            return
+        placeholders = ",".join("?" for _ in missing)
+        rows = self.db.execute(
+            "SELECT entity_id,provider,identifier_type,provider_id "
+            f"FROM entity_provider_ids WHERE entity_id IN ({placeholders}) "
+            "ORDER BY entity_id,provider",
+            missing,
+        )
+        grouped = {entity_id: [] for entity_id in missing}
+        for entity_id, provider, identifier_type, provider_id in rows:
+            grouped[entity_id].append(
+                {"provider": provider, "type": identifier_type, "id": provider_id}
+            )
+        for entity_id, values in grouped.items():
+            entity_row = context.entity_rows.get(entity_id)
+            entity_type = entity_row[3] if entity_row else None
+            primary = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
+            values.sort(
+                key=lambda value: (
+                    0 if primary and value["provider"] == primary else 1,
+                    value["provider"],
+                )
+            )
+        context.provider_ids.update(grouped)
+
     def _provider_ids(self, entity_id: str, entity_type: str) -> list[dict]:
         context = self._read_context.get()
         if context is not None and entity_id in context.provider_ids:
@@ -574,22 +626,21 @@ class Catalog:
                 for image in projected_images.values()
             )
             if not has_projected_artwork:
-                # A projection can be published before an eager artwork
-                # materialization finishes.  The admin preview resolves the
-                # ready cache directly, so do the same repair here instead of
-                # permanently returning the stale empty image map for this
-                # read context.
-                resolved_artwork = self._read_service().resolve_public(
-                    entity_id,
-                    row[3],
-                    self._provider_ids(entity_id, row[3]),
-                    language,
-                )
-                resolved_images = resolved_artwork["metadata"].get("images")
-                if isinstance(resolved_images, dict) and resolved_images:
-                    value["images"] = resolved_images
-                    if context:
-                        context.projected_metadata[(entity_id, language)] = value
+                provider_ids = self._provider_ids(entity_id, row[3])
+                if provider_ids or row[3] in {"artist", "release", "track"}:
+                    # A projection can be published before an eager artwork
+                    # materialization finishes.  The admin preview resolves
+                    # the ready cache directly, so do the same repair here
+                    # instead of permanently returning the stale empty image
+                    # map for this read context.
+                    resolved_artwork = self._read_service().resolve_public(
+                        entity_id, row[3], provider_ids, language
+                    )
+                    resolved_images = resolved_artwork["metadata"].get("images")
+                    if isinstance(resolved_images, dict) and resolved_images:
+                        value["images"] = resolved_images
+                        if context:
+                            context.projected_metadata[(entity_id, language)] = value
             value = self._merge_local_artwork(entity_id, language, value)
             if context:
                 context.projected_metadata[(entity_id, language)] = value
@@ -627,19 +678,27 @@ class Catalog:
                             for field in ("overview", "description")
                         )
                     ):
-                        # Artwork projections can outlive an interrupted
-                        # asset refresh. Re-resolve the image map from ready
-                        # cache rows so stale URLs cannot be shown or cached.
-                        resolved_artwork = self._read_service().resolve_public(
-                            entity_id,
-                            row[3],
-                            self._provider_ids(entity_id, row[3]),
-                            language,
-                        )
                         resolved_value = dict(value)
-                        resolved_value["images"] = resolved_artwork["metadata"].get(
-                            "images", {}
+                        projected_images = value.get("images")
+                        has_projected_artwork = isinstance(
+                            projected_images, dict
+                        ) and any(
+                            isinstance(image, dict) and image.get("url")
+                            for image in projected_images.values()
                         )
+                        if not has_projected_artwork:
+                            provider_ids = self._provider_ids(entity_id, row[3])
+                            if provider_ids or row[3] in {"artist", "release", "track"}:
+                                # Artwork projections can outlive an
+                                # interrupted asset refresh. Re-resolve the
+                                # image map from ready cache rows when there
+                                # are provider identities to resolve.
+                                resolved_artwork = self._read_service().resolve_public(
+                                    entity_id, row[3], provider_ids, language
+                                )
+                                resolved_value["images"] = resolved_artwork[
+                                    "metadata"
+                                ].get("images", {})
                         resolved_value = self._merge_local_artwork(
                             entity_id, language, resolved_value
                         )
@@ -790,15 +849,16 @@ class Catalog:
         row = self._entity_row(entity_id)
         if not row or image_type not in LOCAL_ARTWORK_NAMES:
             return None
+        library_columns = self._table_columns("libraries")
+        if "directory" not in library_columns:
+            return None
         directory_rows = self.db.execute(
             "SELECT directory FROM libraries WHERE id=?", (row[1],)
         )
         if not directory_rows or not directory_rows[0][0]:
             return None
-        columns = {
-            value[1] for value in self.db.execute("PRAGMA table_info(media_files)")
-        }
-        if not columns:
+        columns = self._table_columns("media_files")
+        if not columns or "quick_fingerprint" not in columns:
             return None
         blur_field = ",image_blur_hash" if "image_blur_hash" in columns else ""
         cache = LocalArtworkCache(self.db)
@@ -1373,6 +1433,7 @@ class Catalog:
             parent_ids.update(row[2] for row in parent_rows if row[2])
         self._preload_projected_states(user_id, list(context.entity_rows))
         self._preload_projected_metadata(user_id, list(context.entity_rows), language)
+        self._preload_provider_ids(list(context.entity_rows))
 
     def _hydrate_rows(
         self,

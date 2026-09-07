@@ -73,6 +73,10 @@ class LastFmClientTest(unittest.TestCase):
                     "releasedate": "01 Jan 2024, 00:00",
                     "listeners": "42",
                     "playcount": "100",
+                    "bio": {
+                        "summary": "Biography summary <a href=\"https://www.last.fm/music/Artist/+wiki\">Read more on Last.fm</a>.",
+                        "content": "Long biography <a href=\"https://www.last.fm/music/Artist/+wiki\">Read more on Last.fm</a>.",
+                    },
                     "image": [
                         {"#text": "https://lastfm.freetls.fastly.net/large.jpg", "size": "large"},
                         {"#text": "https://lastfm.freetls.fastly.net/mega.jpg", "size": "mega"},
@@ -99,6 +103,8 @@ class LastFmClientTest(unittest.TestCase):
 
         self.assertEqual(normalized["title"], "Album")
         self.assertEqual(normalized["year"], "2024")
+        self.assertEqual(normalized["overview"], "Long biography")
+        self.assertNotIn("Read more on Last.fm", normalized["providers"]["lastfm"]["wiki"]["content"])
         self.assertEqual(normalized["tags"], ["indie"])
         self.assertEqual(normalized["tracks"][0]["title"], "Song")
         self.assertEqual(normalized["tracks"][0]["durationSeconds"], 180.0)

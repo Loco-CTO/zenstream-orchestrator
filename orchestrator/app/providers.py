@@ -2180,6 +2180,12 @@ class LastFmClient(ProviderClient):
         if not value:
             return None
         text = html.unescape(re.sub(r"<[^>]+>", " ", str(value)))
+        text = re.sub(
+            r"\s*\bread\s+more\s+on\s+last\.fm\b\s*[.!…]?",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
         text = re.sub(r"\s+", " ", text).strip()
         return text or None
 

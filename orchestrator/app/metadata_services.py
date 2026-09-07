@@ -1105,7 +1105,7 @@ class MetadataSearchProjection:
                     if has_projection:
                         cursor.execute(
                             "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,1) "
-                            "ON CONFLICT(entity_id,locale) DO UPDATE SET payload=excluded.payload,title_sort=excluded.title_sort,rating_sort=excluded.rating_sort,release_sort=excluded.release_sort,runtime_sort=excluded.runtime_sort,updated_at=excluded.updated_at",
+                            "ON CONFLICT(entity_id,locale) DO UPDATE SET library_id=excluded.library_id,parent_id=excluded.parent_id,entity_type=excluded.entity_type,payload=excluded.payload,title_sort=excluded.title_sort,rating_sort=excluded.rating_sort,release_sort=excluded.release_sort,runtime_sort=excluded.runtime_sort,updated_at=excluded.updated_at",
                             (
                                 entity_id,
                                 locale,

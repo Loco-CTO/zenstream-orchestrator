@@ -147,6 +147,39 @@ class MusicBrainzLookupTest(unittest.TestCase):
             value["tracks"][0]["contributingArtists"], value["tracks"][0]["artists"]
         )
 
+    def test_release_normalization_keeps_ordered_multi_artist_credit(self):
+        value = MusicBrainzClient.normalize(
+            "release",
+            "release-id",
+            {
+                "id": "release-id",
+                "title": "new world",
+                "artist-credit": [
+                    {
+                        "artist": {"id": "aiobahn-id", "name": "Aiobahn"},
+                        "joinphrase": " feat. ",
+                    },
+                    {
+                        "artist": {
+                            "id": "uisekai-id",
+                            "name": "ヰ世界情緒",
+                        },
+                        "joinphrase": "",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(value["albumArtist"], "Aiobahn")
+        self.assertEqual(
+            value["artists"],
+            [
+                {"id": "aiobahn-id", "name": "Aiobahn", "joinPhrase": " feat. "},
+                {"id": "uisekai-id", "name": "ヰ世界情緒", "joinPhrase": ""},
+            ],
+        )
+        self.assertEqual(value["contributingArtists"], value["artists"])
+
     def test_release_normalization_keeps_release_group_types(self):
         value = MusicBrainzClient.normalize(
             "release",

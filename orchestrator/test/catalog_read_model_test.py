@@ -197,6 +197,36 @@ class CatalogReadModelTest(unittest.TestCase):
         self.assertEqual(catalog.search("user", "original", "en", 1, 10)["total"], 1)
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_refresh_root_updates_projection_parent_without_replacing_payload(
+        self, _languages
+    ):
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute(
+            "UPDATE library_entities SET parent_id=? WHERE id=?",
+            ("series", "episode-1"),
+        )
+        self.db.execute(
+            "UPDATE catalog_item_projection SET payload=? WHERE entity_id=? AND locale='en'",
+            ('{"title":"Preserved episode","custom":"value"}', "episode-1"),
+        )
+
+        model.refresh_roots(["series"])
+
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT parent_id FROM catalog_item_projection WHERE entity_id='episode-1' AND locale='en'"
+            ),
+            [("series",)],
+        )
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id='episode-1' AND locale='en'"
+            ),
+            [('{"title":"Preserved episode","custom":"value"}',)],
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_refresh_root_admits_new_collection_entity(self, _languages):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])

@@ -274,6 +274,152 @@ class MusicArtistCreditsTest(unittest.TestCase):
             ],
         )
 
+    def test_credit_normalization_removes_joined_synthetic_artist(self):
+        document = {
+            "artists": [
+                {"name": "Aiobahn feat. ヰ世界情緒"},
+                {
+                    "id": "mb-aiobahn",
+                    "name": "Aiobahn",
+                    "joinPhrase": " feat. ",
+                },
+                {"id": "mb-uisekai", "name": "ヰ世界情緒", "joinPhrase": ""},
+            ],
+            "contributingArtists": [
+                {"id": "mb-aiobahn", "name": "Aiobahn", "joinPhrase": " feat. "},
+                {"id": "mb-uisekai", "name": "ヰ世界情緒", "joinPhrase": ""},
+            ],
+        }
+
+        self.assertEqual(
+            self.scanner._music_document_credits(document),
+            [
+                {"name": "Aiobahn", "id": "mb-aiobahn", "joinPhrase": " feat. "},
+                {"name": "ヰ世界情緒", "id": "mb-uisekai", "joinPhrase": ""},
+            ],
+        )
+
+    def test_repair_reparents_release_to_primary_and_removes_joined_parent(self):
+        old_artist = self.scanner._entity("library-1", None, "artist", "ヰ世界情緒")
+        primary_artist = self.scanner._entity("library-1", None, "artist", "Aiobahn")
+        release = self.scanner._entity(
+            "library-1", old_artist, "release", "Aiobahn feat. ヰ世界情緒/new world"
+        )
+        track = self.scanner._entity(
+            "library-1",
+            release,
+            "track",
+            "Aiobahn feat. ヰ世界情緒/new world/01. new world.flac",
+            disc_number=1,
+            track_number=1,
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            (primary_artist, "musicbrainz", "artist", "mb-aiobahn", 1),
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            (track, "musicbrainz", "recording", "mb-recording", 1),
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT, locale TEXT, payload TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                release,
+                "en",
+                json.dumps(
+                    {
+                        "albumArtist": "Aiobahn",
+                        "artists": [
+                            {"id": "mb-aiobahn", "name": "Aiobahn"},
+                            {
+                                "id": "mb-uisekai",
+                                "name": "ヰ世界情緒",
+                                "joinPhrase": " feat. ",
+                            },
+                        ],
+                        "contributingArtists": [
+                            {"id": "mb-aiobahn", "name": "Aiobahn"},
+                            {
+                                "id": "mb-uisekai",
+                                "name": "ヰ世界情緒",
+                                "joinPhrase": " feat. ",
+                            },
+                        ],
+                        "tracks": [
+                            {
+                                "id": "mb-recording",
+                                "position": 1,
+                                "disc": 1,
+                                "artists": [
+                                    {"id": "mb-aiobahn", "name": "Aiobahn"},
+                                    {
+                                        "id": "mb-uisekai",
+                                        "name": "ヰ世界情緒",
+                                        "joinPhrase": " feat. ",
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                track,
+                "en",
+                json.dumps(
+                    {
+                        "artists": [
+                            {"name": "Aiobahn feat. ヰ世界情緒"}
+                        ],
+                        "contributingArtists": [
+                            {"name": "Aiobahn feat. ヰ世界情緒"}
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        repaired = self.scanner.repair_music_artist_credits(
+            _SuccessfulIngest(), "job-1", lambda: False
+        )
+
+        self.assertEqual(repaired, 1)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT parent_id FROM library_entities WHERE id=?", (release,)
+            ),
+            [(primary_artist,)],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT artist_id,credit_order,credited_name FROM music_artist_credits WHERE track_id=? ORDER BY credit_order",
+                (track,),
+            ),
+            [
+                (primary_artist, 0, "Aiobahn"),
+                (
+                    self.scanner._music_artist_entities["ヰ世界情緒"],
+                    1,
+                    "ヰ世界情緒",
+                ),
+            ],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT id FROM library_entities WHERE entity_type='artist' AND relative_path=?",
+                ("Aiobahn feat. ヰ世界情緒",),
+            ),
+            [],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

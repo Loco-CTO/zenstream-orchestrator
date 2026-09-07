@@ -21,11 +21,13 @@ from app.library import (
     _inventory_query,
     _music_filename_parts,
     _music_local_document,
+    _music_primary_artist_credit,
     _quick_fingerprint,
     _SidecarStatWorker,
     _top_level_key,
     guess_media,
     normalized_path,
+    parse_audio_tags,
     provider_ids,
     sidecar_display_title,
 )
@@ -1956,6 +1958,118 @@ class LibraryMetadataTest(unittest.TestCase):
         )
         self.assertEqual(fallback["artists"], [{"name": "Album Artist"}])
 
+    def test_audio_parser_prefers_structured_artists_over_joined_aliases(self):
+        audio = MagicMock()
+        audio.tags = {
+            "artist": ["Aiobahn feat. ヰ世界情緒"],
+            "artists": ["Aiobahn", "ヰ世界情緒"],
+            "albumartist": ["Aiobahn feat. ヰ世界情緒"],
+            "musicbrainz_artistid": ["mb-aiobahn", "mb-uisekai"],
+            "musicbrainz_albumartistid": ["mb-aiobahn", "mb-uisekai"],
+        }
+        audio.info = MagicMock(length=None)
+
+        with patch("mutagen.File", return_value=audio):
+            tags = parse_audio_tags(Path("new-world.flac"))
+
+        self.assertEqual(tags["ARTIST"], "Aiobahn;ヰ世界情緒")
+        self.assertEqual(
+            _music_primary_artist_credit(tags),
+            {"name": "Aiobahn", "id": "mb-aiobahn"},
+        )
+        document = _music_local_document(
+            Path("1.01. new world.flac"), tags, "release"
+        )
+        self.assertEqual(document["albumArtist"], "Aiobahn")
+        self.assertEqual(
+            document["artists"],
+            [
+                {"name": "Aiobahn", "id": "mb-aiobahn"},
+                {"name": "ヰ世界情緒", "id": "mb-uisekai"},
+            ],
+        )
+
+    def test_music_primary_artist_credit_uses_ordered_structured_names(self):
+        for album, join_phrase in (("CALL", "×"), ("生存", "×")):
+            with self.subTest(album=album):
+                tags = {
+                    "ARTIST": "ヰ世界情緒;春猿火",
+                    "ALBUMARTIST": f"ヰ世界情緒{join_phrase}春猿火",
+                    "MUSICBRAINZ_ARTISTID": "mb-uisekai;mb-harusaruhi",
+                    "MUSICBRAINZ_ALBUMARTISTID": "mb-uisekai;mb-harusaruhi",
+                }
+
+                self.assertEqual(
+                    _music_primary_artist_credit(tags),
+                    {"name": "ヰ世界情緒", "id": "mb-uisekai"},
+                )
+                document = _music_local_document(
+                    Path(f"{album}.flac"), tags, "release"
+                )
+                self.assertEqual(document["albumArtist"], "ヰ世界情緒")
+                self.assertEqual(
+                    [credit["name"] for credit in document["artists"]],
+                    ["ヰ世界情緒", "春猿火"],
+                )
+
+    def test_music_rescan_refreshes_parent_for_existing_release_identity(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                album = root / "Aiobahn feat. ヰ世界情緒" / "new world"
+                album.mkdir(parents=True)
+                track = album / "01. new world.flac"
+                track.touch()
+                tags = {
+                    "TITLE": "new world",
+                    "ALBUM": "new world",
+                    "ALBUMARTIST": "Aiobahn feat. ヰ世界情緒",
+                    "ARTIST": "Aiobahn;ヰ世界情緒",
+                    "MUSICBRAINZ_ARTISTID": "mb-aiobahn;mb-uisekai",
+                    "MUSICBRAINZ_ALBUMARTISTID": "mb-aiobahn;mb-uisekai",
+                    "MUSICBRAINZ_ALBUMID": "mb-new-world",
+                    "TRACKNUMBER": "1",
+                }
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", return_value=tags),
+                    patch.object(scanner, "_resolve_music_group"),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                (artist_id,) = db.execute(
+                    "SELECT id FROM library_entities WHERE entity_type='artist' AND relative_path='Aiobahn'"
+                )[0]
+                (release_id,) = db.execute(
+                    "SELECT id FROM library_entities WHERE entity_type='release'"
+                )[0]
+                participant_id = scanner._entity(
+                    "library-1", None, "artist", "ヰ世界情緒"
+                )
+                db.execute(
+                    "UPDATE library_entities SET parent_id=? WHERE id=?",
+                    (participant_id, release_id),
+                )
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", return_value=tags),
+                    patch.object(scanner, "_resolve_music_group"),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                self.assertEqual(
+                    db.execute(
+                        "SELECT parent_id FROM library_entities WHERE id=?",
+                        (release_id,),
+                    ),
+                    [(artist_id,)],
+                )
+        finally:
+            db.close()
+
     def test_music_local_metadata_keeps_album_type_tags(self):
         self.assertEqual(_audio_tag_key("MUSICBRAINZ ALBUM TYPE"), "ALBUMTYPE")
         document = _music_local_document(
@@ -2011,6 +2125,62 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(values["en"]["artists"], [{"name": "Track Artist"}])
         self.assertEqual(
             values["en"]["contributingArtists"], [{"name": "Track Artist"}]
+        )
+
+    def test_music_track_documents_merge_local_and_provider_artist_credits(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._music_local_metadata = {
+            "track-1": {
+                "title": "new world",
+                "artists": [{"name": "Aiobahn feat. ヰ世界情緒"}],
+                "trackNumber": 1,
+                "discNumber": 1,
+            }
+        }
+        release_documents = {
+            "release-1": {
+                "en": {
+                    "providerId": "release-mbid",
+                    "title": "new world",
+                    "tracks": [
+                        {
+                            "id": "track-1",
+                            "title": "new world",
+                            "position": 1,
+                            "disc": 1,
+                            "artists": [
+                                {
+                                    "id": "mb-aiobahn",
+                                    "name": "Aiobahn",
+                                    "joinPhrase": " feat. ",
+                                },
+                                {
+                                    "id": "mb-uisekai",
+                                    "name": "ヰ世界情緒",
+                                    "joinPhrase": "",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            }
+        }
+
+        values = scanner._music_track_documents(
+            "track-1",
+            "release-1",
+            "track-1",
+            release_documents,
+            MagicMock(),
+            ["en"],
+        )
+
+        self.assertEqual(
+            values["en"]["artists"],
+            [
+                {"name": "Aiobahn", "id": "mb-aiobahn", "joinPhrase": " feat. "},
+                {"name": "ヰ世界情緒", "id": "mb-uisekai", "joinPhrase": ""},
+            ],
         )
 
     def test_music_scan_uses_filename_numbers_and_title_fallback(self):

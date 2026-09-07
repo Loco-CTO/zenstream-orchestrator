@@ -442,9 +442,7 @@ class SyncplayGroup:
                 (int(watching), loading, self.id, user_id, participant_id),
             )
             member_changed = before != (int(watching), 0, loading, -1)
-            self.reconcile_readiness(
-                cursor, state, member_changed=member_changed
-            )
+            self.reconcile_readiness(cursor, state, member_changed=member_changed)
 
         return self.mutate(user_id, None, operation_id, apply)
 

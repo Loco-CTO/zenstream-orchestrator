@@ -1299,9 +1299,7 @@ async def syncplay_remove_member(group_id: str, member_id: str, request: Request
             "DELETE FROM syncplay_members WHERE group_id=? AND user_id=?",
             (group_id, member_id),
         )
-        group.reconcile_readiness(
-            cursor, state, member_changed=cursor.rowcount > 0
-        )
+        group.reconcile_readiness(cursor, state, member_changed=cursor.rowcount > 0)
 
     try:
         state = await run_control(

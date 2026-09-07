@@ -259,9 +259,7 @@ class SyncplayModelTests(unittest.TestCase):
             "host", None, None, lambda cursor, state: background(cursor, state, 2)
         )
         self.assertEqual(unchanged["revision"], paused["revision"])
-        self.assertEqual(
-            unchanged["timelineRevision"], paused["timelineRevision"]
-        )
+        self.assertEqual(unchanged["timelineRevision"], paused["timelineRevision"])
         self.assertEqual(unchanged["pauseReason"], "background")
 
     def test_disconnected_watching_member_gets_background_barrier(self):
@@ -669,9 +667,7 @@ class SyncplayModelTests(unittest.TestCase):
             "host", initial["revision"], "presence-heartbeat", heartbeat
         )
         self.assertEqual(unchanged["revision"], initial["revision"])
-        self.assertEqual(
-            unchanged["timelineRevision"], initial["timelineRevision"]
-        )
+        self.assertEqual(unchanged["timelineRevision"], initial["timelineRevision"])
 
         next_state = group.mutate(
             "host",
@@ -700,9 +696,7 @@ class SyncplayModelTests(unittest.TestCase):
                 )
             )
 
-        changed = group.mutate(
-            "host", initial["revision"], "presence-ready", ready
-        )
+        changed = group.mutate("host", initial["revision"], "presence-ready", ready)
         self.assertEqual(changed["revision"], initial["revision"] + 1)
         self.assertEqual(changed["timelineRevision"], initial["timelineRevision"])
         self.assertTrue(changed["members"][0]["viewing"])
@@ -727,6 +721,4 @@ class SyncplayModelTests(unittest.TestCase):
             "host", changed["revision"], "second-presence-heartbeat", heartbeat
         )
         self.assertEqual(unchanged["revision"], changed["revision"])
-        self.assertEqual(
-            unchanged["timelineRevision"], changed["timelineRevision"]
-        )
+        self.assertEqual(unchanged["timelineRevision"], changed["timelineRevision"])

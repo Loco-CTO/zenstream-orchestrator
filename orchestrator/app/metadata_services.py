@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import html
 import ipaddress
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -50,6 +52,35 @@ def _ready_file(path: Path | str | None) -> bool:
 
 
 CATALOG_ITEM_PROJECTION_SCHEMA = 2
+
+_LASTFM_READ_MORE_PATTERN = re.compile(
+    r"\s*\bread\s+more\s+on\s+last\.fm\b\s*[.!…]?",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_lastfm_payload(payload: dict) -> dict:
+    """Remove Last.fm's boilerplate from fresh and legacy cached documents."""
+    sanitized = copy.deepcopy(payload)
+
+    def clean(value: str) -> str | None:
+        text = html.unescape(re.sub(r"<[^>]+>", " ", value))
+        text = _LASTFM_READ_MORE_PATTERN.sub("", text)
+        return re.sub(r"\s+", " ", text).strip() or None
+
+    for key in ("overview", "description"):
+        value = sanitized.get(key)
+        if isinstance(value, str):
+            sanitized[key] = clean(value)
+    namespaces = sanitized.get("providers")
+    namespace = namespaces.get("lastfm") if isinstance(namespaces, dict) else None
+    wiki = namespace.get("wiki") if isinstance(namespace, dict) else None
+    if isinstance(wiki, dict):
+        for key in ("summary", "content"):
+            value = wiki.get(key)
+            if isinstance(value, str):
+                wiki[key] = clean(value)
+    return sanitized
 
 MUSICBRAINZ_NEUTRAL_ENTITY_TYPES = frozenset(
     {"artist", "release", "release_group", "track", "recording", "work"}
@@ -779,6 +810,8 @@ class MetadataSearchProjection:
         preserve_artwork: set[str] | None = None,
         replace_metadata: bool = False,
     ) -> None:
+        if provider == "lastfm" and isinstance(payload, dict):
+            payload = _sanitize_lastfm_payload(payload)
         if entity_type == "track" and isinstance(payload, dict):
             # Track filenames may carry ordering prefixes such as
             # ``1.01. Title``. They are structural metadata, not part of the
@@ -1287,6 +1320,8 @@ class MetadataReadService:
                 except (TypeError, json.JSONDecodeError):
                     continue
                 if value.get("_imageLanguageSchema") == IMAGE_LANGUAGE_SCHEMA:
+                    if provider == "lastfm":
+                        value = _sanitize_lastfm_payload(value)
                     payloads.setdefault((provider, locale), value)
         self._payloads[cache_key] = payloads
         return payloads

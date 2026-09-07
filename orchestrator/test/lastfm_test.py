@@ -158,6 +158,9 @@ class LastFmClientTest(unittest.TestCase):
                         "lastfm": {
                             "url": "https://www.last.fm/music/Artist",
                             "stats": {"listeners": 10},
+                            "wiki": {
+                                "content": "Cached biography <a href=\"https://www.last.fm/music/Artist/+wiki\">Read more on Last.fm</a>."
+                            },
                         }
                     },
                 }
@@ -189,6 +192,10 @@ class LastFmClientTest(unittest.TestCase):
                 self.assertEqual(result["tags"], ["rock", "indie"])
                 self.assertEqual(
                     result["providers"]["lastfm"]["stats"]["listeners"], 10
+                )
+                self.assertEqual(
+                    result["providers"]["lastfm"]["wiki"]["content"],
+                    "Cached biography",
                 )
             finally:
                 database.close()

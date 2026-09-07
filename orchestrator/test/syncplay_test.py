@@ -216,6 +216,52 @@ class SyncplayModelTests(unittest.TestCase):
         resumed = group.mutate("host", None, None, host_resume)
         self.assertTrue(resumed["playing"])
 
+    def test_repeated_background_presence_does_not_change_timeline(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+
+        def prepare(cursor, state):
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE group_id=?",
+                (group.id,),
+            )
+            group.transition(
+                cursor,
+                state,
+                timeline=True,
+                item_id="movie",
+                media_generation=1,
+                playing=1,
+                anchor_time=time.time(),
+                effective_at=0,
+                playback_state="playing",
+            )
+
+        group.mutate("host", None, None, prepare)
+
+        def background(cursor, state, sequence):
+            return group.apply_presence(
+                cursor,
+                state,
+                "host",
+                "host-tab",
+                generation=0,
+                timeline_revision=0,
+                sequence=sequence,
+                viewing=False,
+                loading=False,
+                pause_room=True,
+            )
+
+        paused = group.mutate(
+            "host", None, None, lambda cursor, state: background(cursor, state, 1)
+        )
+        unchanged = group.mutate(
+            "host", None, None, lambda cursor, state: background(cursor, state, 2)
+        )
+        self.assertEqual(unchanged["revision"], paused["revision"])
+        self.assertEqual(unchanged["timelineRevision"], paused["timelineRevision"])
+        self.assertEqual(unchanged["pauseReason"], "background")
+
     def test_disconnected_watching_member_gets_background_barrier(self):
         group = SyncplayGroup.create("host", "host-tab", "Host")
         group.mutate(
@@ -597,3 +643,82 @@ class SyncplayModelTests(unittest.TestCase):
                 "stale-command",
                 lambda cursor, state: pause(group, cursor, state, "command"),
             )
+
+    def test_identical_presence_heartbeat_does_not_change_revision(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        initial = group.state()
+
+        def heartbeat(cursor, state):
+            self.assertFalse(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "host",
+                    "host-tab",
+                    initial["mediaGeneration"],
+                    initial["timelineRevision"],
+                    1,
+                    False,
+                    False,
+                )
+            )
+
+        unchanged = group.mutate(
+            "host", initial["revision"], "presence-heartbeat", heartbeat
+        )
+        self.assertEqual(unchanged["revision"], initial["revision"])
+        self.assertEqual(unchanged["timelineRevision"], initial["timelineRevision"])
+
+        next_state = group.mutate(
+            "host",
+            unchanged["revision"],
+            "play-after-heartbeat",
+            lambda cursor, state: schedule(group, cursor, state, 10),
+        )
+        self.assertEqual(next_state["revision"], initial["revision"] + 1)
+
+    def test_real_readiness_change_advances_revision_without_timeline_change(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        initial = group.state()
+
+        def ready(cursor, state):
+            self.assertTrue(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "host",
+                    "host-tab",
+                    state["mediaGeneration"],
+                    state["timelineRevision"],
+                    1,
+                    True,
+                    False,
+                )
+            )
+
+        changed = group.mutate("host", initial["revision"], "presence-ready", ready)
+        self.assertEqual(changed["revision"], initial["revision"] + 1)
+        self.assertEqual(changed["timelineRevision"], initial["timelineRevision"])
+        self.assertTrue(changed["members"][0]["viewing"])
+        self.assertFalse(changed["members"][0]["loading"])
+
+        def heartbeat(cursor, state):
+            self.assertFalse(
+                group.apply_presence(
+                    cursor,
+                    state,
+                    "host",
+                    "host-tab",
+                    state["mediaGeneration"],
+                    state["timelineRevision"],
+                    2,
+                    True,
+                    False,
+                )
+            )
+
+        unchanged = group.mutate(
+            "host", changed["revision"], "second-presence-heartbeat", heartbeat
+        )
+        self.assertEqual(unchanged["revision"], changed["revision"])
+        self.assertEqual(unchanged["timelineRevision"], changed["timelineRevision"])

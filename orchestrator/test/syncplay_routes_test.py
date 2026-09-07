@@ -363,6 +363,52 @@ class SyncplayPresenceRouteTest(unittest.TestCase):
         )
         broadcast.assert_awaited_once()
 
+    def test_identical_presence_does_not_broadcast(self):
+        state = {"id": "group-1", "revision": 4, "members": []}
+        cursor = MagicMock()
+        group = MagicMock()
+        group.apply_presence.return_value = False
+
+        def mutate(user, expected_revision, operation_id, apply):
+            apply(cursor, state)
+            return state
+
+        group.mutate.side_effect = mutate
+
+        async def run_control_inline(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        with (
+            patch.object(
+                app_module,
+                "_sync_group_context",
+                new=AsyncMock(
+                    return_value=(
+                        "user-1",
+                        "browser-tab",
+                        group,
+                        {
+                            "mediaGeneration": 2,
+                            "timelineRevision": 8,
+                            "presenceSequence": 4,
+                            "viewing": True,
+                            "loading": False,
+                        },
+                    )
+                ),
+            ),
+            patch.object(
+                app_module, "run_control", new=AsyncMock(side_effect=run_control_inline)
+            ),
+            patch.object(app_module.hub, "broadcast", new=AsyncMock()) as broadcast,
+        ):
+            response = asyncio.run(
+                app_module.syncplay_presence("group-1", _request("POST"))
+            )
+
+        self.assertIs(response, state)
+        broadcast.assert_not_awaited()
+
     def test_pause_room_must_be_boolean(self):
         group = MagicMock()
         with (

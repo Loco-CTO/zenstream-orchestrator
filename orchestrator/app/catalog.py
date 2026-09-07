@@ -22,6 +22,7 @@ from app.metadata_domain import (
 from app.metadata_services import (
     CATALOG_ITEM_PROJECTION_SCHEMA,
     MetadataReadService,
+    _sanitize_lastfm_payload,
 )
 from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
@@ -48,6 +49,20 @@ def _date_from_ns(value: int | None) -> str:
         if value is not None
         else ""
     )
+
+
+def _sanitize_projected_lastfm(value: dict) -> dict:
+    namespaces = value.get("providers")
+    has_lastfm_namespace = isinstance(namespaces, dict) and isinstance(
+        namespaces.get("lastfm"), dict
+    )
+    has_legacy_text = any(
+        "read more on last.fm" in str(value.get(field) or "").casefold()
+        for field in ("overview", "description")
+    )
+    if not has_lastfm_namespace and not has_legacy_text:
+        return value
+    return _sanitize_lastfm_payload(value)
 
 
 class _CatalogDatabase:
@@ -620,6 +635,7 @@ class Catalog:
             )
         ):
             value = dict(projected)
+            value = _sanitize_projected_lastfm(value)
             projected_images = value.get("images")
             has_projected_artwork = isinstance(projected_images, dict) and any(
                 isinstance(image, dict) and image.get("url")
@@ -679,6 +695,7 @@ class Catalog:
                         )
                     ):
                         resolved_value = dict(value)
+                        resolved_value = _sanitize_projected_lastfm(resolved_value)
                         projected_images = value.get("images")
                         has_projected_artwork = isinstance(
                             projected_images, dict

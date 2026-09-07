@@ -1673,6 +1673,50 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(metadata["overview"], "English overview")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_ready_projection_sanitizes_lastfm_boilerplate(self, _languages):
+        account = self.account().create("lastfm-projection", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.seed_item()
+        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT)")
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie",
+                "en",
+                json.dumps(
+                    {
+                        "title": "English",
+                        "overview": "Read more on Last.fm",
+                        "description": "Artist details Read more on Last.fm.",
+                        "images": {"Primary": {"url": "poster.jpg"}},
+                        "providers": {
+                            "lastfm": {
+                                "wiki": {"summary": "Read more on Last.fm"}
+                            }
+                        },
+                        "_catalogItemProjectionSchema": 2,
+                    }
+                ),
+            ),
+        )
+
+        metadata = self.catalog().metadata(account["id"], "movie", "en")["metadata"]
+
+        self.assertIsNone(metadata["overview"])
+        self.assertEqual(metadata["description"], "Artist details")
+        self.assertIsNone(metadata["providers"]["lastfm"]["wiki"]["summary"])
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     @patch("app.catalog.MetadataReadService.resolve_public")
     def test_preloaded_empty_projection_rehydrates_ready_artwork(
         self, resolve_public, _languages

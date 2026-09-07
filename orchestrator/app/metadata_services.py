@@ -115,9 +115,9 @@ PROVIDER_PRIORITIES = {
     "episode": ["tvdb", "tmdb"],
     "movie": ["tmdb", "tvdb"],
     "collection": ["tvdb", "tmdb"],
-    "artist": ["musicbrainz", "local"],
-    "release": ["musicbrainz"],
-    "track": ["musicbrainz"],
+    "artist": ["musicbrainz", "local", "lastfm"],
+    "release": ["musicbrainz", "lastfm"],
+    "track": ["musicbrainz", "lastfm"],
 }
 
 _fetch_activity_lock = threading.Lock()
@@ -302,6 +302,37 @@ def _canonical_metadata_language(value: object) -> str | None:
 
 def _usable_projection_value(value) -> bool:
     return value is not None and value != "" and value != [] and value != {}
+
+
+def _music_tag_union(
+    payloads: dict[tuple[str, str], dict],
+    providers: list[str],
+    tiers: list[str],
+    available: set[str],
+) -> list[str]:
+    """Merge music tags while keeping provider order and removing duplicates."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for provider in providers:
+        selected = None
+        for tier in tiers:
+            for locale in locale_variants(tier, available):
+                value = payloads.get((provider, locale), {}).get("tags")
+                if _usable_projection_value(value):
+                    selected = value
+                    break
+            if selected is not None:
+                break
+        values = selected if isinstance(selected, list) else [selected]
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("name")
+            value = str(value or "").strip()
+            key = value.casefold()
+            if value and key not in seen:
+                seen.add(key)
+                result.append(value)
+    return result
 
 
 def _asset_version(local_path: object, fallback: object) -> str:
@@ -861,6 +892,23 @@ class MetadataSearchProjection:
                         else {}
                     )
                     trailer_payloads[(provider, locale)] = payload
+                    if entity_type in {"artist", "release", "track"}:
+                        resolved_music = (
+                            trailer_reader.resolve_raw(entity_type, provider_ids, locale)
+                            if "metadata_cache" in tables
+                            else {}
+                        )
+                        if resolved_music.get("tags"):
+                            merged["tags"] = resolved_music["tags"]
+                        if resolved_music.get("providers"):
+                            merged["providers"] = resolved_music["providers"]
+                        current_namespaces = payload.get("providers")
+                        if provider == "lastfm" and isinstance(
+                            current_namespaces, dict
+                        ) and isinstance(current_namespaces.get("lastfm"), dict):
+                            merged.setdefault("providers", {})["lastfm"] = copy.deepcopy(
+                                current_namespaces["lastfm"]
+                            )
                     trailer_original = next(
                         (
                             _canonical_metadata_language(value.get("originalLanguage"))
@@ -1291,6 +1339,11 @@ class MetadataReadService:
                 if found:
                     break
 
+        if entity_type in {"artist", "release", "track"}:
+            tags = _music_tag_union(payloads, providers, tiers, available)
+            if tags:
+                result["tags"] = tags
+
         if isinstance(result.get("people"), list):
             result["people"] = [
                 {
@@ -1343,6 +1396,21 @@ class MetadataReadService:
                     and image.get("type") in ARTWORK_CATEGORY_SET
                 )
         result["images"] = images
+        provider_values = {}
+        for provider in providers:
+            for tier in tiers:
+                found = False
+                for locale in locale_variants(tier, available):
+                    value = payloads.get((provider, locale), {}).get("providers")
+                    namespace = value.get(provider) if isinstance(value, dict) else None
+                    if isinstance(namespace, dict) and namespace:
+                        provider_values[provider] = copy.deepcopy(namespace)
+                        found = True
+                        break
+                if found:
+                    break
+        if provider_values:
+            result["providers"] = provider_values
         result["trailers"] = self._localized_trailers(
             payloads, providers, requested, original
         )
@@ -1684,7 +1752,7 @@ class MetadataIngestService:
         replace_metadata: bool = False,
         should_terminate=None,
     ) -> list[dict]:
-        if provider not in {"tmdb", "tvdb", "musicbrainz"}:
+        if provider not in {"tmdb", "tvdb", "musicbrainz", "lastfm"}:
             return []
         should_terminate = should_terminate or (lambda: False)
         provider_locales = self.provider_locales(provider, entity_type)
@@ -2016,7 +2084,7 @@ class MetadataImageIngestService:
             host.strip().lower()
             for host in os.getenv(
                 "METADATA_IMAGE_HOST_ALLOWLIST",
-                "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org,archive.org",
+                "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org,archive.org,lastfm.freetls.fastly.net,lastfm-img2.akamaized.net",
             ).split(",")
             if host.strip()
         }

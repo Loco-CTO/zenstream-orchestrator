@@ -142,6 +142,7 @@ export default function MetadataPage() {
 	const [tmdbType, setTmdbType] = useState("api_key");
 	const [tvdb, setTvdb] = useState("");
 	const [pin, setPin] = useState("");
+	const [lastfm, setLastfm] = useState("");
 	const [message, setMessage] = useState("");
 	const [locales, setLocales] = useState<string[]>(["en"]);
 	const [preferNoLanguageForBackdrop, setPreferNoLanguageForBackdrop] =
@@ -248,13 +249,15 @@ export default function MetadataPage() {
 		}
 	}, []);
 
-	async function save(event: FormEvent, provider: "tmdb" | "tvdb") {
+	async function save(event: FormEvent, provider: "tmdb" | "tvdb" | "lastfm") {
 		event.preventDefault();
 		if (!session) return;
 		const body =
 			provider === "tmdb"
 				? { credential: tmdb, credentialType: tmdbType, validate: true }
-				: { apiKey: tvdb, pin, validate: true };
+				: provider === "tvdb"
+					? { apiKey: tvdb, pin, validate: true }
+					: { apiKey: lastfm, validate: true };
 		const response = await adminFetch(
 			`/api/admin/metadata/providers/${provider}`,
 			session,
@@ -272,15 +275,15 @@ export default function MetadataPage() {
 		);
 		if (response.ok) {
 			if (provider === "tmdb") setTmdb("");
-			else {
+			else if (provider === "tvdb") {
 				setTvdb("");
 				setPin("");
-			}
+			} else setLastfm("");
 			load(session);
 		}
 	}
 
-	async function clear(provider: "tmdb" | "tvdb") {
+	async function clear(provider: "tmdb" | "tvdb" | "lastfm") {
 		if (!session) return;
 		await adminFetch(`/api/admin/metadata/providers/${provider}`, session, {
 			method: "PUT",
@@ -795,6 +798,60 @@ export default function MetadataPage() {
 							<button
 								type="button"
 								onClick={() => clear("tvdb")}
+								className="rounded-xl border console-divider px-4 py-3 text-sm console-muted"
+							>
+								Clear
+							</button>
+						)}
+					</div>
+				</form>
+				<form
+					onSubmit={(event) => save(event, "lastfm")}
+					autoComplete="off"
+					className="console-card rounded-2xl p-6"
+				>
+					<div className="flex items-start justify-between">
+						<div>
+							<h2 className="text-xl font-bold">Last.fm</h2>
+						</div>
+						<IconKey className="text-[#5ee3d8]" size={22} />
+					</div>
+					<p className="mt-3 text-sm leading-6 console-muted">
+						Optional music enrichment for artist, album, and track biographies, tags,
+						and artwork. MusicBrainz and local tags remain authoritative; the key is
+						stored encrypted and is never shown again.
+					</p>
+					<p className="mt-3 text-xs console-muted">
+						Create a key in the{" "}
+						<a
+							className="text-[#5ee3d8]"
+							href="https://www.last.fm/api/account/create"
+							target="_blank"
+							rel="noreferrer"
+						>
+							Last.fm API account
+						</a>
+						.
+					</p>
+					<input
+						name="lastfm-api-key"
+						autoComplete="off"
+						value={lastfm}
+						onChange={(event) => setLastfm(event.target.value)}
+						required={!providers.lastfm?.configured}
+						placeholder="API key"
+						type="password"
+						className="console-input mt-5 h-11 w-full rounded-xl px-4 text-sm outline-none placeholder:text-white/30"
+					/>
+					<ProviderStatus state={providers.lastfm} />
+					<div className="mt-5 flex gap-3">
+						<button className="console-button rounded-xl px-4 py-3 text-sm font-semibold">
+							Save and validate
+						</button>
+						{providers.lastfm?.configured && (
+							<button
+								type="button"
+								onClick={() => clear("lastfm")}
 								className="rounded-xl border console-divider px-4 py-3 text-sm console-muted"
 							>
 								Clear

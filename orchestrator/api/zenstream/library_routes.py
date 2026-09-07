@@ -807,8 +807,10 @@ async def update_provider(
 ):
     require_admin(Username, TOKEN)
     provider = provider.lower()
-    if provider not in {"tmdb", "tvdb"}:
-        raise HTTPException(400, "Only TMDB and TheTVDB credentials can be configured.")
+    if provider not in {"tmdb", "tvdb", "lastfm"}:
+        raise HTTPException(
+            400, "Only TMDB, TheTVDB, and Last.fm credentials can be configured."
+        )
     data = await request.json()
     if data.get("clear"):
 
@@ -828,12 +830,18 @@ async def update_provider(
         }:
             raise HTTPException(400, "A valid TMDB credential and type are required.")
         credential = {"value": value}
-    else:
+    elif provider == "tvdb":
         value = str(data.get("apiKey") or data.get("credential") or "").strip()
         if not value:
             raise HTTPException(400, "A TheTVDB API key is required.")
         credential_type = "api_key"
         credential = {"apiKey": value, "pin": str(data.get("pin") or "").strip()}
+    else:
+        value = str(data.get("apiKey") or data.get("credential") or "").strip()
+        if not value:
+            raise HTTPException(400, "A Last.fm API key is required.")
+        credential_type = "api_key"
+        credential = {"apiKey": value}
     if data.get("validate", True):
         try:
             await run_foreground(
@@ -846,7 +854,13 @@ async def update_provider(
         credentials.set(provider, credential, credential_type)
         return credentials.configured()[provider]
 
-    return await run_control(save_provider)
+    saved = await run_control(save_provider)
+    if provider == "lastfm":
+        saved = {
+            **saved,
+            "backfill": await run_control(scheduler.enqueue_metadata_missing),
+        }
+    return saved
 
 
 @router.post("/metadata/providers/{provider}/test")
@@ -857,6 +871,7 @@ async def test_provider(
     TOKEN: str | None = Header(None),
 ):
     require_admin(Username, TOKEN)
+    provider = provider.lower()
     data = await request.json()
     try:
         if provider == "tmdb":
@@ -874,6 +889,14 @@ async def test_provider(
                 {
                     "apiKey": str(data.get("apiKey") or ""),
                     "pin": str(data.get("pin") or ""),
+                },
+            )
+        elif provider == "lastfm":
+            await run_foreground(
+                MetadataService().test,
+                provider,
+                {
+                    "apiKey": str(data.get("apiKey") or data.get("credential") or "")
                 },
             )
         else:

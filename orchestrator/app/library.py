@@ -1158,6 +1158,7 @@ class LibraryScanner:
             "removed": set(),
         }
         self._scan_provider_identity_changed: set[str] = set()
+        self._scan_lastfm_attempted_ids: set[str] = set()
         self._scan_rejected_ids: set[str] = set()
         self._scan_reconciled_ids: set[str] = set()
         self._scan_deferred_roots: set[str] = set()
@@ -1367,6 +1368,7 @@ class LibraryScanner:
             "removed": set(),
         }
         self._scan_provider_identity_changed = set()
+        self._scan_lastfm_attempted_ids = set()
         self._scan_rejected_ids = set()
         self._scan_reconciled_ids = set()
         self._scan_deferred_roots = set()
@@ -2197,8 +2199,14 @@ class LibraryScanner:
         locales = ingest.locales()
         tasks = {}
         for entity_id, entity_type, provider, identifier_type, provider_id in rows:
-            if provider not in {"tmdb", "tvdb", "musicbrainz"}:
+            if provider not in {"tmdb", "tvdb", "musicbrainz", "lastfm"}:
                 continue
+            if provider == "lastfm":
+                try:
+                    if not ingest.metadata_service.credentials.get("lastfm"):
+                        continue
+                except (AttributeError, RuntimeError, ValueError):
+                    continue
             if provider == "musicbrainz":
                 expected_identifier = {
                     "artist": "artist",
@@ -2345,6 +2353,14 @@ class LibraryScanner:
                 value
                 for value in current
                 if value[0] == "local" and value not in normalized_keys
+            )
+            normalized = list(dict.fromkeys(normalized))
+        if entity_type in {"artist", "release", "track"}:
+            normalized_keys = set(normalized)
+            normalized.extend(
+                value
+                for value in current
+                if value[0] == "lastfm" and value not in normalized_keys
             )
             normalized = list(dict.fromkeys(normalized))
         if set(normalized) != set(current):
@@ -3802,13 +3818,13 @@ class LibraryScanner:
     ) -> None:
         from app.metadata_services import MetadataIngestService
 
-        if provider not in {"tmdb", "tvdb", "musicbrainz"}:
+        if provider not in {"tmdb", "tvdb", "musicbrainz", "lastfm"}:
             return
 
         ingest = MetadataIngestService(service, background_assets=False)
         locales = (
             ingest.provider_locales(provider, entity_type)
-            if provider == "musicbrainz"
+            if provider in {"musicbrainz", "lastfm"}
             else ingest.locales()
         )
         if progress:
@@ -5401,6 +5417,230 @@ class LibraryScanner:
             self._files(release, root, image_paths, job_id=job_id)
         return artist, release, tracks, len(tracks)
 
+    def _enrich_music_lastfm_group(
+        self,
+        library_id: str,
+        album_artist_id: str,
+        release_id: str,
+        tracks: list[dict],
+        service,
+        ingest,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+    ) -> None:
+        """Best-effort Last.fm enrichment after local/MB music identity work."""
+        from app.providers import LastFmClient, ProviderError
+
+        try:
+            client = service.client("lastfm")
+        except (AttributeError, ProviderError, RuntimeError, ValueError):
+            # Last.fm is optional. An absent or unreadable key must never make
+            # a playable music unit fail admission.
+            return
+
+        locales = ingest.locales()
+        if not locales:
+            return
+        attempted = getattr(self, "_scan_lastfm_attempted_ids", set())
+        self._scan_lastfm_attempted_ids = attempted
+
+        def provider_id(entity_id: str, identifier_type: str) -> str | None:
+            rows = self.db.execute(
+                "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? "
+                "AND provider='lastfm' AND identifier_type=? ORDER BY provider_id LIMIT 1",
+                (entity_id, identifier_type),
+            )
+            return str(rows[0][0]) if rows else None
+
+        def musicbrainz_id(entity_id: str, identifier_type: str) -> str | None:
+            rows = self.db.execute(
+                "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? "
+                "AND provider='musicbrainz' AND identifier_type=? "
+                "ORDER BY is_primary DESC,provider_id LIMIT 1",
+                (entity_id, identifier_type),
+            )
+            return str(rows[0][0]) if rows else None
+
+        def attach(entity_id: str, identifier_type: str, value: str) -> None:
+            current = provider_id(entity_id, identifier_type)
+            if current == value:
+                return
+            if current:
+                self.db.execute(
+                    "DELETE FROM entity_provider_ids WHERE entity_id=? AND provider='lastfm' AND identifier_type=?",
+                    (entity_id, identifier_type),
+                )
+            self.db.execute(
+                "INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
+                (entity_id, "lastfm", identifier_type, value),
+            )
+            if current:
+                self._music_mark_identity_changed(entity_id)
+                self._mark_changed(entity_id)
+
+        def enrich(
+            entity_id: str,
+            entity_type: str,
+            *,
+            artist_name: str | None,
+            album_name: str | None = None,
+            track_name: str | None = None,
+            year: str | None = None,
+            duration_seconds: float | None = None,
+        ) -> None:
+            if entity_id in attempted:
+                return
+            if entity_type == "artist" and not artist_name:
+                return
+            if entity_type == "release" and not (artist_name and album_name):
+                return
+            if entity_type == "track" and not (track_name and artist_name):
+                return
+            attempted.add(entity_id)
+            current = provider_id(entity_id, entity_type)
+            changed = (
+                entity_id in self._scan_created_ids
+                or entity_id in self._scan_provider_identity_changed
+                or entity_id in self._scan_delta.get("content_changed", set())
+            )
+            try:
+                if current and not changed:
+                    lookup = current
+                else:
+                    lookup, _payload = client.resolve_lookup(
+                        entity_type,
+                        artist_name=artist_name,
+                        album_name=album_name,
+                        track_name=track_name,
+                        year=year,
+                        duration_seconds=duration_seconds,
+                        mbid=musicbrainz_id(
+                            entity_id,
+                            "recording" if entity_type == "track" else entity_type,
+                        ),
+                        locale=locales[0],
+                    )
+                attach(entity_id, entity_type, lookup)
+                ingest.ingest_locales(
+                    "lastfm", entity_type, lookup, locales, force=False
+                )
+            except ProviderError as error:
+                # Keep the identity when a resolved document fails during
+                # ingestion; the existing metadata repair job can retry it.
+                if current:
+                    self._queue_metadata_repair(
+                        entity_id,
+                        library_id,
+                        job_id,
+                        f"Last.fm metadata unavailable: {error}",
+                        locales,
+                    )
+                logger.info(
+                    "Last.fm enrichment skipped entity_id=%s type=%s error=%s",
+                    entity_id,
+                    entity_type,
+                    error,
+                )
+            except JobTerminated:
+                raise
+            except Exception as error:
+                if current:
+                    self._queue_metadata_repair(
+                        entity_id,
+                        library_id,
+                        job_id,
+                        f"Last.fm metadata unavailable: {error}",
+                        locales,
+                    )
+                logger.info(
+                    "Last.fm enrichment skipped entity_id=%s type=%s error=%s",
+                    entity_id,
+                    entity_type,
+                    error,
+                )
+
+        release_local = self._music_local_metadata.get(release_id) or self._music_document(
+            release_id, "release"
+        )
+        artist_local = self._music_local_metadata.get(album_artist_id) or self._music_document(
+            album_artist_id, "artist"
+        )
+        album_name = _music_display_value(
+            release_local.get("title") or release_local.get("album")
+        )
+        artist_name = _music_display_value(
+            release_local.get("albumArtist")
+            or artist_local.get("title")
+            or artist_local.get("albumArtist")
+        )
+        year = str(release_local.get("year") or "")[:4] or None
+
+        enrich(
+            album_artist_id,
+            "artist",
+            artist_name=artist_name,
+        )
+        enrich(
+            release_id,
+            "release",
+            artist_name=artist_name,
+            album_name=album_name,
+            year=year,
+        )
+
+        artist_ids = [album_artist_id]
+        track_ids = [
+            str(track.get("entity_id"))
+            for track in tracks
+            if isinstance(track, dict) and track.get("entity_id")
+        ]
+        if track_ids and self._has_table("music_artist_credits"):
+            placeholders = ",".join("?" for _ in track_ids)
+            artist_ids.extend(
+                str(row[0])
+                for row in self.db.execute(
+                    "SELECT DISTINCT artist_id FROM music_artist_credits "
+                    f"WHERE track_id IN ({placeholders}) ORDER BY artist_id",
+                    track_ids,
+                )
+                if str(row[0]) not in artist_ids
+            )
+        for entity_id in artist_ids:
+            self._check_termination(should_terminate)
+            document = self._music_local_metadata.get(entity_id) or self._music_document(
+                entity_id, "artist"
+            )
+            name = _music_display_value(
+                document.get("title") or document.get("albumArtist")
+            )
+            enrich(entity_id, "artist", artist_name=name)
+
+        for track in tracks:
+            self._check_termination(should_terminate)
+            if not isinstance(track, dict) or not track.get("entity_id"):
+                continue
+            local = track.get("local") or self._music_local_metadata.get(
+                str(track["entity_id"]), {}
+            )
+            track_artists = local.get("artists") if isinstance(local, dict) else []
+            track_artist = next(
+                (
+                    _music_display_value(value.get("name"))
+                    for value in track_artists or []
+                    if isinstance(value, dict) and value.get("name")
+                ),
+                None,
+            )
+            enrich(
+                str(track["entity_id"]),
+                "track",
+                artist_name=track_artist or artist_name,
+                album_name=_music_display_value(local.get("album")) or album_name,
+                track_name=_music_display_value(local.get("title")),
+                year=str(local.get("year") or year or "")[:4] or None,
+                duration_seconds=local.get("durationSeconds"),
+            )
+
     def _resolve_music_group(
         self,
         library_id: str,
@@ -5733,6 +5973,16 @@ class LibraryScanner:
             should_terminate,
             parent_id=release,
             release_documents={release: release_documents},
+        )
+        self._enrich_music_lastfm_group(
+            library_id,
+            artist,
+            release,
+            tracks,
+            service,
+            ingest,
+            job_id,
+            should_terminate,
         )
         self._extract_and_reproject(artist, "artist", should_terminate)
         self._scan_refresh_root_ids.add(artist)
@@ -6594,6 +6844,16 @@ class LibraryScanner:
                         should_terminate,
                         parent_id=release,
                     )
+                    self._enrich_music_lastfm_group(
+                        library_id,
+                        artist,
+                        release,
+                        tracks,
+                        service,
+                        ingest,
+                        job_id,
+                        should_terminate,
+                    )
                     self._extract_and_reproject(release, "release", should_terminate)
                     self._extract_and_reproject(artist, "artist", should_terminate)
                     self._scan_refresh_root_ids.add(artist)
@@ -6645,6 +6905,16 @@ class LibraryScanner:
                     job_id,
                     should_terminate,
                     parent_id=release,
+                )
+                self._enrich_music_lastfm_group(
+                    library_id,
+                    artist,
+                    release,
+                    tracks,
+                    service,
+                    ingest,
+                    job_id,
+                    should_terminate,
                 )
                 self._extract_and_reproject(release, "release", should_terminate)
                 self._extract_and_reproject(artist, "artist", should_terminate)

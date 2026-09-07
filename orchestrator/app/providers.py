@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import html
+import json
 import os
 import random
 import re
@@ -11,7 +13,7 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 import pycountry
@@ -1853,6 +1855,582 @@ class MusicBrainzClient(ProviderClient):
         }
 
 
+class LastFmClient(ProviderClient):
+    """Read-only Last.fm enrichment for already-resolved music entities.
+
+    Last.fm has no stable catalog identifier for every recording in a local
+    library.  The provider ID stored by ZenStream is therefore either an
+    encoded MusicBrainz ID lookup or an encoded, exact artist/album/track name
+    lookup.  The encoded form keeps the identity deterministic without making
+    Last.fm's own IDs catalog identities.
+    """
+
+    base_url = "https://ws.audioscrobbler.com/2.0/"
+    _language_aliases = {
+        "zh-hans": "zh",
+        "zh-hant": "zh",
+        "pt-br": "pt",
+    }
+    _image_sizes = {
+        "small": 1,
+        "medium": 2,
+        "large": 3,
+        "extralarge": 4,
+        "mega": 5,
+    }
+
+    def __init__(self, credentials: dict, timeout: float = 20):
+        super().__init__(timeout)
+        self.credentials = credentials
+        self._resolved_payloads: dict[tuple[str, str, str], dict] = {}
+
+    @property
+    def api_key(self) -> str:
+        return str(
+            self.credentials.get("apiKey")
+            or self.credentials.get("value")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def lookup_key(
+        entity_type: str,
+        *,
+        artist_name: str | None = None,
+        album_name: str | None = None,
+        track_name: str | None = None,
+        mbid: str | None = None,
+    ) -> str:
+        if mbid and str(mbid).strip():
+            return f"mbid:{quote(str(mbid).strip(), safe='')}"
+        values = {
+            key: str(value).strip()
+            for key, value in (
+                ("artist", artist_name),
+                ("album", album_name),
+                ("track", track_name),
+            )
+            if value is not None and str(value).strip()
+        }
+        if entity_type == "artist":
+            values = {"artist": values.get("artist", "")}
+        elif entity_type == "release":
+            values = {
+                key: values[key]
+                for key in ("artist", "album")
+                if values.get(key)
+            }
+        else:
+            values = {
+                key: values[key]
+                for key in ("artist", "album", "track")
+                if values.get(key)
+            }
+        encoded = quote(
+            json.dumps(values, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            safe="",
+        )
+        return f"name:{encoded}"
+
+    @staticmethod
+    def _lookup_values(provider_id: str) -> dict:
+        value = str(provider_id or "")
+        if value.startswith("mbid:"):
+            return {"mbid": unquote(value[5:])}
+        if value.startswith("name:"):
+            try:
+                parsed = json.loads(unquote(value[5:]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                raise ProviderError("Invalid Last.fm name lookup identity")
+            if isinstance(parsed, dict):
+                return {
+                    str(key): str(item).strip()
+                    for key, item in parsed.items()
+                    if item is not None and str(item).strip()
+                }
+            raise ProviderError("Invalid Last.fm name lookup identity")
+        # Accept a legacy/raw MBID when reading an identity created before the
+        # deterministic key format was introduced.
+        return {"mbid": value}
+
+    @classmethod
+    def _language_code(cls, locale: str | None) -> str:
+        value = str(locale or "en").replace("_", "-").lower()
+        value = cls._language_aliases.get(value, value)
+        return value.split("-", 1)[0] or "en"
+
+    def _request(self, method: str, params: dict | None = None) -> dict:
+        if not self.api_key:
+            raise ProviderError("Last.fm API key is empty")
+        request_params = {
+            "method": method,
+            "api_key": self.api_key,
+            "format": "json",
+            **(params or {}),
+        }
+        payload = self._get(
+            self.base_url,
+            params=request_params,
+            headers={
+                "User-Agent": f"ZenStream/{__version__}",
+                "Accept": "application/json",
+            },
+        )
+        if not isinstance(payload, dict):
+            raise ProviderError("Last.fm returned an invalid response")
+        if payload.get("error") is not None:
+            code = str(payload.get("error"))
+            message = str(payload.get("message") or "Last.fm request failed")
+            if code == "6":
+                raise ProviderNotFoundError(message)
+            raise ProviderError(f"Last.fm error {code}: {message}")
+        return payload
+
+    @staticmethod
+    def _method(entity_type: str) -> str:
+        method = {
+            "artist": "artist.getInfo",
+            "release": "album.getInfo",
+            "track": "track.getInfo",
+            "recording": "track.getInfo",
+        }.get(entity_type)
+        if not method:
+            raise ProviderError(f"Unsupported Last.fm entity type '{entity_type}'")
+        return method
+
+    def _details_request(
+        self, entity_type: str, provider_id: str, locale: str
+    ) -> dict:
+        values = self._lookup_values(provider_id)
+        params = {"autocorrect": "0", "lang": self._language_code(locale)}
+        if values.get("mbid"):
+            params["mbid"] = values["mbid"]
+        else:
+            for key in ("artist", "album", "track"):
+                if values.get(key):
+                    params[key] = values[key]
+        return self._request(self._method(entity_type), params)
+
+    def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
+        cache_key = (entity_type, str(provider_id), str(locale or "en"))
+        cached = self._resolved_payloads.pop(cache_key, None)
+        if cached is not None:
+            return copy.deepcopy(cached)
+        return self._details_request(entity_type, provider_id, locale)
+
+    def details_all_locales(
+        self, entity_type: str, provider_id: str, locales: list[str]
+    ) -> dict[str, dict]:
+        return {
+            locale: self.details(entity_type, provider_id, locale)
+            for locale in locales
+        }
+
+    def test(self) -> None:
+        self._request(
+            "artist.getInfo",
+            {"artist": "Last.fm", "autocorrect": "0", "lang": "en"},
+        )
+
+    @staticmethod
+    def _record(payload: dict, entity_type: str) -> dict:
+        key = "artist" if entity_type == "artist" else "album" if entity_type == "release" else "track"
+        value = payload.get(key)
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _artist_name(value: object) -> str | None:
+        if isinstance(value, dict):
+            value = value.get("name")
+        value = str(value or "").strip()
+        return value or None
+
+    @classmethod
+    def _matches(
+        cls,
+        entity_type: str,
+        payload: dict,
+        *,
+        artist_name: str | None,
+        album_name: str | None,
+        track_name: str | None,
+        year: str | None,
+        duration_seconds: float | None,
+        mbid: str | None,
+    ) -> bool:
+        record = cls._record(payload, entity_type)
+        if not record:
+            return False
+
+        def same(left: object, right: object) -> bool:
+            return bool(left and right and _music_match_text(str(left)) == _music_match_text(str(right)))
+
+        actual_mbid = str(record.get("mbid") or "").strip()
+        if mbid and actual_mbid and actual_mbid.casefold() != str(mbid).strip().casefold():
+            return False
+        if entity_type == "artist":
+            return same(record.get("name"), artist_name)
+
+        actual_artist = cls._artist_name(record.get("artist"))
+        expected_artist = artist_name
+        if not same(record.get("name"), album_name if entity_type == "release" else track_name):
+            return False
+        if expected_artist and not same(actual_artist, expected_artist):
+            return False
+        if entity_type == "track" and album_name:
+            actual_album = record.get("album")
+            if isinstance(actual_album, dict):
+                actual_album = actual_album.get("title") or actual_album.get("name")
+            if actual_album and not same(actual_album, album_name):
+                return False
+
+        def year_value(value: object) -> int | None:
+            match = re.search(r"\b(?:19|20)\d{2}\b", str(value or ""))
+            return int(match.group(0)) if match else None
+
+        expected_year = year_value(year)
+        actual_year = year_value(record.get("releasedate") or record.get("date"))
+        if expected_year and actual_year and abs(expected_year - actual_year) > 1:
+            return False
+        if entity_type == "track" and duration_seconds is not None:
+            actual_duration = cls._duration_seconds(record.get("duration"))
+            if actual_duration is not None and abs(actual_duration - float(duration_seconds)) > 5:
+                return False
+        return True
+
+    @classmethod
+    def _duration_seconds(cls, value: object) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if parsed < 0:
+            return None
+        return parsed / 1000.0 if parsed >= 1000 else parsed
+
+    def resolve_lookup(
+        self,
+        entity_type: str,
+        *,
+        artist_name: str | None = None,
+        album_name: str | None = None,
+        track_name: str | None = None,
+        year: str | None = None,
+        duration_seconds: float | None = None,
+        mbid: str | None = None,
+        locale: str = "en",
+    ) -> tuple[str, dict]:
+        if entity_type == "artist" and not artist_name:
+            raise ProviderError("Last.fm artist lookup requires an artist name")
+        if entity_type == "release" and not mbid and (
+            not artist_name or not album_name
+        ):
+            raise ProviderError(
+                "Last.fm album name lookup requires both artist and album context"
+            )
+        if entity_type in {"track", "recording"} and not track_name:
+            raise ProviderError("Last.fm track lookup requires a track name")
+        if entity_type in {"track", "recording"} and not mbid and not artist_name:
+            raise ProviderError(
+                "Last.fm track name lookup requires an artist context"
+            )
+        candidates = []
+        if mbid:
+            candidates.append(
+                LastFmClient.lookup_key(entity_type, mbid=mbid)
+            )
+        candidates.append(
+            LastFmClient.lookup_key(
+                entity_type,
+                artist_name=artist_name,
+                album_name=album_name,
+                track_name=track_name,
+            )
+        )
+        seen = set()
+        for provider_id in candidates:
+            if provider_id in seen:
+                continue
+            seen.add(provider_id)
+            try:
+                payload = self.details(entity_type, provider_id, locale)
+            except ProviderNotFoundError:
+                continue
+            if not self._matches(
+                entity_type,
+                payload,
+                artist_name=artist_name,
+                album_name=album_name,
+                track_name=track_name,
+                year=year,
+                duration_seconds=duration_seconds,
+                mbid=mbid if provider_id.startswith("mbid:") else None,
+            ):
+                continue
+            self._resolved_payloads[(entity_type, provider_id, str(locale or "en"))] = (
+                copy.deepcopy(payload)
+            )
+            return provider_id, payload
+        raise ProviderError(
+            f"No strict Last.fm match for {entity_type} '{track_name or album_name or artist_name}'"
+        )
+
+    @staticmethod
+    def _clean_text(value: object) -> str | None:
+        if not value:
+            return None
+        text = html.unescape(re.sub(r"<[^>]+>", " ", str(value)))
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or None
+
+    @classmethod
+    def _tags(cls, record: dict) -> tuple[list[str], list[dict]]:
+        source = record.get("toptags") or record.get("tags") or {}
+        values = source.get("tag") if isinstance(source, dict) else source
+        if isinstance(values, dict):
+            values = [values]
+        names = []
+        details = []
+        for value in values if isinstance(values, list) else []:
+            if isinstance(value, dict):
+                name = cls._clean_text(value.get("name"))
+                url = str(value.get("url") or "").strip() or None
+                count = value.get("count")
+            else:
+                name = cls._clean_text(value)
+                url = None
+                count = None
+            if not name or name.casefold() in {item.casefold() for item in names}:
+                continue
+            names.append(name)
+            item = {"name": name}
+            if url:
+                item["url"] = url
+            if count is not None:
+                try:
+                    item["count"] = int(count)
+                except (TypeError, ValueError):
+                    pass
+            details.append(item)
+        return names, details
+
+    @classmethod
+    def _wiki(cls, record: dict) -> dict | None:
+        source = record.get("bio") or record.get("wiki")
+        if not isinstance(source, dict):
+            return None
+        value = {}
+        for key in ("published", "summary", "content"):
+            cleaned = cls._clean_text(source.get(key))
+            if cleaned:
+                value[key] = cleaned
+        return value or None
+
+    @classmethod
+    def _images(cls, record: dict) -> list[dict]:
+        values = record.get("image") or []
+        if isinstance(values, dict):
+            values = [values]
+        candidates = []
+        seen = set()
+        for value in values if isinstance(values, list) else []:
+            if not isinstance(value, dict):
+                continue
+            url = str(value.get("#text") or value.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            size = str(value.get("size") or "").lower()
+            candidates.append((cls._image_sizes.get(size, 0), url, size))
+        if not candidates:
+            return []
+        _rank, url, size = max(candidates, key=lambda item: (item[0], item[1]))
+        return [
+            _image(
+                PRIMARY,
+                url,
+                provider="lastfm",
+                source_type=f"lastfm:{size}" if size else "lastfm",
+            )
+        ]
+
+    @staticmethod
+    def _person(value: object) -> dict | None:
+        if not isinstance(value, dict):
+            return None
+        result = {}
+        for key in ("name", "mbid", "url"):
+            text = str(value.get(key) or "").strip()
+            if text:
+                result[key] = text
+        return result or None
+
+    @classmethod
+    def _tracklist(cls, record: dict) -> list[dict]:
+        source = record.get("tracks") or {}
+        values = source.get("track") if isinstance(source, dict) else source
+        if isinstance(values, dict):
+            values = [values]
+        result = []
+        for position, value in enumerate(values if isinstance(values, list) else [], 1):
+            if not isinstance(value, dict):
+                continue
+            name = cls._clean_text(value.get("name"))
+            if not name:
+                continue
+            item = {"position": position, "name": name}
+            for key in ("mbid", "url", "duration", "streamable"):
+                text = str(value.get(key) or "").strip()
+                if text:
+                    item[key] = text
+            artist = cls._person(value.get("artist"))
+            if artist:
+                item["artist"] = artist
+            result.append(item)
+        return result
+
+    @classmethod
+    def _provider_namespace(
+        cls, entity_type: str, record: dict, tags: list[dict], wiki: dict | None
+    ) -> dict:
+        result = {}
+        for key in (
+            "name",
+            "mbid",
+            "url",
+            "releasedate",
+            "duration",
+            "streamable",
+            "ontour",
+            "listeners",
+            "playcount",
+        ):
+            value = record.get(key)
+            if value not in (None, "", []):
+                if key in {"listeners", "playcount"}:
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                result[key] = value
+        stats = record.get("stats")
+        if isinstance(stats, dict):
+            normalized_stats = {}
+            for key in ("listeners", "playcount"):
+                if stats.get(key) in (None, ""):
+                    continue
+                try:
+                    normalized_stats[key] = int(stats[key])
+                except (TypeError, ValueError):
+                    continue
+            if normalized_stats:
+                result["stats"] = normalized_stats
+        for key in ("artist", "album"):
+            person = cls._person(record.get(key))
+            if person:
+                result[key] = person
+        if tags:
+            result["tags"] = tags
+        if wiki:
+            result["wiki"] = wiki
+        tracklist = cls._tracklist(record)
+        if tracklist:
+            result["tracklist"] = tracklist
+        return result
+
+    @classmethod
+    def normalize(cls, entity_type: str, provider_id: str, payload: dict) -> dict:
+        normalized_type = "track" if entity_type == "recording" else entity_type
+        record = cls._record(payload, normalized_type)
+        if not record:
+            return {
+                "title": None,
+                "overview": None,
+                "description": None,
+                "tags": [],
+                "provider": "lastfm",
+                "providerId": provider_id,
+                "ids": [
+                    {
+                        "provider": "lastfm",
+                        "identifierType": normalized_type,
+                        "id": provider_id,
+                    }
+                ],
+                "images": [],
+                "extraImages": [],
+                "providers": {},
+            }
+        tags, tag_details = cls._tags(record)
+        wiki = cls._wiki(record)
+        artist = cls._person(record.get("artist"))
+        album = record.get("album") if isinstance(record.get("album"), dict) else {}
+        album_name = cls._clean_text(album.get("title") or album.get("name"))
+        artist_name = cls._artist_name(record.get("artist"))
+        if normalized_type == "artist":
+            title = cls._clean_text(record.get("name"))
+            images = cls._images(record)
+        elif normalized_type == "release":
+            title = cls._clean_text(record.get("name"))
+            images = cls._images(record)
+        else:
+            title = cls._clean_text(record.get("name"))
+            images = cls._images(record)
+            if not images and album:
+                images = cls._images(album)
+        date = str(record.get("releasedate") or record.get("date") or "").strip()
+        year_match = re.search(r"\b(?:19|20)\d{2}\b", date)
+        year = year_match.group(0) if year_match else None
+        duration = cls._duration_seconds(record.get("duration"))
+        tracklist = cls._tracklist(record)
+        tracks = []
+        if normalized_type == "release":
+            tracks = [
+                {
+                    "title": item["name"],
+                    "position": item.get("position"),
+                    "durationSeconds": cls._duration_seconds(item.get("duration")),
+                    "artists": ([{"name": item["artist"]["name"]}] if item.get("artist", {}).get("name") else []),
+                }
+                for item in tracklist
+            ]
+        elif normalized_type == "track":
+            tracks = [{"title": title, "durationSeconds": duration}]
+        namespace = cls._provider_namespace(normalized_type, record, tag_details, wiki)
+        return {
+            "title": title,
+            "overview": (wiki or {}).get("content") or (wiki or {}).get("summary"),
+            "description": (wiki or {}).get("summary"),
+            "date": date or None,
+            "releaseDate": date or None,
+            "year": year,
+            "tags": tags,
+            "originalLanguage": None,
+            "albumArtist": artist_name if normalized_type != "artist" else title,
+            "artists": ([{"name": artist_name}] if artist_name else []),
+            "contributingArtists": ([{"name": artist_name}] if artist_name else []),
+            "album": album_name,
+            "albumId": None,
+            "albumType": None,
+            "albumSecondaryTypes": [],
+            "label": None,
+            "durationSeconds": duration,
+            "tracks": tracks,
+            "provider": "lastfm",
+            "providerId": provider_id,
+            "ids": [
+                {
+                    "provider": "lastfm",
+                    "identifierType": normalized_type,
+                    "id": provider_id,
+                }
+            ],
+            "images": images,
+            "extraImages": [],
+            "providers": {"lastfm": namespace},
+        }
+
+
 def _fallback_tvdb_image_type(entity_type: str, artwork: dict) -> str | None:
     raw_type = artwork.get("type", "")
     kind = str(raw_type).lower()
@@ -2080,6 +2658,8 @@ class MetadataService:
                     )
                 elif provider == "tvdb":
                     client = TVDBClient(credential)
+                elif provider == "lastfm":
+                    client = LastFmClient(credential)
                 else:
                     raise ProviderError(f"Unsupported metadata provider '{provider}'")
             clients[provider] = client
@@ -2099,6 +2679,10 @@ class MetadataService:
             TVDBClient(credential or self.credentials.get(provider) or {}).test()
         elif provider == "musicbrainz":
             MusicBrainzClient()._request("/artist/00000000-0000-0000-0000-000000000000")
+        elif provider == "lastfm":
+            LastFmClient(
+                credential or self.credentials.get(provider) or {}
+            ).test()
         else:
             raise ProviderError("Unsupported provider")
 

@@ -6,8 +6,14 @@ import {
   type EnvironmentKey,
 } from "../shared";
 
-export const DEFAULT_IMAGE_HOST_ALLOWLIST =
-  "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org";
+export const DEFAULT_IMAGE_HOST_ALLOWLIST = [
+  "image.tmdb.org",
+  "media.themoviedb.org",
+  "artworks.thetvdb.com",
+  "coverartarchive.org",
+  "lastfm.freetls.fastly.net",
+  "lastfm-img2.akamaized.net",
+].join(",");
 
 export function defaultEnvironment(localAppData: string): EnvironmentConfig {
   return {

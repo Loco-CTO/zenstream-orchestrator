@@ -32,8 +32,14 @@ const config: EditableConfig = {
     METADATA_ASSET_WORKERS: "12",
     METADATA_PROVIDER_TIMEOUT_SECONDS: "20",
     METADATA_IMAGE_TIMEOUT_SECONDS: "20",
-    METADATA_IMAGE_HOST_ALLOWLIST:
-      "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org",
+    METADATA_IMAGE_HOST_ALLOWLIST: [
+      "image.tmdb.org",
+      "media.themoviedb.org",
+      "artworks.thetvdb.com",
+      "coverartarchive.org",
+      "lastfm.freetls.fastly.net",
+      "lastfm-img2.akamaized.net",
+    ].join(","),
   },
   secretConfigured: true,
   startWithWindows: false,

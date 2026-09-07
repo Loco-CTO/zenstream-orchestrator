@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 IMAGE_LANGUAGE_SCHEMA = 3
 
-PROVIDERS = {"tmdb", "tvdb"}
+PROVIDERS = {"tmdb", "tvdb", "lastfm"}
 DEFAULT_METADATA_LOCALES = ["en"]
 PREFER_NO_LANGUAGE_FOR_BACKDROP_KEY = "prefer_no_language_for_backdrop"
 DEFAULT_PREFER_NO_LANGUAGE_FOR_BACKDROP = False
@@ -395,10 +395,16 @@ class MetadataCredentials:
             values[provider] = {
                 "configured": True,
                 "credentialType": credential_type,
-                "credential": credential.get("value") or credential.get("apiKey") or "",
                 "validatedAt": validated_at,
                 "updatedAt": updated_at,
             }
+            # API keys are write-only in the administrator dashboard. Keep
+            # the existing TMDB/TVDB response shape for compatibility, but do
+            # not expose a Last.fm key after it has been saved.
+            if provider != "lastfm":
+                values[provider]["credential"] = (
+                    credential.get("value") or credential.get("apiKey") or ""
+                )
         for provider in sorted(PROVIDERS):
             values.setdefault(provider, {"configured": False, "validatedAt": None})
         values["musicbrainz"] = {

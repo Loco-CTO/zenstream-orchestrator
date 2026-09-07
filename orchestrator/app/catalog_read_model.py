@@ -1102,7 +1102,7 @@ class CatalogReadModel:
                 summaries,
             )
             cursor.executemany(
-                "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id,locale) DO NOTHING",
+                "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id,locale) DO UPDATE SET library_id=excluded.library_id,parent_id=excluded.parent_id,entity_type=excluded.entity_type",
                 projection_rows,
             )
             if entities and self._has_table("catalog_search_grams"):

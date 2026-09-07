@@ -431,7 +431,9 @@ _AUDIO_TAG_ALIASES = {
     "SINGER": "ARTIST",
     "TPE2": "ALBUMARTIST",
     "ALBUMARTIST": "ALBUMARTIST",
+    "ALBUMARTISTS": "ALBUMARTIST",
     "ALBUM ARTIST": "ALBUMARTIST",
+    "ALBUM ARTISTS": "ALBUMARTIST",
     "AART": "ALBUMARTIST",
     "TIT2": "TITLE",
     "TITLE": "TITLE",
@@ -502,9 +504,31 @@ _AUDIO_ID_TAGS = {
     "MUSICBRAINZ_WORKID",
 }
 _AUDIO_MULTI_TAGS = {"ARTIST", "ALBUMARTIST", "ALBUMTYPES", "ALBUMSECONDARYTYPES"}
+_AUDIO_ARTIST_TAG_PRIORITIES = {
+    # Mutagen exposes structured Vorbis/MP4 artist lists as plural fields.
+    # They must win over a joined scalar alias regardless of tag iteration
+    # order.
+    "ARTISTS": 0,
+    "PERFORMERS": 0,
+    "PERFORMER NAME": 0,
+    "VOCALIST": 0,
+    "SINGER": 0,
+    "TPE1": 1,
+    "ARTIST": 1,
+    "ART": 1,
+    "PERFORMER": 1,
+}
+_AUDIO_ALBUM_ARTIST_TAG_PRIORITIES = {
+    "ALBUMARTISTS": 0,
+    "ALBUM ARTISTS": 0,
+    "TPE2": 1,
+    "ALBUMARTIST": 1,
+    "ALBUM ARTIST": 1,
+    "AART": 1,
+}
 
 
-def _audio_tag_key(raw_key: object) -> str:
+def _audio_raw_tag_key(raw_key: object) -> str:
     key = str(raw_key).strip().upper()
     if ":" in key:
         # Mutagen exposes MP4 freeform tags as
@@ -515,6 +539,11 @@ def _audio_tag_key(raw_key: object) -> str:
     key = key.replace("©", "")
     key = re.sub(r"[._-]+", " ", key)
     key = re.sub(r"\s+", " ", key).strip()
+    return key
+
+
+def _audio_tag_key(raw_key: object) -> str:
+    key = _audio_raw_tag_key(raw_key)
     return _AUDIO_TAG_ALIASES.get(key, key.replace(" ", "_"))
 
 
@@ -541,17 +570,52 @@ def parse_audio_tags(path: Path) -> dict[str, str]:
         audio = File(path, easy=False)
         if audio is None or not audio.tags:
             return {}
-        tags: dict[str, str] = {}
+        collected: dict[str, list[tuple[str, list[str]]]] = {}
         for raw_key, raw_value in audio.tags.items():
-            key = _audio_tag_key(raw_key)
+            raw_name = _audio_raw_tag_key(raw_key)
+            key = _AUDIO_TAG_ALIASES.get(raw_name, raw_name.replace(" ", "_"))
             values = _audio_tag_values(raw_value)
             if not values:
                 continue
-            tags[key] = (
-                ";".join(values)
-                if key in _AUDIO_ID_TAGS or key in _AUDIO_MULTI_TAGS
-                else values[0]
-            )
+            collected.setdefault(key, []).append((raw_name, values))
+        tags: dict[str, str] = {}
+        for key, entries in collected.items():
+            if key in _AUDIO_ID_TAGS or key in _AUDIO_MULTI_TAGS:
+                if key == "ARTIST":
+                    priority = min(
+                        _AUDIO_ARTIST_TAG_PRIORITIES.get(raw_name, 2)
+                        for raw_name, _ in entries
+                    )
+                    selected = [
+                        values
+                        for raw_name, values in entries
+                        if _AUDIO_ARTIST_TAG_PRIORITIES.get(raw_name, 2) == priority
+                    ]
+                elif key == "ALBUMARTIST":
+                    priority = min(
+                        _AUDIO_ALBUM_ARTIST_TAG_PRIORITIES.get(raw_name, 2)
+                        for raw_name, _ in entries
+                    )
+                    selected = [
+                        values
+                        for raw_name, values in entries
+                        if _AUDIO_ALBUM_ARTIST_TAG_PRIORITIES.get(raw_name, 2)
+                        == priority
+                    ]
+                else:
+                    selected = [values for _, values in entries]
+                values = list(
+                    dict.fromkeys(
+                        value for entry_values in selected for value in entry_values
+                    )
+                )
+                if values:
+                    tags[key] = ";".join(values)
+            else:
+                # Aliases are allowed to coexist in a file. Keep the first
+                # usable scalar deterministically instead of letting the
+                # final Mutagen tag overwrite it.
+                tags[key] = entries[0][1][0]
         if "DURATIONSECONDS" not in tags:
             length = getattr(getattr(audio, "info", None), "length", None)
             if length is not None:
@@ -1699,6 +1763,8 @@ class LibraryScanner:
             "catalog_user_summary": "entity_id",
             "catalog_item_genres": "entity_id",
             "catalog_search_grams": "entity_id",
+            "catalog_root_search_grams": "entity_id",
+            "catalog_artwork_selection": "entity_id",
             "catalog_collection_summary": "collection_entity_id",
         }
         for offset in range(0, len(ids), 300):
@@ -2511,7 +2577,7 @@ class LibraryScanner:
                 if not isinstance(candidate_artists, list):
                     candidate_artists = candidate.get("contributingArtists")
                 track_artists = (
-                    local_artists
+                    self._merge_music_artist_credits(local_artists, candidate_artists)
                     if isinstance(local_artists, list) and local_artists
                     else candidate_artists
                 )
@@ -5159,26 +5225,20 @@ class LibraryScanner:
     ) -> tuple[str, str, list[dict], int]:
         first_path, first_tags = group_entries[0]
         relative_first = Path(relative(str(root), str(first_path)))
-        artist_name = (
-            _music_display_value(first_tags.get("ALBUMARTIST"))
-            or _music_display_value(first_tags.get("ARTIST"))
-            or (
-                relative_first.parts[0]
-                if relative_first.parts
-                else first_path.parent.name
-            )
+        fallback_artist_name = (
+            relative_first.parts[0] if relative_first.parts else first_path.parent.name
         )
+        primary_credit = _music_primary_artist_credit(
+            first_tags, fallback_name=fallback_artist_name
+        )
+        artist_name = primary_credit["name"] if primary_credit else fallback_artist_name
         artist_key = _music_normalize(artist_name)
-        embedded_artist_ids = []
-        for _, tags in group_entries:
-            embedded_artist_ids.extend(_music_ids(tags, "artist"))
+        embedded_artist_id = primary_credit.get("id") if primary_credit else None
         artist = None
-        for value in embedded_artist_ids:
+        if embedded_artist_id:
             artist = self._music_entity_by_provider_id(
-                library_id, "artist", "artist", value[2]
+                library_id, "artist", "artist", embedded_artist_id
             )
-            if artist:
-                break
         artist = (
             artist
             or artist_entities.get(artist_key)
@@ -5193,8 +5253,8 @@ class LibraryScanner:
             "artist",
             artist_name=artist_name,
         )
-        if embedded_artist_ids:
-            self._replace_ids(artist, list(dict.fromkeys(embedded_artist_ids)))
+        if embedded_artist_id:
+            self._replace_ids(artist, [("musicbrainz", "artist", embedded_artist_id)])
 
         release_ids = []
         for _, tags in group_entries:
@@ -5223,6 +5283,16 @@ class LibraryScanner:
             )
         if not release:
             release = self._entity(library_id, artist, "release", album_path)
+        else:
+            # Provider-ID lookup can return an existing release before the
+            # path-based entity helper runs. Keep its catalog hierarchy in
+            # sync with the one explicit album owner on every rescan.
+            existing_path = self.db.execute(
+                "SELECT relative_path FROM library_entities WHERE id=?",
+                (release,),
+            )
+            if existing_path:
+                self._entity(library_id, artist, "release", existing_path[0][0])
         release_entities[release_key] = release
         release_tags = dict(first_tags)
         for key in ("ALBUMTYPE", "ALBUMTYPES", "ALBUMSECONDARYTYPES"):
@@ -5415,23 +5485,84 @@ class LibraryScanner:
                 locales,
             )
 
+        local_album_artist = _music_display_value(release_local.get("albumArtist"))
+        if release_documents and local_album_artist:
+            # MusicBrainz release credits are additive enrichment. Preserve
+            # the explicit embedded primary in the projected album payload;
+            # the provider's first credit is not an ownership decision.
+            try:
+                from app.metadata_services import MetadataSearchProjection
+
+                projection = MetadataSearchProjection(self.db)
+                for locale, document in release_documents.items():
+                    if not isinstance(document, dict):
+                        continue
+                    local_credits = self._music_document_credits(release_local)
+                    if not local_credits:
+                        local_credits = [{"name": local_album_artist}]
+                    provider_credits = self._music_document_credits(document)
+                    merged_credits = self._merge_music_artist_credits(
+                        local_credits, provider_credits
+                    )
+                    if merged_credits:
+                        document["artists"] = merged_credits
+                        document["contributingArtists"] = deepcopy(merged_credits)
+                    document["albumArtist"] = local_album_artist
+                    projection.project(
+                        "musicbrainz",
+                        "release",
+                        release_id,
+                        locale,
+                        document,
+                    )
+            except Exception:
+                logger.warning(
+                    "could not preserve embedded music album artist in projection release_id=%s",
+                    release,
+                    exc_info=True,
+                )
+
         release_document_values = list(release_documents.values())
         release_tracks = []
         if release_document_values:
             release_tracks = list(release_document_values[0].get("tracks", []) or [])
         used_release_track_ids: set[str] = set()
-        artist_ids = []
-        for document in release_document_values:
-            for value in document.get("artists", []) or []:
-                if isinstance(value, dict) and value.get("id"):
-                    artist_ids.append(str(value["id"]))
-        if artist_ids:
-            album_artist_id = artist_ids[0]
-            self._replace_ids(artist, [("musicbrainz", "artist", album_artist_id)])
-            self._music_mark_identity_changed(artist)
+        artist_provider_rows = self.db.execute(
+            "SELECT provider_id FROM entity_provider_ids WHERE entity_id=? "
+            "AND provider='musicbrainz' AND identifier_type='artist' "
+            "ORDER BY is_primary DESC,provider_id LIMIT 1",
+            (artist,),
+        )
+        artist_provider_id = (
+            str(artist_provider_rows[0][0]) if artist_provider_rows else None
+        )
+        if not artist_provider_id:
+            # If the local parent has no identity yet, only attach a provider
+            # credit whose name matches that explicit parent. Never use the
+            # first release credit as an implicit reparenting signal.
+            for document in release_document_values:
+                matching = next(
+                    (
+                        value
+                        for value in self._music_document_credits(document)
+                        if value.get("id")
+                        and _music_normalize(value.get("name"))
+                        == _music_normalize(artist_name)
+                    ),
+                    None,
+                )
+                if matching:
+                    artist_provider_id = str(matching["id"])
+                    self._replace_ids(
+                        artist,
+                        [("musicbrainz", "artist", artist_provider_id)],
+                    )
+                    self._music_mark_identity_changed(artist)
+                    break
+        if artist_provider_id:
             try:
                 ingest.ingest_locales(
-                    "musicbrainz", "artist", album_artist_id, locales, force=False
+                    "musicbrainz", "artist", artist_provider_id, locales, force=False
                 )
                 self.db.execute(
                     "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
@@ -5626,36 +5757,15 @@ class LibraryScanner:
             return
 
         def values_from(source) -> list[dict]:
-            if not isinstance(source, list):
-                return []
-            values = []
-            for value in source:
-                if isinstance(value, dict):
-                    name = _music_display_value(value.get("name") or value.get("title"))
-                    provider_id = value.get("id") or value.get("providerId")
-                else:
-                    name = _music_display_value(value)
-                    provider_id = None
-                if name:
-                    values.append(
-                        {
-                            "name": name,
-                            "id": str(provider_id).strip()
-                            if provider_id is not None and str(provider_id).strip()
-                            else None,
-                        }
-                    )
-            return values
+            return self._music_credit_source(source)
 
         release_values: list[dict] = []
         local_release = self._music_local_metadata.get(release_id) or {}
-        release_values.extend(values_from(local_release.get("artists")))
-        release_values.extend(values_from(local_release.get("contributingArtists")))
+        release_values.extend(self._music_document_credits(local_release))
         for document in (release_documents or {}).values():
             if not isinstance(document, dict):
                 continue
-            release_values.extend(values_from(document.get("artists")))
-            release_values.extend(values_from(document.get("contributingArtists")))
+            release_values.extend(self._music_document_credits(document))
 
         artist_local = self._music_local_metadata.get(album_artist_id) or {}
         album_artist_name = _music_display_value(
@@ -5670,52 +5780,55 @@ class LibraryScanner:
             (album_artist_id,),
         )
         album_artist_provider_id = str(parent_id_rows[0][0]) if parent_id_rows else None
+
+        def primary_from_document(document: dict) -> dict | None:
+            if not isinstance(document, dict):
+                return None
+            document_name = _music_display_value(document.get("albumArtist"))
+            document_credits = self._music_document_credits(document)
+            if document_credits:
+                first_credit = document_credits[0]
+                if document_name and _music_normalize(
+                    first_credit["name"]
+                ) == _music_normalize(document_name):
+                    return dict(first_credit)
+                if len(document_credits) > 1:
+                    # A scalar albumArtist that names a later credit is not
+                    # an ownership signal once ordered atomic credits exist.
+                    return dict(first_credit)
+                if document_name:
+                    return {"name": document_name}
+                return dict(first_credit)
+            return {"name": document_name} if document_name else None
+
+        primary_credit = primary_from_document(local_release)
+        if primary_credit is None:
+            for document in (release_documents or {}).values():
+                primary_credit = primary_from_document(document)
+                if primary_credit:
+                    break
+        if primary_credit is None and album_artist_name:
+            primary_credit = {"name": album_artist_name}
+        if primary_credit is None:
+            primary_credit = {"name": "Unknown Artist"}
+        album_artist_name = primary_credit["name"]
         parent_credit = {
             "name": album_artist_name,
-            "id": album_artist_provider_id,
+            "id": album_artist_provider_id or primary_credit.get("id"),
         }
         attempted_provider_ids: set[str] = set()
         materialized_artists: set[str] = set()
         artist_entities = getattr(self, "_music_artist_entities", {})
 
         def dedupe(values: list[dict]) -> list[dict]:
-            result: list[dict] = []
-            by_id: dict[str, int] = {}
-            by_name: dict[str, int] = {}
-            for value in values:
-                name = _music_display_value(value.get("name"))
-                if not name:
-                    continue
-                provider_id = value.get("id")
-                provider_id = (
-                    str(provider_id).strip() if provider_id is not None else None
-                ) or None
-                name_key = _music_normalize(name)
-                if provider_id and provider_id in by_id:
-                    existing = result[by_id[provider_id]]
-                    if not existing.get("name"):
-                        existing["name"] = name
-                    continue
-                if name_key in by_name:
-                    index = by_name[name_key]
-                    existing = result[index]
-                    if provider_id and not existing.get("id"):
-                        existing["id"] = provider_id
-                        by_id[provider_id] = index
-                    continue
-                index = len(result)
-                result.append({"name": name, "id": provider_id})
-                by_name[name_key] = index
-                if provider_id:
-                    by_id[provider_id] = index
-            return result
+            return self._music_document_credits({"artists": values})
 
-        def resolve_artist(credit: dict) -> str:
+        def resolve_artist(credit: dict, *, primary: bool = False) -> str:
             name = credit["name"]
             provider_id = credit.get("id")
             entity = None
             normalized_name = _music_normalize(name)
-            if normalized_name == _music_normalize(album_artist_name):
+            if primary:
                 entity = album_artist_id
             elif provider_id:
                 entity = self._music_entity_by_provider_id(
@@ -5781,7 +5894,7 @@ class LibraryScanner:
             credits = dedupe(candidates)
             rows = []
             for order, credit in enumerate(credits):
-                artist_entity = resolve_artist(credit)
+                artist_entity = resolve_artist(credit, primary=order == 0)
                 rows.append(
                     (
                         track["entity_id"],
@@ -5857,15 +5970,213 @@ class LibraryScanner:
                 return document
         return projected_document or {}
 
+    def _update_music_projection_fields(self, entity_id: str, document: dict) -> None:
+        """Apply local music credit fields while retaining cached payload data."""
+        if not document or not self._has_table("catalog_item_projection"):
+            return
+        rows = self.db.execute(
+            "SELECT locale,payload FROM catalog_item_projection WHERE entity_id=?",
+            (entity_id,),
+        )
+        projection_columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(catalog_item_projection)")
+        }
+        updated_at = (
+            ",updated_at=CURRENT_TIMESTAMP"
+            if "updated_at" in projection_columns
+            else ""
+        )
+        for locale, payload in rows:
+            try:
+                merged = json.loads(payload or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                merged = {}
+            if not isinstance(merged, dict):
+                merged = {}
+            changed = False
+            for field in ("albumArtist", "artists", "contributingArtists"):
+                if field in document and merged.get(field) != document[field]:
+                    merged[field] = deepcopy(document[field])
+                    changed = True
+            if changed:
+                self.db.execute(
+                    "UPDATE catalog_item_projection SET payload=?"
+                    + updated_at
+                    + " WHERE entity_id=? AND locale=?",
+                    (json.dumps(merged, ensure_ascii=False), entity_id, locale),
+                )
+
+    @staticmethod
+    def _music_credit_source(source) -> list[dict]:
+        """Normalize one ordered metadata credit list without joining names."""
+        if not isinstance(source, list):
+            return []
+        values = []
+        for value in source:
+            if isinstance(value, dict):
+                name = _music_display_value(value.get("name") or value.get("title"))
+                provider_id = value.get("id") or value.get("providerId")
+                join_phrase = value.get("joinPhrase")
+                if join_phrase is None:
+                    join_phrase = value.get("joinphrase")
+            else:
+                name = _music_display_value(value)
+                provider_id = None
+                join_phrase = None
+            if not name:
+                continue
+            credit = {
+                "name": name,
+                "id": str(provider_id).strip()
+                if provider_id is not None and str(provider_id).strip()
+                else None,
+            }
+            if join_phrase is not None:
+                credit["joinPhrase"] = str(join_phrase)
+            values.append(credit)
+        return values
+
+    @staticmethod
+    def _music_credit_is_combined(value: dict, atomic_values: list[dict]) -> bool:
+        """Identify a joined scalar once structured artist boundaries exist."""
+        if len(atomic_values) < 2:
+            return False
+        candidate = _music_normalize(value.get("name"))
+        atomic_names = [_music_normalize(item.get("name")) for item in atomic_values]
+        if not candidate or candidate in atomic_names:
+            return False
+        rendered = "".join(
+            f"{item.get('name', '')}{item.get('joinPhrase', '')}"
+            for item in atomic_values
+        )
+        if _music_normalize(rendered) == candidate:
+            return True
+        # Local documents may not retain a provider joinPhrase. The ordered
+        # structured names still establish the boundary, so remove a scalar
+        # that contains those names in order without attempting to split it.
+        cursor = 0
+        for name in atomic_names:
+            if not name:
+                return False
+            position = candidate.find(name, cursor)
+            if position < 0:
+                return False
+            cursor = position + len(name)
+        return True
+
+    @staticmethod
+    def _music_document_has_combined_credit(
+        document: dict, atomic_values: list[dict]
+    ) -> bool:
+        if not isinstance(document, dict) or len(atomic_values) < 2:
+            return False
+        return any(
+            LibraryScanner._music_credit_is_combined(value, atomic_values)
+            for key in ("artists", "contributingArtists")
+            for value in LibraryScanner._music_credit_source(document.get(key))
+        )
+
     @staticmethod
     def _music_document_credits(document: dict) -> list[dict]:
         """Combine primary and contributing credits from a cached document."""
         values: list[dict] = []
+        by_id: dict[str, int] = {}
+        by_name: dict[str, list[int]] = {}
+        sources: list[list[dict]] = []
         for key in ("artists", "contributingArtists"):
-            source = document.get(key)
+            source = LibraryScanner._music_credit_source(document.get(key))
+            if source:
+                sources.append(source)
+                for value in source:
+                    name = value["name"]
+                    provider_id = value.get("id")
+                    name_key = _music_normalize(name)
+                    index = by_id.get(provider_id) if provider_id else None
+                    if index is None:
+                        name_indices = by_name.get(name_key, [])
+                        index = next(
+                            (
+                                candidate
+                                for candidate in name_indices
+                                if not values[candidate].get("id")
+                            ),
+                            None,
+                        )
+                        if index is None and not provider_id and name_indices:
+                            index = name_indices[0]
+                    if index is None:
+                        index = len(values)
+                        values.append(
+                            {
+                                "name": name,
+                                **({"id": provider_id} if provider_id else {}),
+                                **(
+                                    {"joinPhrase": value["joinPhrase"]}
+                                    if "joinPhrase" in value
+                                    else {}
+                                ),
+                            }
+                        )
+                        by_name.setdefault(name_key, []).append(index)
+                        if provider_id:
+                            by_id[provider_id] = index
+                        continue
+                    existing = values[index]
+                    if provider_id and not existing.get("id"):
+                        existing["id"] = provider_id
+                        by_id[provider_id] = index
+                    if "joinPhrase" not in existing and "joinPhrase" in value:
+                        existing["joinPhrase"] = value["joinPhrase"]
+        atomic_sources: list[list[dict]] = []
+        for source in sources:
+            candidate_values = [
+                value
+                for index, value in enumerate(source)
+                if not LibraryScanner._music_credit_is_combined(
+                    value,
+                    [
+                        other
+                        for other_index, other in enumerate(source)
+                        if other_index != index
+                    ],
+                )
+            ]
+            identified = [value for value in candidate_values if value.get("id")]
+            if len(identified) >= 2:
+                atomic_source = identified
+            else:
+                atomic_source = candidate_values
+            if len(atomic_source) > 1:
+                atomic_sources.append(atomic_source)
+        if atomic_sources:
+            filtered = []
+            for value in values:
+                combined = False
+                for atomic_source in atomic_sources:
+                    atomic_ids = {
+                        item.get("id") for item in atomic_source if item.get("id")
+                    }
+                    if LibraryScanner._music_credit_is_combined(
+                        value, atomic_source
+                    ) and (not value.get("id") or value.get("id") not in atomic_ids):
+                        combined = True
+                        break
+                if not combined:
+                    filtered.append(value)
+            values = filtered
+        return values
+
+    @staticmethod
+    def _merge_music_artist_credits(
+        *sources: list[dict] | None,
+    ) -> list[dict]:
+        """Merge local/provider credits while retaining provider join phrases."""
+        values: list[dict] = []
+        for source in sources:
             if isinstance(source, list):
                 values.extend(value for value in source if isinstance(value, dict))
-        return values
+        return LibraryScanner._music_document_credits({"artists": values})
 
     @staticmethod
     def _music_release_track_document(
@@ -5918,29 +6229,121 @@ class LibraryScanner:
             "ORDER BY library_id,id"
         )
         repaired = 0
+        affected_libraries: set[str] = set()
+        affected_artist_roots: set[str] = set()
         for release_id, library_id, album_artist_id in release_rows:
             self._check_termination(should_terminate)
-            release_document = self._music_document(str(release_id), "release")
-            artist_document = self._music_document(str(album_artist_id), "artist")
-            artist_row = self.db.execute(
-                "SELECT relative_path FROM library_entities WHERE id=? AND entity_type='artist'",
-                (album_artist_id,),
-            )
-            artist_name = _music_display_value(
-                (artist_document or {}).get("title")
-                or (release_document or {}).get("albumArtist")
-                or (artist_row[0][0] if artist_row else "")
-            )
+            release_id = str(release_id)
+            library_id = str(library_id)
+            old_album_artist_id = str(album_artist_id)
+            release_document = self._music_document(release_id, "release")
+            artist_document = self._music_document(old_album_artist_id, "artist")
             if not isinstance(release_document, dict):
                 release_document = {}
             release_document = deepcopy(release_document)
+            artist_row = self.db.execute(
+                "SELECT relative_path FROM library_entities WHERE id=? AND entity_type='artist'",
+                (old_album_artist_id,),
+            )
+            current_artist_name = _music_display_value(
+                (artist_document or {}).get("title")
+                or (artist_row[0][0] if artist_row else "")
+            )
+            release_credits = self._music_document_credits(release_document)
+            explicit_album_artist = _music_display_value(
+                release_document.get("albumArtist")
+            )
+            primary_credit = None
+            if release_credits:
+                first_credit = release_credits[0]
+                if explicit_album_artist and _music_normalize(
+                    first_credit.get("name")
+                ) == _music_normalize(explicit_album_artist):
+                    primary_credit = first_credit
+                elif len(release_credits) > 1:
+                    # A legacy scalar albumArtist that names a later credit
+                    # is superseded by the ordered atomic credit list.
+                    primary_credit = first_credit
+                elif explicit_album_artist:
+                    primary_credit = {"name": explicit_album_artist}
+                else:
+                    primary_credit = first_credit
+            elif explicit_album_artist:
+                primary_credit = {"name": explicit_album_artist}
+            if primary_credit is None and current_artist_name:
+                primary_credit = {"name": current_artist_name}
+            if primary_credit is None:
+                primary_credit = {"name": "Unknown Artist"}
+            primary_credit = dict(primary_credit)
+            artist_name = _music_display_value(primary_credit.get("name"))
             if artist_name:
-                release_document.setdefault("albumArtist", artist_name)
-                if not release_document.get("artists"):
-                    release_document["artists"] = [{"name": artist_name}]
+                release_document["albumArtist"] = artist_name
+                ordered_credits = [primary_credit]
+                for credit in release_credits:
+                    same_provider_id = bool(
+                        credit.get("id")
+                        and primary_credit.get("id")
+                        and str(credit["id"]) == str(primary_credit["id"])
+                    )
+                    same_name = _music_normalize(
+                        credit.get("name")
+                    ) == _music_normalize(artist_name)
+                    if same_provider_id or same_name:
+                        continue
+                    ordered_credits.append(credit)
+                release_document["artists"] = ordered_credits
+                release_document["contributingArtists"] = deepcopy(ordered_credits)
             self._music_local_metadata[str(release_id)] = release_document
-            if artist_document:
-                self._music_local_metadata[str(album_artist_id)] = artist_document
+            self._update_music_projection_fields(release_id, release_document)
+
+            primary_provider_id = primary_credit.get("id")
+            target_artist_id = None
+            if primary_provider_id:
+                target_artist_id = self._music_entity_by_provider_id(
+                    library_id,
+                    "artist",
+                    "artist",
+                    str(primary_provider_id),
+                )
+            target_artist_id = target_artist_id or self._music_artist_by_name(
+                library_id, artist_name
+            )
+            if target_artist_id is None and _music_normalize(
+                current_artist_name
+            ) == _music_normalize(artist_name):
+                target_artist_id = old_album_artist_id
+            if target_artist_id is None:
+                target_artist_id = self._entity(library_id, None, "artist", artist_name)
+            self._scan_seen_ids.add(target_artist_id)
+            self._music_artist_entities[_music_normalize(artist_name)] = (
+                target_artist_id
+            )
+            self._persist_music_local_artist(target_artist_id, artist_name, ingest)
+            if primary_provider_id:
+                self._replace_ids(
+                    target_artist_id,
+                    [("musicbrainz", "artist", str(primary_provider_id))],
+                )
+                self._music_mark_identity_changed(target_artist_id)
+
+            album_artist_id = target_artist_id
+            affected_libraries.add(library_id)
+            affected_artist_roots.update({old_album_artist_id, album_artist_id})
+            if album_artist_id != old_album_artist_id:
+                relative_row = self.db.execute(
+                    "SELECT relative_path FROM library_entities WHERE id=? AND entity_type='release'",
+                    (release_id,),
+                )
+                if relative_row:
+                    self._entity(
+                        library_id,
+                        album_artist_id,
+                        "release",
+                        relative_row[0][0],
+                    )
+                self._scan_refresh_root_ids.update(
+                    {old_album_artist_id, album_artist_id}
+                )
 
             track_columns = {
                 row[1] for row in self.db.execute("PRAGMA table_info(library_entities)")
@@ -5986,11 +6389,27 @@ class LibraryScanner:
                 release_track = self._music_release_track_document(
                     release_document, recording_id, disc_number, track_number
                 )
-                if not self._music_document_credits(document):
-                    credits = self._music_document_credits(release_track)
-                    if credits:
-                        document["artists"] = deepcopy(credits)
-                        document["contributingArtists"] = deepcopy(credits)
+                track_credits = self._music_document_credits(document)
+                release_track_credits = self._music_document_credits(release_track)
+                if len(release_track_credits) > 1 or not track_credits:
+                    track_credits = release_track_credits or track_credits
+                if not track_credits and len(release_credits) > 1:
+                    track_credits = release_credits
+                structured_credits = (
+                    release_track_credits
+                    if len(release_track_credits) > 1
+                    else release_credits
+                    if len(release_credits) > 1
+                    else []
+                )
+                if structured_credits and self._music_document_has_combined_credit(
+                    document, structured_credits
+                ):
+                    track_credits = release_track_credits or release_credits
+                if track_credits:
+                    document["artists"] = deepcopy(track_credits)
+                    document["contributingArtists"] = deepcopy(track_credits)
+                    self._update_music_projection_fields(str(track_id), document)
                 document.setdefault("discNumber", disc_number)
                 document.setdefault("trackNumber", track_number)
                 if not document.get("title") and relative_path:
@@ -5999,7 +6418,7 @@ class LibraryScanner:
                     {
                         "entity_id": str(track_id),
                         "local": document,
-                        "resolved_artists": self._music_document_credits(release_track),
+                        "resolved_artists": track_credits,
                     }
                 )
             if not materialized_tracks:
@@ -6016,6 +6435,29 @@ class LibraryScanner:
                 resolve_provider_metadata=False,
             )
             repaired += 1
+        for library_id in affected_libraries:
+            self._remove_orphan_music_artists(library_id)
+        for root_id in affected_artist_roots:
+            if self.db.execute(
+                "SELECT 1 FROM library_entities WHERE id=? AND entity_type='artist'",
+                (root_id,),
+            ):
+                self._scan_refresh_root_ids.add(root_id)
+                self._publish_root(root_id)
+        self._flush_publications()
+        if affected_libraries and self._has_table("catalog_item_projection"):
+            try:
+                from app.catalog_read_model import CatalogReadModel
+
+                CatalogReadModel(self.db).refresh_roots(
+                    [], affected_library_ids=sorted(affected_libraries)
+                )
+            except Exception:
+                logger.warning(
+                    "music artist repair catalog refresh failed libraries=%s",
+                    sorted(affected_libraries),
+                    exc_info=True,
+                )
         return repaired
 
     def _remove_orphan_music_artists(self, library_id: str) -> None:
@@ -6036,6 +6478,7 @@ class LibraryScanner:
         from app.library_cleanup import cleanup_entities
 
         cleanup_entities(self.db, orphan_ids)
+        self._delete_catalog_rows(orphan_ids)
         self._scan_delta["removed"].update(orphan_ids)
         self._scan_seen_ids.difference_update(orphan_ids)
         self._scan_refresh_root_ids.difference_update(orphan_ids)
@@ -6759,6 +7202,98 @@ def _music_tag_values(tags: dict[str, str], key: str) -> list[str]:
     ]
 
 
+def _music_artist_credits(
+    tags: dict[str, str], fallback_name: str | None = None
+) -> list[dict[str, str]]:
+    """Return ordered atomic local artist credits without guessing joins."""
+    names = _music_tag_values(tags, "ARTIST")
+    provider_ids = _music_tag_values(tags, "MUSICBRAINZ_ARTISTID")
+    # A single joined name plus several IDs has no safe name boundary. Keep
+    # the name intact and let provider metadata enrich it later rather than
+    # manufacturing a credit-to-ID pairing.
+    pair_ids = provider_ids if len(names) != 1 or len(provider_ids) <= 1 else []
+    credits: list[dict[str, str]] = []
+    for index, name in enumerate(names):
+        credit = {"name": name}
+        if index < len(pair_ids):
+            credit["id"] = pair_ids[index]
+        credits.append(credit)
+    if not credits and fallback_name:
+        name = _music_display_value(fallback_name)
+        if name:
+            credits.append({"name": name})
+    return credits
+
+
+def _music_primary_artist_credit(
+    tags: dict[str, str], fallback_name: str | None = None
+) -> dict[str, str] | None:
+    """Select the one atomic artist that owns a local release."""
+    album_artist_ids = _music_tag_values(tags, "MUSICBRAINZ_ALBUMARTISTID")
+    album_artist_names = _music_tag_values(tags, "ALBUMARTIST")
+    credits = _music_artist_credits(tags, fallback_name=None)
+
+    if album_artist_ids:
+        primary_id = album_artist_ids[0]
+        if len(album_artist_names) > 1:
+            # Plural album-artist tags establish the ordered name boundary;
+            # pair the first one with the first ordered embedded ID.
+            return {"name": album_artist_names[0], "id": primary_id}
+        matching = next(
+            (credit for credit in credits if credit.get("id") == primary_id), None
+        )
+        if matching:
+            return dict(matching)
+        if album_artist_names:
+            named = next(
+                (
+                    credit
+                    for credit in credits
+                    if _music_normalize(credit.get("name"))
+                    == _music_normalize(album_artist_names[0])
+                ),
+                None,
+            )
+            if named:
+                named = dict(named)
+                named["id"] = primary_id
+                return named
+        if credits:
+            # The ordered album-artist ID establishes which structured name
+            # is primary even when the local name and ID fields were written
+            # by different tag writers.
+            return {"name": credits[0]["name"], "id": primary_id}
+        if album_artist_names:
+            return {"name": album_artist_names[0], "id": primary_id}
+
+    # Multiple structured credits establish atomic boundaries. Prefer their
+    # first entry over an otherwise ambiguous joined album-artist scalar.
+    if len(credits) > 1:
+        return dict(credits[0])
+
+    if len(album_artist_names) > 1:
+        # A structured plural album-artist field can disambiguate a joined
+        # scalar artist field even when the file has no provider IDs.
+        return {"name": album_artist_names[0]}
+
+    if album_artist_names:
+        primary_name = album_artist_names[0]
+        matching = next(
+            (
+                credit
+                for credit in credits
+                if _music_normalize(credit.get("name"))
+                == _music_normalize(primary_name)
+            ),
+            None,
+        )
+        return dict(matching) if matching else {"name": primary_name}
+    if credits:
+        return dict(credits[0])
+    fallback = _music_display_value(fallback_name)
+    return {"name": fallback} if fallback else None
+
+
 def _music_display_value(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -6793,11 +7328,8 @@ def _music_group_key(root: Path, path: Path, tags: dict[str, str]) -> tuple[str,
     relative_path = Path(relative(str(root), str(path)))
     top_level = relative_path.parts[0] if relative_path.parts else path.parent.name
     album = _music_display_value(tags.get("ALBUM")) or path.parent.name
-    album_artist = (
-        _music_display_value(tags.get("ALBUMARTIST"))
-        or _music_display_value(tags.get("ARTIST"))
-        or top_level
-    )
+    primary = _music_primary_artist_credit(tags, fallback_name=top_level)
+    album_artist = primary["name"] if primary else top_level
     if release_id:
         return ("id", release_id)
     return (
@@ -6824,16 +7356,11 @@ def _music_local_document(
     catalog a stable title/relationship while MusicBrainz is unavailable or
     being repaired; provider artwork still comes from release metadata.
     """
-    artists = _music_tag_values(tags, "ARTIST")
-    if not artists and artist_name:
-        fallback_artist = _music_display_value(artist_name)
-        if fallback_artist:
-            artists = [fallback_artist]
-    album_artist = (
-        _music_display_value(tags.get("ALBUMARTIST"))
-        or _music_display_value(artist_name)
-        or (artists[0] if artists else None)
-    )
+    artist_credits = _music_artist_credits(tags, fallback_name=artist_name)
+    primary_credit = _music_primary_artist_credit(tags, fallback_name=artist_name)
+    album_artist = primary_credit["name"] if primary_credit else None
+    if not artist_credits and primary_credit:
+        artist_credits = [dict(primary_credit)]
     filename_title, filename_disc_number, filename_track_number = _music_filename_parts(
         path
     )
@@ -6855,16 +7382,13 @@ def _music_local_document(
     for key in ("GENRE", "STYLE", "MOOD"):
         genres.extend(_music_tag_values(tags, key))
     genres = list(dict.fromkeys(genres))
-    artist_ids = _music_tag_values(tags, "MUSICBRAINZ_ARTISTID")
-    artist_credits = [
-        {
-            **({"id": artist_ids[index]} if index < len(artist_ids) else {}),
-            "name": value,
-        }
-        for index, value in enumerate(artists)
-    ]
     if entity_type == "artist":
-        title = _music_display_value(artist_name) or title
+        # An artist root represents the one album owner. Participating
+        # credits belong on releases/tracks, never on the root document.
+        if primary_credit:
+            artist_credits = [dict(primary_credit)]
+            album_artist = primary_credit["name"]
+        title = _music_display_value(album_artist) or title
     elif entity_type == "release":
         title = album or title
     album_type, album_secondary_types = _music_album_type_values(tags)
@@ -6969,10 +7493,10 @@ def _music_ids(
         # The parent artist represents the album artist.  Contributing artist
         # IDs remain structured metadata on the track rather than being
         # incorrectly attached to that parent entity.
-        artist_values = _music_tag_values(tags, "MUSICBRAINZ_ALBUMARTISTID")
-        if not artist_values:
-            artist_values = _music_tag_values(tags, "MUSICBRAINZ_ARTISTID")
-        return [("musicbrainz", "artist", value) for value in artist_values]
+        primary = _music_primary_artist_credit(tags)
+        if primary and primary.get("id"):
+            return [("musicbrainz", "artist", primary["id"])]
+        return []
     for key, identifier_type in mapping.items():
         if entity_type == "artist" and identifier_type != "artist":
             continue

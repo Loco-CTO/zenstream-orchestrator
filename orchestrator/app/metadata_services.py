@@ -729,6 +729,7 @@ class MetadataSearchProjection:
         payload: dict,
         *,
         preserve_artwork: set[str] | None = None,
+        replace_metadata: bool = False,
     ) -> None:
         tables = {
             row[0]
@@ -795,6 +796,9 @@ class MetadataSearchProjection:
                         merged = {}
                     if not isinstance(merged, dict):
                         merged = {}
+                    if replace_metadata and is_primary:
+                        for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
+                            merged.pop(field, None)
                     for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
                         if (
                             field in payload
@@ -1603,6 +1607,7 @@ class MetadataIngestService:
         *,
         force: bool = False,
         force_assets: bool | None = None,
+        replace_metadata: bool = False,
         should_terminate=None,
     ) -> list[dict]:
         if provider not in {"tmdb", "tvdb", "musicbrainz"}:
@@ -1621,6 +1626,7 @@ class MetadataIngestService:
                 locales,
                 force=force,
                 force_assets=force_assets,
+                replace_metadata=replace_metadata,
             ).values()
         )
 
@@ -1633,6 +1639,7 @@ class MetadataIngestService:
         *,
         force: bool = False,
         force_assets: bool | None = None,
+        replace_metadata: bool = False,
     ) -> dict[str, dict]:
         locales = list(dict.fromkeys(locales or self.locales()))
         unsupported = [locale for locale in locales if locale not in self._locales]
@@ -1670,6 +1677,7 @@ class MetadataIngestService:
                     locale,
                     values[locale],
                     force_assets=force_assets,
+                    replace_metadata=replace_metadata,
                 )
             }
 
@@ -1678,7 +1686,12 @@ class MetadataIngestService:
         if db is not None:
             for locale in locales:
                 MetadataSearchProjection(db).project(
-                    provider, entity_type, provider_id, locale, values[locale]
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    values[locale],
+                    replace_metadata=replace_metadata,
                 )
 
         def materialize_assets() -> None:
@@ -1741,6 +1754,7 @@ class MetadataIngestService:
         *,
         force: bool = False,
         force_assets: bool | None = None,
+        replace_metadata: bool = False,
     ) -> dict:
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
@@ -1751,6 +1765,7 @@ class MetadataIngestService:
             [locale],
             force=force,
             force_assets=force_assets,
+            replace_metadata=replace_metadata,
         )[locale]
 
     def ingest_document(
@@ -1762,6 +1777,7 @@ class MetadataIngestService:
         normalized: dict,
         *,
         force_assets: bool = False,
+        replace_metadata: bool = False,
     ) -> dict:
         """Materialize a normalized document, including documents cached by aggregation."""
         if locale not in self.locales():
@@ -1770,7 +1786,12 @@ class MetadataIngestService:
         db = getattr(cache, "db", None)
         if db is not None:
             MetadataSearchProjection(db).project(
-                provider, entity_type, provider_id, locale, normalized
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                normalized,
+                replace_metadata=replace_metadata,
             )
         if self.image_ingest is not None or self.credit_ingest is not None:
 

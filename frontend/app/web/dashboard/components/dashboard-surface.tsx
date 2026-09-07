@@ -163,11 +163,9 @@ export function SurfaceCard({
 }
 
 export function SectionHeader({
-	kicker,
 	title,
 	action,
 }: {
-	kicker?: string;
 	title: string;
 	action?: ReactNode;
 }) {
@@ -183,24 +181,10 @@ export function SectionHeader({
 			}}
 		>
 			<div>
-				{kicker && (
-					<p
-						style={{
-							fontSize: 10,
-							fontWeight: 600,
-							letterSpacing: "0.1em",
-							textTransform: "uppercase",
-							color: "var(--primary)",
-							marginBottom: 8,
-						}}
-					>
-						{kicker}
-					</p>
-				)}
 				<h2
 					style={{
 						margin: 0,
-						fontSize: kicker ? 16 : 13,
+						fontSize: 13,
 						fontWeight: 600,
 						color: "#fff",
 					}}

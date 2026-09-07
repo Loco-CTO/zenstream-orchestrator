@@ -2245,7 +2245,7 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertEqual(response["locales"], ["en", "zh-TW"])
         self.assertTrue(response["preferNoLanguageForBackdrop"])
         settings.update.assert_called_once_with(["en", "zh-TW"], True)
-        refresh.assert_called_once_with()
+        refresh.assert_called_once_with({"refreshAll": True})
 
     def test_metadata_language_update_preserves_option_when_omitted(self):
         settings = MagicMock()
@@ -2289,6 +2289,65 @@ class LibraryMetadataTest(unittest.TestCase):
             )
         self.assertEqual(response, {"backfill": {"id": "run-1"}})
         refresh.assert_called_once_with()
+
+    def test_sparse_refresh_settings_endpoint_uses_control_lane(self):
+        expected = {"itemTypes": {"movie": {"enabled": False}}}
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(
+                library_routes,
+                "_get_metadata_refresh_settings_sync",
+                return_value=expected,
+            ) as get_settings,
+        ):
+            response = asyncio.run(
+                library_routes.metadata_refresh_settings(
+                    Username="admin", TOKEN="token"
+                )
+            )
+
+        self.assertEqual(response, expected)
+        get_settings.assert_called_once_with()
+
+    def test_sparse_refresh_settings_are_saved_without_queueing_a_run(self):
+        values = {"pretend": True}
+        expected = {"pretend": True}
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(
+                library_routes,
+                "_update_metadata_refresh_settings_sync",
+                return_value=expected,
+            ) as update_settings,
+        ):
+            response = asyncio.run(
+                library_routes.update_metadata_refresh_settings(
+                    _JsonRequest(values), Username="admin", TOKEN="token"
+                )
+            )
+
+        self.assertEqual(response, expected)
+        update_settings.assert_called_once_with(values)
+
+    def test_manual_metadata_refresh_accepts_full_mode(self):
+        with (
+            patch.object(library_routes, "require_admin"),
+            patch.object(
+                library_routes.scheduler,
+                "enqueue_metadata_refresh",
+                return_value={"id": "run-1"},
+            ) as refresh,
+        ):
+            response = asyncio.run(
+                library_routes.refresh_metadata(
+                    _JsonRequest({"refreshAll": True}),
+                    Username="admin",
+                    TOKEN="token",
+                )
+            )
+
+        self.assertEqual(response, {"backfill": {"id": "run-1"}})
+        refresh.assert_called_once_with({"refreshAll": True})
 
     def test_item_metadata_refresh_forces_all_locales_assets_and_publication(self):
         ingest = MagicMock()

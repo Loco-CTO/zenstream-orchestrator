@@ -100,8 +100,7 @@ export default function AdministratorsPage() {
 					))}
 				</SurfaceCard>
 				<form onSubmit={create} className="console-card rounded-2xl p-6">
-					<p className="console-kicker">New account</p>
-					<h2 className="mt-2 text-xl font-bold">Add administrator</h2>
+					<h2 className="text-xl font-bold">Add administrator</h2>
 					<p className="mt-2 text-sm console-muted">
 						Create a local console account.
 					</p>

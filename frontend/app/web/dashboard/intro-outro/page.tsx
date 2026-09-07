@@ -425,9 +425,8 @@ export default function IntroOutroPage() {
 				</div>
 			</SurfaceCard>
 			<SurfaceCard className="mt-5 p-6">
-				<p className="console-kicker">Detection task</p>
 				{task ? (
-					<div className="mt-3 space-y-2 text-sm">
+					<div className="space-y-2 text-sm">
 						<p>
 							<span className="console-muted">Status: </span>
 							{task.triggers?.length ? stateLabel(task.lastState) : "paused"}

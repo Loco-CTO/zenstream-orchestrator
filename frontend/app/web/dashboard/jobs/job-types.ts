@@ -57,6 +57,7 @@ export type JobOptionDefinition = {
 	type: "boolean";
 	default?: boolean;
 	description?: string;
+	manualOnly?: boolean;
 };
 
 export type Job = {

@@ -19,6 +19,7 @@ from app.models.metadata import (
     IMAGE_LANGUAGE_SCHEMA,
     MetadataCredentials,
     MetadataLanguageSettings,
+    MetadataRefreshSettings,
     normalize_metadata_locale,
 )
 from app.providers import (
@@ -739,17 +740,62 @@ async def update_metadata_languages(
             saved = await run_control(settings.update, data.get("locales"))
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
-    run = await run_control(scheduler.enqueue_metadata_refresh)
+    run = await run_control(scheduler.enqueue_metadata_refresh, {"refreshAll": True})
     return {**saved, "backfill": run}
+
+
+def _get_metadata_refresh_settings_sync() -> dict:
+    return MetadataRefreshSettings().get()
+
+
+def _update_metadata_refresh_settings_sync(values: dict) -> dict:
+    return MetadataRefreshSettings().update(values)
+
+
+@router.get("/metadata/refresh/settings")
+async def metadata_refresh_settings(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    require_admin(Username, TOKEN)
+    return await run_control(_get_metadata_refresh_settings_sync)
+
+
+@router.put("/metadata/refresh/settings")
+async def update_metadata_refresh_settings(
+    request: Request,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    require_admin(Username, TOKEN)
+    try:
+        values = await request.json()
+        return await run_control(_update_metadata_refresh_settings_sync, values)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.post("/metadata/refresh")
 async def refresh_metadata(
-    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+    request: Request = None,
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
 ):
-    """Explicitly repair/refetch all indexed provider metadata and artwork."""
+    """Queue a sparse metadata refresh or an explicit full refresh."""
     require_admin(Username, TOKEN)
-    return {"backfill": await run_control(scheduler.enqueue_metadata_refresh)}
+    if request is None:
+        return {"backfill": await run_control(scheduler.enqueue_metadata_refresh)}
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Refresh options must be an object.")
+    try:
+        return {"backfill": await run_control(scheduler.enqueue_metadata_refresh, data)}
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.put("/metadata/providers/{provider}")
@@ -1027,6 +1073,8 @@ async def run_scheduled_job(
         )
     except KeyError as error:
         raise HTTPException(404, str(error)) from error
+    except (TypeError, ValueError) as error:
+        raise HTTPException(400, str(error)) from error
 
 
 @router.post("/jobs/{job_id}/runs/{run_id}/terminate")

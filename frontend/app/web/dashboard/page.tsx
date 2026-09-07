@@ -344,19 +344,6 @@ export default function DashboardOverview() {
 						}}
 					>
 						<div>
-							<span
-								style={{
-									fontSize: 10,
-									fontWeight: 600,
-									letterSpacing: "0.1em",
-									textTransform: "uppercase",
-									color: "var(--primary)",
-									display: "block",
-									marginBottom: 8,
-								}}
-							>
-								Scheduler
-							</span>
 							<div style={{ fontSize: 15, fontWeight: 600, color: "#fff" }}>
 								Background tasks
 							</div>
@@ -443,19 +430,6 @@ export default function DashboardOverview() {
 				<section
 					style={{ background: "#080808", borderRadius: 12, padding: "18px 22px" }}
 				>
-					<span
-						style={{
-							fontSize: 10,
-							fontWeight: 600,
-							letterSpacing: "0.1em",
-							textTransform: "uppercase",
-							color: "var(--primary)",
-							display: "block",
-							marginBottom: 8,
-						}}
-					>
-						Shortcuts
-					</span>
 					<div
 						style={{ fontSize: 15, fontWeight: 600, color: "#fff", marginBottom: 16 }}
 					>

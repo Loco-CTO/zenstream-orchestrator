@@ -57,6 +57,29 @@ _LASTFM_READ_MORE_PATTERN = re.compile(
     r"\s*\bread\s+more\s+on\s+last\.fm\b\s*[.!…]?",
     re.IGNORECASE,
 )
+_LASTFM_ATTRIBUTION_PATTERN = re.compile(
+    r"\s*\buser[-\s]+contributed\s+text\s+is\s+available\s+under\s+the\s+"
+    r"creative\s+commons\s+by[-\s]+sa\s+license\s*;\s*"
+    r"additional\s+terms\s+may\s+apply\s*[.!…]?",
+    re.IGNORECASE,
+)
+
+
+def _clean_lastfm_text(value: str) -> str | None:
+    text = html.unescape(re.sub(r"<[^>]+>", " ", value))
+    text = _LASTFM_READ_MORE_PATTERN.sub(" ", text)
+    text = _LASTFM_ATTRIBUTION_PATTERN.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip() or None
+
+
+def _has_lastfm_boilerplate(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = html.unescape(re.sub(r"<[^>]+>", " ", value))
+    return bool(
+        _LASTFM_READ_MORE_PATTERN.search(text)
+        or _LASTFM_ATTRIBUTION_PATTERN.search(text)
+    )
 
 
 def _sanitize_lastfm_payload(payload: dict) -> dict:
@@ -64,9 +87,7 @@ def _sanitize_lastfm_payload(payload: dict) -> dict:
     sanitized = copy.deepcopy(payload)
 
     def clean(value: str) -> str | None:
-        text = html.unescape(re.sub(r"<[^>]+>", " ", value))
-        text = _LASTFM_READ_MORE_PATTERN.sub("", text)
-        return re.sub(r"\s+", " ", text).strip() or None
+        return _clean_lastfm_text(value)
 
     for key in ("overview", "description"):
         value = sanitized.get(key)

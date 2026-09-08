@@ -308,7 +308,14 @@ class PersistenceMigrationTest(unittest.TestCase):
                 connection.execute(
                     "INSERT INTO library_entities(id,library_id,entity_type,relative_path,created_at,updated_at) "
                     "VALUES(?,?,?,?,?,?)",
-                    ("track-1", "music-1", "track", "Album/01.mp3", "2026-01-01", "2026-01-01"),
+                    (
+                        "track-1",
+                        "music-1",
+                        "track",
+                        "Album/01.mp3",
+                        "2026-01-01",
+                        "2026-01-01",
+                    ),
                 )
                 connection.execute(
                     "INSERT INTO media_files(id,entity_id,relative_path,role) VALUES(?,?,?,?)",
@@ -328,7 +335,8 @@ class PersistenceMigrationTest(unittest.TestCase):
                     [("track-1", "track")],
                 )
                 notification_columns = {
-                    row[1] for row in connection.execute("PRAGMA table_info(notifications)")
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(notifications)")
                 }
                 self.assertIn("artist_id", notification_columns)
                 follow_sql = connection.execute(
@@ -360,7 +368,9 @@ class PersistenceMigrationTest(unittest.TestCase):
                     "artist_id",
                     {
                         row[1]
-                        for row in connection.execute("PRAGMA table_info(notifications)")
+                        for row in connection.execute(
+                            "PRAGMA table_info(notifications)"
+                        )
                     },
                 )
             finally:

@@ -324,7 +324,15 @@ class FollowAndNotificationTest(unittest.TestCase):
 
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?)",
-            ("track-4", "library", "release-owned", "track", "Owned/03.mp3", None, None),
+            (
+                "track-4",
+                "library",
+                "release-owned",
+                "track",
+                "Owned/03.mp3",
+                None,
+                None,
+            ),
         )
         self.db.execute("INSERT INTO media_files VALUES(?,?)", ("track-4", "media"))
         self.db.execute(

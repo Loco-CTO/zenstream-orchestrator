@@ -1051,11 +1051,31 @@ async def music_artist(
     request: Request,
     language: str | None = Query(None),
     view: str | None = Query(None),
+    includeTracks: bool = Query(True),
 ):
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
     result = await run_foreground(
-        catalog.music_artist_detail, account["id"], artist_id, preferred
+        catalog.music_artist_detail,
+        account["id"],
+        artist_id,
+        preferred,
+        include_tracks=includeTracks,
+    )
+    return _catalog_response(result, view)
+
+
+@router.get("/api/catalog/music/artists/{artist_id}/tracks")
+async def music_artist_tracks(
+    artist_id: str,
+    request: Request,
+    language: str | None = Query(None),
+    view: str | None = Query(None),
+):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    result = await run_foreground(
+        catalog.music_artist_tracks, account["id"], artist_id, preferred
     )
     return _catalog_response(result, view)
 

@@ -22,6 +22,11 @@ from queue import Empty
 from app.config import Config
 from app.images import LocalArtworkCache, blurhash_for_image
 from app.language_registry import language_options, normalize_track_language
+from app.local_metadata import (
+    NFO_EXTENSIONS,
+    parse_nfo_ids,
+    parse_nfo_metadata,
+)
 from app.logging_config import get_logger
 from app.metadata_domain import clean_music_title, music_filename_parts
 from app.progress import WholeJobProgress
@@ -391,30 +396,6 @@ def provider_ids(name: str) -> list[tuple[str, str, str]]:
     return result
 
 
-def parse_nfo_ids(path: Path) -> list[tuple[str, str, str]]:
-    if path.suffix.lower() != ".nfo":
-        return []
-    try:
-        import xml.etree.ElementTree as ET
-
-        root = ET.parse(path).getroot()
-    except (OSError, ET.ParseError):
-        return []
-    values = []
-    for node in root.findall(".//uniqueid"):
-        provider = (node.attrib.get("type") or "").lower()
-        value = (node.text or "").strip()
-        if not value:
-            continue
-        if provider in {"tmdb", "themoviedb"}:
-            values.append(("tmdb", "movie", value))
-        elif provider in {"tvdb", "thetvdb"}:
-            values.append(("tvdb", "series", value))
-        elif provider in {"imdb"}:
-            values.append(("imdb", "imdb", value))
-    return values
-
-
 _AUDIO_TAG_ALIASES = {
     "NAM": "TITLE",
     "TALB": "ALBUM",
@@ -649,6 +630,8 @@ def media_role(path: Path) -> str | None:
         return "subtitle"
     if suffix in LYRIC_EXTENSIONS:
         return "lyrics"
+    if suffix in NFO_EXTENSIONS:
+        return "metadata"
     if suffix in IMAGE_EXTENSIONS:
         return "image"
     if name == "theme" or path.parent.name.lower() == "theme-music":
@@ -1154,6 +1137,8 @@ class LibraryScanner:
             "added": set(),
             "changed": set(),
             "content_changed": set(),
+            "metadata_changed": set(),
+            "artwork_changed": set(),
             "unchanged": set(),
             "removed": set(),
         }
@@ -1165,6 +1150,7 @@ class LibraryScanner:
         self._scan_access_errors: set[Path] = set()
         self._scan_refresh_root_ids: set[str] = set()
         self._music_local_metadata: dict[str, dict] = {}
+        self._local_nfo_sources: dict[str, tuple[str, Path, list]] = {}
         self._scan_complete = False
         self._stage_lock = threading.RLock()
         self._stage = "idle"
@@ -1364,6 +1350,8 @@ class LibraryScanner:
             "added": set(),
             "changed": set(),
             "content_changed": set(),
+            "metadata_changed": set(),
+            "artwork_changed": set(),
             "unchanged": set(),
             "removed": set(),
         }
@@ -1375,6 +1363,7 @@ class LibraryScanner:
         self._scan_access_errors = set()
         self._scan_refresh_root_ids = set()
         self._music_local_metadata = {}
+        self._local_nfo_sources = {}
         self._last_stage_persisted_at = 0.0
         self._scan_complete = False
         try:
@@ -1626,16 +1615,28 @@ class LibraryScanner:
         self._scan_seen_ids.add(entity_id)
         return entity_id
 
-    def _mark_changed(self, entity_id: str, *, content_changed: bool = False) -> None:
+    def _mark_changed(
+        self,
+        entity_id: str,
+        *,
+        content_changed: bool = False,
+        metadata_changed: bool = False,
+        artwork_changed: bool = False,
+    ) -> None:
         self._scan_delta["changed"].add(entity_id)
         self._scan_delta["unchanged"].discard(entity_id)
         if content_changed:
             self._scan_delta["content_changed"].add(entity_id)
+        if metadata_changed:
+            self._scan_delta.setdefault("metadata_changed", set()).add(entity_id)
+        if artwork_changed:
+            self._scan_delta.setdefault("artwork_changed", set()).add(entity_id)
 
     def _metadata_candidates(self) -> set[str]:
         return (
             set(self._scan_delta["added"])
             | set(self._scan_delta["content_changed"])
+            | set(self._scan_delta.get("metadata_changed", set()))
             | set(self._scan_provider_identity_changed)
         )
 
@@ -2179,6 +2180,251 @@ class LibraryScanner:
             )
         )
 
+    @staticmethod
+    def _nfo_file_for_entity(
+        anchor: Path,
+        entity_type: str,
+        files: Iterable[Path | tuple[Path, os.stat_result | None]],
+    ) -> Path | None:
+        """Choose one deterministic sidecar NFO for an indexed entity."""
+        candidates = sorted(
+            {
+                Path(value[0] if isinstance(value, tuple) else value)
+                for value in files
+                if Path(value[0] if isinstance(value, tuple) else value).suffix.casefold()
+                in NFO_EXTENSIONS
+            },
+            key=lambda value: (str(value.parent).casefold(), value.name.casefold()),
+        )
+        if not candidates:
+            return None
+        anchor = Path(anchor)
+        anchor_directory = anchor.parent if anchor.suffix else anchor
+        same_directory = [
+            value for value in candidates if value.parent == anchor_directory
+        ]
+        preferred = {
+            "movie": ("movie.nfo", "movie.xml"),
+            "series": ("tvshow.nfo", "series.nfo", "show.nfo"),
+            "season": ("season.nfo", "season.xml"),
+            "episode": ("episodedetails.nfo", "episode.nfo"),
+            "artist": ("artist.nfo", "artist.xml"),
+            "release": ("album.nfo", "release.nfo", "album.xml"),
+            "track": ("track.nfo", "recording.nfo"),
+        }.get(entity_type, ())
+        for name in preferred:
+            match = next(
+                (value for value in same_directory if value.name.casefold() == name),
+                None,
+            )
+            if match:
+                return match
+        anchor_name = anchor.stem.casefold() if anchor.suffix else anchor.name.casefold()
+        match = next(
+            (
+                value
+                for value in same_directory
+                if value.stem.casefold() in {anchor_name, "".join(anchor_name.split())}
+            ),
+            None,
+        )
+        if match:
+            return match
+        if same_directory:
+            return same_directory[0]
+        return None
+
+    def _local_nfo_document(self, entity_id: str) -> dict | None:
+        if not self._has_table("metadata_cache"):
+            return None
+        rows = self.db.execute(
+            "SELECT payload FROM metadata_cache WHERE provider='local' "
+            "AND entity_type=(SELECT entity_type FROM library_entities WHERE id=?) "
+            "AND provider_id=? AND locale='' ORDER BY rowid DESC LIMIT 1",
+            (entity_id, entity_id),
+        )
+        if not rows:
+            return None
+        try:
+            value = json.loads(rows[0][0] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict) or not value.get("_localNfo"):
+            return None
+        value.pop("_imageLanguageSchema", None)
+        value.pop("_metadataLocale", None)
+        value.pop("_stale", None)
+        return value
+
+    def _write_local_nfo_cache(
+        self, entity_id: str, entity_type: str, document: dict
+    ) -> None:
+        if not self._has_table("metadata_cache"):
+            return
+        from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
+
+        payload = deepcopy(document)
+        payload["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
+        payload["_metadataLocale"] = ""
+        encoded = json.dumps(payload, ensure_ascii=False)
+        timestamp = now()
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(days=3650)
+        ).isoformat()
+        existing = self.db.execute(
+            "SELECT rowid FROM metadata_cache WHERE provider='local' AND entity_type=? "
+            "AND provider_id=? AND locale='' ORDER BY rowid DESC LIMIT 1",
+            (entity_type, entity_id),
+        )
+        if existing:
+            self.db.execute(
+                "UPDATE metadata_cache SET payload=?,fetched_at=?,expires_at=? WHERE rowid=?",
+                (encoded, timestamp, expires_at, existing[0][0]),
+            )
+        else:
+            self.db.execute(
+                "INSERT INTO metadata_cache(provider,entity_type,provider_id,locale,payload,fetched_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+                ("local", entity_type, entity_id, "", encoded, timestamp, expires_at),
+            )
+
+    def _project_local_nfo(
+        self, entity_id: str, entity_type: str, document: dict
+    ) -> None:
+        try:
+            from app.metadata_services import MetadataSearchProjection
+            from app.models.metadata import MetadataLanguageSettings
+
+            locales = list(MetadataLanguageSettings().get()) or ["en"]
+            projection = MetadataSearchProjection(self.db)
+            for locale in locales:
+                projection.project(
+                    "local",
+                    entity_type,
+                    entity_id,
+                    locale,
+                    document,
+                    replace_metadata=True,
+                )
+        except Exception:
+            logger.debug(
+                "local NFO projection deferred entity_id=%s type=%s",
+                entity_id,
+                entity_type,
+                exc_info=True,
+            )
+
+    def _persist_nfo_metadata(
+        self,
+        entity_id: str,
+        entity_type: str,
+        anchor: Path,
+        files: Iterable[Path | tuple[Path, os.stat_result | None]],
+        *,
+        base_document: dict | None = None,
+    ) -> bool:
+        """Persist one sidecar document and project it over provider metadata."""
+        file_values = list(files)
+        sources = getattr(self, "_local_nfo_sources", {})
+        self._local_nfo_sources = sources
+        sources[entity_id] = (
+            entity_type,
+            Path(anchor),
+            file_values,
+        )
+        nfo = self._nfo_file_for_entity(anchor, entity_type, file_values)
+        previous = self._local_nfo_document(entity_id)
+        if nfo is None:
+            if previous is None:
+                return False
+            fallback = base_document
+            if fallback is None and entity_type in {"artist", "release", "track"}:
+                fallback = self._music_local_metadata.get(entity_id)
+            if fallback and isinstance(fallback, dict):
+                document = deepcopy(fallback)
+                document["provider"] = "local"
+                document["providerId"] = entity_id
+                document["ids"] = [
+                    {
+                        "provider": "local",
+                        "identifierType": entity_type,
+                        "id": entity_id,
+                    }
+                ]
+                document.pop("_localNfo", None)
+                self._write_local_nfo_cache(entity_id, entity_type, document)
+                self._project_local_nfo(entity_id, entity_type, document)
+                if entity_type in {"artist", "release", "track"}:
+                    self._music_local_metadata[entity_id] = document
+                return True
+            self.db.execute(
+                "DELETE FROM metadata_cache WHERE provider='local' AND entity_type=? AND provider_id=?",
+                (entity_type, entity_id),
+            )
+            self.db.execute(
+                "DELETE FROM entity_provider_ids WHERE entity_id=? AND provider='local'",
+                (entity_id,),
+            )
+            self._project_local_nfo(entity_id, entity_type, {})
+            self._mark_changed(entity_id, metadata_changed=True)
+            return True
+
+        nfo_document = parse_nfo_metadata(nfo, entity_type)
+        if not nfo_document:
+            return False
+        if base_document is None and entity_type in {"artist", "release", "track"}:
+            base_document = self._music_local_metadata.get(entity_id)
+        document = deepcopy(base_document) if isinstance(base_document, dict) else {}
+        for key, value in nfo_document.items():
+            if key in {"provider", "providerId", "ids"}:
+                continue
+            if key in {"images", "extraImages"} and not value:
+                continue
+            document[key] = deepcopy(value)
+        document["provider"] = "local"
+        document["providerId"] = entity_id
+        nfo_ids = parse_nfo_ids(nfo, entity_type)
+        document["ids"] = [
+            {
+                "provider": "local",
+                "identifierType": entity_type,
+                "id": entity_id,
+            }
+        ] + [
+            {"provider": provider, "identifierType": identifier_type, "id": value}
+            for provider, identifier_type, value in nfo_ids
+        ]
+        document["_localNfo"] = True
+        changed = previous != document
+        if nfo_ids:
+            self._ids(entity_id, nfo_ids)
+        self.db.execute(
+            "INSERT OR REPLACE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
+            (entity_id, "local", entity_type, entity_id),
+        )
+        self._write_local_nfo_cache(entity_id, entity_type, document)
+        self._project_local_nfo(entity_id, entity_type, document)
+        if entity_type in {"artist", "release", "track"}:
+            self._music_local_metadata[entity_id] = document
+        if changed:
+            self._mark_changed(entity_id, metadata_changed=True)
+        return changed
+
+    def _repersist_nfo_metadata(self, entity_ids: Iterable[str]) -> None:
+        """Reapply sidecars after a provider projection has completed."""
+        sources = getattr(self, "_local_nfo_sources", {})
+        for entity_id in dict.fromkeys(str(value) for value in entity_ids):
+            source = sources.get(entity_id)
+            if not source:
+                continue
+            entity_type, anchor, files = source
+            self._persist_nfo_metadata(
+                entity_id,
+                entity_type,
+                anchor,
+                files,
+                base_document=self._music_local_metadata.get(entity_id),
+            )
+
     def _fetch_seen_locales(self, should_terminate: Callable[[], bool]) -> None:
         """Populate configured locales only for inventory changes from this scan."""
         from app.metadata_services import MetadataIngestService, metadata_task_results
@@ -2347,7 +2593,15 @@ class LibraryScanner:
                 if value[0] == "tmdb" and value not in normalized_keys
             )
             normalized = list(dict.fromkeys(normalized))
-        if entity_type == "artist":
+        if entity_type in {
+            "movie",
+            "series",
+            "season",
+            "episode",
+            "artist",
+            "release",
+            "track",
+        }:
             normalized_keys = set(normalized)
             normalized.extend(
                 value
@@ -3001,6 +3255,7 @@ class LibraryScanner:
             total,
         )
         service = MetadataService()
+        has_local_nfo = self._local_nfo_document(entity_id) is not None
         explicit = [
             {"provider": value[0], "id": value[2]}
             for value in self.db.execute(
@@ -3024,6 +3279,16 @@ class LibraryScanner:
                 value for value in provider_ids if value["provider"] in {"tmdb", "tvdb"}
             ]
             if not supported:
+                if has_local_nfo:
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_nfo',updated_at=? WHERE id=?",
+                        (now(), entity_id),
+                    )
+                    message = f"Kept local NFO metadata for {query}"
+                    self.store.update_job(
+                        job_id, progress_current=index, message=message
+                    )
+                    return
                 raise ValueError(f"No supported metadata identity for movie '{query}'")
             required_provider = (
                 "tmdb"
@@ -3052,6 +3317,17 @@ class LibraryScanner:
                 total,
             )
         except (ProviderError, ValueError, OSError) as error:
+            if has_local_nfo:
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_nfo',updated_at=? WHERE id=?",
+                    (now(), entity_id),
+                )
+                self.store.update_job(
+                    job_id,
+                    progress_current=index,
+                    message=f"Kept local NFO metadata for {query}; provider unavailable",
+                )
+                return
             self.db.execute(
                 "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
                 (now(), entity_id),
@@ -3068,6 +3344,17 @@ class LibraryScanner:
             )
             message = f"Metadata failed for {query}; continuing"
         except Exception as error:
+            if has_local_nfo:
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_nfo',updated_at=? WHERE id=?",
+                    (now(), entity_id),
+                )
+                self.store.update_job(
+                    job_id,
+                    progress_current=index,
+                    message=f"Kept local NFO metadata for {query}; provider unavailable",
+                )
+                return
             self.db.execute(
                 "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
                 (now(), entity_id),
@@ -3105,6 +3392,7 @@ class LibraryScanner:
             relative_path,
         )
         result = None
+        has_local_nfo = self._local_nfo_document(series_id) is not None
         # Revisit matched TVDB roots during an affected scan so the TVDB
         # remote-ID list can add the optional TMDB secondary identity.
         has_tmdb_identity = bool(
@@ -3132,6 +3420,16 @@ class LibraryScanner:
                     "series", query, year, explicit
                 )
             except ProviderError as error:
+                if has_local_nfo:
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_nfo',updated_at=? WHERE id=?",
+                        (now(), series_id),
+                    )
+                    self.store.update_job(
+                        job_id,
+                        message=f"Kept local NFO metadata for series {series_id}",
+                    )
+                    return None
                 self.db.execute(
                     "UPDATE library_entities SET match_status='failed',match_confidence=NULL,match_method='scan_resolution',updated_at=? WHERE id=?",
                     (now(), series_id),
@@ -3175,6 +3473,8 @@ class LibraryScanner:
                 (series_id,),
             )
             for provider, provider_id in provider_rows:
+                if provider == "local":
+                    continue
                 self._fetch_configured_locales(
                     service,
                     provider,
@@ -4105,6 +4405,8 @@ class LibraryScanner:
             "removed": 0,
             "unchanged": 0,
             "content_changed": False,
+            "metadata_changed": False,
+            "artwork_changed": False,
         }
         for file_entry in files:
             if isinstance(file_entry, tuple):
@@ -4286,8 +4588,13 @@ class LibraryScanner:
                     ),
                 )
                 result["updated"] += 1
-                if content_changed and role == "media":
-                    result["content_changed"] = True
+                if content_changed:
+                    if role == "media":
+                        result["content_changed"] = True
+                    elif role == "metadata":
+                        result["metadata_changed"] = True
+                    elif role == "image":
+                        result["artwork_changed"] = True
             else:
                 if has_fingerprint:
                     self.db.execute(
@@ -4321,6 +4628,10 @@ class LibraryScanner:
                 result["added"] += 1
                 if role == "media":
                     result["content_changed"] = True
+                elif role == "metadata":
+                    result["metadata_changed"] = True
+                elif role == "image":
+                    result["artwork_changed"] = True
         for key, old in existing.items():
             if key in seen:
                 continue
@@ -4328,10 +4639,36 @@ class LibraryScanner:
             result["removed"] += 1
             if old[2] == "media":
                 result["content_changed"] = True
+            elif old[2] == "metadata":
+                result["metadata_changed"] = True
+            elif old[2] == "image":
+                result["artwork_changed"] = True
         if has_fingerprint:
             self._materialize_local_artwork(entity_id, root)
-        if result["added"] or result["removed"] or result["content_changed"]:
-            self._mark_changed(entity_id, content_changed=result["content_changed"])
+        if (
+            result["added"]
+            or result["removed"]
+            or result["content_changed"]
+            or result["metadata_changed"]
+            or result["artwork_changed"]
+        ):
+            self._mark_changed(
+                entity_id,
+                content_changed=result["content_changed"],
+                metadata_changed=result["metadata_changed"],
+                artwork_changed=result["artwork_changed"],
+            )
+        if result["artwork_changed"]:
+            try:
+                from app.metadata_services import reproject_entity_artwork
+
+                reproject_entity_artwork(self.db, entity_id)
+            except Exception:
+                logger.debug(
+                    "local artwork projection refresh deferred entity_id=%s",
+                    entity_id,
+                    exc_info=True,
+                )
         # Probe after the file rows are reconciled so playback never depends
         # on a stale source row. A same-fingerprint timestamp touch does not probe.
         if result["content_changed"]:
@@ -4610,9 +4947,23 @@ class LibraryScanner:
                             for sidecar_entry in files_by_parent.get(media.parent, [])
                             if sidecar_entry[0] == media
                             or (
-                                sidecar_entry[0].stem.startswith(media.stem)
+                                sidecar_entry[0].stem.casefold().startswith(
+                                    media.stem.casefold()
+                                )
                                 and sidecar_entry[0].suffix.lower()
                                 not in VIDEO_EXTENSIONS
+                            )
+                            or (
+                                sidecar_entry[0].name.casefold()
+                                in {"episodedetails.nfo", "episode.nfo"}
+                                and sum(
+                                    1
+                                    for sibling, sibling_stat in files_by_parent.get(
+                                        media.parent, []
+                                    )
+                                    if self._is_supported_video(sibling, sibling_stat)
+                                )
+                                == 1
                             )
                         ],
                     )
@@ -4699,7 +5050,7 @@ class LibraryScanner:
             for nfo in (
                 path for path, _file_stat in files if path.suffix.lower() == ".nfo"
             ):
-                discovered_ids.extend(parse_nfo_ids(nfo))
+                discovered_ids.extend(parse_nfo_ids(nfo, "movie"))
             if discovered_ids:
                 self._replace_ids(entity, discovered_ids)
             file_delta = self._files(
@@ -4708,6 +5059,7 @@ class LibraryScanner:
                 files,
                 job_id=job_id,
             )
+            self._persist_nfo_metadata(entity, "movie", entry, files)
             if not self.db.execute(
                 "SELECT 1 FROM media_files WHERE entity_id=? AND role='media' LIMIT 1",
                 (entity,),
@@ -4718,6 +5070,8 @@ class LibraryScanner:
             requires_materialization = (
                 entity in self._scan_created_ids
                 or file_delta["content_changed"]
+                or file_delta["metadata_changed"]
+                or file_delta["artwork_changed"]
                 or entity in self._scan_provider_identity_changed
             )
             if requires_materialization:
@@ -4738,6 +5092,7 @@ class LibraryScanner:
                     len(entries),
                 )
                 self._await_metadata_futures([future], should_terminate)
+                self._persist_nfo_metadata(entity, "movie", entry, files)
             else:
                 self._publish_root(entity)
             count += 1
@@ -4849,11 +5204,15 @@ class LibraryScanner:
                 service = MetadataService()
             series = self._entity(library_id, None, "series", series_relative_path)
             series_ids = provider_ids(series_dir.name)
+            for path in series_children:
+                if path.is_file() and path.suffix.casefold() in NFO_EXTENSIONS:
+                    series_ids.extend(parse_nfo_ids(path, "series"))
             if series_ids:
                 self._replace_ids(series, series_ids)
             series_metadata = None
             accepted_series_episodes = 0
-            accepted_seasons: list[tuple[Path, int, str]] = []
+            accepted_seasons: list[tuple[Path, int, str, list]] = []
+            accepted_episodes: list[tuple[str, str, Path, list]] = []
             for season_dir, season_folder_number, episode_records in episode_plan:
                 logger.info(
                     "library scan season start library_id=%s job_id=%s series_id=%s path=%s",
@@ -4868,6 +5227,30 @@ class LibraryScanner:
                     "season",
                     relative(str(root), str(season_dir)),
                     season_number=season_folder_number,
+                )
+                season_files = []
+                try:
+                    season_files = [
+                        path
+                        for path in season_dir.iterdir()
+                        if path.is_file()
+                        and (
+                            path.suffix.casefold() in NFO_EXTENSIONS
+                            or path.suffix.lower() in IMAGE_EXTENSIONS
+                        )
+                        and not any(
+                            path.stem.startswith(record[2].stem)
+                            for record in episode_records
+                        )
+                    ]
+                except OSError:
+                    self._defer_root(
+                        relative(str(root), str(season_dir)),
+                        "season artwork directory is inaccessible",
+                    )
+                self._files(season, root, season_files, job_id=job_id)
+                self._persist_nfo_metadata(
+                    season, "season", season_dir, season_files
                 )
                 accepted_season_episodes = 0
                 for (
@@ -4897,6 +5280,9 @@ class LibraryScanner:
                         episode_end_number=end_number,
                     )
                     episode_ids = provider_ids(media.name)
+                    for path, _file_stat in episode_files:
+                        if path.suffix.casefold() in NFO_EXTENSIONS:
+                            episode_ids.extend(parse_nfo_ids(path, "episode"))
                     if episode_ids:
                         self._replace_ids(episode, episode_ids)
                     self._files(
@@ -4904,6 +5290,9 @@ class LibraryScanner:
                         root,
                         episode_files,
                         job_id=job_id,
+                    )
+                    self._persist_nfo_metadata(
+                        episode, "episode", media, episode_files
                     )
                     if not self.db.execute(
                         "SELECT 1 FROM media_files WHERE entity_id=? AND role='media' LIMIT 1",
@@ -4913,6 +5302,7 @@ class LibraryScanner:
                         continue
                     accepted_season_episodes += 1
                     accepted_series_episodes += 1
+                    accepted_episodes.append((episode, season, media, episode_files))
                     episode_count += 1
                     if episode_count == 1 or episode_count % 10 == 0:
                         self.store.update_job(
@@ -4938,26 +5328,32 @@ class LibraryScanner:
                 if not accepted_season_episodes:
                     self._scan_rejected_ids.add(season)
                     continue
-                accepted_seasons.append((season_dir, season_folder_number, season))
+                accepted_seasons.append(
+                    (season_dir, season_folder_number, season, season_files)
+                )
             root_video_stems = {
                 path.stem
                 for path in series_children
                 if path.suffix.lower() in VIDEO_EXTENSIONS
             }
+            series_files = [
+                path
+                for path in series_children
+                if path.is_file()
+                and path.suffix.lower() not in VIDEO_EXTENSIONS
+                and not any(
+                    path.stem.startswith(video_stem)
+                    for video_stem in root_video_stems
+                )
+            ]
             self._files(
                 series,
                 root,
-                [
-                    path
-                    for path in series_children
-                    if path.is_file()
-                    and path.suffix.lower() not in VIDEO_EXTENSIONS
-                    and not any(
-                        path.stem.startswith(video_stem)
-                        for video_stem in root_video_stems
-                    )
-                ],
+                series_files,
                 job_id=job_id,
+            )
+            self._persist_nfo_metadata(
+                series, "series", series_dir, series_files
             )
             unseen_descendants = self.db.execute(
                 "WITH RECURSIVE descendants(id) AS ("
@@ -5012,7 +5408,12 @@ class LibraryScanner:
             tvdb_identity = None
             if service:
                 season_candidates = self._metadata_candidates()
-                for season_dir, season_folder_number, season in accepted_seasons:
+                for (
+                    season_dir,
+                    season_folder_number,
+                    season,
+                    season_files,
+                ) in accepted_seasons:
                     season_rows = self.db.execute(
                         "SELECT id FROM library_entities WHERE id=? OR parent_id=?",
                         (season, season),
@@ -5052,6 +5453,22 @@ class LibraryScanner:
                             series_metadata=series_metadata,
                             tvdb_identity=tvdb_identity,
                         )
+                        self._persist_nfo_metadata(
+                            season, "season", season_dir, season_files
+                        )
+                        for (
+                            child_id,
+                            child_season,
+                            media,
+                            episode_files,
+                        ) in accepted_episodes:
+                            if child_season == season:
+                                self._persist_nfo_metadata(
+                                    child_id,
+                                    "episode",
+                                    media,
+                                    episode_files,
+                                )
                     except JobTerminated:
                         raise
                     except Exception as error:
@@ -5067,6 +5484,11 @@ class LibraryScanner:
                             job_id,
                             message=f"Metadata failed for season {season_folder_number}; continuing",
                         )
+            self._persist_nfo_metadata(series, "series", series_dir, series_files)
+            for child_id, _season, media, episode_files in accepted_episodes:
+                self._persist_nfo_metadata(
+                    child_id, "episode", media, episode_files
+                )
             self._scan_refresh_root_ids.add(series)
             self._publish_root(series)
             series_count += 1
@@ -5129,6 +5551,10 @@ class LibraryScanner:
         self, artist_id: str, name: str, ingest=None
     ) -> None:
         """Keep providerless artist metadata durable and projection-readable."""
+        existing_nfo = self._local_nfo_document(artist_id)
+        if existing_nfo is not None:
+            self._music_local_metadata[artist_id] = existing_nfo
+            return
         display_name = _music_display_value(name)
         if not display_name:
             return
@@ -5269,6 +5695,35 @@ class LibraryScanner:
             "artist",
             artist_name=artist_name,
         )
+        artist_directory = (
+            root / relative_first.parts[0]
+            if relative_first.parts and (root / relative_first.parts[0]).is_dir()
+            else first_path.parent
+        )
+        try:
+            artist_assets = [
+                path
+                for path in artist_directory.iterdir()
+                if path.is_file()
+                and (
+                    path.suffix.lower() in IMAGE_EXTENSIONS
+                    or path.suffix.casefold() in NFO_EXTENSIONS
+                )
+            ]
+        except OSError:
+            artist_assets = []
+            self._defer_root(
+                relative(str(root), str(artist_directory)),
+                "artist artwork directory is inaccessible",
+            )
+        self._files(artist, root, artist_assets, job_id=job_id)
+        self._persist_nfo_metadata(
+            artist,
+            "artist",
+            artist_directory,
+            artist_assets,
+            base_document=self._music_local_metadata.get(artist),
+        )
         if embedded_artist_id:
             self._replace_ids(artist, [("musicbrainz", "artist", embedded_artist_id)])
 
@@ -5380,7 +5835,19 @@ class LibraryScanner:
                     sidecar
                     for sidecar in track.parent.iterdir()
                     if sidecar.is_file()
-                    and sidecar.stem.startswith(track.stem)
+                    and (
+                        sidecar.stem.casefold().startswith(track.stem.casefold())
+                        or (
+                            sidecar.name.casefold() in {"track.nfo", "recording.nfo"}
+                            and sum(
+                                1
+                                for sibling in track.parent.iterdir()
+                                if sibling.is_file()
+                                and sibling.suffix.casefold() in AUDIO_EXTENSIONS
+                            )
+                            == 1
+                        )
+                    )
                     and sidecar != track
                 ]
             except OSError:
@@ -5388,11 +5855,21 @@ class LibraryScanner:
                     relative(str(root), str(track.parent)),
                     "track sidecars are inaccessible",
                 )
-            self._files(entity, root, [track, *sidecars], job_id=job_id)
+            track_files = [track, *sidecars]
+            self._files(entity, root, track_files, job_id=job_id)
+            self._persist_nfo_metadata(
+                entity,
+                "track",
+                track,
+                track_files,
+                base_document=local,
+            )
+            local = self._music_local_metadata.get(entity, local)
             tracks.append(
                 {
                     "entity_id": entity,
                     "path": track,
+                    "files": track_files,
                     "tags": tags,
                     "local": local,
                     "music_ids": music_ids,
@@ -5404,7 +5881,11 @@ class LibraryScanner:
             image_paths = [
                 path
                 for path in album_dir.iterdir()
-                if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+                if path.is_file()
+                and (
+                    path.suffix.lower() in IMAGE_EXTENSIONS
+                    or path.suffix.casefold() in NFO_EXTENSIONS
+                )
             ]
         except OSError:
             image_paths = []
@@ -5415,6 +5896,20 @@ class LibraryScanner:
             )
         if artwork_accessible:
             self._files(release, root, image_paths, job_id=job_id)
+            self._persist_nfo_metadata(
+                release,
+                "release",
+                album_dir,
+                image_paths,
+                base_document=self._music_local_metadata.get(release),
+            )
+        self._persist_nfo_metadata(
+            artist,
+            "artist",
+            artist_directory,
+            artist_assets,
+            base_document=self._music_local_metadata.get(artist),
+        )
         return artist, release, tracks, len(tracks)
 
     def _enrich_music_lastfm_group(
@@ -6173,6 +6668,9 @@ class LibraryScanner:
 
     def _music_document(self, entity_id: str, entity_type: str) -> dict:
         """Read one cached/projected music document without contacting a provider."""
+        local_nfo = self._local_nfo_document(entity_id)
+        if local_nfo is not None:
+            return local_nfo
         projected_document = None
         if self._has_table("catalog_item_projection"):
             rows = self.db.execute(
@@ -6747,6 +7245,7 @@ class LibraryScanner:
         targets: set[str] | None = None,
     ) -> int:
         self._music_local_metadata = {}
+        self._local_nfo_sources = {}
         self._music_artist_entities: dict[str, str] = {}
         self._music_release_entities: dict[tuple[str, ...], str] = {}
         scan_roots = [root] if targets is None else self._target_entries(root, targets)
@@ -6921,6 +7420,14 @@ class LibraryScanner:
                 self._scan_refresh_root_ids.add(artist)
                 self._publish_root(artist)
                 self._flush_publications()
+            self._repersist_nfo_metadata(
+                [artist, release]
+                + [
+                    str(track.get("entity_id"))
+                    for track in tracks
+                    if isinstance(track, dict) and track.get("entity_id")
+                ]
+            )
             group_count += 1
             count += indexed_count
             self.store.update_job(

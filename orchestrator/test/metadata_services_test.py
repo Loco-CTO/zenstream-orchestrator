@@ -353,6 +353,84 @@ class MetadataServicesTest(unittest.TestCase):
             finally:
                 database.close()
 
+    def test_local_metadata_fields_override_provider_and_restore_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler("sqlite", {}, str(Path(directory) / "db.sqlite"))
+            try:
+                for statement in (
+                    "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)",
+                    "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT,is_primary INTEGER)",
+                    "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)",
+                    "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))",
+                    "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))",
+                    "CREATE TABLE catalog_root_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,title_sort TEXT,PRIMARY KEY(gram,entity_id,locale))",
+                    "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))",
+                    "CREATE TABLE catalog_artwork_selection(entity_id TEXT,locale TEXT,image_type TEXT,provider TEXT,local_path TEXT,blur_hash TEXT,version TEXT,updated_at TEXT,PRIMARY KEY(entity_id,locale,image_type))",
+                    "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT,fetched_at TEXT,blur_hash TEXT)",
+                ):
+                    database.execute(statement)
+                database.execute(
+                    "INSERT INTO library_entities VALUES('movie','library',NULL,'movie')"
+                )
+                database.execute(
+                    "INSERT INTO entity_provider_ids VALUES('movie','tmdb','1',1)"
+                )
+                database.execute(
+                    "INSERT INTO entity_provider_ids VALUES('movie','local','movie',0)"
+                )
+
+                projection = MetadataSearchProjection(database)
+                projection.project(
+                    "tmdb",
+                    "movie",
+                    "1",
+                    "en",
+                    {"title": "Provider title", "overview": "Provider overview"},
+                )
+                projection.project(
+                    "local",
+                    "movie",
+                    "movie",
+                    "en",
+                    {"title": "NFO title", "overview": "NFO overview"},
+                    replace_metadata=True,
+                )
+                projection.project(
+                    "tmdb",
+                    "movie",
+                    "1",
+                    "en",
+                    {
+                        "title": "Refreshed provider title",
+                        "overview": "Refreshed provider overview",
+                    },
+                )
+                projected = json.loads(
+                    database.read_execute(
+                        "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
+                    )[0][0]
+                )
+                self.assertEqual(projected["title"], "NFO title")
+                self.assertEqual(projected["overview"], "NFO overview")
+
+                projection.project(
+                    "local",
+                    "movie",
+                    "movie",
+                    "en",
+                    {},
+                    replace_metadata=True,
+                )
+                restored = json.loads(
+                    database.read_execute(
+                        "SELECT payload FROM catalog_item_projection WHERE entity_id='movie' AND locale='en'"
+                    )[0][0]
+                )
+                self.assertEqual(restored["title"], "Refreshed provider title")
+                self.assertEqual(restored["overview"], "Refreshed provider overview")
+            finally:
+                database.close()
+
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
         self.db.execute(

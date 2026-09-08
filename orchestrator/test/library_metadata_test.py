@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import threading
@@ -27,6 +28,8 @@ from app.library import (
     _top_level_key,
     guess_media,
     normalized_path,
+    parse_nfo_ids,
+    parse_nfo_metadata,
     parse_audio_tags,
     provider_ids,
     sidecar_display_title,
@@ -2834,6 +2837,151 @@ class LibraryMetadataTest(unittest.TestCase):
         self.assertFalse(
             library_routes._local_image_for_type("Series/poster.jpg", "Backdrop")
         )
+
+    def test_nfo_metadata_parser_reads_video_fields_people_and_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "movie.nfo"
+            path.write_text(
+                """<movie>
+                    <title>Local Movie</title>
+                    <originaltitle>Original Movie</originaltitle>
+                    <plot>A local plot.</plot>
+                    <premiered>2025-03-04</premiered>
+                    <runtime>2h 10m</runtime>
+                    <genre>Drama</genre><genre>Drama</genre>
+                    <studio>Local Studio</studio>
+                    <uniqueid type="tmdb">123</uniqueid>
+                    <uniqueid type="imdb">tt123</uniqueid>
+                    <actor><name>Actor One</name><role>Hero</role><order>1</order></actor>
+                    <director>Director One</director>
+                </movie>""",
+                encoding="utf-8",
+            )
+
+            document = parse_nfo_metadata(path, "movie")
+            ids = parse_nfo_ids(path, "movie")
+
+        self.assertEqual(document["title"], "Local Movie")
+        self.assertEqual(document["originalTitle"], "Original Movie")
+        self.assertEqual(document["releaseDate"], "2025-03-04")
+        self.assertEqual(document["runtimeMinutes"], 130)
+        self.assertEqual(document["tags"], ["Drama"])
+        self.assertEqual(
+            ids,
+            [("tmdb", "movie", "123"), ("imdb", "imdb", "tt123")],
+        )
+        self.assertEqual(document["people"][0]["name"], "Actor One")
+        self.assertEqual(document["people"][0]["role"], "Hero")
+
+    def test_nfo_metadata_parser_reads_music_id_tags_and_artwork_variants(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "album.nfo"
+            path.write_text(
+                """<album>
+                    <title>Local Album</title>
+                    <albumartist>Artist One</albumartist>
+                    <artist>Artist One</artist><artist>Artist Two</artist>
+                    <musicbrainzalbumid>release-1</musicbrainzalbumid>
+                    <genre>Jazz</genre><year>2024</year>
+                </album>""",
+                encoding="utf-8",
+            )
+
+            document = parse_nfo_metadata(path, "release")
+            ids = parse_nfo_ids(path, "release")
+
+        self.assertEqual(document["title"], "Local Album")
+        self.assertEqual(document["albumArtist"], "Artist One")
+        self.assertEqual(
+            [value["name"] for value in document["artists"]],
+            ["Artist One", "Artist Two"],
+        )
+        self.assertEqual(ids, [("musicbrainz", "release", "release-1")])
+
+        from app.local_metadata import local_artwork_type
+
+        self.assertEqual(local_artwork_type("poster-2.jpg"), "Primary")
+        self.assertEqual(local_artwork_type("fanart_03.webp"), "Backdrop")
+        self.assertEqual(local_artwork_type("clear-logo.png"), "Logo")
+
+    def test_nfo_parser_ignores_malformed_and_oversized_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            malformed = Path(directory) / "bad.nfo"
+            malformed.write_text("<movie>", encoding="utf-8")
+            oversized = Path(directory) / "large.nfo"
+            oversized.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+
+            self.assertEqual(parse_nfo_metadata(malformed, "movie"), {})
+            self.assertEqual(parse_nfo_ids(oversized, "movie"), [])
+
+    def test_movie_scan_persists_nfo_as_local_metadata_and_media_role(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                movie = root / "Movie"
+                movie.mkdir()
+                (movie / "Movie.mkv").write_bytes(b"video")
+                (movie / "movie.nfo").write_text(
+                    "<movie><title>Edited title</title>"
+                    "<plot>Edited plot</plot><uniqueid type='tmdb'>77</uniqueid></movie>",
+                    encoding="utf-8",
+                )
+                self._prepare_incremental_scan(scanner)
+                with patch.object(scanner, "_resolve_movie_row"):
+                    scanner._scan_movies("library-1", root, "job-1", lambda: False)
+
+                entity_id = db.execute(
+                    "SELECT id FROM library_entities WHERE entity_type='movie'"
+                )[0][0]
+                self.assertEqual(
+                    db.execute(
+                        "SELECT role FROM media_files WHERE entity_id=? AND relative_path='Movie/movie.nfo'",
+                        (entity_id,),
+                    ),
+                    [("metadata",)],
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT provider,identifier_type,provider_id FROM entity_provider_ids WHERE entity_id=? ORDER BY provider",
+                        (entity_id,),
+                    ),
+                    [("local", "movie", entity_id), ("tmdb", "movie", "77")],
+                )
+                payload = db.execute(
+                    "SELECT payload FROM metadata_cache WHERE provider='local' AND entity_type='movie' AND provider_id=?",
+                    (entity_id,),
+                )[0][0]
+                self.assertEqual(json.loads(payload)["title"], "Edited title")
+        finally:
+            db.close()
+
+    def test_generic_episode_nfo_is_assigned_when_directory_has_one_episode(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                series = root / "Example"
+                season = series / "Season 1"
+                season.mkdir(parents=True)
+                episode = season / "Example - S01E01.mkv"
+                episode.write_bytes(b"video")
+                nfo = season / "episode.nfo"
+                nfo.write_text(
+                    "<episodedetails><title>Local episode</title></episodedetails>",
+                    encoding="utf-8",
+                )
+
+                plan = scanner._series_episode_plan(
+                    root,
+                    series,
+                    lambda: False,
+                    list(series.iterdir()),
+                )
+                episode_files = plan[0][2][0][-1]
+                self.assertIn(nfo, [path for path, _file_stat in episode_files])
+        finally:
+            db.close()
 
     def test_primary_image_candidates_include_series_for_seasons_and_episodes(self):
         values = {

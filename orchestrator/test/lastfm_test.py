@@ -202,17 +202,19 @@ class LastFmClientTest(unittest.TestCase):
 
     def test_lastfm_errors_are_provider_errors_without_exposing_invalid_json(self):
         client = LastFmClient({"apiKey": "test-key"})
-        with patch.object(
-            client,
-            "_get",
-            return_value={"error": 6, "message": "The artist was not found"},
+        with (
+            patch.object(
+                client,
+                "_get",
+                return_value={"error": 6, "message": "The artist was not found"},
+            ),
+            self.assertRaises(ProviderError),
         ):
-            with self.assertRaises(ProviderError):
-                client.details(
-                    "artist",
-                    LastFmClient.lookup_key("artist", artist_name="Missing"),
-                    "en",
-                )
+            client.details(
+                "artist",
+                LastFmClient.lookup_key("artist", artist_name="Missing"),
+                "en",
+            )
 
     def test_music_reads_union_lastfm_tags_and_preserve_provider_namespace(self):
         with tempfile.TemporaryDirectory() as directory:

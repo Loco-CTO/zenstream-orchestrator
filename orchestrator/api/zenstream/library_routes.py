@@ -10,8 +10,8 @@ from app.foreground import run_auth, run_control, run_foreground
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore, render_audio_preview
 from app.jobs import scheduler
-from app.local_metadata import local_artwork_type
 from app.library import LibraryStore, runtime
+from app.local_metadata import local_artwork_type
 from app.logging_config import get_logger
 from app.metadata_domain import choose_artwork
 from app.metadata_services import MetadataIngestService, MetadataReadService

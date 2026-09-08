@@ -33,9 +33,9 @@ from app.client_auth import (
 )
 from app.foreground import run_auth, run_control, run_foreground
 from app.images import LocalArtworkCache
-from app.local_metadata import local_artwork_type
 from app.intro_outro import IntroOutroStore
 from app.language_registry import language_options
+from app.local_metadata import local_artwork_type
 from app.logging_config import get_logger
 from app.lyrics import lyrics_to_vtt
 from app.models.account import Account
@@ -1168,10 +1168,7 @@ async def item_image(
                 (entity_id,),
             ):
                 candidate = directory / relative_path
-                if (
-                    local_artwork_type(candidate) == image_type
-                    and candidate.is_file()
-                ):
+                if local_artwork_type(candidate) == image_type and candidate.is_file():
                     cached = LocalArtworkCache(catalog.db).path(content_hash)
                     if cached and cached.is_file():
                         return cached

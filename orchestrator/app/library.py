@@ -2191,7 +2191,9 @@ class LibraryScanner:
             {
                 Path(value[0] if isinstance(value, tuple) else value)
                 for value in files
-                if Path(value[0] if isinstance(value, tuple) else value).suffix.casefold()
+                if Path(
+                    value[0] if isinstance(value, tuple) else value
+                ).suffix.casefold()
                 in NFO_EXTENSIONS
             },
             key=lambda value: (str(value.parent).casefold(), value.name.casefold()),
@@ -2219,7 +2221,9 @@ class LibraryScanner:
             )
             if match:
                 return match
-        anchor_name = anchor.stem.casefold() if anchor.suffix else anchor.name.casefold()
+        anchor_name = (
+            anchor.stem.casefold() if anchor.suffix else anchor.name.casefold()
+        )
         match = next(
             (
                 value
@@ -2268,9 +2272,7 @@ class LibraryScanner:
         payload["_metadataLocale"] = ""
         encoded = json.dumps(payload, ensure_ascii=False)
         timestamp = now()
-        expires_at = (
-            datetime.now(timezone.utc) + timedelta(days=3650)
-        ).isoformat()
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=3650)).isoformat()
         existing = self.db.execute(
             "SELECT rowid FROM metadata_cache WHERE provider='local' AND entity_type=? "
             "AND provider_id=? AND locale='' ORDER BY rowid DESC LIMIT 1",
@@ -4947,9 +4949,9 @@ class LibraryScanner:
                             for sidecar_entry in files_by_parent.get(media.parent, [])
                             if sidecar_entry[0] == media
                             or (
-                                sidecar_entry[0].stem.casefold().startswith(
-                                    media.stem.casefold()
-                                )
+                                sidecar_entry[0]
+                                .stem.casefold()
+                                .startswith(media.stem.casefold())
                                 and sidecar_entry[0].suffix.lower()
                                 not in VIDEO_EXTENSIONS
                             )
@@ -5249,9 +5251,7 @@ class LibraryScanner:
                         "season artwork directory is inaccessible",
                     )
                 self._files(season, root, season_files, job_id=job_id)
-                self._persist_nfo_metadata(
-                    season, "season", season_dir, season_files
-                )
+                self._persist_nfo_metadata(season, "season", season_dir, season_files)
                 accepted_season_episodes = 0
                 for (
                     episode_number,
@@ -5291,9 +5291,7 @@ class LibraryScanner:
                         episode_files,
                         job_id=job_id,
                     )
-                    self._persist_nfo_metadata(
-                        episode, "episode", media, episode_files
-                    )
+                    self._persist_nfo_metadata(episode, "episode", media, episode_files)
                     if not self.db.execute(
                         "SELECT 1 FROM media_files WHERE entity_id=? AND role='media' LIMIT 1",
                         (episode,),
@@ -5342,8 +5340,7 @@ class LibraryScanner:
                 if path.is_file()
                 and path.suffix.lower() not in VIDEO_EXTENSIONS
                 and not any(
-                    path.stem.startswith(video_stem)
-                    for video_stem in root_video_stems
+                    path.stem.startswith(video_stem) for video_stem in root_video_stems
                 )
             ]
             self._files(
@@ -5352,9 +5349,7 @@ class LibraryScanner:
                 series_files,
                 job_id=job_id,
             )
-            self._persist_nfo_metadata(
-                series, "series", series_dir, series_files
-            )
+            self._persist_nfo_metadata(series, "series", series_dir, series_files)
             unseen_descendants = self.db.execute(
                 "WITH RECURSIVE descendants(id) AS ("
                 "SELECT id FROM library_entities WHERE parent_id=? "
@@ -5486,9 +5481,7 @@ class LibraryScanner:
                         )
             self._persist_nfo_metadata(series, "series", series_dir, series_files)
             for child_id, _season, media, episode_files in accepted_episodes:
-                self._persist_nfo_metadata(
-                    child_id, "episode", media, episode_files
-                )
+                self._persist_nfo_metadata(child_id, "episode", media, episode_files)
             self._scan_refresh_root_ids.add(series)
             self._publish_root(series)
             series_count += 1

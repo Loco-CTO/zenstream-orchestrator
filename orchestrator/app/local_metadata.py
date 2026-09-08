@@ -7,7 +7,6 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urlparse
 
-
 NFO_MAX_BYTES = 4 * 1024 * 1024
 NFO_EXTENSIONS = frozenset({".nfo"})
 
@@ -35,10 +34,7 @@ LOCAL_ARTWORK_NAMES = {
 }
 
 _LOCAL_ARTWORK_COMPACT = {
-    image_type: {
-        re.sub(r"[^a-z0-9]", "", name.casefold())
-        for name in names
-    }
+    image_type: {re.sub(r"[^a-z0-9]", "", name.casefold()) for name in names}
     for image_type, names in LOCAL_ARTWORK_NAMES.items()
 }
 
@@ -71,9 +67,7 @@ def _text(node: ET.Element | None) -> str | None:
 def _nodes(root: ET.Element, *names: str) -> list[ET.Element]:
     wanted = {_tag(name) for name in names}
     return [
-        node
-        for node in root.iter()
-        if node is not root and _tag(node.tag) in wanted
+        node for node in root.iter() if node is not root and _tag(node.tag) in wanted
     ]
 
 
@@ -145,7 +139,9 @@ def _entity_identifier_type(entity_type: str | None, provider: str) -> str:
             else "movie"
         )
     if provider == "tvdb":
-        return entity_type if entity_type in {"series", "season", "episode"} else "series"
+        return (
+            entity_type if entity_type in {"series", "season", "episode"} else "series"
+        )
     if provider == "imdb":
         return "imdb"
     if entity_type == "artist":
@@ -312,7 +308,11 @@ def _video_people(root: ET.Element) -> list[dict]:
         if kind != "actor":
             person["role"] = person.get("role") or kind.title()
             person["department"] = (
-                "Directing" if kind == "director" else "Writing" if kind == "writer" else "Production"
+                "Directing"
+                if kind == "director"
+                else "Writing"
+                if kind == "writer"
+                else "Production"
             )
         order = _number(_first(node, "order"), integer=True)
         if order is not None:

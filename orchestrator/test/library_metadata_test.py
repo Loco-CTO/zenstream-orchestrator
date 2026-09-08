@@ -28,9 +28,9 @@ from app.library import (
     _top_level_key,
     guess_media,
     normalized_path,
+    parse_audio_tags,
     parse_nfo_ids,
     parse_nfo_metadata,
-    parse_audio_tags,
     provider_ids,
     sidecar_display_title,
 )

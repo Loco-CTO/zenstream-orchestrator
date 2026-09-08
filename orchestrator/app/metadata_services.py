@@ -158,6 +158,8 @@ FACT_FIELDS = {
 
 MUSIC_ENTITY_TYPES = frozenset({"artist", "release", "track"})
 MUSIC_PROJECTION_FIELDS = (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}
+MUSIC_CREDIT_FIELDS = frozenset({"albumArtist", "artists", "contributingArtists"})
+MUSIC_CREDIT_LIST_FIELDS = frozenset({"artists", "contributingArtists"})
 
 PROVIDER_PRIORITIES = {
     "series": ["local", "tvdb", "tmdb"],
@@ -380,10 +382,37 @@ def merge_music_projection_fallback(
         candidate = resolved.get(field)
         if not usable_text(field, candidate):
             continue
-        if value.get(field) != candidate:
-            value[field] = copy.deepcopy(candidate)
+        selected = candidate
+        if field in MUSIC_CREDIT_LIST_FIELDS:
+            existing = value.get(field)
+            if _music_credit_quality(existing) > _music_credit_quality(candidate):
+                selected = existing
+        if value.get(field) != selected:
+            value[field] = copy.deepcopy(selected)
             changed = True
     return value, changed
+
+
+def _music_credit_quality(value: object) -> tuple[int, int, int]:
+    """Rank ordered credit lists by atomic entries and retained identity data."""
+    if not isinstance(value, list):
+        return (0, 0, 0)
+    atomic_count = 0
+    identified_count = 0
+    joined_count = 0
+    for credit in value:
+        if isinstance(credit, dict):
+            name = credit.get("name") or credit.get("title")
+            if not str(name or "").strip():
+                continue
+            atomic_count += 1
+            if credit.get("id") or credit.get("providerId"):
+                identified_count += 1
+            if "joinPhrase" in credit or "joinphrase" in credit:
+                joined_count += 1
+        elif str(credit or "").strip():
+            atomic_count += 1
+    return (atomic_count, identified_count, joined_count)
 
 
 def _music_tag_union(
@@ -1457,6 +1486,28 @@ class MetadataReadService:
         result: dict = {}
 
         for key in TEXT_FIELDS:
+            # MusicBrainz release/recording credits are locale-neutral. For
+            # credit fields, provider precedence must be evaluated before
+            # locale preference; otherwise a localized Last.fm fallback can
+            # replace the richer neutral MusicBrainz credit list.
+            provider_first = (
+                entity_type in MUSIC_ENTITY_TYPES and key in MUSIC_CREDIT_FIELDS
+            )
+            if provider_first:
+                for provider in providers:
+                    found = False
+                    for tier in tiers:
+                        for locale in locale_variants(tier, available):
+                            value = payloads.get((provider, locale), {}).get(key)
+                            if usable_text(key, value):
+                                result[key] = value
+                                found = True
+                                break
+                        if found:
+                            break
+                    if found:
+                        break
+                continue
             for tier in tiers:
                 found = False
                 for locale in locale_variants(tier, available):

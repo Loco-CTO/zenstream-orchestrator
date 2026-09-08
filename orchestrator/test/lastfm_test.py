@@ -60,6 +60,58 @@ class LastFmClientTest(unittest.TestCase):
             },
         )
 
+    def test_normalize_artist_removes_lastfm_attribution_from_bio(self):
+        attribution = (
+            "User-contributed text is available under the Creative Commons By-SA "
+            "License; additional terms may apply."
+        )
+        normalized = LastFmClient.normalize(
+            "artist",
+            "name:artist",
+            {
+                "artist": {
+                    "name": "Artist",
+                    "bio": {
+                        "summary": (
+                            "Short biography <a href=\"https://www.last.fm/wiki\">"
+                            f"Read more on Last.fm</a> {attribution}  "
+                        ),
+                        "content": f"Long biography {attribution}  ",
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(normalized["overview"], "Long biography")
+        self.assertEqual(normalized["description"], "Short biography")
+        self.assertEqual(
+            normalized["providers"]["lastfm"]["wiki"],
+            {"summary": "Short biography", "content": "Long biography"},
+        )
+
+    def test_normalize_artist_drops_attribution_only_bio(self):
+        attribution = (
+            "User-contributed text is available under the Creative Commons By-SA "
+            "License; additional terms may apply."
+        )
+        normalized = LastFmClient.normalize(
+            "artist",
+            "name:artist",
+            {
+                "artist": {
+                    "name": "Artist",
+                    "bio": {
+                        "summary": f"<p>{attribution}</p>",
+                        "content": f"{attribution}  ",
+                    },
+                }
+            },
+        )
+
+        self.assertIsNone(normalized["overview"])
+        self.assertIsNone(normalized["description"])
+        self.assertNotIn("wiki", normalized["providers"]["lastfm"])
+
     def test_artist_gallery_lookup_is_reused_for_each_configured_locale(self):
         client = LastFmClient({"apiKey": "test-key"})
         lookup = LastFmClient.lookup_key("artist", artist_name="Artist")
@@ -285,6 +337,64 @@ class LastFmClientTest(unittest.TestCase):
                 )
             finally:
                 database.close()
+
+    def test_cached_lastfm_artist_bio_sanitizes_attribution(self):
+        attribution = (
+            "User-contributed text is available under the Creative Commons By-SA "
+            "License; additional terms may apply."
+        )
+        database = DatabaseHandler("sqlite", {}, ":memory:")
+        database.execute(
+            "CREATE TABLE metadata_cache(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,payload TEXT,PRIMARY KEY(provider,entity_type,provider_id,locale))"
+        )
+        database.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?)",
+            (
+                "lastfm",
+                "artist",
+                "name:artist",
+                "en",
+                json.dumps(
+                    {
+                        "title": "Artist",
+                        "overview": f"Cached overview {attribution}",
+                        "description": f"Cached description {attribution}",
+                        "provider": "lastfm",
+                        "providerId": "name:artist",
+                        "ids": [{"provider": "lastfm", "id": "name:artist"}],
+                        "images": [],
+                        "providers": {
+                            "lastfm": {
+                                "wiki": {
+                                    "summary": f"Cached summary {attribution}",
+                                    "content": f"Cached content {attribution}",
+                                }
+                            }
+                        },
+                        "_imageLanguageSchema": IMAGE_LANGUAGE_SCHEMA,
+                    }
+                ),
+            ),
+        )
+        try:
+            with patch(
+                "app.metadata_services.MetadataLanguageSettings",
+                return_value=_Settings(),
+            ):
+                result = MetadataReadService(database).resolve_raw(
+                    "artist",
+                    [{"provider": "lastfm", "id": "name:artist"}],
+                    "en",
+                )
+        finally:
+            database.close()
+
+        self.assertEqual(result["overview"], "Cached overview")
+        self.assertEqual(result["description"], "Cached description")
+        self.assertEqual(
+            result["providers"]["lastfm"]["wiki"],
+            {"summary": "Cached summary", "content": "Cached content"},
+        )
 
 
 if __name__ == "__main__":

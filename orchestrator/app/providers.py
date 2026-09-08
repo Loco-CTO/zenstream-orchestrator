@@ -40,6 +40,17 @@ class ProviderNotFoundError(ProviderError):
 
 logger = get_logger("providers")
 
+_LASTFM_READ_MORE_PATTERN = re.compile(
+    r"\s*\bread\s+more\s+on\s+last\.fm\b\s*[.!…]?",
+    re.IGNORECASE,
+)
+_LASTFM_ATTRIBUTION_PATTERN = re.compile(
+    r"\s*\buser[-\s]+contributed\s+text\s+is\s+available\s+under\s+the\s+"
+    r"creative\s+commons\s+by[-\s]+sa\s+license\s*;\s*"
+    r"additional\s+terms\s+may\s+apply\s*[.!…]?",
+    re.IGNORECASE,
+)
+
 
 PRIMARY = "Primary"
 BACKDROP = "Backdrop"
@@ -2360,12 +2371,8 @@ class LastFmClient(ProviderClient):
         if not value:
             return None
         text = html.unescape(re.sub(r"<[^>]+>", " ", str(value)))
-        text = re.sub(
-            r"\s*\bread\s+more\s+on\s+last\.fm\b\s*[.!…]?",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        )
+        text = _LASTFM_READ_MORE_PATTERN.sub(" ", text)
+        text = _LASTFM_ATTRIBUTION_PATTERN.sub(" ", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text or None
 

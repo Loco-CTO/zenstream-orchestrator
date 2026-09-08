@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.catalog import Catalog, _CatalogReadContext
+from app.catalog import Catalog, _CatalogReadContext, _sanitize_projected_lastfm
 from app.database import DatabaseHandler
 from app.models.account import Account
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
@@ -1713,6 +1713,22 @@ class CatalogTest(unittest.TestCase):
         self.assertIsNone(metadata["overview"])
         self.assertEqual(metadata["description"], "Artist details")
         self.assertIsNone(metadata["providers"]["lastfm"]["wiki"]["summary"])
+
+    def test_legacy_lastfm_projection_sanitizes_attribution_without_namespace(self):
+        attribution = (
+            "User-contributed text is available under the Creative Commons By-SA "
+            "License; additional terms may apply."
+        )
+        sanitized = _sanitize_projected_lastfm(
+            {
+                "overview": f"Artist bio <p>{attribution}</p>",
+                "description": f"Artist details {attribution}  ",
+                "images": {},
+            }
+        )
+
+        self.assertEqual(sanitized["overview"], "Artist bio")
+        self.assertEqual(sanitized["description"], "Artist details")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
     @patch("app.catalog.MetadataReadService.schedule_music_cache_repair")

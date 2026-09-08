@@ -23,6 +23,7 @@ from app.metadata_services import (
     CATALOG_ITEM_PROJECTION_SCHEMA,
     MUSIC_ENTITY_TYPES,
     MetadataReadService,
+    _has_lastfm_boilerplate,
     _sanitize_lastfm_payload,
     merge_music_projection_fallback,
 )
@@ -59,7 +60,7 @@ def _sanitize_projected_lastfm(value: dict) -> dict:
         namespaces.get("lastfm"), dict
     )
     has_legacy_text = any(
-        "read more on last.fm" in str(value.get(field) or "").casefold()
+        _has_lastfm_boilerplate(value.get(field))
         for field in ("overview", "description")
     )
     if not has_lastfm_namespace and not has_legacy_text:

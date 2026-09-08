@@ -5429,7 +5429,7 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
     ) -> None:
         """Best-effort Last.fm enrichment after local/MB music identity work."""
-        from app.providers import LastFmClient, ProviderError
+        from app.providers import ProviderError
 
         try:
             client = service.client("lastfm")
@@ -5559,12 +5559,12 @@ class LibraryScanner:
                     error,
                 )
 
-        release_local = self._music_local_metadata.get(release_id) or self._music_document(
-            release_id, "release"
-        )
-        artist_local = self._music_local_metadata.get(album_artist_id) or self._music_document(
-            album_artist_id, "artist"
-        )
+        release_local = self._music_local_metadata.get(
+            release_id
+        ) or self._music_document(release_id, "release")
+        artist_local = self._music_local_metadata.get(
+            album_artist_id
+        ) or self._music_document(album_artist_id, "artist")
         album_name = _music_display_value(
             release_local.get("title") or release_local.get("album")
         )
@@ -5607,9 +5607,9 @@ class LibraryScanner:
             )
         for entity_id in artist_ids:
             self._check_termination(should_terminate)
-            document = self._music_local_metadata.get(entity_id) or self._music_document(
-                entity_id, "artist"
-            )
+            document = self._music_local_metadata.get(
+                entity_id
+            ) or self._music_document(entity_id, "artist")
             name = _music_display_value(
                 document.get("title") or document.get("albumArtist")
             )

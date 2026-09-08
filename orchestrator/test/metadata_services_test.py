@@ -507,9 +507,7 @@ class MetadataServicesTest(unittest.TestCase):
                 )
 
         self.assertIn("Primary", value["metadata"]["images"])
-        self.assertEqual(
-            value["metadata"]["images"]["Primary"]["language"], None
-        )
+        self.assertEqual(value["metadata"]["images"]["Primary"]["language"], None)
 
     def test_music_cache_repair_is_deduplicated_and_cache_only(self):
         payload = {
@@ -525,7 +523,15 @@ class MetadataServicesTest(unittest.TestCase):
         }
         self.db.execute(
             "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
-            ("lastfm", "artist", "lastfm-artist", "en", json.dumps(payload), "now", "later"),
+            (
+                "lastfm",
+                "artist",
+                "lastfm-artist",
+                "en",
+                json.dumps(payload),
+                "now",
+                "later",
+            ),
         )
         executor = MetadataAssetExecutor(max_workers=1)
         cache = MagicMock()

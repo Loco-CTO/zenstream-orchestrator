@@ -1912,18 +1912,13 @@ class _LastFmArtistPhotoParser(HTMLParser):
         if normalized_tag != "img":
             return
         classes = set(str(values.get("class") or "").casefold().split())
-        if (
-            self._photo_anchor_depth <= 0
-            and "sidebar-image-list-image" not in classes
-        ):
+        if self._photo_anchor_depth <= 0 and "sidebar-image-list-image" not in classes:
             return
         source = self._source(values)
         if source:
             self.urls.append(source)
 
-    def handle_startendtag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
         self.handle_endtag(tag)
 
@@ -1974,9 +1969,7 @@ class LastFmClient(ProviderClient):
     @property
     def api_key(self) -> str:
         return str(
-            self.credentials.get("apiKey")
-            or self.credentials.get("value")
-            or ""
+            self.credentials.get("apiKey") or self.credentials.get("value") or ""
         ).strip()
 
     @staticmethod
@@ -2003,9 +1996,7 @@ class LastFmClient(ProviderClient):
             values = {"artist": values.get("artist", "")}
         elif entity_type == "release":
             values = {
-                key: values[key]
-                for key in ("artist", "album")
-                if values.get(key)
+                key: values[key] for key in ("artist", "album") if values.get(key)
             }
         else:
             values = {
@@ -2014,7 +2005,9 @@ class LastFmClient(ProviderClient):
                 if values.get(key)
             }
         encoded = quote(
-            json.dumps(values, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            json.dumps(
+                values, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            ),
             safe="",
         )
         return f"name:{encoded}"
@@ -2085,9 +2078,7 @@ class LastFmClient(ProviderClient):
             raise ProviderError(f"Unsupported Last.fm entity type '{entity_type}'")
         return method
 
-    def _details_request(
-        self, entity_type: str, provider_id: str, locale: str
-    ) -> dict:
+    def _details_request(self, entity_type: str, provider_id: str, locale: str) -> dict:
         values = self._lookup_values(provider_id)
         params = {"autocorrect": "0", "lang": self._language_code(locale)}
         if values.get("mbid"):
@@ -2112,8 +2103,7 @@ class LastFmClient(ProviderClient):
         self, entity_type: str, provider_id: str, locales: list[str]
     ) -> dict[str, dict]:
         return {
-            locale: self.details(entity_type, provider_id, locale)
-            for locale in locales
+            locale: self.details(entity_type, provider_id, locale) for locale in locales
         }
 
     def test(self) -> None:
@@ -2207,7 +2197,13 @@ class LastFmClient(ProviderClient):
 
     @staticmethod
     def _record(payload: dict, entity_type: str) -> dict:
-        key = "artist" if entity_type == "artist" else "album" if entity_type == "release" else "track"
+        key = (
+            "artist"
+            if entity_type == "artist"
+            else "album"
+            if entity_type == "release"
+            else "track"
+        )
         value = payload.get(key)
         return value if isinstance(value, dict) else {}
 
@@ -2236,17 +2232,27 @@ class LastFmClient(ProviderClient):
             return False
 
         def same(left: object, right: object) -> bool:
-            return bool(left and right and _music_match_text(str(left)) == _music_match_text(str(right)))
+            return bool(
+                left
+                and right
+                and _music_match_text(str(left)) == _music_match_text(str(right))
+            )
 
         actual_mbid = str(record.get("mbid") or "").strip()
-        if mbid and actual_mbid and actual_mbid.casefold() != str(mbid).strip().casefold():
+        if (
+            mbid
+            and actual_mbid
+            and actual_mbid.casefold() != str(mbid).strip().casefold()
+        ):
             return False
         if entity_type == "artist":
             return same(record.get("name"), artist_name)
 
         actual_artist = cls._artist_name(record.get("artist"))
         expected_artist = artist_name
-        if not same(record.get("name"), album_name if entity_type == "release" else track_name):
+        if not same(
+            record.get("name"), album_name if entity_type == "release" else track_name
+        ):
             return False
         if expected_artist and not same(actual_artist, expected_artist):
             return False
@@ -2267,7 +2273,10 @@ class LastFmClient(ProviderClient):
             return False
         if entity_type == "track" and duration_seconds is not None:
             actual_duration = cls._duration_seconds(record.get("duration"))
-            if actual_duration is not None and abs(actual_duration - float(duration_seconds)) > 5:
+            if (
+                actual_duration is not None
+                and abs(actual_duration - float(duration_seconds)) > 5
+            ):
                 return False
         return True
 
@@ -2295,8 +2304,10 @@ class LastFmClient(ProviderClient):
     ) -> tuple[str, dict]:
         if entity_type == "artist" and not artist_name:
             raise ProviderError("Last.fm artist lookup requires an artist name")
-        if entity_type == "release" and not mbid and (
-            not artist_name or not album_name
+        if (
+            entity_type == "release"
+            and not mbid
+            and (not artist_name or not album_name)
         ):
             raise ProviderError(
                 "Last.fm album name lookup requires both artist and album context"
@@ -2304,14 +2315,10 @@ class LastFmClient(ProviderClient):
         if entity_type in {"track", "recording"} and not track_name:
             raise ProviderError("Last.fm track lookup requires a track name")
         if entity_type in {"track", "recording"} and not mbid and not artist_name:
-            raise ProviderError(
-                "Last.fm track name lookup requires an artist context"
-            )
+            raise ProviderError("Last.fm track name lookup requires an artist context")
         candidates = []
         if mbid:
-            candidates.append(
-                LastFmClient.lookup_key(entity_type, mbid=mbid)
-            )
+            candidates.append(LastFmClient.lookup_key(entity_type, mbid=mbid))
         candidates.append(
             LastFmClient.lookup_key(
                 entity_type,
@@ -2551,10 +2558,7 @@ class LastFmClient(ProviderClient):
         album = record.get("album") if isinstance(record.get("album"), dict) else {}
         album_name = cls._clean_text(album.get("title") or album.get("name"))
         artist_name = cls._artist_name(record.get("artist"))
-        if normalized_type == "artist":
-            title = cls._clean_text(record.get("name"))
-            images = cls._images(record)
-        elif normalized_type == "release":
+        if normalized_type == "artist" or normalized_type == "release":
             title = cls._clean_text(record.get("name"))
             images = cls._images(record)
         else:
@@ -2574,7 +2578,11 @@ class LastFmClient(ProviderClient):
                     "title": item["name"],
                     "position": item.get("position"),
                     "durationSeconds": cls._duration_seconds(item.get("duration")),
-                    "artists": ([{"name": item["artist"]["name"]}] if item.get("artist", {}).get("name") else []),
+                    "artists": (
+                        [{"name": item["artist"]["name"]}]
+                        if item.get("artist", {}).get("name")
+                        else []
+                    ),
                 }
                 for item in tracklist
             ]
@@ -2864,9 +2872,7 @@ class MetadataService:
         elif provider == "musicbrainz":
             MusicBrainzClient()._request("/artist/00000000-0000-0000-0000-000000000000")
         elif provider == "lastfm":
-            LastFmClient(
-                credential or self.credentials.get(provider) or {}
-            ).test()
+            LastFmClient(credential or self.credentials.get(provider) or {}).test()
         else:
             raise ProviderError("Unsupported provider")
 

@@ -1700,9 +1700,7 @@ class CatalogTest(unittest.TestCase):
                         "description": "Artist details Read more on Last.fm.",
                         "images": {"Primary": {"url": "poster.jpg"}},
                         "providers": {
-                            "lastfm": {
-                                "wiki": {"summary": "Read more on Last.fm"}
-                            }
+                            "lastfm": {"wiki": {"summary": "Read more on Last.fm"}}
                         },
                         "_catalogItemProjectionSchema": 2,
                     }

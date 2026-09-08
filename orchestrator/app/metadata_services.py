@@ -82,6 +82,7 @@ def _sanitize_lastfm_payload(payload: dict) -> dict:
                 wiki[key] = clean(value)
     return sanitized
 
+
 MUSICBRAINZ_NEUTRAL_ENTITY_TYPES = frozenset(
     {"artist", "release", "release_group", "track", "recording", "work"}
 )
@@ -962,7 +963,9 @@ class MetadataSearchProjection:
                     trailer_payloads[(provider, locale)] = payload
                     if entity_type in MUSIC_ENTITY_TYPES:
                         resolved_music = (
-                            trailer_reader.resolve_raw(entity_type, provider_ids, locale)
+                            trailer_reader.resolve_raw(
+                                entity_type, provider_ids, locale
+                            )
                             if "metadata_cache" in tables
                             else {}
                         )
@@ -974,11 +977,13 @@ class MetadataSearchProjection:
                         if resolved_music.get("providers"):
                             merged["providers"] = resolved_music["providers"]
                         current_namespaces = payload.get("providers")
-                        if provider == "lastfm" and isinstance(
-                            current_namespaces, dict
-                        ) and isinstance(current_namespaces.get("lastfm"), dict):
-                            merged.setdefault("providers", {})["lastfm"] = copy.deepcopy(
-                                current_namespaces["lastfm"]
+                        if (
+                            provider == "lastfm"
+                            and isinstance(current_namespaces, dict)
+                            and isinstance(current_namespaces.get("lastfm"), dict)
+                        ):
+                            merged.setdefault("providers", {})["lastfm"] = (
+                                copy.deepcopy(current_namespaces["lastfm"])
                             )
                     trailer_original = next(
                         (
@@ -1385,9 +1390,12 @@ class MetadataReadService:
             media=False,
             include_english=any(language_family(value) == "en" for value in configured),
         )
-        has_music_neutral_identity = entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES and any(
-            identity.get("provider") in {"musicbrainz", "local"}
-            for identity in provider_ids
+        has_music_neutral_identity = (
+            entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+            and any(
+                identity.get("provider") in {"musicbrainz", "local"}
+                for identity in provider_ids
+            )
         )
         if has_music_neutral_identity:
             # MusicBrainz audio metadata is locale-neutral. Keep the catalog
@@ -1622,7 +1630,7 @@ class MetadataReadService:
 
     @staticmethod
     def _documents_have_artwork(
-        documents: Iterable[tuple[str, str, dict[str, dict]]]
+        documents: Iterable[tuple[str, str, dict[str, dict]]],
     ) -> bool:
         return any(
             isinstance(document.get("images"), list)
@@ -1653,7 +1661,9 @@ class MetadataReadService:
         if not documents:
             return None
         has_cached_artwork = self._documents_have_artwork(documents)
-        if not projection_changed and (projection_has_artwork or not has_cached_artwork):
+        if not projection_changed and (
+            projection_has_artwork or not has_cached_artwork
+        ):
             return None
         snapshot = tuple(
             (provider, provider_id, localized)
@@ -1701,9 +1711,7 @@ class MetadataReadService:
         configured = list(MetadataLanguageSettings().get())
         projection = MetadataSearchProjection(writable_db)
         image_ingest = (
-            MetadataImageIngestService(cache)
-            if "metadata_images" in tables
-            else None
+            MetadataImageIngestService(cache) if "metadata_images" in tables else None
         )
         errors: list[Exception] = []
         for provider, provider_id, localized in documents:
@@ -1713,9 +1721,7 @@ class MetadataReadService:
                     and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
                 ) or (provider == "local" and entity_type == "artist")
                 if neutral:
-                    document = localized.get("") or next(
-                        iter(localized.values()), None
-                    )
+                    document = localized.get("") or next(iter(localized.values()), None)
                     if not isinstance(document, dict):
                         continue
                     for locale in configured:

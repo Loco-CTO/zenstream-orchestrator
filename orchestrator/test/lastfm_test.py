@@ -41,9 +41,10 @@ class LastFmClientTest(unittest.TestCase):
                 <img class="sidebar-image-list-image" src="https://lastfm-img.freetls.fastly.net/i/u/avatar170s/photo-id">
             </a>
         """
-        with patch.object(client, "_get", return_value=api_payload), patch.object(
-            client, "_get_text", return_value=page
-        ) as page_request:
+        with (
+            patch.object(client, "_get", return_value=api_payload),
+            patch.object(client, "_get_text", return_value=page) as page_request,
+        ):
             result = client.details("artist", lookup, "ja")
 
         self.assertEqual(
@@ -63,14 +64,17 @@ class LastFmClientTest(unittest.TestCase):
         client = LastFmClient({"apiKey": "test-key"})
         lookup = LastFmClient.lookup_key("artist", artist_name="Artist")
         page = '<a href="/music/Artist/+images/photo"><img src="/i/u/avatar170s/photo"></a>'
-        with patch.object(
-            client,
-            "_get",
-            side_effect=[
-                {"artist": {"name": "Artist"}},
-                {"artist": {"name": "Artist"}},
-            ],
-        ), patch.object(client, "_get_text", return_value=page) as page_request:
+        with (
+            patch.object(
+                client,
+                "_get",
+                side_effect=[
+                    {"artist": {"name": "Artist"}},
+                    {"artist": {"name": "Artist"}},
+                ],
+            ),
+            patch.object(client, "_get_text", return_value=page) as page_request,
+        ):
             values = client.details_all_locales("artist", lookup, ["en", "ja"])
 
         self.assertEqual(page_request.call_count, 1)
@@ -138,16 +142,26 @@ class LastFmClientTest(unittest.TestCase):
                     "listeners": "42",
                     "playcount": "100",
                     "bio": {
-                        "summary": "Biography summary <a href=\"https://www.last.fm/music/Artist/+wiki\">Read more on Last.fm</a>.",
-                        "content": "Long biography <a href=\"https://www.last.fm/music/Artist/+wiki\">Read more on Last.fm</a>.",
+                        "summary": 'Biography summary <a href="https://www.last.fm/music/Artist/+wiki">Read more on Last.fm</a>.',
+                        "content": 'Long biography <a href="https://www.last.fm/music/Artist/+wiki">Read more on Last.fm</a>.',
                     },
                     "image": [
-                        {"#text": "https://lastfm.freetls.fastly.net/large.jpg", "size": "large"},
-                        {"#text": "https://lastfm.freetls.fastly.net/mega.jpg", "size": "mega"},
+                        {
+                            "#text": "https://lastfm.freetls.fastly.net/large.jpg",
+                            "size": "large",
+                        },
+                        {
+                            "#text": "https://lastfm.freetls.fastly.net/mega.jpg",
+                            "size": "mega",
+                        },
                     ],
                     "tags": {
                         "tag": [
-                            {"name": "indie", "url": "https://www.last.fm/tag/indie", "count": "9"},
+                            {
+                                "name": "indie",
+                                "url": "https://www.last.fm/tag/indie",
+                                "count": "9",
+                            },
                             {"name": "Indie", "url": "https://www.last.fm/tag/indie"},
                         ]
                     },
@@ -168,7 +182,9 @@ class LastFmClientTest(unittest.TestCase):
         self.assertEqual(normalized["title"], "Album")
         self.assertEqual(normalized["year"], "2024")
         self.assertEqual(normalized["overview"], "Long biography")
-        self.assertNotIn("Read more on Last.fm", normalized["providers"]["lastfm"]["wiki"]["content"])
+        self.assertNotIn(
+            "Read more on Last.fm", normalized["providers"]["lastfm"]["wiki"]["content"]
+        )
         self.assertEqual(normalized["tags"], ["indie"])
         self.assertEqual(normalized["tracks"][0]["title"], "Song")
         self.assertEqual(normalized["tracks"][0]["durationSeconds"], 180.0)
@@ -192,7 +208,11 @@ class LastFmClientTest(unittest.TestCase):
             return_value={"error": 6, "message": "The artist was not found"},
         ):
             with self.assertRaises(ProviderError):
-                client.details("artist", LastFmClient.lookup_key("artist", artist_name="Missing"), "en")
+                client.details(
+                    "artist",
+                    LastFmClient.lookup_key("artist", artist_name="Missing"),
+                    "en",
+                )
 
     def test_music_reads_union_lastfm_tags_and_preserve_provider_namespace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -223,7 +243,7 @@ class LastFmClientTest(unittest.TestCase):
                             "url": "https://www.last.fm/music/Artist",
                             "stats": {"listeners": 10},
                             "wiki": {
-                                "content": "Cached biography <a href=\"https://www.last.fm/music/Artist/+wiki\">Read more on Last.fm</a>."
+                                "content": 'Cached biography <a href="https://www.last.fm/music/Artist/+wiki">Read more on Last.fm</a>.'
                             },
                         }
                     },

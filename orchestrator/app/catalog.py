@@ -635,9 +635,7 @@ class Catalog:
             context = self._read_context.get()
             resolved = context.measure("metadata", resolve) if context else resolve()
             resolved_metadata = resolved.get("metadata") or {}
-            value, changed = merge_music_projection_fallback(
-                value, resolved_metadata
-            )
+            value, changed = merge_music_projection_fallback(value, resolved_metadata)
             resolved_images = resolved_metadata.get("images")
             if isinstance(resolved_images, dict) and resolved_images:
                 if value.get("images") != resolved_images:

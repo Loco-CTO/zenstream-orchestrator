@@ -1718,9 +1718,7 @@ class MetadataMissingJob:
         )
         items = list(rows)
         try:
-            lastfm_configured = bool(
-                ingest.metadata_service.credentials.get("lastfm")
-            )
+            lastfm_configured = bool(ingest.metadata_service.credentials.get("lastfm"))
         except (AttributeError, ValueError, RuntimeError):
             lastfm_configured = False
         if not lastfm_configured:

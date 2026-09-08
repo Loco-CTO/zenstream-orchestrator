@@ -895,9 +895,7 @@ async def test_provider(
             await run_foreground(
                 MetadataService().test,
                 provider,
-                {
-                    "apiKey": str(data.get("apiKey") or data.get("credential") or "")
-                },
+                {"apiKey": str(data.get("apiKey") or data.get("credential") or "")},
             )
         else:
             raise ProviderError("Unsupported provider")

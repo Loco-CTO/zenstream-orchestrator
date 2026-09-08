@@ -73,7 +73,7 @@ class LastFmClientTest(unittest.TestCase):
                     "name": "Artist",
                     "bio": {
                         "summary": (
-                            "Short biography <a href=\"https://www.last.fm/wiki\">"
+                            'Short biography <a href="https://www.last.fm/wiki">'
                             f"Read more on Last.fm</a> {attribution}  "
                         ),
                         "content": f"Long biography {attribution}  ",

@@ -140,6 +140,9 @@ FACT_FIELDS = {
     "trailers",
 }
 
+MUSIC_ENTITY_TYPES = frozenset({"artist", "release", "track"})
+MUSIC_PROJECTION_FIELDS = (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}
+
 PROVIDER_PRIORITIES = {
     "series": ["tvdb", "tmdb"],
     "season": ["tvdb", "tmdb"],
@@ -262,39 +265,53 @@ class MetadataAssetExecutor:
                 self._state_times.pop(key, None)
                 self._states.pop(key, None)
 
+    def _submit_future_locked(self, key: tuple, work) -> Future:
+        self._states[key] = "pending"
+        self._state_times[key] = time.monotonic()
+
+        future = self._executor.submit(work)
+        self._pending[key] = future
+
+        def finished(done: Future) -> None:
+            state = "complete"
+            try:
+                done.result()
+            except Exception as error:
+                state = "failed"
+                logger.warning("metadata asset work failed key=%s error=%s", key, error)
+            with self._lock:
+                self._states[key] = state
+                self._state_times[key] = time.monotonic()
+                self._pending.pop(key, None)
+                self._prune_states_locked()
+
+        future.add_done_callback(finished)
+        return future
+
     def submit_future(self, key: tuple, work) -> Future:
         with self._lock:
             self._prune_states_locked()
             current = self._pending.get(key)
             if current is not None and not current.done():
                 return current
-            self._states[key] = "pending"
-            self._state_times[key] = time.monotonic()
-
-            future = self._executor.submit(work)
-            self._pending[key] = future
-
-            def finished(done: Future) -> None:
-                state = "complete"
-                try:
-                    done.result()
-                except Exception as error:
-                    state = "failed"
-                    logger.warning(
-                        "metadata asset work failed key=%s error=%s", key, error
-                    )
-                with self._lock:
-                    self._states[key] = state
-                    self._state_times[key] = time.monotonic()
-                    self._pending.pop(key, None)
-                    self._prune_states_locked()
-
-            future.add_done_callback(finished)
-            return future
+            return self._submit_future_locked(key, work)
 
     def submit(self, key: tuple, work) -> str:
         self.submit_future(key, work)
         return "pending"
+
+    def submit_once(self, key: tuple, work) -> str:
+        """Submit read-triggered repair work once during the state window."""
+        with self._lock:
+            self._prune_states_locked()
+            current = self._pending.get(key)
+            if current is not None and not current.done():
+                return "pending"
+            state = self._states.get(key)
+            if state in {"pending", "complete", "failed"}:
+                return state
+            self._submit_future_locked(key, work)
+            return "pending"
 
     def submit_wait(self, key: tuple, work):
         return self.submit_future(key, work).result()
@@ -333,6 +350,24 @@ def _canonical_metadata_language(value: object) -> str | None:
 
 def _usable_projection_value(value) -> bool:
     return value is not None and value != "" and value != [] and value != {}
+
+
+def merge_music_projection_fallback(
+    projected: dict, resolved: dict
+) -> tuple[dict, bool]:
+    """Hydrate a music projection from the canonical locale resolver."""
+    value = _sanitize_lastfm_payload(projected)
+    changed = value != projected
+    if not isinstance(resolved, dict):
+        return value, changed
+    for field in MUSIC_PROJECTION_FIELDS:
+        candidate = resolved.get(field)
+        if not usable_text(field, candidate):
+            continue
+        if value.get(field) != candidate:
+            value[field] = copy.deepcopy(candidate)
+            changed = True
+    return value, changed
 
 
 def _music_tag_union(
@@ -925,11 +960,14 @@ class MetadataSearchProjection:
                         else {}
                     )
                     trailer_payloads[(provider, locale)] = payload
-                    if entity_type in {"artist", "release", "track"}:
+                    if entity_type in MUSIC_ENTITY_TYPES:
                         resolved_music = (
                             trailer_reader.resolve_raw(entity_type, provider_ids, locale)
                             if "metadata_cache" in tables
                             else {}
+                        )
+                        merged, _ = merge_music_projection_fallback(
+                            merged, resolved_music
                         )
                         if resolved_music.get("tags"):
                             merged["tags"] = resolved_music["tags"]
@@ -1347,15 +1385,16 @@ class MetadataReadService:
             media=False,
             include_english=any(language_family(value) == "en" for value in configured),
         )
-        if entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES and any(
+        has_music_neutral_identity = entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES and any(
             identity.get("provider") in {"musicbrainz", "local"}
             for identity in provider_ids
-        ):
+        )
+        if has_music_neutral_identity:
             # MusicBrainz audio metadata is locale-neutral. Keep the catalog
             # language selection API intact, but allow the neutral cache bucket
-            # to satisfy every configured display locale.
-            if "" not in tiers:
-                tiers.append("")
+            # to satisfy every configured display locale before the generic
+            # English/original-language fallbacks.
+            tiers = list(dict.fromkeys([requested, "", *tiers[1:]]))
         providers = self.providers(entity_type)
         result: dict = {}
 
@@ -1541,6 +1580,198 @@ class MetadataReadService:
         }
         self._public_resolutions[cache_key] = copy.deepcopy(resolved)
         return resolved
+
+    def _cached_music_documents(
+        self, entity_type: str, provider_ids: Iterable[dict]
+    ) -> list[tuple[str, str, dict[str, dict]]]:
+        """Snapshot cached music documents for a bounded background repair."""
+        if entity_type not in MUSIC_ENTITY_TYPES:
+            return []
+        if not self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata_cache'"
+        ):
+            return []
+        documents: list[tuple[str, str, dict[str, dict]]] = []
+        for identity in provider_ids:
+            provider = str(identity.get("provider") or "")
+            provider_id = str(identity.get("id") or "")
+            if not provider or not provider_id:
+                continue
+            rows = self.db.execute(
+                "SELECT locale,payload FROM metadata_cache "
+                "WHERE provider=? AND entity_type=? AND provider_id=?",
+                (provider, entity_type, provider_id),
+            )
+            localized: dict[str, dict] = {}
+            for locale, encoded in rows:
+                try:
+                    value = json.loads(encoded)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if (
+                    not isinstance(value, dict)
+                    or value.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA
+                ):
+                    continue
+                if provider == "lastfm":
+                    value = _sanitize_lastfm_payload(value)
+                localized[str(locale)] = value
+            if localized:
+                documents.append((provider, provider_id, localized))
+        return documents
+
+    @staticmethod
+    def _documents_have_artwork(
+        documents: Iterable[tuple[str, str, dict[str, dict]]]
+    ) -> bool:
+        return any(
+            isinstance(document.get("images"), list)
+            and any(
+                isinstance(image, dict)
+                and image.get("type") in ARTWORK_CATEGORY_SET
+                and isinstance(image.get("url"), str)
+                and image.get("url")
+                for image in document.get("images", [])
+            )
+            for _provider, _provider_id, localized in documents
+            for document in localized.values()
+        )
+
+    def schedule_music_cache_repair(
+        self,
+        entity_id: str,
+        entity_type: str,
+        provider_ids: Iterable[dict],
+        *,
+        projection_changed: bool,
+        projection_has_artwork: bool,
+    ) -> str | None:
+        """Repair cached music projections/assets without provider fetching."""
+        if entity_type not in MUSIC_ENTITY_TYPES:
+            return None
+        documents = self._cached_music_documents(entity_type, provider_ids)
+        if not documents:
+            return None
+        has_cached_artwork = self._documents_have_artwork(documents)
+        if not projection_changed and (projection_has_artwork or not has_cached_artwork):
+            return None
+        snapshot = tuple(
+            (provider, provider_id, localized)
+            for provider, provider_id, localized in documents
+        )
+        digest = hashlib.sha256(
+            json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        identities = tuple(
+            sorted((provider, provider_id) for provider, provider_id, _ in snapshot)
+        )
+        key = ("music-cache-repair", str(entity_id), entity_type, identities, digest)
+        cache = self.cache
+
+        def repair() -> None:
+            self._repair_cached_music(cache, entity_id, entity_type, snapshot)
+
+        try:
+            return asset_executor.submit_once(key, repair)
+        except RuntimeError:
+            # Shutdown may race with a final catalog read. The read response
+            # is still valid; the next process can perform the repair.
+            logger.debug(
+                "music cache repair could not be queued entity_id=%s entity_type=%s",
+                entity_id,
+                entity_type,
+            )
+            return None
+
+    @staticmethod
+    def _repair_cached_music(
+        cache,
+        entity_id: str,
+        entity_type: str,
+        documents: tuple[tuple[str, str, dict[str, dict]], ...],
+    ) -> None:
+        """Replay cached music documents and materialize their artwork."""
+        writable_db = cache.db
+        tables = {
+            row[0]
+            for row in writable_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        configured = list(MetadataLanguageSettings().get())
+        projection = MetadataSearchProjection(writable_db)
+        image_ingest = (
+            MetadataImageIngestService(cache)
+            if "metadata_images" in tables
+            else None
+        )
+        errors: list[Exception] = []
+        for provider, provider_id, localized in documents:
+            try:
+                neutral = (
+                    provider == "musicbrainz"
+                    and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+                ) or (provider == "local" and entity_type == "artist")
+                if neutral:
+                    document = localized.get("") or next(
+                        iter(localized.values()), None
+                    )
+                    if not isinstance(document, dict):
+                        continue
+                    for locale in configured:
+                        projection.project(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            locale,
+                            document,
+                        )
+                    asset_documents = {"": document}
+                else:
+                    asset_documents = {
+                        locale: document
+                        for locale, document in localized.items()
+                        if locale in configured
+                    }
+                    for locale, document in asset_documents.items():
+                        projection.project(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            locale,
+                            document,
+                        )
+                if image_ingest is not None and asset_documents:
+                    image_ingest.ingest_documents(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        asset_documents,
+                        force=False,
+                        complete_batch=False,
+                    )
+            except Exception as error:
+                errors.append(error)
+                logger.warning(
+                    "cached music metadata repair failed entity_id=%s provider=%s entity_type=%s provider_id=%s error=%s",
+                    entity_id,
+                    provider,
+                    entity_type,
+                    provider_id,
+                    error,
+                )
+        try:
+            projection.reproject_entity_artwork(entity_id, configured)
+        except Exception as error:
+            errors.append(error)
+            logger.warning(
+                "cached music artwork reproject failed entity_id=%s entity_type=%s error=%s",
+                entity_id,
+                entity_type,
+                error,
+            )
+        if errors:
+            raise errors[0]
 
     def ready_artwork(
         self,
@@ -2115,20 +2346,7 @@ class MetadataImageIngestService:
         parsed = urlparse(value)
         if parsed.scheme not in {"https", "http"} or not parsed.hostname:
             raise ValueError("provider image URL is not an HTTP(S) URL")
-        allowlist = {
-            host.strip().lower()
-            for host in os.getenv(
-                "METADATA_IMAGE_HOST_ALLOWLIST",
-                "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org,archive.org,lastfm.freetls.fastly.net,lastfm-img2.akamaized.net",
-            ).split(",")
-            if host.strip()
-        }
         hostname = parsed.hostname.casefold().rstrip(".")
-        if not any(
-            hostname == allowed or hostname.endswith("." + allowed)
-            for allowed in allowlist
-        ):
-            raise ValueError("provider image host is not allowlisted")
         try:
             addresses = {
                 info[4][0]

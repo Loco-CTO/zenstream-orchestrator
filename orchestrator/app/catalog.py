@@ -21,8 +21,10 @@ from app.metadata_domain import (
 )
 from app.metadata_services import (
     CATALOG_ITEM_PROJECTION_SCHEMA,
+    MUSIC_ENTITY_TYPES,
     MetadataReadService,
     _sanitize_lastfm_payload,
+    merge_music_projection_fallback,
 )
 from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
@@ -63,6 +65,13 @@ def _sanitize_projected_lastfm(value: dict) -> dict:
     if not has_lastfm_namespace and not has_legacy_text:
         return value
     return _sanitize_lastfm_payload(value)
+
+
+def _has_projected_artwork(value: dict) -> bool:
+    images = value.get("images")
+    return isinstance(images, dict) and any(
+        isinstance(image, dict) and image.get("url") for image in images.values()
+    )
 
 
 class _CatalogDatabase:
@@ -608,6 +617,54 @@ class Catalog:
             else MetadataReadService(self.db)
         )
 
+    def _hydrate_projected_metadata(
+        self,
+        entity_id: str,
+        entity_type: str,
+        language: str,
+        projected: dict,
+    ) -> dict:
+        value = _sanitize_projected_lastfm(projected)
+        provider_ids = self._provider_ids(entity_id, entity_type)
+        reader = self._read_service()
+        if entity_type in MUSIC_ENTITY_TYPES:
+            projection_has_artwork = _has_projected_artwork(value)
+            resolve = lambda: reader.resolve_public(
+                entity_id, entity_type, provider_ids, language
+            )
+            context = self._read_context.get()
+            resolved = context.measure("metadata", resolve) if context else resolve()
+            resolved_metadata = resolved.get("metadata") or {}
+            value, changed = merge_music_projection_fallback(
+                value, resolved_metadata
+            )
+            resolved_images = resolved_metadata.get("images")
+            if isinstance(resolved_images, dict) and resolved_images:
+                if value.get("images") != resolved_images:
+                    changed = True
+                value["images"] = resolved_images
+            reader.schedule_music_cache_repair(
+                entity_id,
+                entity_type,
+                provider_ids,
+                projection_changed=changed,
+                projection_has_artwork=projection_has_artwork,
+            )
+            return value
+
+        if not _has_projected_artwork(value):
+            if provider_ids:
+                # A projection can be published before an eager artwork
+                # materialization finishes. Resolve the ready cache directly
+                # instead of returning a stale empty image map.
+                resolved_artwork = reader.resolve_public(
+                    entity_id, entity_type, provider_ids, language
+                )
+                resolved_images = resolved_artwork["metadata"].get("images")
+                if isinstance(resolved_images, dict) and resolved_images:
+                    value["images"] = resolved_images
+        return value
+
     @_catalog_read
     def metadata(
         self, user_id: str, entity_id: str, language: str, include_credits: bool = False
@@ -634,29 +691,9 @@ class Catalog:
                 for field in ("overview", "description")
             )
         ):
-            value = dict(projected)
-            value = _sanitize_projected_lastfm(value)
-            projected_images = value.get("images")
-            has_projected_artwork = isinstance(projected_images, dict) and any(
-                isinstance(image, dict) and image.get("url")
-                for image in projected_images.values()
+            value = self._hydrate_projected_metadata(
+                entity_id, row[3], language, dict(projected)
             )
-            if not has_projected_artwork:
-                provider_ids = self._provider_ids(entity_id, row[3])
-                if provider_ids or row[3] in {"artist", "release", "track"}:
-                    # A projection can be published before an eager artwork
-                    # materialization finishes.  The admin preview resolves
-                    # the ready cache directly, so do the same repair here
-                    # instead of permanently returning the stale empty image
-                    # map for this read context.
-                    resolved_artwork = self._read_service().resolve_public(
-                        entity_id, row[3], provider_ids, language
-                    )
-                    resolved_images = resolved_artwork["metadata"].get("images")
-                    if isinstance(resolved_images, dict) and resolved_images:
-                        value["images"] = resolved_images
-                        if context:
-                            context.projected_metadata[(entity_id, language)] = value
             value = self._merge_local_artwork(entity_id, language, value)
             if context:
                 context.projected_metadata[(entity_id, language)] = value
@@ -694,28 +731,9 @@ class Catalog:
                             for field in ("overview", "description")
                         )
                     ):
-                        resolved_value = dict(value)
-                        resolved_value = _sanitize_projected_lastfm(resolved_value)
-                        projected_images = value.get("images")
-                        has_projected_artwork = isinstance(
-                            projected_images, dict
-                        ) and any(
-                            isinstance(image, dict) and image.get("url")
-                            for image in projected_images.values()
+                        resolved_value = self._hydrate_projected_metadata(
+                            entity_id, row[3], language, dict(value)
                         )
-                        if not has_projected_artwork:
-                            provider_ids = self._provider_ids(entity_id, row[3])
-                            if provider_ids or row[3] in {"artist", "release", "track"}:
-                                # Artwork projections can outlive an
-                                # interrupted asset refresh. Re-resolve the
-                                # image map from ready cache rows when there
-                                # are provider identities to resolve.
-                                resolved_artwork = self._read_service().resolve_public(
-                                    entity_id, row[3], provider_ids, language
-                                )
-                                resolved_value["images"] = resolved_artwork[
-                                    "metadata"
-                                ].get("images", {})
                         resolved_value = self._merge_local_artwork(
                             entity_id, language, resolved_value
                         )

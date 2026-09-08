@@ -27,6 +27,9 @@ class _Settings:
     def get(self):
         return list(self._locales)
 
+    def prefer_no_language_for_backdrop(self):
+        return False
+
 
 class _Fetcher:
     def __init__(self):
@@ -381,6 +384,297 @@ class MetadataServicesTest(unittest.TestCase):
         finally:
             executor.shutdown()
         self.assertEqual(calls, [1])
+
+    def test_asset_executor_submit_once_deduplicates_completed_work(self):
+        executor = MetadataAssetExecutor(max_workers=1)
+        calls = []
+        key = ("music-cache-repair", "artist-1")
+        try:
+            executor.submit_once(key, lambda: calls.append(1))
+            executor.drain(5)
+            executor.submit_once(key, lambda: calls.append(2))
+            executor.drain(5)
+        finally:
+            executor.shutdown()
+        self.assertEqual(calls, [1])
+
+    def test_music_read_fallback_uses_requested_neutral_and_english_tiers(self):
+        def cache(provider, provider_id, locale, payload):
+            self.db.execute(
+                "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    "artist",
+                    provider_id,
+                    locale,
+                    json.dumps({"_imageLanguageSchema": 3, **payload}),
+                    "now",
+                    "later",
+                ),
+            )
+
+        cache(
+            "musicbrainz",
+            "mb-artist",
+            "",
+            {"title": "Neutral title", "images": []},
+        )
+        cache(
+            "lastfm",
+            "lastfm-artist",
+            "ja",
+            {"title": "Japanese title", "overview": "Read more on Last.fm"},
+        )
+        cache(
+            "lastfm",
+            "lastfm-artist",
+            "en",
+            {"overview": "English biography"},
+        )
+
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en", "ja"]),
+        ):
+            value = MetadataReadService(self.db).resolve_raw(
+                "artist",
+                [
+                    {"provider": "musicbrainz", "id": "mb-artist"},
+                    {"provider": "lastfm", "id": "lastfm-artist"},
+                ],
+                "ja",
+            )
+
+        self.assertEqual(value["title"], "Japanese title")
+        self.assertEqual(value["overview"], "English biography")
+
+    def test_music_neutral_artwork_is_public_for_a_localized_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "artist.webp"
+            image_path.write_bytes(b"ready")
+            self.db.execute(
+                "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT,fetched_at TEXT,blur_hash TEXT)"
+            )
+            self.db.execute(
+                "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+                (
+                    "musicbrainz",
+                    "artist",
+                    "mb-artist",
+                    "",
+                    json.dumps(
+                        {
+                            "_imageLanguageSchema": 3,
+                            "title": "Artist",
+                            "images": [
+                                {
+                                    "type": "Primary",
+                                    "url": "https://coverartarchive.org/artist.webp",
+                                    "language": None,
+                                    "provider": "musicbrainz",
+                                }
+                            ],
+                        }
+                    ),
+                    "now",
+                    "later",
+                ),
+            )
+            self.db.execute(
+                "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    "musicbrainz",
+                    "artist",
+                    "mb-artist",
+                    "",
+                    "Primary",
+                    "https://coverartarchive.org/artist.webp",
+                    str(image_path),
+                    "now",
+                    "blur",
+                ),
+            )
+
+            with patch(
+                "app.metadata_services.MetadataLanguageSettings",
+                return_value=_Settings(["en", "ja"]),
+            ):
+                value = MetadataReadService(self.db).resolve_public(
+                    "artist-entity",
+                    "artist",
+                    [{"provider": "musicbrainz", "id": "mb-artist"}],
+                    "ja",
+                )
+
+        self.assertIn("Primary", value["metadata"]["images"])
+        self.assertEqual(
+            value["metadata"]["images"]["Primary"]["language"], None
+        )
+
+    def test_music_cache_repair_is_deduplicated_and_cache_only(self):
+        payload = {
+            "_imageLanguageSchema": 3,
+            "title": "Artist",
+            "images": [
+                {
+                    "type": "Primary",
+                    "url": "https://lastfm-img.freetls.fastly.net/artist.jpg",
+                    "language": None,
+                }
+            ],
+        }
+        self.db.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+            ("lastfm", "artist", "lastfm-artist", "en", json.dumps(payload), "now", "later"),
+        )
+        executor = MetadataAssetExecutor(max_workers=1)
+        cache = MagicMock()
+        service = MetadataReadService(self.db, cache=cache)
+        calls = []
+        with (
+            patch("app.metadata_services.asset_executor", executor),
+            patch.object(
+                service,
+                "_repair_cached_music",
+                side_effect=lambda *_args: calls.append(1),
+            ),
+        ):
+            service.schedule_music_cache_repair(
+                "artist-entity",
+                "artist",
+                [{"provider": "lastfm", "id": "lastfm-artist"}],
+                projection_changed=True,
+                projection_has_artwork=False,
+            )
+            service.schedule_music_cache_repair(
+                "artist-entity",
+                "artist",
+                [{"provider": "lastfm", "id": "lastfm-artist"}],
+                projection_changed=True,
+                projection_has_artwork=False,
+            )
+            executor.drain(5)
+        executor.shutdown()
+
+        self.assertEqual(calls, [1])
+
+    def test_cached_music_repair_reprojects_all_locales_and_retries_assets(self):
+        for statement in (
+            "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)",
+            "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,is_primary INTEGER)",
+            "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)",
+            "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))",
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))",
+            "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT,fetched_at TEXT,blur_hash TEXT)",
+        ):
+            self.db.execute(statement)
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?)",
+            ("artist-entity", "library", None, "artist"),
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            ("artist-entity", "musicbrainz", "artist", "mb-artist", 1),
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            ("artist-entity", "lastfm", "artist", "lastfm-artist", 0),
+        )
+        neutral = {
+            "_imageLanguageSchema": 3,
+            "title": "Neutral artist",
+            "images": [],
+        }
+        japanese = {
+            "_imageLanguageSchema": 3,
+            "overview": "Read more on Last.fm",
+            "images": [
+                {
+                    "type": "Primary",
+                    "url": "https://lastfm-img.freetls.fastly.net/artist.jpg",
+                    "language": None,
+                }
+            ],
+        }
+        english = {
+            "_imageLanguageSchema": 3,
+            "overview": "English biography",
+            "images": [],
+        }
+        for provider, provider_id, locale, payload in (
+            ("musicbrainz", "mb-artist", "", neutral),
+            ("lastfm", "lastfm-artist", "ja", japanese),
+            ("lastfm", "lastfm-artist", "en", english),
+        ):
+            self.db.execute(
+                "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    "artist",
+                    provider_id,
+                    locale,
+                    json.dumps(payload),
+                    "now",
+                    "later",
+                ),
+            )
+
+        cache = MetadataCache.__new__(MetadataCache)
+        cache.db = self.db
+        image_ingest = MagicMock()
+        documents = (
+            ("musicbrainz", "mb-artist", {"": neutral}),
+            ("lastfm", "lastfm-artist", {"ja": japanese, "en": english}),
+        )
+        with (
+            patch(
+                "app.metadata_services.MetadataLanguageSettings",
+                return_value=_Settings(["en", "ja"]),
+            ),
+            patch(
+                "app.metadata_services.MetadataImageIngestService",
+                return_value=image_ingest,
+            ),
+        ):
+            MetadataReadService._repair_cached_music(
+                cache, "artist-entity", "artist", documents
+            )
+
+        rows = self.db.read_execute(
+            "SELECT locale,payload FROM catalog_item_projection "
+            "WHERE entity_id=? ORDER BY locale",
+            ("artist-entity",),
+        )
+        projected = {locale: json.loads(payload) for locale, payload in rows}
+        self.assertEqual(
+            {locale: value["overview"] for locale, value in projected.items()},
+            {"en": "English biography", "ja": "English biography"},
+        )
+        self.assertEqual(
+            {locale: value["title"] for locale, value in projected.items()},
+            {"en": "Neutral artist", "ja": "Neutral artist"},
+        )
+        self.assertEqual(image_ingest.ingest_documents.call_count, 2)
+        calls = image_ingest.ingest_documents.call_args_list
+        self.assertEqual(calls[0].args[0:3], ("musicbrainz", "artist", "mb-artist"))
+        self.assertEqual(calls[0].args[3], {"": neutral})
+        self.assertEqual(calls[1].args[0:3], ("lastfm", "artist", "lastfm-artist"))
+        self.assertEqual(set(calls[1].args[3]), {"en", "ja"})
+
+    def test_public_image_hosts_are_accepted_without_a_host_allowlist(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "app.metadata_services.socket.getaddrinfo",
+                return_value=[(None, None, None, None, ("8.8.8.8", 443))],
+            ),
+        ):
+            MetadataImageIngestService._validate_provider_url(
+                "https://lastfm-img.freetls.fastly.net/artist.jpg"
+            )
+            MetadataImageIngestService._validate_provider_url(
+                "https://unrelated.example/artist.jpg"
+            )
 
     def test_neutral_image_writes_use_one_non_null_identity(self):
         self.db.execute(
@@ -1275,12 +1569,9 @@ class MetadataServicesTest(unittest.TestCase):
             ],
         )
 
-    def test_cover_art_archive_redirect_host_is_allowlisted(self):
+    def test_public_redirect_hosts_are_accepted(self):
         with (
-            patch.dict(
-                os.environ,
-                {"METADATA_IMAGE_HOST_ALLOWLIST": "coverartarchive.org,archive.org"},
-            ),
+            patch.dict(os.environ, {}, clear=True),
             patch(
                 "app.metadata_services.socket.getaddrinfo",
                 return_value=[(None, None, None, None, ("8.8.8.8", 443))],

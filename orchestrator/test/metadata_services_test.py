@@ -15,6 +15,7 @@ from app.metadata_services import (
     MetadataReadService,
     MetadataSearchProjection,
     _asset_version,
+    merge_music_projection_fallback,
     metadata_fetch_activity,
 )
 from app.models.metadata import MetadataCache
@@ -525,6 +526,80 @@ class MetadataServicesTest(unittest.TestCase):
 
         self.assertEqual(value["title"], "Japanese title")
         self.assertEqual(value["overview"], "English biography")
+
+    def test_music_credits_prefer_neutral_musicbrainz_over_localized_lastfm(self):
+        credits = [
+            {"id": "mb-aiobahn", "name": "Aiobahn", "joinPhrase": " feat. "},
+            {"id": "mb-uisekai", "name": "ヰ世界情緒", "joinPhrase": ""},
+        ]
+
+        def cache(provider, entity_type, provider_id, locale, payload):
+            self.db.execute(
+                "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    json.dumps({"_imageLanguageSchema": 3, **payload}),
+                    "now",
+                    "later",
+                ),
+            )
+
+        cache(
+            "musicbrainz",
+            "release",
+            "mb-release",
+            "",
+            {
+                "title": "new world",
+                "albumArtist": "Aiobahn",
+                "artists": credits,
+                "contributingArtists": credits,
+                "images": [],
+            },
+        )
+        cache(
+            "lastfm",
+            "release",
+            "lastfm-release",
+            "en",
+            {
+                "title": "new world",
+                "albumArtist": "Aiobahn",
+                "artists": [{"name": "Aiobahn"}],
+                "contributingArtists": [{"name": "Aiobahn"}],
+                "images": [],
+            },
+        )
+
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en", "ja"]),
+        ):
+            value = MetadataReadService(self.db).resolve_raw(
+                "release",
+                [
+                    {"provider": "musicbrainz", "id": "mb-release"},
+                    {"provider": "lastfm", "id": "lastfm-release"},
+                ],
+                "en",
+            )
+
+        self.assertEqual(value["artists"], credits)
+        self.assertEqual(value["contributingArtists"], credits)
+
+        merged, changed = merge_music_projection_fallback(
+            {"artists": credits, "contributingArtists": credits},
+            {
+                "artists": [{"name": "Aiobahn"}],
+                "contributingArtists": [{"name": "Aiobahn"}],
+            },
+        )
+        self.assertFalse(changed)
+        self.assertEqual(merged["artists"], credits)
+        self.assertEqual(merged["contributingArtists"], credits)
 
     def test_music_neutral_artwork_is_public_for_a_localized_request(self):
         with tempfile.TemporaryDirectory() as directory:

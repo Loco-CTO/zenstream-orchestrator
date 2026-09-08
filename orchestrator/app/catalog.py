@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app.config import Config
 from app.images import LocalArtworkCache
+from app.local_metadata import LOCAL_ARTWORK_NAMES, local_artwork_type
 from app.logging_config import get_logger
 from app.metadata_domain import (
     clean_music_title,
@@ -31,13 +32,6 @@ from app.models.metadata import MetadataLanguageSettings, normalize_metadata_loc
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
 from app.search_scoring import match_score, normalize_search_text, trigram_set
 from fastapi import HTTPException
-
-LOCAL_ARTWORK_NAMES = {
-    "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
-    "Backdrop": {"backdrop", "fanart", "background"},
-    "Logo": {"logo", "clearlogo", "clear-logo"},
-    "Banner": {"banner"},
-}
 
 logger = get_logger("catalog")
 
@@ -904,7 +898,7 @@ class Catalog:
             candidate = Path(directory_rows[0][0]) / relative_path
             cached = cache.path(content_hash)
             if (
-                candidate.stem.lower() in LOCAL_ARTWORK_NAMES[image_type]
+                local_artwork_type(candidate) == image_type
                 and candidate.is_file()
                 and cached
                 and cached.is_file()

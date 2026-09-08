@@ -14,6 +14,7 @@ from app.images import (
     WEBP_QUALITY,
     blurhash_for_image,
 )
+from app.local_metadata import local_artwork_type
 from app.logging_config import get_logger
 from app.playback import PLAYABLE_ROLE, ffmpeg_path
 
@@ -42,13 +43,12 @@ def _provider_primary_ready_for_all_locales(
     except Exception:
         locales = ["en"]
     # Local Primary artwork remains the highest-priority source.
-    local_names = {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"}
     local_rows = db.execute(
         "SELECT relative_path,quick_fingerprint FROM media_files WHERE entity_id=? AND role='image'",
         (entity_id,),
     )
     if any(
-        Path(str(path or "")).stem.casefold() in local_names and fingerprint
+        local_artwork_type(str(path or "")) == "Primary" and fingerprint
         for path, fingerprint in local_rows
     ):
         return True

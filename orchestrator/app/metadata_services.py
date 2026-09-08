@@ -19,6 +19,7 @@ from urllib.parse import urljoin, urlparse
 
 from app.images import LocalArtworkCache, blurhash_for_image, encode_webp_bytes
 from app.language_registry import normalize_language
+from app.local_metadata import LOCAL_ARTWORK_NAMES, local_artwork_type
 from app.logging_config import get_logger
 from app.metadata_domain import (
     ARTWORK_CATEGORIES,
@@ -108,13 +109,6 @@ MUSICBRAINZ_NEUTRAL_ENTITY_TYPES = frozenset(
     {"artist", "release", "release_group", "track", "recording", "work"}
 )
 
-LOCAL_ARTWORK_NAMES = {
-    "Primary": {"poster", "folder", "cover", "primary", "tvshow", "movie", "season"},
-    "Backdrop": {"backdrop", "fanart", "background"},
-    "Logo": {"logo", "clearlogo", "clear-logo"},
-    "Banner": {"banner"},
-}
-
 TEXT_FIELDS = {
     "title",
     "originalTitle",
@@ -166,14 +160,14 @@ MUSIC_ENTITY_TYPES = frozenset({"artist", "release", "track"})
 MUSIC_PROJECTION_FIELDS = (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}
 
 PROVIDER_PRIORITIES = {
-    "series": ["tvdb", "tmdb"],
-    "season": ["tvdb", "tmdb"],
-    "episode": ["tvdb", "tmdb"],
-    "movie": ["tmdb", "tvdb"],
-    "collection": ["tvdb", "tmdb"],
-    "artist": ["musicbrainz", "local", "lastfm"],
-    "release": ["musicbrainz", "lastfm"],
-    "track": ["musicbrainz", "lastfm"],
+    "series": ["local", "tvdb", "tmdb"],
+    "season": ["local", "tvdb", "tmdb"],
+    "episode": ["local", "tvdb", "tmdb"],
+    "movie": ["local", "tmdb", "tvdb"],
+    "collection": ["local", "tvdb", "tmdb"],
+    "artist": ["local", "musicbrainz", "lastfm"],
+    "release": ["local", "musicbrainz", "lastfm"],
+    "track": ["local", "musicbrainz", "lastfm"],
 }
 
 _fetch_activity_lock = threading.Lock()
@@ -646,7 +640,15 @@ class MetadataSearchProjection:
         if not entity_rows:
             return 0
         library_id, parent_id, entity_type = entity_rows[0]
-        if entity_type not in {"movie", "episode", "artist", "release", "track"}:
+        if entity_type not in {
+            "movie",
+            "series",
+            "season",
+            "episode",
+            "artist",
+            "release",
+            "track",
+        }:
             return 0
         configured = list(locales or MetadataLanguageSettings().get()) or ["en"]
         identities = [
@@ -685,10 +687,7 @@ class MetadataSearchProjection:
                 (entity_id,),
             ):
                 stem = Path(relative_path or "").stem.casefold()
-                if (
-                    stem not in LOCAL_ARTWORK_NAMES.get(image_type, set())
-                    or not fingerprint
-                ):
+                if local_artwork_type(stem) != image_type or not fingerprint:
                     continue
                 path = local_cache.path(str(fingerprint))
                 if path and _ready_file(path):
@@ -952,19 +951,46 @@ class MetadataSearchProjection:
                         merged = {}
                     if not isinstance(merged, dict):
                         merged = {}
+                    local_fields = {
+                        str(field)
+                        for field in merged.get("_localMetadataFields", [])
+                        if isinstance(field, str)
+                    }
+                    local_fallbacks = merged.get("_localMetadataFallbacks")
+                    if not isinstance(local_fallbacks, dict):
+                        local_fallbacks = {}
+                    if provider == "local" and replace_metadata:
+                        for field in local_fields:
+                            fallback = local_fallbacks.get(field)
+                            if _usable_projection_value(fallback):
+                                merged[field] = fallback
+                            else:
+                                merged.pop(field, None)
+                        local_fields = set()
                     if replace_metadata and is_primary:
                         for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
                             merged.pop(field, None)
                     for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
+                        candidate = payload.get(field)
+                        if not _usable_projection_value(candidate):
+                            continue
+                        if provider != "local" and field in local_fields:
+                            local_fallbacks[field] = copy.deepcopy(candidate)
+                            continue
                         if (
-                            field in payload
-                            and _usable_projection_value(payload[field])
-                            and (
-                                is_primary
-                                or not _usable_projection_value(merged.get(field))
-                            )
+                            provider == "local"
+                            or is_primary
+                            or not _usable_projection_value(merged.get(field))
                         ):
-                            merged[field] = payload[field]
+                            if provider == "local" and field not in local_fields:
+                                existing = merged.get(field)
+                                if _usable_projection_value(existing):
+                                    local_fallbacks[field] = copy.deepcopy(existing)
+                                local_fields.add(field)
+                            merged[field] = copy.deepcopy(candidate)
+                    if provider == "local":
+                        merged["_localMetadataFields"] = sorted(local_fields)
+                        merged["_localMetadataFallbacks"] = local_fallbacks
                     merged["_catalogItemProjectionSchema"] = (
                         CATALOG_ITEM_PROJECTION_SCHEMA
                     )
@@ -1148,7 +1174,7 @@ class MetadataSearchProjection:
                                 for image_type, names in LOCAL_ARTWORK_NAMES.items():
                                     if (
                                         image_type in selected_local
-                                        or stem not in names
+                                        or local_artwork_type(stem) != image_type
                                         or not fingerprint
                                     ):
                                         continue
@@ -1411,6 +1437,9 @@ class MetadataReadService:
             media=False,
             include_english=any(language_family(value) == "en" for value in configured),
         )
+        has_local_identity = any(
+            identity.get("provider") == "local" for identity in provider_ids
+        )
         has_music_neutral_identity = (
             entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
             and any(
@@ -1418,7 +1447,7 @@ class MetadataReadService:
                 for identity in provider_ids
             )
         )
-        if has_music_neutral_identity:
+        if has_music_neutral_identity or has_local_identity:
             # MusicBrainz audio metadata is locale-neutral. Keep the catalog
             # language selection API intact, but allow the neutral cache bucket
             # to satisfy every configured display locale before the generic
@@ -2020,7 +2049,11 @@ class MetadataIngestService:
         return (
             provider == "musicbrainz"
             and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
-        ) or (provider == "local" and entity_type == "artist")
+        ) or (
+            provider == "local"
+            and entity_type
+            in {"movie", "series", "season", "episode", "artist", "release", "track"}
+        )
 
     def provider_locales(self, provider: str, entity_type: str) -> list[str]:
         """Return cache and repair locales for one provider entity.

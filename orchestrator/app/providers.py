@@ -12,8 +12,9 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
+from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 import pycountry
@@ -291,7 +292,7 @@ class ProviderClient:
                 self._http_clients[key] = client
             return client
 
-    def _get(self, url: str, **kwargs) -> dict:
+    def _request_response(self, url: str, **kwargs) -> httpx.Response:
         started = time.monotonic()
         client_name = type(self).__name__
         request_params = dict(kwargs.get("params") or {})
@@ -369,7 +370,6 @@ class ProviderClient:
                 )
                 raise ProviderNotFoundError("provider resource not found")
             response.raise_for_status()
-            payload = response.json()
             logger.info(
                 "metadata provider request complete client=%s url=%s status=%s duration_seconds=%.1f",
                 client_name,
@@ -377,13 +377,7 @@ class ProviderClient:
                 response.status_code,
                 time.monotonic() - started,
             )
-            logger.debug(
-                "provider response url=%s status=%s payload=%s",
-                url,
-                response.status_code,
-                payload,
-            )
-            return payload
+            return response
         except (httpx.HTTPError, ValueError) as error:
             logger.warning(
                 "metadata provider request failed client=%s url=%s duration_seconds=%.1f error=%s",
@@ -398,6 +392,39 @@ class ProviderClient:
             raise ProviderError(
                 f"provider request failed: {type(error).__name__}: {error}"
             ) from error
+
+    def _get(self, url: str, **kwargs) -> dict:
+        response = self._request_response(url, **kwargs)
+        try:
+            payload = response.json()
+        except ValueError as error:
+            logger.warning(
+                "metadata provider response was not JSON client=%s url=%s error=%s",
+                type(self).__name__,
+                url,
+                error,
+            )
+            raise ProviderError(
+                f"provider request failed: {type(error).__name__}: {error}"
+            ) from error
+        logger.debug(
+            "provider response url=%s status=%s payload=%s",
+            url,
+            response.status_code,
+            payload,
+        )
+        return payload
+
+    def _get_text(self, url: str, **kwargs) -> str:
+        response = self._request_response(url, **kwargs)
+        payload = response.text
+        logger.debug(
+            "provider text response url=%s status=%s length=%s",
+            url,
+            response.status_code,
+            len(payload),
+        )
+        return payload
 
 
 class TMDBClient(ProviderClient):
@@ -1855,6 +1882,56 @@ class MusicBrainzClient(ProviderClient):
         }
 
 
+class _LastFmArtistPhotoParser(HTMLParser):
+    """Extract artist gallery images from the public Last.fm artist page."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.urls: list[str] = []
+        self._photo_anchor_depth = 0
+
+    @staticmethod
+    def _source(attrs: dict[str, str | None]) -> str | None:
+        for key in ("data-src", "data-original", "data-lazy-src", "src"):
+            value = str(attrs.get(key) or "").strip()
+            if value:
+                return value
+        srcset = str(attrs.get("srcset") or "").strip()
+        if srcset:
+            value = srcset.split(",")[-1].strip().split(" ", 1)[0]
+            return value or None
+        return None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = str(tag).casefold()
+        values = {str(key).casefold(): value for key, value in attrs}
+        if normalized_tag == "a":
+            href = unquote(str(values.get("href") or "")).casefold()
+            if "/+images/" in href:
+                self._photo_anchor_depth += 1
+        if normalized_tag != "img":
+            return
+        classes = set(str(values.get("class") or "").casefold().split())
+        if (
+            self._photo_anchor_depth <= 0
+            and "sidebar-image-list-image" not in classes
+        ):
+            return
+        source = self._source(values)
+        if source:
+            self.urls.append(source)
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if str(tag).casefold() == "a" and self._photo_anchor_depth:
+            self._photo_anchor_depth -= 1
+
+
 class LastFmClient(ProviderClient):
     """Read-only Last.fm enrichment for already-resolved music entities.
 
@@ -1866,6 +1943,14 @@ class LastFmClient(ProviderClient):
     """
 
     base_url = "https://ws.audioscrobbler.com/2.0/"
+    artist_page_base_url = "https://www.last.fm/music/"
+    _placeholder_image_tokens = {
+        "2a96cbd8b46e442fc41c2b86b821562f",
+        "placeholder",
+        "noimage",
+        "no-image",
+        "default-image",
+    }
     _language_aliases = {
         "zh-hans": "zh",
         "zh-hant": "zh",
@@ -1883,6 +1968,8 @@ class LastFmClient(ProviderClient):
         super().__init__(timeout)
         self.credentials = credentials
         self._resolved_payloads: dict[tuple[str, str, str], dict] = {}
+        self._artist_page_images: dict[str, tuple[str, ...]] = {}
+        self._artist_page_images_lock = threading.Lock()
 
     @property
     def api_key(self) -> str:
@@ -2009,7 +2096,10 @@ class LastFmClient(ProviderClient):
             for key in ("artist", "album", "track"):
                 if values.get(key):
                     params[key] = values[key]
-        return self._request(self._method(entity_type), params)
+        payload = self._request(self._method(entity_type), params)
+        if entity_type == "artist":
+            self._hydrate_artist_page_image(payload)
+        return payload
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
         cache_key = (entity_type, str(provider_id), str(locale or "en"))
@@ -2031,6 +2121,89 @@ class LastFmClient(ProviderClient):
             "artist.getInfo",
             {"artist": "Last.fm", "autocorrect": "0", "lang": "en"},
         )
+
+    @classmethod
+    def _artist_page_url(cls, record: dict) -> str | None:
+        name = cls._clean_text(record.get("name"))
+        if not name:
+            return None
+        candidate = str(record.get("url") or "").strip()
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname
+            and parsed.hostname.casefold().rstrip(".") in {"last.fm", "www.last.fm"}
+            and parsed.path.casefold().startswith("/music/")
+        ):
+            return urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
+            )
+        return f"{cls.artist_page_base_url}{quote(name, safe='')}"
+
+    @classmethod
+    def _artist_photo_url(cls, value: object) -> str | None:
+        candidate = str(value or "").strip()
+        if not candidate:
+            return None
+        absolute = urljoin("https://www.last.fm", candidate)
+        parsed = urlsplit(absolute)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        path = parsed.path
+        marker = "/i/u/avatar170s/"
+        marker_index = path.casefold().find(marker)
+        if marker_index >= 0:
+            filename = path[marker_index + len(marker) :].strip("/")
+            if filename:
+                if "." not in filename.rsplit("/", 1)[-1]:
+                    filename = f"{filename}.jpg"
+                path = f"{path[:marker_index]}/i/u/770x0/{filename}"
+        return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+
+    def _fetch_artist_page_images(self, record: dict) -> list[str]:
+        page_url = self._artist_page_url(record)
+        if not page_url:
+            return []
+        with self._artist_page_images_lock:
+            cached = self._artist_page_images.get(page_url)
+        if cached is not None:
+            return list(cached)
+        values: list[str] = []
+        try:
+            source = self._get_text(
+                page_url,
+                follow_redirects=True,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml",
+                    "User-Agent": f"ZenStream/{__version__}",
+                },
+            )
+            parser = _LastFmArtistPhotoParser()
+            parser.feed(source)
+            seen = set()
+            for value in parser.urls:
+                image_url = self._artist_photo_url(value)
+                if not image_url or image_url in seen:
+                    continue
+                seen.add(image_url)
+                values.append(image_url)
+        except (ProviderError, UnicodeError, ValueError) as error:
+            logger.info(
+                "lastfm artist gallery lookup unavailable url=%s error=%s",
+                page_url,
+                error,
+            )
+        with self._artist_page_images_lock:
+            self._artist_page_images[page_url] = tuple(values)
+        return values
+
+    def _hydrate_artist_page_image(self, payload: dict) -> None:
+        record = self._record(payload, "artist")
+        if not record or self._images(record):
+            return
+        images = self._fetch_artist_page_images(record)
+        if images:
+            record["image"] = [{"#text": images[0], "size": "mega"}]
 
     @staticmethod
     def _record(payload: dict, entity_type: str) -> dict:
@@ -2243,7 +2416,7 @@ class LastFmClient(ProviderClient):
             if not isinstance(value, dict):
                 continue
             url = str(value.get("#text") or value.get("url") or "").strip()
-            if not url or url in seen:
+            if not url or cls._is_placeholder_image(url) or url in seen:
                 continue
             seen.add(url)
             size = str(value.get("size") or "").lower()
@@ -2259,6 +2432,11 @@ class LastFmClient(ProviderClient):
                 source_type=f"lastfm:{size}" if size else "lastfm",
             )
         ]
+
+    @classmethod
+    def _is_placeholder_image(cls, value: object) -> bool:
+        candidate = unquote(str(value or "")).casefold()
+        return any(token in candidate for token in cls._placeholder_image_tokens)
 
     @staticmethod
     def _person(value: object) -> dict | None:

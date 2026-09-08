@@ -8,6 +8,7 @@ from app.database import DatabaseHandler
 from app.metadata_services import MetadataReadService
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
 from app.providers import LastFmClient, ProviderError
+from version import __version__
 
 
 class _Settings:
@@ -19,6 +20,69 @@ class _Settings:
 
 
 class LastFmClientTest(unittest.TestCase):
+    def test_artist_details_replaces_lastfm_placeholder_with_gallery_photo(self):
+        client = LastFmClient({"apiKey": "test-key"})
+        lookup = LastFmClient.lookup_key("artist", artist_name="ヰ世界情緒")
+        api_payload = {
+            "artist": {
+                "name": "ヰ世界情緒",
+                "url": "https://www.last.fm/music/%E3%83%B0%E4%B8%96%E7%95%8C%E6%83%85%E7%B7%92",
+                "image": [
+                    {
+                        "#text": "https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png",
+                        "size": "mega",
+                    }
+                ],
+            }
+        }
+        page = """
+            <img class="cover-art" src="https://lastfm-img.freetls.fastly.net/i/u/300x300/album.jpg">
+            <a class="image-list-item" href="/music/%E3%83%B0%E4%B8%96%E7%95%8C%E6%83%85%E7%B7%92/+images/photo-id">
+                <img class="sidebar-image-list-image" src="https://lastfm-img.freetls.fastly.net/i/u/avatar170s/photo-id">
+            </a>
+        """
+        with patch.object(client, "_get", return_value=api_payload), patch.object(
+            client, "_get_text", return_value=page
+        ) as page_request:
+            result = client.details("artist", lookup, "ja")
+
+        self.assertEqual(
+            result["artist"]["image"][0]["#text"],
+            "https://lastfm-img.freetls.fastly.net/i/u/770x0/photo-id.jpg",
+        )
+        page_request.assert_called_once_with(
+            "https://www.last.fm/music/%E3%83%B0%E4%B8%96%E7%95%8C%E6%83%85%E7%B7%92",
+            follow_redirects=True,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": f"ZenStream/{__version__}",
+            },
+        )
+
+    def test_artist_gallery_lookup_is_reused_for_each_configured_locale(self):
+        client = LastFmClient({"apiKey": "test-key"})
+        lookup = LastFmClient.lookup_key("artist", artist_name="Artist")
+        page = '<a href="/music/Artist/+images/photo"><img src="/i/u/avatar170s/photo"></a>'
+        with patch.object(
+            client,
+            "_get",
+            side_effect=[
+                {"artist": {"name": "Artist"}},
+                {"artist": {"name": "Artist"}},
+            ],
+        ), patch.object(client, "_get_text", return_value=page) as page_request:
+            values = client.details_all_locales("artist", lookup, ["en", "ja"])
+
+        self.assertEqual(page_request.call_count, 1)
+        self.assertEqual(
+            values["en"]["artist"]["image"][0]["#text"],
+            "https://www.last.fm/i/u/770x0/photo.jpg",
+        )
+        self.assertEqual(
+            values["ja"]["artist"]["image"][0]["#text"],
+            "https://www.last.fm/i/u/770x0/photo.jpg",
+        )
+
     def test_details_uses_api_key_and_structured_lookup_parameters(self):
         client = LastFmClient({"apiKey": "test-key"})
         lookup = LastFmClient.lookup_key(

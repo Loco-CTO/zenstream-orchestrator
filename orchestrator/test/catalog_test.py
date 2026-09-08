@@ -1673,6 +1673,162 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(metadata["overview"], "English overview")
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_ready_projection_sanitizes_lastfm_boilerplate(self, _languages):
+        account = self.account().create("lastfm-projection", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.seed_item()
+        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT)")
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie",
+                "en",
+                json.dumps(
+                    {
+                        "title": "English",
+                        "overview": "Read more on Last.fm",
+                        "description": "Artist details Read more on Last.fm.",
+                        "images": {"Primary": {"url": "poster.jpg"}},
+                        "providers": {
+                            "lastfm": {"wiki": {"summary": "Read more on Last.fm"}}
+                        },
+                        "_catalogItemProjectionSchema": 2,
+                    }
+                ),
+            ),
+        )
+
+        metadata = self.catalog().metadata(account["id"], "movie", "en")["metadata"]
+
+        self.assertIsNone(metadata["overview"])
+        self.assertEqual(metadata["description"], "Artist details")
+        self.assertIsNone(metadata["providers"]["lastfm"]["wiki"]["summary"])
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en", "ja"])
+    @patch("app.catalog.MetadataReadService.schedule_music_cache_repair")
+    def test_music_projection_uses_locale_fallback_in_db_and_preloaded_paths(
+        self, schedule_repair, _languages
+    ):
+        account = self.account().create("music-fallback", "password-123")
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (account["id"], "allowed", "now"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "artist",
+                "allowed",
+                None,
+                "artist",
+                "Artist",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            ("artist", "musicbrainz", "artist", "mb-artist", 1),
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            ("artist", "lastfm", "artist", "lastfm-artist", 0),
+        )
+
+        def cache(provider, provider_id, locale, payload):
+            self.db.execute(
+                "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    "artist",
+                    provider_id,
+                    locale,
+                    json.dumps({"_imageLanguageSchema": 3, **payload}),
+                    "now",
+                    "later",
+                ),
+            )
+
+        cache("musicbrainz", "mb-artist", "", {"title": "Neutral artist"})
+        cache(
+            "lastfm",
+            "lastfm-artist",
+            "ja",
+            {
+                "overview": "Read more on Last.fm",
+                "images": [
+                    {
+                        "type": "Primary",
+                        "url": "https://lastfm-img.freetls.fastly.net/artist.jpg",
+                        "language": None,
+                    }
+                ],
+            },
+        )
+        cache(
+            "lastfm",
+            "lastfm-artist",
+            "en",
+            {"overview": "English biography"},
+        )
+        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT)")
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "artist",
+                "ja",
+                json.dumps(
+                    {
+                        "title": "Neutral artist",
+                        "overview": "Read more on Last.fm",
+                        "images": {},
+                        "_catalogItemProjectionSchema": 2,
+                    }
+                ),
+            ),
+        )
+
+        catalog = self.catalog()
+        database_value = catalog.metadata(account["id"], "artist", "ja")["metadata"]
+
+        context = _CatalogReadContext(catalog, account["id"])
+        token = catalog._read_context.set(context)
+        try:
+            catalog._preload_projected_metadata(account["id"], ["artist"], "ja")
+            preloaded_value = catalog.metadata(account["id"], "artist", "ja")[
+                "metadata"
+            ]
+        finally:
+            catalog._read_context.reset(token)
+
+        self.assertEqual(database_value["title"], "Neutral artist")
+        self.assertEqual(database_value["overview"], "English biography")
+        self.assertEqual(preloaded_value["title"], "Neutral artist")
+        self.assertEqual(preloaded_value["overview"], "English biography")
+        self.assertEqual(schedule_repair.call_count, 2)
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     @patch("app.catalog.MetadataReadService.resolve_public")
     def test_preloaded_empty_projection_rehydrates_ready_artwork(
         self, resolve_public, _languages

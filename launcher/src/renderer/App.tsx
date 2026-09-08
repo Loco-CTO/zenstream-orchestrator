@@ -168,12 +168,6 @@ const groups: FieldGroup[] = [
         description: "Maximum artwork download duration in seconds.",
         type: "number",
       },
-      {
-        key: "METADATA_IMAGE_HOST_ALLOWLIST",
-        label: "Image host allowlist",
-        description:
-          "Comma-separated provider hosts allowed for artwork downloads.",
-      },
     ],
   },
   {

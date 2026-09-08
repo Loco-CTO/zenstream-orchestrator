@@ -102,6 +102,12 @@ def _metadata_upgrade_needed(
     """Return whether fresh non-empty provider data can improve existing data."""
     if not isinstance(before, dict) or not isinstance(fresh, dict):
         return False
+    if (
+        provider == "lastfm"
+        and _usable_metadata_value(fresh.get("providers"))
+        and before.get("providers") != fresh.get("providers")
+    ):
+        return True
     for field in TEXT_FIELDS | FACT_FIELDS:
         previous = before.get(field)
         current = fresh.get(field)
@@ -319,12 +325,43 @@ def _metadata_document_gaps(
             and not _usable_metadata_value(document.get("title"))
         ):
             gaps.add("metadata:title")
+        if provider == "lastfm":
+            source_namespace = (document.get("providers") or {}).get("lastfm")
+            projected_namespaces = projection.get("providers") or {}
+            if (
+                isinstance(source_namespace, dict)
+                and source_namespace
+                and projected_namespaces.get("lastfm") != source_namespace
+            ):
+                gaps.add("metadata:providers")
         for field in projected_fields:
             source_value = document.get(field)
-            if (
-                _usable_metadata_value(source_value)
-                and projection.get(field) != source_value
-            ):
+            if not _usable_metadata_value(source_value):
+                continue
+            if provider == "lastfm":
+                if field in {"ids", "provider", "providerId"}:
+                    continue
+                if field == "tags":
+                    projected_tags = projection.get("tags")
+                    projected_tags = (
+                        projected_tags if isinstance(projected_tags, list) else []
+                    )
+                    projected_keys = {
+                        str(value.get("name") if isinstance(value, dict) else value)
+                        .strip()
+                        .casefold()
+                        for value in projected_tags
+                    }
+                    if any(
+                        str(value).strip().casefold() not in projected_keys
+                        for value in source_value
+                        if str(value).strip()
+                    ):
+                        gaps.add("metadata:tags")
+                elif not _usable_metadata_value(projection.get(field)):
+                    gaps.add(f"metadata:{field}")
+                continue
+            if projection.get(field) != source_value:
                 gaps.add(f"metadata:{field}")
         projected_images = projection.get("images")
         if not isinstance(projected_images, dict):
@@ -1669,7 +1706,7 @@ class MetadataMissingJob:
         rows = self.db.execute(
             "SELECT DISTINCT p.provider,p.identifier_type,p.provider_id "
             "FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
-            "WHERE p.provider IN ('tmdb','tvdb','musicbrainz') "
+            "WHERE p.provider IN ('tmdb','tvdb','musicbrainz','lastfm') "
             # MusicBrainz release-group, release-track, and work IDs are
             # supporting identities attached to an admitted release/track;
             # they are not catalog metadata documents. Treating them as
@@ -1680,6 +1717,15 @@ class MetadataMissingJob:
             "ORDER BY p.provider,e.entity_type,p.provider_id"
         )
         items = list(rows)
+        try:
+            lastfm_configured = bool(ingest.metadata_service.credentials.get("lastfm"))
+        except (AttributeError, ValueError, RuntimeError):
+            lastfm_configured = False
+        if not lastfm_configured:
+            # Clearing the optional key disables future network work while
+            # deliberately retaining Last.fm identities, cached documents,
+            # artwork, and the projected enrichment already on the catalog.
+            items = [item for item in items if item[0] != "lastfm"]
         total = sum(
             1
             if (

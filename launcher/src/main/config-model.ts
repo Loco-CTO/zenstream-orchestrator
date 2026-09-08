@@ -6,9 +6,6 @@ import {
   type EnvironmentKey,
 } from "../shared";
 
-export const DEFAULT_IMAGE_HOST_ALLOWLIST =
-  "image.tmdb.org,media.themoviedb.org,artworks.thetvdb.com,coverartarchive.org";
-
 export function defaultEnvironment(localAppData: string): EnvironmentConfig {
   return {
     ORCHESTRATOR_HOST: "127.0.0.1",
@@ -37,7 +34,6 @@ export function defaultEnvironment(localAppData: string): EnvironmentConfig {
     METADATA_ASSET_WORKERS: "12",
     METADATA_PROVIDER_TIMEOUT_SECONDS: "20",
     METADATA_IMAGE_TIMEOUT_SECONDS: "20",
-    METADATA_IMAGE_HOST_ALLOWLIST: DEFAULT_IMAGE_HOST_ALLOWLIST,
   };
 }
 
@@ -91,9 +87,6 @@ export function validateEnvironment(environment: EnvironmentConfig): string[] {
         "Public web URL must be a valid HTTP(S) origin, such as https://stream.example.com.",
       );
     }
-  }
-  if (!environment.METADATA_IMAGE_HOST_ALLOWLIST) {
-    errors.push("Metadata image host allowlist cannot be empty.");
   }
   if (
     !["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"].includes(

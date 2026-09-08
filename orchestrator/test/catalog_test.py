@@ -2537,10 +2537,19 @@ class CatalogTest(unittest.TestCase):
             "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
             ("artist-main", "musicbrainz", "artist", "mb-main", 1),
         )
+        self.db.execute(
+            "CREATE TABLE user_follow_targets(id TEXT PRIMARY KEY,user_id TEXT,library_id TEXT,target_type TEXT,provider TEXT,provider_id TEXT,entity_id TEXT,created_at TEXT,updated_at TEXT,UNIQUE(user_id,library_id,target_type,provider,provider_id))"
+        )
+
+        follow_state = self.catalog().update_state(
+            account["id"], "artist-main", {"following": True}
+        )
+        self.assertTrue(follow_state["following"])
 
         result = self.catalog().music_artist_detail(account["id"], "artist-main", "en")
 
         self.assertEqual(result["artist"]["id"], "artist-main")
+        self.assertTrue(result["artist"]["userState"]["following"])
         self.assertEqual([value["id"] for value in result["albums"]], ["release-main"])
         self.assertEqual(
             [value["id"] for value in result["appearsIn"]], ["release-appears"]

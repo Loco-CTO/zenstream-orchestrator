@@ -20,7 +20,8 @@ class FollowAndNotificationTest(unittest.TestCase):
             "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)",
             "CREATE TABLE user_follow_targets(id TEXT PRIMARY KEY,user_id TEXT,library_id TEXT,target_type TEXT,provider TEXT,provider_id TEXT,entity_id TEXT,created_at TEXT,updated_at TEXT,UNIQUE(user_id,library_id,target_type,provider,provider_id))",
             "CREATE TABLE catalog_admissions(entity_id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT,admitted_at TEXT)",
-            "CREATE TABLE notifications(id TEXT PRIMARY KEY,user_id TEXT,kind TEXT,entity_id TEXT,series_id TEXT,title TEXT,subtitle TEXT,season_number INTEGER,episode_number INTEGER,navigation_path TEXT,dedupe_key TEXT,created_at TEXT,read_at TEXT,UNIQUE(user_id,dedupe_key))",
+            "CREATE TABLE notifications(id TEXT PRIMARY KEY,user_id TEXT,kind TEXT,entity_id TEXT,series_id TEXT,artist_id TEXT,title TEXT,subtitle TEXT,season_number INTEGER,episode_number INTEGER,navigation_path TEXT,dedupe_key TEXT,created_at TEXT,read_at TEXT,UNIQUE(user_id,dedupe_key))",
+            "CREATE TABLE music_artist_credits(track_id TEXT,artist_id TEXT,credit_order INTEGER,credited_name TEXT,PRIMARY KEY(track_id,artist_id))",
             "CREATE TABLE calendar_events(id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,tvdb_id TEXT,tmdb_id TEXT,series_tvdb_id TEXT)",
             "CREATE TABLE calendar_event_entities(event_id TEXT,entity_id TEXT)",
         ]
@@ -215,3 +216,120 @@ class FollowAndNotificationTest(unittest.TestCase):
             ),
             [("series",)],
         )
+
+    def test_artist_follow_uses_musicbrainz_identity_and_fallback_entity_identity(self):
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?)",
+            ("artist", "library", None, "artist", "Artist", None, None),
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            ("artist", "musicbrainz", "artist", "artist-mb", 1),
+        )
+        follow = FollowService(self.db)
+        self.assertTrue(follow.set_for_entity("user", "artist", True))
+        self.assertEqual(
+            self.db.execute(
+                "SELECT target_type,provider,provider_id,entity_id FROM user_follow_targets"
+            ),
+            [("artist", "musicbrainz", "artist-mb", "artist")],
+        )
+        self.assertTrue(follow.following_for_entity("user", "artist"))
+
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?)",
+            ("artist-local", "library", None, "artist", "Local Artist", None, None),
+        )
+        self.assertTrue(follow.set_for_entity("user", "artist-local", True))
+        self.assertEqual(
+            self.db.execute(
+                "SELECT provider,provider_id,entity_id FROM user_follow_targets "
+                "WHERE entity_id='artist-local'"
+            ),
+            [("entity", "artist-local", "artist-local")],
+        )
+
+    def test_artist_release_notifications_group_tracks_and_match_credits(self):
+        entities = (
+            ("artist-main", "Main Artist", None, "artist"),
+            ("artist-feature", "Feature Artist", None, "artist"),
+            ("artist-other", "Other Artist", None, "artist"),
+            ("release-owned", "Owned Release", "artist-main", "release"),
+            ("release-appears", "Appears Release", "artist-other", "release"),
+            ("track-1", "Owned/01.mp3", "release-owned", "track"),
+            ("track-2", "Owned/02.mp3", "release-owned", "track"),
+            ("track-3", "Appears/01.mp3", "release-appears", "track"),
+        )
+        for entity_id, path, parent_id, entity_type in entities:
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?)",
+                (entity_id, "library", parent_id, entity_type, path, None, None),
+            )
+        for track_id in ("track-1", "track-2", "track-3"):
+            self.db.execute("INSERT INTO media_files VALUES(?,?)", (track_id, "media"))
+        for values in (
+            ("track-1", "artist-main", 0, "Main Artist"),
+            ("track-1", "artist-feature", 1, "Feature Artist"),
+            ("track-2", "artist-main", 0, "Main Artist"),
+            ("track-3", "artist-feature", 0, "Feature Artist"),
+        ):
+            self.db.execute("INSERT INTO music_artist_credits VALUES(?,?,?,?)", values)
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+            ("artist-main", "musicbrainz", "artist", "main-mb", 1),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("release-owned", "en", json.dumps({"title": "Owned Release"})),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("release-appears", "en", json.dumps({"title": "Appears Release"})),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("artist-main", "en", json.dumps({"title": "Main Artist"})),
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("artist-feature", "en", json.dumps({"title": "Feature Artist"})),
+        )
+        follow = FollowService(self.db)
+        self.assertTrue(follow.set_for_entity("user", "artist-main", True))
+        self.assertTrue(follow.set_for_entity("user", "artist-feature", True))
+
+        notifications = NotificationService(self.db)
+        self.assertEqual(
+            notifications.record_admissions({"track-1", "track-2", "track-3"}), 2
+        )
+        page = notifications.list("user")
+        self.assertEqual(page["unreadCount"], 2)
+        by_item = {item["itemId"]: item for item in page["items"]}
+        self.assertEqual(
+            by_item["release-owned"]["kind"],
+            "new_release",
+        )
+        self.assertEqual(
+            by_item["release-owned"]["subtitle"],
+            "New release: Main Artist",
+        )
+        self.assertEqual(
+            by_item["release-owned"]["navigationTarget"],
+            "/album/release-owned",
+        )
+        self.assertEqual(by_item["release-owned"]["artistId"], "artist-main")
+
+        self.assertEqual(notifications.record_admissions({"track-1", "track-2"}), 0)
+        self.assertEqual(len(notifications.list("user")["items"]), 2)
+
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?)",
+            ("track-4", "library", "release-owned", "track", "Owned/03.mp3", None, None),
+        )
+        self.db.execute("INSERT INTO media_files VALUES(?,?)", ("track-4", "media"))
+        self.db.execute(
+            "INSERT INTO music_artist_credits VALUES(?,?,?,?)",
+            ("track-4", "artist-main", 0, "Main Artist"),
+        )
+        self.assertEqual(notifications.record_admissions({"track-4"}), 1)
+        self.assertEqual(len(notifications.list("user")["items"]), 3)

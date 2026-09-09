@@ -1521,7 +1521,12 @@ def reproject_entity_artwork(
     return MetadataSearchProjection(db).reproject_entity_artwork(entity_id, locales)
 
 
-def repair_music_track_contexts(db, library_id: str, should_terminate=None) -> int:
+def repair_music_track_contexts(
+    db,
+    library_id: str,
+    should_terminate=None,
+    release_ids: Iterable[str] | None = None,
+) -> int:
     """Repair stale track album fields without contacting a provider.
 
     This is deliberately cache/read-model only. It can correct catalogs that
@@ -1537,11 +1542,29 @@ def repair_music_track_contexts(db, library_id: str, should_terminate=None) -> i
         return 0
     locales = list(MetadataLanguageSettings().get()) or ["en"]
     projection = MetadataSearchProjection(db)
-    rows = db.execute(
-        "SELECT id FROM library_entities WHERE library_id=? AND entity_type='track' "
-        "ORDER BY relative_path COLLATE NOCASE,id",
-        (library_id,),
+    scoped_releases = (
+        {str(value) for value in release_ids if value}
+        if release_ids is not None
+        else None
     )
+    if scoped_releases is not None and not scoped_releases:
+        return 0
+    if scoped_releases is None:
+        rows = db.execute(
+            "SELECT id FROM library_entities WHERE library_id=? AND entity_type='track' "
+            "ORDER BY relative_path COLLATE NOCASE,id",
+            (library_id,),
+        )
+    else:
+        placeholders = ",".join("?" for _ in scoped_releases)
+        rows = db.execute(
+            "SELECT track.id FROM library_entities track "
+            "JOIN library_entities release ON release.id=track.parent_id "
+            "WHERE track.library_id=? AND track.entity_type='track' "
+            f"AND release.id IN ({placeholders}) "
+            "ORDER BY track.relative_path COLLATE NOCASE,track.id",
+            (library_id, *sorted(scoped_releases)),
+        )
     corrected = 0
     for (entity_id,) in rows:
         if should_terminate():

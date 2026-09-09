@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from api.zenstream import library_routes
@@ -13,6 +14,7 @@ from app.database import DatabaseHandler
 from app.library import (
     EPISODE_RE,
     QUICK_FINGERPRINT_SAMPLE_SIZE,
+    AudioTags,
     FairMetadataExecutor,
     LibraryRuntime,
     LibraryScanner,
@@ -28,6 +30,7 @@ from app.library import (
     _top_level_key,
     guess_media,
     normalized_path,
+    parse_audio_inventory,
     parse_audio_tags,
     parse_nfo_ids,
     parse_nfo_metadata,
@@ -586,6 +589,18 @@ class LibraryMetadataTest(unittest.TestCase):
         scanner._scan_reconciled_ids = set()
         scanner._scan_refresh_root_ids = set()
         scanner._scan_complete = False
+
+    @staticmethod
+    def _enable_music_inventory(db):
+        db.execute(
+            "CREATE TABLE music_file_inventory ("
+            "library_id TEXT NOT NULL,path_key TEXT NOT NULL,"
+            "relative_path TEXT NOT NULL,entity_id TEXT,size INTEGER NOT NULL,"
+            "modified_ns INTEGER NOT NULL,tag_snapshot_version INTEGER NOT NULL,"
+            "tag_fingerprint TEXT NOT NULL,tag_payload TEXT NOT NULL,"
+            "group_key TEXT NOT NULL,updated_at TEXT NOT NULL,"
+            "PRIMARY KEY(library_id,path_key))"
+        )
 
     @staticmethod
     def _finish_incremental_scan(scanner, library_id, root):
@@ -2287,6 +2302,288 @@ class LibraryMetadataTest(unittest.TestCase):
                 )
         finally:
             db.close()
+
+    def test_music_group_publishes_only_after_its_metadata_phase(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first = root / "Artist" / "Album A"
+                second = root / "Artist" / "Album B"
+                first.mkdir(parents=True)
+                second.mkdir(parents=True)
+                first_track = first / "01. First.flac"
+                second_track = second / "01. Second.flac"
+                first_track.touch()
+                second_track.touch()
+                tags = {
+                    first_track: {
+                        "TITLE": "First",
+                        "ALBUM": "Album A",
+                        "ALBUMARTIST": "Artist",
+                    },
+                    second_track: {
+                        "TITLE": "Second",
+                        "ALBUM": "Album B",
+                        "ALBUMARTIST": "Artist",
+                    },
+                }
+                events = []
+
+                def resolve(*args):
+                    events.append(("metadata", args[6][0]["local"]["title"]))
+
+                def publish(*_args):
+                    events.append(("publish", None))
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", side_effect=tags.get),
+                    patch("app.playback.PlaybackManager"),
+                    patch.object(scanner, "_resolve_music_group", side_effect=resolve),
+                    patch.object(scanner, "_publish_root", side_effect=publish),
+                    patch.object(scanner, "_flush_publications"),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                self.assertEqual(
+                    events,
+                    [
+                        ("metadata", "First"),
+                        ("publish", None),
+                        ("metadata", "Second"),
+                        ("publish", None),
+                    ],
+                )
+        finally:
+            db.close()
+
+    def test_music_inventory_cache_skips_mutagen_and_provider_on_unchanged_rescan(
+        self,
+    ):
+        db, scanner = self._scanner_db()
+        try:
+            self._enable_music_inventory(db)
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                album = root / "Artist" / "Album"
+                album.mkdir(parents=True)
+                track = album / "01. Track.flac"
+                track.touch()
+                tags = {
+                    "TITLE": "Track",
+                    "ALBUM": "Album",
+                    "ALBUMARTIST": "Artist",
+                    "TRACKNUMBER": "1",
+                }
+                probe = {
+                    "format": {"format_name": "flac"},
+                    "streams": [{"codec_type": "audio", "codec_name": "flac"}],
+                }
+                parsed = AudioTags(tags, probe)
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", return_value=parsed) as parse,
+                    patch("app.playback.PlaybackManager") as playback,
+                    patch.object(scanner, "_resolve_music_group") as resolve,
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+                    self.assertEqual(parse.call_count, 1)
+                    self.assertEqual(
+                        playback.return_value.probe_entity.call_args.kwargs[
+                            "audio_probes"
+                        ],
+                        {"Artist/Album/01. Track.flac": probe},
+                    )
+
+                    parse.reset_mock()
+                    playback.return_value.probe_entity.reset_mock()
+                    resolve.reset_mock()
+                    self._prepare_incremental_scan(scanner)
+                    with patch("app.providers.MetadataService") as metadata:
+                        scanner._scan_music("library-1", root, "job-2", lambda: False)
+
+                    parse.assert_not_called()
+                    resolve.assert_not_called()
+                    metadata.assert_not_called()
+                    playback.return_value.probe_entity.assert_not_called()
+                    self.assertEqual(
+                        db.execute("SELECT COUNT(*) FROM music_file_inventory")[0][0],
+                        1,
+                    )
+        finally:
+            db.close()
+
+    def test_changed_music_track_only_resolves_its_targeted_group(self):
+        db, scanner = self._scanner_db()
+        try:
+            self._enable_music_inventory(db)
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                first = root / "Artist One" / "Album A"
+                second = root / "Artist Two" / "Album B"
+                first.mkdir(parents=True)
+                second.mkdir(parents=True)
+                first_track = first / "01. First.flac"
+                second_track = second / "01. Second.flac"
+                first_track.touch()
+                second_track.touch()
+                tags = {
+                    first_track: {
+                        "TITLE": "First",
+                        "ALBUM": "Album A",
+                        "ALBUMARTIST": "Artist One",
+                    },
+                    second_track: {
+                        "TITLE": "Second",
+                        "ALBUM": "Album B",
+                        "ALBUMARTIST": "Artist Two",
+                    },
+                }
+                resolved = []
+
+                def resolve(*args):
+                    resolved.append(args[6][0]["local"]["title"])
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch(
+                        "app.library.parse_audio_tags", side_effect=tags.__getitem__
+                    ) as parse,
+                    patch("app.playback.PlaybackManager"),
+                    patch.object(scanner, "_resolve_music_group", side_effect=resolve),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+                    resolved.clear()
+                    parse.reset_mock()
+
+                    first_track.write_bytes(b"changed")
+                    self._prepare_incremental_scan(scanner)
+                    scanner._scan_music(
+                        "library-1",
+                        root,
+                        "job-2",
+                        lambda: False,
+                        targets={"Artist One"},
+                    )
+
+                    self.assertEqual(resolved, ["First"])
+                    self.assertEqual(parse.call_count, 1)
+                    self.assertEqual(parse.call_args.args[0], first_track)
+        finally:
+            db.close()
+
+    def test_music_album_groups_can_span_directories_without_splitting_identity(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                disc_one = root / "Artist" / "Album" / "Disc 1"
+                disc_two = root / "Artist" / "Album" / "Disc 2"
+                disc_one.mkdir(parents=True)
+                disc_two.mkdir(parents=True)
+                first = disc_one / "01. First.flac"
+                second = disc_two / "02. Second.flac"
+                first.touch()
+                second.touch()
+                tags = {
+                    first: {
+                        "TITLE": "First",
+                        "ALBUM": "Album",
+                        "ALBUMARTIST": "Artist",
+                        "TRACKNUMBER": "1",
+                    },
+                    second: {
+                        "TITLE": "Second",
+                        "ALBUM": "Album",
+                        "ALBUMARTIST": "Artist",
+                        "TRACKNUMBER": "2",
+                    },
+                }
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", side_effect=tags.get),
+                    patch("app.playback.PlaybackManager"),
+                    patch.object(scanner, "_resolve_music_group"),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                self.assertEqual(
+                    db.execute(
+                        "SELECT relative_path FROM library_entities WHERE entity_type='release'"
+                    ),
+                    [("Artist/Album",)],
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM library_entities WHERE entity_type='track'"
+                    )[0][0],
+                    2,
+                )
+        finally:
+            db.close()
+
+    def test_music_sidecar_and_artwork_changes_dirty_only_the_own_group(self):
+        db, scanner = self._scanner_db()
+        try:
+            self._enable_music_inventory(db)
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                album = root / "Artist" / "Album"
+                album.mkdir(parents=True)
+                track = album / "01. Track.flac"
+                track.touch()
+                tags = {
+                    "TITLE": "Track",
+                    "ALBUM": "Album",
+                    "ALBUMARTIST": "Artist",
+                }
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", return_value=tags),
+                    patch("app.playback.PlaybackManager"),
+                    patch.object(scanner, "_resolve_music_group"),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                (album / "cover.jpg").write_bytes(b"cover")
+                (album / "Album.nfo").write_text("", encoding="utf-8")
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags") as parse,
+                    patch("app.library.LocalArtworkCache") as artwork,
+                    patch.object(scanner, "_resolve_music_group") as resolve,
+                ):
+                    artwork.return_value.path.return_value = None
+                    scanner._scan_music("library-1", root, "job-2", lambda: False)
+
+                parse.assert_not_called()
+                resolve.assert_called_once()
+        finally:
+            db.close()
+
+    def test_parse_audio_inventory_opens_mutagen_once_and_returns_playback_probe(self):
+        info = SimpleNamespace(
+            length=123.5,
+            bitrate=900000,
+            sample_rate=48000,
+            channels=2,
+            codec="FLAC",
+        )
+        audio = SimpleNamespace(tags={"title": ["Track"]}, info=info)
+        path = Path("Track.flac")
+
+        with patch("mutagen.File", return_value=audio) as mutagen_file:
+            inventory = parse_audio_inventory(path)
+
+        mutagen_file.assert_called_once_with(path, easy=False)
+        self.assertEqual(inventory.tags["TITLE"], "Track")
+        self.assertEqual(inventory.tags["DURATIONSECONDS"], "123.5")
+        self.assertEqual(inventory.probe["streams"][0]["codec_name"], "flac")
+        self.assertEqual(inventory.probe["format"]["duration"], 123.5)
 
     def test_music_release_track_matching_uses_disc_position_title_and_duration(self):
         local = {

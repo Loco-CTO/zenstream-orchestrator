@@ -27,7 +27,11 @@ from app.library import (
 )
 from app.logging_config import get_logger
 from app.lyrics import choose_lyrics, embedded_lyrics, parse_lyrics_text
-from app.media_probe import first_audio_stream, select_usable_video_stream
+from app.media_probe import (
+    audio_probe_from_mutagen,
+    first_audio_stream,
+    select_usable_video_stream,
+)
 from app.models.playback_settings import PlaybackSettings
 from app.models.playback_viewer import PlaybackViewerStore
 from fastapi import HTTPException
@@ -82,69 +86,7 @@ def _mutagen_audio_probe(path: Path) -> dict | None:
         from mutagen import File
 
         audio = File(path, easy=False)
-        info = getattr(audio, "info", None) if audio is not None else None
-        if info is None:
-            return None
-        suffix = path.suffix.lower().lstrip(".")
-        raw_codec = (
-            str(getattr(info, "codec", None) or getattr(info, "codec_name", None) or "")
-            .strip()
-            .lower()
-        )
-        info_type = type(info).__name__.casefold()
-        if raw_codec.startswith("mp4a") or raw_codec in {"aac", "aac lc"}:
-            codec = "aac"
-        elif "mpeg" in raw_codec or suffix == "mp3":
-            codec = "mp3"
-        elif "flac" in raw_codec or suffix == "flac":
-            codec = "flac"
-        elif "opus" in raw_codec or "opus" in info_type or suffix == "opus":
-            codec = "opus"
-        elif "vorbis" in raw_codec or "vorbis" in info_type or suffix in {"ogg", "oga"}:
-            codec = "vorbis"
-        elif suffix == "aac":
-            codec = "aac"
-        elif suffix in {"wav", "wave"}:
-            codec = "pcm_s16le"
-        elif suffix in {"aiff", "aif"}:
-            codec = "pcm_s16be"
-        elif suffix == "wma":
-            codec = "wmav2"
-        elif suffix == "ape":
-            codec = "ape"
-        elif suffix == "wv":
-            codec = "wavpack"
-        else:
-            codec = raw_codec or suffix
-
-        def number(value, default=0):
-            try:
-                return float(value or default)
-            except (TypeError, ValueError):
-                return float(default)
-
-        duration = max(0.0, number(getattr(info, "length", 0)))
-        bitrate = max(0, int(number(getattr(info, "bitrate", 0))))
-        sample_rate = int(number(getattr(info, "sample_rate", 0)))
-        channels = int(number(getattr(info, "channels", 0)))
-        stream = {
-            "index": 0,
-            "codec_type": "audio",
-            "codec_name": codec,
-            "duration": duration,
-            "bit_rate": bitrate,
-            "sample_rate": str(sample_rate) if sample_rate else None,
-            "channels": channels or None,
-            "tags": {},
-        }
-        return {
-            "format": {
-                "format_name": suffix,
-                "duration": duration,
-                "bit_rate": bitrate,
-            },
-            "streams": [stream],
-        }
+        return audio_probe_from_mutagen(audio, path)
     except Exception as error:
         logger.debug("mutagen audio probe failed path=%s error=%s", path, error)
         return None
@@ -425,7 +367,12 @@ class PlaybackManager:
             raise HTTPException(404, "Media source is unavailable.")
         return rows[0][0], resolved
 
-    def probe_entity(self, entity_id: str) -> list[dict]:
+    def probe_entity(
+        self,
+        entity_id: str,
+        *,
+        audio_probes: dict[str, dict] | None = None,
+    ) -> list[dict]:
         executable = ffprobe_path()
         rows = self.db.execute(
             "SELECT f.id,l.directory,f.relative_path FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.entity_id=? AND f.role=?",
@@ -448,11 +395,11 @@ class PlaybackManager:
                 continue
             if path.is_symlink() or not resolved.is_file():
                 continue
-            payload = (
-                _mutagen_audio_probe(resolved)
-                if resolved.suffix.lower() in AUDIO_EXTENSIONS
-                else None
-            )
+            payload = None
+            if resolved.suffix.lower() in AUDIO_EXTENSIONS and audio_probes:
+                payload = audio_probes.get(str(relative_path))
+            if payload is None and resolved.suffix.lower() in AUDIO_EXTENSIONS:
+                payload = _mutagen_audio_probe(resolved)
             if payload is None and not executable:
                 logger.warning(
                     "playback probe unavailable entity_id=%s media_file_id=%s path=%s",

@@ -96,6 +96,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                     )
                 }
                 self.assertIn("music_identity_keys", tables)
+                self.assertIn("music_file_inventory", tables)
                 self.assertNotIn("music_scan_diagnostics", tables)
                 self.assertTrue(
                     {

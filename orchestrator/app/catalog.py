@@ -1176,7 +1176,7 @@ class Catalog:
         if context is not None and entity_id in context.following_states:
             return context.following_states[entity_id]
         row = self._entity_row(entity_id)
-        if not row or row[3] not in {"movie", "series"}:
+        if not row or row[3] not in {"movie", "series", "artist"}:
             value = False
         else:
             from app.notifications import FollowService
@@ -1882,7 +1882,7 @@ class Catalog:
             if row[3] in {"movie", "episode", "track"}
             else self._state(user_id, row[0])
         )
-        if row[3] not in {"movie", "series"}:
+        if row[3] not in {"movie", "series", "artist"}:
             user_state.pop("following", None)
         disc_number = None
         track_number = None
@@ -3181,7 +3181,7 @@ class Catalog:
             raise HTTPException(400, "Invalid playback position.")
         if not self._watch_history_enabled(user_id):
             result = self._state(user_id, entity_id)
-            if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+            if self._entity_row(entity_id)[3] not in {"movie", "series", "artist"}:
                 result.pop("following", None)
             return result
         return self.update_state(user_id, entity_id, changes)
@@ -3325,7 +3325,11 @@ class Catalog:
             if set(changes) <= {"following"}:
                 self._invalidate_home_cache(user_id)
                 result = self._state(user_id, entity_id)
-                if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+                if self._entity_row(entity_id)[3] not in {
+                    "movie",
+                    "series",
+                    "artist",
+                }:
                     result.pop("following", None)
                 return result
         entities, children, parents = self._relationship_graph(user_id)
@@ -3425,7 +3429,7 @@ class Catalog:
             CatalogReadModel(self.db).refresh_user_entities(user_id, affected)
         self._invalidate_home_cache(user_id)
         result = self._state(user_id, entity_id)
-        if self._entity_row(entity_id)[3] not in {"movie", "series"}:
+        if self._entity_row(entity_id)[3] not in {"movie", "series", "artist"}:
             result.pop("following", None)
         return result
 

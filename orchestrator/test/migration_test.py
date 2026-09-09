@@ -282,6 +282,100 @@ class PersistenceMigrationTest(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_artist_follow_migration_backfills_tracks_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "0048_music_artist_credits")
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "INSERT INTO users(id,username,password) VALUES(?,?,?)",
+                    ("user-1", "viewer", "hash"),
+                )
+                connection.execute(
+                    "INSERT INTO libraries(id,name,type,directory,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        "music-1",
+                        "Music",
+                        "music",
+                        "/music",
+                        "2026-01-01",
+                        "2026-01-01",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO library_entities(id,library_id,entity_type,relative_path,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        "track-1",
+                        "music-1",
+                        "track",
+                        "Album/01.mp3",
+                        "2026-01-01",
+                        "2026-01-01",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO media_files(id,entity_id,relative_path,role) VALUES(?,?,?,?)",
+                    ("media-1", "track-1", "Album/01.mp3", "media"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT entity_id,entity_type FROM catalog_admissions"
+                    ).fetchall(),
+                    [("track-1", "track")],
+                )
+                notification_columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(notifications)")
+                }
+                self.assertIn("artist_id", notification_columns)
+                follow_sql = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='user_follow_targets'"
+                ).fetchone()[0]
+                self.assertIn("'artist'", follow_sql)
+                self.assertIn("'musicbrainz'", follow_sql)
+                admission_sql = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='catalog_admissions'"
+                ).fetchone()[0]
+                self.assertIn("'track'", admission_sql)
+                notification_sql = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='notifications'"
+                ).fetchone()[0]
+                self.assertIn("'new_release'", notification_sql)
+            finally:
+                connection.close()
+
+            command.downgrade(config, "0048_music_artist_credits")
+            connection = sqlite3.connect(database_path)
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM catalog_admissions WHERE entity_type='track'"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertNotIn(
+                    "artist_id",
+                    {
+                        row[1]
+                        for row in connection.execute(
+                            "PRAGMA table_info(notifications)"
+                        )
+                    },
+                )
+            finally:
+                connection.close()
+
     def test_avatar_migration_preserves_existing_accounts_without_avatar_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "orchestrator.db"

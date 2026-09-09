@@ -72,14 +72,22 @@ class FollowService:
             target = self._series_for_entity(entity_id)
             if not target:
                 raise HTTPException(404, "Series not found.")
-        if target[3] not in {"movie", "series"}:
+        if target[3] not in {"movie", "series", "artist"}:
             raise HTTPException(
-                400, "Only movies, series, and episodes can be followed."
+                400, "Only movies, series, episodes, and artists can be followed."
             )
 
         target_type = target[3]
-        preferred = "tmdb" if target_type == "movie" else "tvdb"
-        preferred_type = "movie" if target_type == "movie" else "series"
+        preferred = {
+            "movie": "tmdb",
+            "series": "tvdb",
+            "artist": "musicbrainz",
+        }[target_type]
+        preferred_type = {
+            "movie": "movie",
+            "series": "series",
+            "artist": "artist",
+        }[target_type]
         rows = self.db.execute(
             "SELECT provider,provider_id FROM entity_provider_ids "
             "WHERE entity_id=? AND provider=? AND identifier_type=? "
@@ -91,7 +99,8 @@ class FollowService:
         else:
             rows = self.db.execute(
                 "SELECT provider,provider_id FROM entity_provider_ids "
-                "WHERE entity_id=? AND provider IN ('tmdb','tvdb') AND identifier_type=? "
+                "WHERE entity_id=? AND provider IN ('tmdb','tvdb','musicbrainz') "
+                "AND identifier_type=? "
                 "ORDER BY is_primary DESC,provider,provider_id LIMIT 1",
                 (target[0], preferred_type),
             )
@@ -383,12 +392,16 @@ class NotificationService:
     @staticmethod
     def _notification_label(kind: str, interface_locale: str) -> str:
         if language_family(interface_locale) == "ja":
-            return (
-                "新しいエピソード"
-                if kind == "new_episode"
-                else "新しい映画が追加されました"
-            )
-        return "New episode" if kind == "new_episode" else "New movie added"
+            if kind == "new_episode":
+                return "新しいエピソード"
+            if kind == "new_release":
+                return "新しいリリース"
+            return "新しい映画が追加されました"
+        if kind == "new_episode":
+            return "New episode"
+        if kind == "new_release":
+            return "New release"
+        return "New movie added"
 
     @classmethod
     def _projection_title(
@@ -460,6 +473,7 @@ class NotificationService:
         metadata_locale: str,
         interface_locale: str,
         configured: list[str],
+        artist_id: str | None = None,
     ) -> tuple[str, str]:
         if kind == "new_episode":
             series_fallback = str(stored_title or "")
@@ -495,6 +509,26 @@ class NotificationService:
             return (
                 f"{cls._notification_label(kind, interface_locale)}: {series_title}",
                 f"{position} — {episode_title}",
+            )
+
+        if kind == "new_release":
+            release_title = cls._projection_title(
+                executor,
+                entity_id,
+                str(stored_title or "New release"),
+                metadata_locale,
+                configured,
+            )
+            artist_title = cls._projection_title(
+                executor,
+                artist_id,
+                str(stored_subtitle or "Artist"),
+                metadata_locale,
+                configured,
+            )
+            return (
+                release_title,
+                f"{cls._notification_label(kind, interface_locale)}: {artist_title}",
             )
 
         title = cls._projection_title(
@@ -557,7 +591,7 @@ class NotificationService:
             return {"items": [], "unreadCount": 0, "nextCursor": None}
         rows = self.db.execute(
             "SELECT id,kind,title,subtitle,entity_id,series_id,season_number,episode_number,"
-            "created_at,read_at,navigation_path FROM notifications "
+            "artist_id,created_at,read_at,navigation_path FROM notifications "
             "WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
             (user_id, limit + 1, offset),
         )
@@ -578,11 +612,16 @@ class NotificationService:
                 metadata_locale,
                 interface_locale,
                 configured,
+                artist_id=row[8],
             )
             thumbnail = self._projection_primary_image(self.db, row[4], metadata_locale)
             if thumbnail is None and row[5]:
                 thumbnail = self._projection_primary_image(
                     self.db, row[5], metadata_locale
+                )
+            if thumbnail is None and row[8]:
+                thumbnail = self._projection_primary_image(
+                    self.db, row[8], metadata_locale
                 )
             items.append(
                 {
@@ -592,11 +631,12 @@ class NotificationService:
                     "subtitle": subtitle,
                     "itemId": row[4],
                     "seriesId": row[5],
+                    "artistId": row[8],
                     "seasonNumber": row[6],
                     "episodeNumber": row[7],
-                    "createdAt": row[8],
-                    "readAt": row[9],
-                    "navigationTarget": row[10],
+                    "createdAt": row[9],
+                    "readAt": row[10],
+                    "navigationTarget": row[11],
                     "thumbnail": thumbnail,
                 }
             )
@@ -707,7 +747,7 @@ class NotificationService:
     def record_admissions(
         self, entity_ids: set[str] | list[str] | tuple[str, ...]
     ) -> int:
-        """Create one notification per newly admitted playable item.
+        """Create notifications for newly admitted playable catalog items.
 
         This is called only after a scan has completed and the read model has
         been refreshed. The admission ledger makes retries and rescans safe.
@@ -720,12 +760,13 @@ class NotificationService:
             return 0
         now = _now()
         created = 0
+        admitted_tracks: dict[str, list[tuple]] = {}
         with self.db.transaction() as cursor:
             for entity_id in dict.fromkeys(entity_ids):
                 row = cursor.execute(
                     "SELECT e.id,e.library_id,e.entity_type,e.parent_id,e.relative_path,"
                     "e.season_number,e.episode_number FROM library_entities e "
-                    "WHERE e.id=? AND e.entity_type IN ('movie','episode') AND EXISTS ("
+                    "WHERE e.id=? AND e.entity_type IN ('movie','episode','track') AND EXISTS ("
                     "SELECT 1 FROM media_files m WHERE m.entity_id=e.id AND m.role='media')",
                     (entity_id,),
                 ).fetchone()
@@ -737,6 +778,11 @@ class NotificationService:
                     (row[0], row[1], row[2], now),
                 )
                 if cursor.rowcount != 1:
+                    continue
+
+                if row[2] == "track":
+                    if row[3]:
+                        admitted_tracks.setdefault(row[3], []).append(row)
                     continue
 
                 series_row = (
@@ -818,21 +864,151 @@ class NotificationService:
                     notification_id = _id()
                     cursor.execute(
                         "INSERT OR IGNORE INTO notifications "
-                        "(id,user_id,kind,entity_id,series_id,title,subtitle,season_number,"
-                        "episode_number,navigation_path,dedupe_key,created_at,read_at) "
-                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                        "(id,user_id,kind,entity_id,series_id,artist_id,title,subtitle,"
+                        "season_number,episode_number,navigation_path,dedupe_key,created_at,read_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
                         (
                             notification_id,
                             user_id,
                             kind,
                             row[0],
                             target_entity_id if target_type == "series" else None,
+                            None,
                             title,
                             subtitle,
                             season,
                             episode,
                             navigation,
                             f"admission:{row[0]}",
+                            now,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        continue
+                    created += 1
+
+            for release_id, track_rows in admitted_tracks.items():
+                release_row = cursor.execute(
+                    "SELECT id,library_id,parent_id,relative_path FROM library_entities "
+                    "WHERE id=? AND entity_type='release'",
+                    (release_id,),
+                ).fetchone()
+                if not release_row:
+                    continue
+                library_id = release_row[1]
+                artist_ids: list[str] = []
+                primary_artist = cursor.execute(
+                    "SELECT id FROM library_entities WHERE id=? AND library_id=? "
+                    "AND entity_type='artist'",
+                    (release_row[2], library_id),
+                ).fetchone()
+                if primary_artist:
+                    artist_ids.append(str(primary_artist[0]))
+
+                track_ids = [str(row[0]) for row in track_rows]
+                if self._has_table(cursor, "music_artist_credits"):
+                    placeholders = ",".join("?" for _ in track_ids)
+                    credited_rows = cursor.execute(
+                        "SELECT DISTINCT credit.artist_id "
+                        "FROM music_artist_credits credit "
+                        "JOIN library_entities artist ON artist.id=credit.artist_id "
+                        f"WHERE credit.track_id IN ({placeholders}) "
+                        "AND artist.library_id=? AND artist.entity_type='artist' "
+                        "ORDER BY credit.artist_id",
+                        [*track_ids, library_id],
+                    ).fetchall()
+                    artist_ids.extend(str(row[0]) for row in credited_rows)
+                artist_ids = list(dict.fromkeys(artist_ids))
+                if not artist_ids:
+                    continue
+
+                provider_ids = [
+                    provider_id
+                    for artist_id in artist_ids
+                    if (
+                        provider_id := self._provider(
+                            cursor, artist_id, "musicbrainz", "artist"
+                        )
+                    )
+                ]
+                artist_placeholders = ",".join("?" for _ in artist_ids)
+                match_clauses = [
+                    f"f.entity_id IN ({artist_placeholders})",
+                    f"(f.provider='entity' AND f.provider_id IN ({artist_placeholders}))",
+                ]
+                match_params: list[str] = [
+                    library_id,
+                    *artist_ids,
+                    *artist_ids,
+                ]
+                if provider_ids:
+                    provider_placeholders = ",".join("?" for _ in provider_ids)
+                    match_clauses.append(
+                        f"(f.provider='musicbrainz' AND f.provider_id IN ({provider_placeholders}))"
+                    )
+                    match_params.extend(provider_ids)
+                matches = cursor.execute(
+                    "SELECT DISTINCT f.user_id FROM user_follow_targets f "
+                    "JOIN user_library_access access ON access.user_id=f.user_id "
+                    "AND access.library_id=f.library_id WHERE f.library_id=? "
+                    "AND f.target_type='artist' AND ("
+                    + " OR ".join(match_clauses)
+                    + ")",
+                    match_params,
+                ).fetchall()
+                if not matches:
+                    continue
+
+                display_artist_id = artist_ids[0]
+                artist_path = cursor.execute(
+                    "SELECT relative_path FROM library_entities WHERE id=?",
+                    (display_artist_id,),
+                ).fetchone()
+                release_fallback = (
+                    (release_row[3] or "").replace("\\", "/").rsplit("/", 1)[-1]
+                )
+                artist_fallback = (
+                    ((artist_path[0] if artist_path else "") or "")
+                    .replace("\\", "/")
+                    .rsplit("/", 1)[-1]
+                )
+                batch_key = min(track_ids)
+                for (user_id,) in matches:
+                    metadata_locale, interface_locale, configured = self._user_locales(
+                        cursor, user_id
+                    )
+                    title, subtitle = self._notification_copy(
+                        cursor,
+                        "new_release",
+                        release_id,
+                        None,
+                        release_fallback or "New release",
+                        artist_fallback or "Artist",
+                        None,
+                        None,
+                        metadata_locale,
+                        interface_locale,
+                        configured,
+                        artist_id=display_artist_id,
+                    )
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO notifications "
+                        "(id,user_id,kind,entity_id,series_id,artist_id,title,subtitle,"
+                        "season_number,episode_number,navigation_path,dedupe_key,created_at,read_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                        (
+                            _id(),
+                            user_id,
+                            "new_release",
+                            release_id,
+                            None,
+                            display_artist_id,
+                            title,
+                            subtitle,
+                            None,
+                            None,
+                            f"/album/{release_id}",
+                            f"admission:release:{release_id}:{batch_key}",
                             now,
                         ),
                     )

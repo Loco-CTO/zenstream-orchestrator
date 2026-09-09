@@ -97,6 +97,7 @@ class _CatalogReadContext:
         self.projected_states: dict[str, tuple] = {}
         self.empty_state_counts: dict[str, int] = {}
         self.projected_metadata: dict[tuple[str, str], dict] = {}
+        self.metadata_results: dict[tuple[str, str], dict] = {}
         self.projected_metadata_loaded: set[tuple[str, str]] = set()
         self.playable_descendants: dict[str, list[str]] = {}
         self.resolved_states: dict[str, dict] = {}
@@ -668,6 +669,11 @@ class Catalog:
         if language not in configured:
             raise HTTPException(400, "Metadata language is not configured.")
         context = self._context(user_id)
+        metadata_cache_key = (entity_id, language)
+        if context and not include_credits:
+            cached = context.metadata_results.get(metadata_cache_key)
+            if cached is not None:
+                return cached
         projection_loaded = bool(
             context and (entity_id, language) in context.projected_metadata_loaded
         )
@@ -691,10 +697,14 @@ class Catalog:
             if context:
                 context.projected_metadata[(entity_id, language)] = value
             if include_credits:
+                value = dict(value)
                 value["credits"] = self.credits(
                     user_id, entity_id, language, value.get("originalLanguage")
                 )
-            return {"metadata": value}
+            result = {"metadata": value}
+            if context and not include_credits:
+                context.metadata_results[metadata_cache_key] = result
+            return result
         projection_table = (
             "catalog_item_projection"
             if self._read_model_ready() and self._has_table("catalog_item_projection")
@@ -735,13 +745,17 @@ class Catalog:
                                 resolved_value
                             )
                         if include_credits:
+                            resolved_value = dict(resolved_value)
                             resolved_value["credits"] = self.credits(
                                 user_id,
                                 entity_id,
                                 language,
                                 resolved_value.get("originalLanguage"),
                             )
-                        return {"metadata": resolved_value}
+                        result = {"metadata": resolved_value}
+                        if context and not include_credits:
+                            context.metadata_results[metadata_cache_key] = result
+                        return result
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
         resolve = lambda: self._read_service().resolve_public(
@@ -752,12 +766,15 @@ class Catalog:
             entity_id, language, resolved["metadata"]
         )
         if include_credits:
+            resolved["metadata"] = dict(resolved["metadata"])
             resolved["metadata"]["credits"] = self.credits(
                 user_id,
                 entity_id,
                 language,
                 resolved["metadata"].get("originalLanguage"),
             )
+        elif context:
+            context.metadata_results[metadata_cache_key] = resolved
         return resolved
 
     def credits(
@@ -1813,6 +1830,27 @@ class Catalog:
             self._context(user_id).timings.setdefault("candidate_selection", 0.0)
         return {"items": values, "page": page, "pageSize": page_size, "total": total}
 
+    def _projected_music_metadata(
+        self, user_id: str, entity_id: str, language: str
+    ) -> dict | None:
+        context = self._context(user_id)
+        if context is None:
+            return None
+        language = normalize_metadata_locale(language)
+        value = context.projected_metadata.get((entity_id, language))
+        if not (
+            isinstance(value, dict)
+            and isinstance(value.get("images"), dict)
+            and value.get("_catalogItemProjectionSchema")
+            == CATALOG_ITEM_PROJECTION_SCHEMA
+            and not any(
+                is_language_code_placeholder(value.get(field))
+                for field in ("overview", "description")
+            )
+        ):
+            return None
+        return _sanitize_projected_lastfm(value)
+
     def _serialize(
         self,
         user_id: str,
@@ -1822,6 +1860,7 @@ class Catalog:
         dates: dict | None = None,
         series_name: str | None = None,
         language: str | None = None,
+        include_track_release_metadata: bool = True,
     ) -> dict:
         season_id = row[2] if row[3] == "episode" else None
         series_id = row[2] if row[3] == "season" else None
@@ -1838,7 +1877,12 @@ class Catalog:
             if row[3] == "episode" and series_id and language
             else None
         )
-        if row[3] == "track" and row[2] and language:
+        if (
+            row[3] == "track"
+            and row[2]
+            and language
+            and include_track_release_metadata
+        ):
             release_row = self._entity_row(row[2])
             if release_row and release_row[3] == "release":
                 release_metadata = self.metadata(user_id, row[2], language)["metadata"]
@@ -2423,16 +2467,21 @@ class Catalog:
             "WHERE track.parent_id=? AND track.entity_type='track'" + playable,
             (release_id,),
         )
-        return sorted(
-            rows,
-            key=lambda row: (
-                self._audio_fields(row[0])[0] is None,
-                self._audio_fields(row[0])[0] or 0,
-                self._audio_fields(row[0])[1] is None,
-                self._audio_fields(row[0])[1] or 0,
+
+        def track_sort_key(row):
+            disc_number, track_number, _duration = self._audio_fields(row[0])
+            return (
+                disc_number is None,
+                disc_number or 0,
+                track_number is None,
+                track_number or 0,
                 str(row[4] or "").casefold(),
                 row[0],
-            ),
+            )
+
+        return sorted(
+            rows,
+            key=track_sort_key,
         )
 
     def _music_catalog_generation(self, library_id: str) -> int:
@@ -2626,8 +2675,9 @@ class Catalog:
         )
         return str(rows[0][0]) if rows else artist_id
 
-    @_catalog_read
-    def music_artist_detail(self, user_id: str, artist_id: str, language: str) -> dict:
+    def _music_artist_components(
+        self, user_id: str, artist_id: str, include_tracks: bool
+    ):
         artist_id = self._resolve_music_artist_entity_id(user_id, artist_id)
         artist_row = self.require_entity(user_id, artist_id)
         if artist_row[3] != "artist":
@@ -2676,11 +2726,16 @@ class Catalog:
             )
             related_counts = {str(row[0]): int(row[1] or 0) for row in related_rows}
 
+        track_rows_by_release = {
+            album[0]: self._music_track_rows(album[0]) for album in album_rows
+        }
         own_track_rows = [
-            track for album in album_rows for track in self._music_track_rows(album[0])
+            track
+            for album in album_rows
+            for track in track_rows_by_release[album[0]]
         ]
         track_by_id = {row[0]: row for row in own_track_rows}
-        if credited_track_ids:
+        if include_tracks and credited_track_ids:
             credited_rows = self.db.execute(
                 "SELECT track.id,track.library_id,track.parent_id,track.entity_type,"
                 "track.relative_path,track.season_number,track.episode_number,"
@@ -2691,28 +2746,89 @@ class Catalog:
                 [artist_row[1], *sorted(credited_track_ids)],
             )
             track_by_id.update({row[0]: row for row in credited_rows})
-        track_rows = list(track_by_id.values())
-        track_rows.sort(
-            key=lambda row: (
-                str(
-                    (self.metadata(user_id, row[0], language)["metadata"] or {}).get(
-                        "title"
-                    )
-                    or ""
-                ).casefold(),
-                self._audio_fields(row[0])[0] is None,
-                self._audio_fields(row[0])[0] or 0,
-                self._audio_fields(row[0])[1] is None,
-                self._audio_fields(row[0])[1] or 0,
-                str(row[4] or "").casefold(),
-                row[0],
-            )
+        track_rows = list(track_by_id.values()) if include_tracks else []
+        track_count = (
+            len(track_by_id)
+            if include_tracks
+            else len(set(track_by_id).union(credited_track_ids))
         )
         appears_rows = [
             row
             for release_id, row in release_by_id.items()
             if release_id in appears_release_ids
         ]
+        allowed_libraries = self.allowed_libraries(user_id)
+        related_rows = []
+        for entity_id in related_counts:
+            row = self._entity_row(entity_id)
+            if row and row[1] in allowed_libraries and row[3] == "artist":
+                related_rows.append(row)
+
+        return (
+            artist_id,
+            artist_row,
+            release_by_id,
+            album_rows,
+            track_rows_by_release,
+            track_rows,
+            track_count,
+            appears_rows,
+            related_counts,
+            related_rows,
+        )
+
+    @_catalog_read
+    def music_artist_detail(
+        self,
+        user_id: str,
+        artist_id: str,
+        language: str,
+        *,
+        include_tracks: bool = True,
+    ) -> dict:
+        (
+            artist_id,
+            artist_row,
+            _release_by_id,
+            album_rows,
+            track_rows_by_release,
+            track_rows,
+            track_count,
+            appears_rows,
+            related_counts,
+            related_rows,
+        ) = self._music_artist_components(user_id, artist_id, include_tracks)
+
+        all_rows = [
+            artist_row,
+            *album_rows,
+            *appears_rows,
+            *track_rows,
+            *related_rows,
+        ]
+        unique_rows = list({row[0]: row for row in all_rows}.values())
+        self._seed_hydration_rows(user_id, unique_rows, language)
+        self._preload_projected_metadata(
+            user_id, [value[0] for value in unique_rows], language
+        )
+
+        def track_sort_key(row):
+            disc_number, track_number, _duration = self._audio_fields(row[0])
+            metadata = self._projected_music_metadata(
+                user_id, row[0], language
+            ) or self.metadata(user_id, row[0], language)["metadata"]
+            return (
+                str((metadata or {}).get("title") or "").casefold(),
+                disc_number is None,
+                disc_number or 0,
+                track_number is None,
+                track_number or 0,
+                str(row[4] or "").casefold(),
+                row[0],
+            )
+
+        if include_tracks:
+            track_rows.sort(key=track_sort_key)
         appears_rows.sort(
             key=lambda row: (
                 str(
@@ -2722,12 +2838,6 @@ class Catalog:
                 row[0],
             )
         )
-        allowed_libraries = self.allowed_libraries(user_id)
-        related_rows = []
-        for entity_id in related_counts:
-            row = self._entity_row(entity_id)
-            if row and row[1] in allowed_libraries and row[3] == "artist":
-                related_rows.append(row)
         related_rows.sort(
             key=lambda row: (
                 -related_counts.get(row[0], 0),
@@ -2740,18 +2850,6 @@ class Catalog:
                 ).casefold(),
                 row[0],
             )
-        )
-        all_rows = [
-            artist_row,
-            *album_rows,
-            *appears_rows,
-            *track_rows,
-            *related_rows,
-        ]
-        unique_rows = list({row[0]: row for row in all_rows}.values())
-        self._seed_hydration_rows(user_id, unique_rows, language)
-        self._preload_projected_metadata(
-            user_id, [value[0] for value in unique_rows], language
         )
         dates = self._date_values(
             "",
@@ -2771,7 +2869,7 @@ class Catalog:
                 row,
                 language,
                 dates,
-                [track[0] for track in self._music_track_rows(row[0])],
+                [track[0] for track in track_rows_by_release[row[0]]],
             )
             for row in album_rows
         ]
@@ -2805,8 +2903,73 @@ class Catalog:
             "artist": artist,
             "albums": albums,
             "tracks": tracks,
+            "trackCount": track_count,
             "appearsIn": appears_in,
             "relatedArtists": related_artists,
+            "catalogGeneration": self._music_catalog_generation(artist_row[1]),
+        }
+
+    @_catalog_read
+    def music_artist_tracks(self, user_id: str, artist_id: str, language: str) -> dict:
+        (
+            _artist_id,
+            artist_row,
+            _release_by_id,
+            album_rows,
+            _track_rows_by_release,
+            track_rows,
+            track_count,
+            appears_rows,
+            _related_counts,
+            related_rows,
+        ) = self._music_artist_components(user_id, artist_id, True)
+        unique_rows = list(
+            {
+                row[0]: row
+                for row in [
+                    artist_row,
+                    *album_rows,
+                    *appears_rows,
+                    *track_rows,
+                    *related_rows,
+                ]
+            }.values()
+        )
+        self._seed_hydration_rows(user_id, unique_rows, language)
+        self._preload_projected_metadata(
+            user_id, [value[0] for value in unique_rows], language
+        )
+
+        def track_sort_key(row):
+            disc_number, track_number, _duration = self._audio_fields(row[0])
+            metadata = self._projected_music_metadata(
+                user_id, row[0], language
+            ) or self.metadata(user_id, row[0], language)["metadata"]
+            return (
+                str((metadata or {}).get("title") or "").casefold(),
+                disc_number is None,
+                disc_number or 0,
+                track_number is None,
+                track_number or 0,
+                str(row[4] or "").casefold(),
+                row[0],
+            )
+
+        track_rows.sort(key=track_sort_key)
+        tracks = [
+            self._serialize(
+                user_id,
+                row,
+                self._projected_music_metadata(user_id, row[0], language)
+                or self.metadata(user_id, row[0], language)["metadata"],
+                language=language,
+                include_track_release_metadata=False,
+            )
+            for row in track_rows
+        ]
+        return {
+            "tracks": tracks,
+            "trackCount": track_count,
             "catalogGeneration": self._music_catalog_generation(artist_row[1]),
         }
 

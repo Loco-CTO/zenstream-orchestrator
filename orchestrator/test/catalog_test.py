@@ -2565,6 +2565,19 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn(
             "artist-hidden", {value["id"] for value in result["relatedArtists"]}
         )
+        compact_result = self.catalog().music_artist_detail(
+            account["id"], "artist-main", "en", include_tracks=False
+        )
+        self.assertEqual(compact_result["trackCount"], 2)
+        self.assertEqual(compact_result["tracks"], [])
+        queue_result = self.catalog().music_artist_tracks(
+            account["id"], "artist-main", "en"
+        )
+        self.assertEqual(queue_result["trackCount"], 2)
+        self.assertEqual(
+            {value["id"] for value in queue_result["tracks"]},
+            {"track-main", "track-appears"},
+        )
         provider_id_result = self.catalog().music_artist_detail(
             account["id"], "mb-main", "en"
         )

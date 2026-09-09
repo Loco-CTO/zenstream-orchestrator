@@ -1,7 +1,6 @@
 import sqlalchemy as sa
 from alembic import op
 
-
 revision = "0051_music_file_inventory"
 down_revision = "0050_music_scanner_correctness"
 branch_labels = None
@@ -23,9 +22,7 @@ def upgrade() -> None:
         sa.Column("group_key", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("library_id", "path_key"),
-        sa.ForeignKeyConstraint(
-            ["library_id"], ["libraries.id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["entity_id"], ["library_entities.id"], ondelete="SET NULL"
         ),
@@ -43,10 +40,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "idx_music_file_inventory_group", table_name="music_file_inventory"
-    )
-    op.drop_index(
-        "idx_music_file_inventory_entity", table_name="music_file_inventory"
-    )
+    op.drop_index("idx_music_file_inventory_group", table_name="music_file_inventory")
+    op.drop_index("idx_music_file_inventory_entity", table_name="music_file_inventory")
     op.drop_table("music_file_inventory")

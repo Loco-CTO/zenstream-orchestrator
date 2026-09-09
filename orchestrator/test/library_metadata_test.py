@@ -4,17 +4,17 @@ import os
 import tempfile
 import threading
 import time
-from types import SimpleNamespace
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from api.zenstream import library_routes
 from app.database import DatabaseHandler
 from app.library import (
-    AudioTags,
     EPISODE_RE,
     QUICK_FINGERPRINT_SAMPLE_SIZE,
+    AudioTags,
     FairMetadataExecutor,
     LibraryRuntime,
     LibraryScanner,
@@ -2409,9 +2409,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     metadata.assert_not_called()
                     playback.return_value.probe_entity.assert_not_called()
                     self.assertEqual(
-                        db.execute(
-                            "SELECT COUNT(*) FROM music_file_inventory"
-                        )[0][0],
+                        db.execute("SELECT COUNT(*) FROM music_file_inventory")[0][0],
                         1,
                     )
         finally:
@@ -2450,7 +2448,9 @@ class LibraryMetadataTest(unittest.TestCase):
 
                 self._prepare_incremental_scan(scanner)
                 with (
-                    patch("app.library.parse_audio_tags", side_effect=tags.__getitem__) as parse,
+                    patch(
+                        "app.library.parse_audio_tags", side_effect=tags.__getitem__
+                    ) as parse,
                     patch("app.playback.PlaybackManager"),
                     patch.object(scanner, "_resolve_music_group", side_effect=resolve),
                 ):

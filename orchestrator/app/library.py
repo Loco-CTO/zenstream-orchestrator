@@ -632,8 +632,7 @@ def _normalize_audio_tags(audio: object) -> dict[str, str]:
                 selected = [
                     values
                     for raw_name, values in entries
-                    if _AUDIO_ALBUM_ARTIST_TAG_PRIORITIES.get(raw_name, 2)
-                    == priority
+                    if _AUDIO_ALBUM_ARTIST_TAG_PRIORITIES.get(raw_name, 2) == priority
                 ]
             else:
                 selected = [values for _, values in entries]
@@ -662,9 +661,8 @@ def _normalize_audio_tags(audio: object) -> dict[str, str]:
 
 def parse_audio_inventory(path: Path) -> AudioInventory:
     try:
-        from mutagen import File
-
         from app.media_probe import audio_probe_from_mutagen
+        from mutagen import File
 
         audio = File(path, easy=False)
         return AudioInventory(
@@ -1249,9 +1247,7 @@ class LibraryScanner:
 
     def _music_inventory_enabled(self) -> bool:
         if self._music_inventory_available is None:
-            self._music_inventory_available = self._has_table(
-                "music_file_inventory"
-            )
+            self._music_inventory_available = self._has_table("music_file_inventory")
         return self._music_inventory_available
 
     def _music_inventory_rows(
@@ -1271,13 +1267,9 @@ class LibraryScanner:
             clauses = []
             for target in sorted({_top_level_key(value) for value in targets}):
                 escaped = (
-                    target.replace("\\", "\\\\")
-                    .replace("%", "\\%")
-                    .replace("_", "\\_")
+                    target.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 )
-                clauses.append(
-                    "(path_key=? OR path_key LIKE ? ESCAPE '\\')"
-                )
+                clauses.append("(path_key=? OR path_key LIKE ? ESCAPE '\\')")
                 params.extend((target, f"{escaped}/%"))
             query += " AND (" + " OR ".join(clauses) + ")"
         rows = self.db.execute(query + " ORDER BY path_key", params)
@@ -8360,10 +8352,7 @@ class LibraryScanner:
             )
             group_dirty = group_dirty or bool(
                 group_entity_ids
-                & (
-                    set(self._scan_provider_identity_changed)
-                    - provider_changed_before
-                )
+                & (set(self._scan_provider_identity_changed) - provider_changed_before)
             )
             group_dirty = group_dirty or self._music_group_needs_metadata(
                 artist, release, tracks
@@ -8622,8 +8611,7 @@ class LibraryScanner:
             if previous_group_key is None:
                 continue
             if _top_level_key(_path_key(row[0] or "")) in {
-                _top_level_key(_path_key(value))
-                for value in self._scan_deferred_roots
+                _top_level_key(_path_key(value)) for value in self._scan_deferred_roots
             }:
                 continue
             self._music_dirty_group_keys.add(previous_group_key)

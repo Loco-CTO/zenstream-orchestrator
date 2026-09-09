@@ -464,6 +464,122 @@ class MetadataSearchProjection:
     def __init__(self, db):
         self.db = db
 
+    def _music_track_context(self, entity_id: str, locale: str) -> dict:
+        """Return the validated parent-release context for one track.
+
+        A MusicBrainz recording is intentionally reusable across releases. Its
+        normalized document may therefore contain a ``first_release`` value
+        that is unrelated to this catalog track. The catalog relationship is
+        authoritative here: only the track's release parent can provide its
+        album identity.
+        """
+        rows = self.db.execute(
+            "SELECT parent_id,entity_type FROM library_entities WHERE id=?",
+            (entity_id,),
+        )
+        if not rows or rows[0][1] != "track":
+            return {}
+        if not rows[0][0]:
+            # A legacy/orphan track still needs its recording-level album
+            # fields cleared; the recording document cannot establish a
+            # release relationship on its own.
+            return {"unresolved": True}
+        parent_id = str(rows[0][0])
+        parent_rows = self.db.execute(
+            "SELECT entity_type FROM library_entities WHERE id=?",
+            (parent_id,),
+        )
+        if not parent_rows or parent_rows[0][0] != "release":
+            return {"unresolved": True}
+        release_ids = self.db.execute(
+            "SELECT provider_id FROM entity_provider_ids "
+            "WHERE entity_id=? AND provider='musicbrainz' "
+            "AND identifier_type='release' "
+            "ORDER BY is_primary DESC,provider_id LIMIT 1",
+            (parent_id,),
+        )
+        release_id = str(release_ids[0][0]) if release_ids else None
+        title = None
+        projection_rows = (
+            self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
+                (parent_id, locale),
+            )
+            if self._has_table("catalog_item_projection")
+            else []
+        )
+        if projection_rows:
+            try:
+                parent_payload = json.loads(projection_rows[0][0] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parent_payload = {}
+            if isinstance(parent_payload, dict):
+                title = parent_payload.get("title") or parent_payload.get("album")
+        if not title and self._has_table("metadata_cache"):
+            cache_rows = self.db.execute(
+                "SELECT payload FROM metadata_cache WHERE provider='local' "
+                "AND entity_type='release' AND provider_id=? AND locale IN (?, '') ORDER BY "
+                "CASE WHEN locale=? THEN 0 ELSE 1 END,rowid DESC LIMIT 10",
+                (parent_id, locale, locale),
+            )
+            # Local cache rows are keyed by the entity UUID. Provider rows are
+            # keyed by their release ID, so inspect both only after the
+            # parent identity has been validated.
+            provider_cache_rows = (
+                self.db.execute(
+                    "SELECT payload FROM metadata_cache WHERE entity_type='release' "
+                    "AND provider='musicbrainz' AND provider_id=? "
+                    "AND locale IN (?, '') ORDER BY rowid DESC LIMIT 10",
+                    (release_id, locale),
+                )
+                if release_id
+                else []
+            )
+            for encoded in [row[0] for row in cache_rows] + [
+                row[0] for row in provider_cache_rows
+            ]:
+                try:
+                    value = json.loads(encoded or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if isinstance(value, dict) and (
+                    value.get("title") or value.get("album")
+                ):
+                    title = value.get("title") or value.get("album")
+                    break
+        result = {"parentId": parent_id}
+        if release_id:
+            result["albumId"] = release_id
+        if title:
+            result["album"] = title
+        return result
+
+    def _has_table(self, name: str) -> bool:
+        return bool(
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            )
+        )
+
+    def _apply_music_track_context(
+        self, entity_id: str, locale: str, merged: dict, local_fields: set[str]
+    ) -> None:
+        context = self._music_track_context(entity_id, locale)
+        if not context:
+            return
+        # albumId is a structural relationship, never a recording document
+        # field. A missing validated release identity is represented by an
+        # omitted albumId rather than an arbitrary first release.
+        if context.get("albumId"):
+            merged["albumId"] = context["albumId"]
+        else:
+            merged.pop("albumId", None)
+        if "album" not in local_fields:
+            if context.get("album"):
+                merged["album"] = context["album"]
+            else:
+                merged.pop("album", None)
+
     def _ready_artwork(
         self,
         provider: str,
@@ -533,7 +649,11 @@ class MetadataSearchProjection:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata_cache'"
             )
         )
-        raw = reader.resolve_raw(entity_type, provider_ids, locale) if has_cache else {}
+        raw = (
+            reader.resolve_raw(entity_type, provider_ids, locale, entity_id=entity_id)
+            if has_cache
+            else {}
+        )
         images = list(raw.get("images") or [])
         current_images = payload.get("images") if isinstance(payload, dict) else None
         if isinstance(current_images, list):
@@ -751,7 +871,9 @@ class MetadataSearchProjection:
             owners = dict(owners) if isinstance(owners, dict) else {}
             fallbacks = payload.get("_catalogArtworkFallbacks")
             fallbacks = dict(fallbacks) if isinstance(fallbacks, dict) else {}
-            raw = reader.resolve_raw(entity_type, identities, locale)
+            raw = reader.resolve_raw(
+                entity_type, identities, locale, entity_id=entity_id
+            )
             existing_rows = self.db.execute(
                 "SELECT image_type,provider,local_path,blur_hash,version "
                 "FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
@@ -894,6 +1016,7 @@ class MetadataSearchProjection:
         *,
         preserve_artwork: set[str] | None = None,
         replace_metadata: bool = False,
+        target_entity_id: str | None = None,
     ) -> None:
         if provider == "lastfm" and isinstance(payload, dict):
             payload = _sanitize_lastfm_payload(payload)
@@ -923,10 +1046,16 @@ class MetadataSearchProjection:
         }
         if "catalog_search" not in tables:
             return
-        entities = self.db.execute(
-            "SELECT e.id,e.library_id,p.is_primary FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? AND p.provider_id=? AND e.entity_type=?",
-            (provider, provider_id, entity_type),
+        entity_query = (
+            "SELECT e.id,e.library_id,p.is_primary FROM entity_provider_ids p "
+            "JOIN library_entities e ON e.id=p.entity_id WHERE p.provider=? "
+            "AND p.provider_id=? AND e.entity_type=?"
         )
+        entity_params: list[object] = [provider, provider_id, entity_type]
+        if target_entity_id:
+            entity_query += " AND e.id=?"
+            entity_params.append(target_entity_id)
+        entities = self.db.execute(entity_query, entity_params)
         has_projection = "catalog_item_projection" in tables
         has_genres = "catalog_item_genres" in tables
         genre_columns = (
@@ -1040,7 +1169,10 @@ class MetadataSearchProjection:
                     if entity_type in MUSIC_ENTITY_TYPES:
                         resolved_music = (
                             trailer_reader.resolve_raw(
-                                entity_type, provider_ids, locale
+                                entity_type,
+                                provider_ids,
+                                locale,
+                                entity_id=entity_id,
                             )
                             if "metadata_cache" in tables
                             else {}
@@ -1061,6 +1193,10 @@ class MetadataSearchProjection:
                             merged.setdefault("providers", {})["lastfm"] = (
                                 copy.deepcopy(current_namespaces["lastfm"])
                             )
+                    if entity_type == "track":
+                        self._apply_music_track_context(
+                            entity_id, locale, merged, local_fields
+                        )
                     trailer_original = next(
                         (
                             _canonical_metadata_language(value.get("originalLanguage"))
@@ -1385,6 +1521,73 @@ def reproject_entity_artwork(
     return MetadataSearchProjection(db).reproject_entity_artwork(entity_id, locales)
 
 
+def repair_music_track_contexts(db, library_id: str, should_terminate=None) -> int:
+    """Repair stale track album fields without contacting a provider.
+
+    This is deliberately cache/read-model only. It can correct catalogs that
+    were built before release-contextual projections existed, even when the
+    provider is unavailable and no source file changed.
+    """
+    should_terminate = should_terminate or (lambda: False)
+    tables = {
+        row[0]
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if not {"library_entities", "catalog_item_projection"}.issubset(tables):
+        return 0
+    locales = list(MetadataLanguageSettings().get()) or ["en"]
+    projection = MetadataSearchProjection(db)
+    rows = db.execute(
+        "SELECT id FROM library_entities WHERE library_id=? AND entity_type='track' "
+        "ORDER BY relative_path COLLATE NOCASE,id",
+        (library_id,),
+    )
+    corrected = 0
+    for (entity_id,) in rows:
+        if should_terminate():
+            return corrected
+        for locale in locales:
+            values = db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
+                (entity_id, locale),
+            )
+            if not values:
+                continue
+            try:
+                payload = json.loads(values[0][0] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            local_fields = {
+                field
+                for field in payload.get("_localMetadataFields", [])
+                if isinstance(field, str)
+            }
+            expected = projection._music_track_context(str(entity_id), locale)
+            if not expected:
+                continue
+            before = (payload.get("albumId"), payload.get("album"))
+            if expected.get("albumId"):
+                payload["albumId"] = expected["albumId"]
+            else:
+                payload.pop("albumId", None)
+            if "album" not in local_fields:
+                if expected.get("album"):
+                    payload["album"] = expected["album"]
+                else:
+                    payload.pop("album", None)
+            after = (payload.get("albumId"), payload.get("album"))
+            if before == after:
+                continue
+            db.execute(
+                "UPDATE catalog_item_projection SET payload=?,updated_at=CURRENT_TIMESTAMP WHERE entity_id=? AND locale=?",
+                (json.dumps(payload, ensure_ascii=False), entity_id, locale),
+            )
+            corrected += 1
+    return corrected
+
+
 class MetadataReadService:
     """Resolve metadata consistently for public and administrator callers."""
 
@@ -1446,7 +1649,12 @@ class MetadataReadService:
         return payloads
 
     def resolve_raw(
-        self, entity_type: str, provider_ids: Iterable[dict], requested: str
+        self,
+        entity_type: str,
+        provider_ids: Iterable[dict],
+        requested: str,
+        *,
+        entity_id: str | None = None,
     ) -> dict:
         provider_ids = list(provider_ids)
         payloads = self.payloads(entity_type, provider_ids)
@@ -1597,6 +1805,31 @@ class MetadataReadService:
         result["trailers"] = self._localized_trailers(
             payloads, providers, requested, original
         )
+        if entity_type == "track" and entity_id:
+            context = MetadataSearchProjection(self.db)._music_track_context(
+                entity_id, requested
+            )
+            if context:
+                if context.get("albumId"):
+                    result["albumId"] = context["albumId"]
+                else:
+                    result.pop("albumId", None)
+                local_album = next(
+                    (
+                        value.get("album")
+                        for (provider, _locale), value in payloads.items()
+                        if provider == "local"
+                        and isinstance(value, dict)
+                        and usable_text("album", value.get("album"))
+                    ),
+                    None,
+                )
+                if local_album:
+                    result["album"] = local_album
+                elif context.get("album"):
+                    result["album"] = context["album"]
+                else:
+                    result.pop("album", None)
         return result
 
     def resolve_public(
@@ -1636,7 +1869,9 @@ class MetadataReadService:
             # finished publishing. Do not keep that empty result in the
             # process cache once a later catalog read can see the ready file.
             self._public_resolutions.pop(cache_key, None)
-        raw = self.resolve_raw(entity_type, provider_ids, requested)
+        raw = self.resolve_raw(
+            entity_type, provider_ids, requested, entity_id=entity_id
+        )
         original = raw.get("originalLanguage")
         providers = self.providers(entity_type)
         selected = {}
@@ -1832,6 +2067,7 @@ class MetadataReadService:
                             provider_id,
                             locale,
                             document,
+                            target_entity_id=entity_id,
                         )
                     asset_documents = {"": document}
                 else:
@@ -1847,15 +2083,18 @@ class MetadataReadService:
                             provider_id,
                             locale,
                             document,
+                            target_entity_id=entity_id,
                         )
                 if image_ingest is not None and asset_documents:
+                    image_kwargs = {"force": False, "complete_batch": False}
+                    if entity_id:
+                        image_kwargs["target_entity_id"] = entity_id
                     image_ingest.ingest_documents(
                         provider,
                         entity_type,
                         provider_id,
                         asset_documents,
-                        force=False,
-                        complete_batch=False,
+                        **image_kwargs,
                     )
             except Exception as error:
                 errors.append(error)
@@ -2128,6 +2367,7 @@ class MetadataIngestService:
         force_assets: bool | None = None,
         replace_metadata: bool = False,
         should_terminate=None,
+        target_entity_id: str | None = None,
     ) -> list[dict]:
         if provider not in {"tmdb", "tvdb", "musicbrainz", "lastfm"}:
             return []
@@ -2147,6 +2387,7 @@ class MetadataIngestService:
                 force=force,
                 force_assets=force_assets,
                 replace_metadata=replace_metadata,
+                target_entity_id=target_entity_id,
             ).values()
         )
 
@@ -2160,6 +2401,7 @@ class MetadataIngestService:
         force: bool = False,
         force_assets: bool | None = None,
         replace_metadata: bool = False,
+        target_entity_id: str | None = None,
     ) -> dict[str, dict]:
         neutral = self.is_locale_neutral(provider, entity_type)
         locales = list(dict.fromkeys(self.locales() if locales is None else locales))
@@ -2183,27 +2425,56 @@ class MetadataIngestService:
         complete_batch = neutral or set(locales) == set(self._locales)
         with metadata_fetch_activity():
             if hasattr(self.metadata_service, "fetch_locales"):
+                fetch_kwargs = {
+                    "force": force,
+                    "project": not neutral,
+                }
+                if target_entity_id:
+                    fetch_kwargs["target_entity_id"] = target_entity_id
                 try:
                     values = self.metadata_service.fetch_locales(
                         provider,
                         entity_type,
                         provider_id,
                         fetch_locales,
-                        force=force,
-                        project=not neutral,
+                        **fetch_kwargs,
                     )
                 except TypeError as error:
                     # Older provider adapters and test doubles may not expose
-                    # the optional projection switch.
-                    if "project" not in str(error):
+                    # the optional projection/context switches.
+                    message = str(error)
+                    if "target_entity_id" in message:
+                        fetch_kwargs.pop("target_entity_id", None)
+                        try:
+                            values = self.metadata_service.fetch_locales(
+                                provider,
+                                entity_type,
+                                provider_id,
+                                fetch_locales,
+                                **fetch_kwargs,
+                            )
+                        except TypeError as retry_error:
+                            if "project" not in str(retry_error):
+                                raise
+                            fetch_kwargs.pop("project", None)
+                            values = self.metadata_service.fetch_locales(
+                                provider,
+                                entity_type,
+                                provider_id,
+                                fetch_locales,
+                                **fetch_kwargs,
+                            )
+                    elif "project" in message:
+                        fetch_kwargs.pop("project", None)
+                        values = self.metadata_service.fetch_locales(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            fetch_locales,
+                            **fetch_kwargs,
+                        )
+                    else:
                         raise
-                    values = self.metadata_service.fetch_locales(
-                        provider,
-                        entity_type,
-                        provider_id,
-                        fetch_locales,
-                        force=force,
-                    )
             else:
                 values = {
                     locale: self.metadata_service.fetch(
@@ -2235,6 +2506,7 @@ class MetadataIngestService:
                     force_assets=force_assets,
                     replace_metadata=replace_metadata,
                     complete_batch=complete_batch,
+                    target_entity_id=target_entity_id,
                 )
             }
 
@@ -2249,6 +2521,7 @@ class MetadataIngestService:
                     locale,
                     values[locale],
                     replace_metadata=replace_metadata,
+                    target_entity_id=target_entity_id,
                 )
 
         asset_documents = {"": values[locales[0]]} if neutral else values
@@ -2257,24 +2530,34 @@ class MetadataIngestService:
             if self.image_ingest is not None:
                 batch_ingest = getattr(self.image_ingest, "ingest_documents", None)
                 if batch_ingest is not None:
+                    image_kwargs = {
+                        "force": force_assets,
+                        "complete_batch": complete_batch,
+                    }
+                    if target_entity_id:
+                        image_kwargs["target_entity_id"] = target_entity_id
                     batch_ingest(
                         provider,
                         entity_type,
                         provider_id,
                         asset_documents,
-                        force=force_assets,
-                        complete_batch=complete_batch,
+                        **image_kwargs,
                     )
                 else:
                     for locale in asset_documents:
+                        image_kwargs = {
+                            "force": force_assets,
+                            "complete_batch": complete_batch,
+                        }
+                        if target_entity_id:
+                            image_kwargs["target_entity_id"] = target_entity_id
                         self.image_ingest.ingest(
                             provider,
                             entity_type,
                             provider_id,
                             locale,
                             asset_documents[locale],
-                            force=force_assets,
-                            complete_batch=complete_batch,
+                            **image_kwargs,
                         )
             if self.credit_ingest is not None:
                 for locale in asset_documents:
@@ -2315,6 +2598,7 @@ class MetadataIngestService:
         force: bool = False,
         force_assets: bool | None = None,
         replace_metadata: bool = False,
+        target_entity_id: str | None = None,
     ) -> dict:
         if locale not in self.locales():
             raise ValueError(f"Metadata language is not configured: {locale}")
@@ -2326,6 +2610,7 @@ class MetadataIngestService:
             force=force,
             force_assets=force_assets,
             replace_metadata=replace_metadata,
+            target_entity_id=target_entity_id,
         )[locale]
 
     def ingest_document(
@@ -2339,6 +2624,7 @@ class MetadataIngestService:
         force_assets: bool = False,
         replace_metadata: bool = False,
         complete_batch: bool | None = None,
+        target_entity_id: str | None = None,
     ) -> dict:
         """Materialize a normalized document, including documents cached by aggregation."""
         neutral = self.is_locale_neutral(provider, entity_type)
@@ -2361,6 +2647,7 @@ class MetadataIngestService:
                     projection_locale,
                     normalized,
                     replace_metadata=replace_metadata,
+                    target_entity_id=target_entity_id,
                 )
         if self.image_ingest is not None or self.credit_ingest is not None:
 
@@ -2368,14 +2655,19 @@ class MetadataIngestService:
                 # Cache hits also run this path so rows created before eager
                 # asset ingestion are repaired without blocking metadata.
                 if self.image_ingest is not None:
+                    image_kwargs = {
+                        "force": force_assets,
+                        "complete_batch": complete_batch,
+                    }
+                    if target_entity_id:
+                        image_kwargs["target_entity_id"] = target_entity_id
                     self.image_ingest.ingest(
                         provider,
                         entity_type,
                         provider_id,
                         asset_locale,
                         normalized,
-                        force=force_assets,
-                        complete_batch=complete_batch,
+                        **image_kwargs,
                     )
                 if self.credit_ingest is not None:
                     self.credit_ingest.ingest(
@@ -2744,6 +3036,7 @@ class MetadataImageIngestService:
         *,
         force: bool = False,
         complete_batch: bool = False,
+        target_entity_id: str | None = None,
     ) -> dict[str, int]:
         """Materialize one provider winner per locale/category.
 
@@ -2863,6 +3156,7 @@ class MetadataImageIngestService:
                 locale,
                 document,
                 preserve_artwork=preserved.get(locale),
+                target_entity_id=target_entity_id,
             )
         # Pruning is safe only when the caller supplied the complete
         # configured-locale document batch.  A single-locale replay from a
@@ -2885,6 +3179,7 @@ class MetadataImageIngestService:
         *,
         force: bool = False,
         complete_batch: bool = False,
+        target_entity_id: str | None = None,
     ) -> dict[str, int]:
         return self.ingest_documents(
             provider,
@@ -2893,6 +3188,7 @@ class MetadataImageIngestService:
             {locale: document},
             force=force,
             complete_batch=complete_batch,
+            target_entity_id=target_entity_id,
         )
 
 

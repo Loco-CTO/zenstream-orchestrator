@@ -66,7 +66,7 @@ def _provider_primary_ready_for_all_locales(
     except Exception:
         return False
     for locale in locales:
-        raw = reader.resolve_raw(entity_type, identities, locale)
+        raw = reader.resolve_raw(entity_type, identities, locale, entity_id=entity_id)
         if not reader.ready_artwork(
             entity_type,
             identities,

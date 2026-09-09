@@ -673,7 +673,7 @@ class CatalogReadModel:
                 )
             ]
             raw = (
-                reader.resolve_raw(entity_type, identities, locale)
+                reader.resolve_raw(entity_type, identities, locale, entity_id=entity_id)
                 if self._has_table("metadata_cache")
                 else {}
             )

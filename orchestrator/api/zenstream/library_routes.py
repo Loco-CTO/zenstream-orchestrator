@@ -524,7 +524,10 @@ def _metadata_for(
         if value is not None:
             return value
     value = MetadataReadService(store.db).resolve_raw(
-        item["type"], item.get("providerIds", []), requested
+        item["type"],
+        item.get("providerIds", []),
+        requested,
+        entity_id=item["id"],
     )
     return value or None
 

@@ -1,6 +1,5 @@
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 revision = "0050_music_scanner_correctness"
 down_revision = "0049_artist_follow_notifications"
@@ -18,7 +17,9 @@ def upgrade() -> None:
         sa.Column("identity_source", sa.Text(), nullable=False),
         sa.Column("identity_version", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("updated_at", sa.Text(), nullable=False),
-        sa.ForeignKeyConstraint(["entity_id"], ["library_entities.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["entity_id"], ["library_entities.id"], ondelete="CASCADE"
+        ),
         sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("entity_id", "entity_type", "identity_key"),
     )

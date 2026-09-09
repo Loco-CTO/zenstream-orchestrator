@@ -1880,12 +1880,7 @@ class Catalog:
             if row[3] == "episode" and series_id and language
             else None
         )
-        if (
-            row[3] == "track"
-            and row[2]
-            and language
-            and include_track_release_metadata
-        ):
+        if row[3] == "track" and row[2] and language and include_track_release_metadata:
             release_row = self._entity_row(row[2])
             if release_row and release_row[3] == "release":
                 release_metadata = self.metadata(user_id, row[2], language)["metadata"]
@@ -2733,9 +2728,7 @@ class Catalog:
             album[0]: self._music_track_rows(album[0]) for album in album_rows
         }
         own_track_rows = [
-            track
-            for album in album_rows
-            for track in track_rows_by_release[album[0]]
+            track for album in album_rows for track in track_rows_by_release[album[0]]
         ]
         track_by_id = {row[0]: row for row in own_track_rows}
         if include_tracks and credited_track_ids:
@@ -2817,9 +2810,10 @@ class Catalog:
 
         def track_sort_key(row):
             disc_number, track_number, _duration = self._audio_fields(row[0])
-            metadata = self._projected_music_metadata(
-                user_id, row[0], language
-            ) or self.metadata(user_id, row[0], language)["metadata"]
+            metadata = (
+                self._projected_music_metadata(user_id, row[0], language)
+                or self.metadata(user_id, row[0], language)["metadata"]
+            )
             return (
                 str((metadata or {}).get("title") or "").casefold(),
                 disc_number is None,
@@ -2945,9 +2939,10 @@ class Catalog:
 
         def track_sort_key(row):
             disc_number, track_number, _duration = self._audio_fields(row[0])
-            metadata = self._projected_music_metadata(
-                user_id, row[0], language
-            ) or self.metadata(user_id, row[0], language)["metadata"]
+            metadata = (
+                self._projected_music_metadata(user_id, row[0], language)
+                or self.metadata(user_id, row[0], language)["metadata"]
+            )
             return (
                 str((metadata or {}).get("title") or "").casefold(),
                 disc_number is None,

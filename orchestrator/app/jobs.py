@@ -940,7 +940,10 @@ class JobStore:
         repair_version = int(
             (music_repair.get("config") or {}).get("repairVersion") or 0
         )
-        if music_repair["lastRunAt"] is None and repair_version < MusicCatalogRepairJob.REPAIR_VERSION:
+        if (
+            music_repair["lastRunAt"] is None
+            and repair_version < MusicCatalogRepairJob.REPAIR_VERSION
+        ):
             self.db.execute(
                 "UPDATE job_definitions SET config=?,next_run_at=?,updated_at=? WHERE id=?",
                 (
@@ -2431,9 +2434,7 @@ class MusicCatalogRepairJob:
                     progress_stage_current=index,
                     progress_stage_total=max(1, total),
                     progress_stage_unit="libraries",
-                    message=(
-                        f"Repaired music library {name} · {index}/{total}"
-                    ),
+                    message=(f"Repaired music library {name} · {index}/{total}"),
                 )
             if failed:
                 failure_time = now()
@@ -3116,9 +3117,9 @@ class JobScheduler:
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
             elif kind == "music_catalog_repair":
-                MusicCatalogRepairJob(
-                    self.store, self.library_runtime
-                ).run(run_id, definition, self.cancel_events[run_id].is_set)
+                MusicCatalogRepairJob(self.store, self.library_runtime).run(
+                    run_id, definition, self.cancel_events[run_id].is_set
+                )
             elif kind == "metadata_refresh":
                 if bool(run_options.get("refreshAll", False)):
                     MetadataMissingJob(self.store).run(

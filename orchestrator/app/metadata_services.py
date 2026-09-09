@@ -500,10 +500,14 @@ class MetadataSearchProjection:
         )
         release_id = str(release_ids[0][0]) if release_ids else None
         title = None
-        projection_rows = self.db.execute(
-            "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
-            (parent_id, locale),
-        ) if self._has_table("catalog_item_projection") else []
+        projection_rows = (
+            self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
+                (parent_id, locale),
+            )
+            if self._has_table("catalog_item_projection")
+            else []
+        )
         if projection_rows:
             try:
                 parent_payload = json.loads(projection_rows[0][0] or "{}")
@@ -538,7 +542,9 @@ class MetadataSearchProjection:
                     value = json.loads(encoded or "{}")
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
-                if isinstance(value, dict) and (value.get("title") or value.get("album")):
+                if isinstance(value, dict) and (
+                    value.get("title") or value.get("album")
+                ):
                     title = value.get("title") or value.get("album")
                     break
         result = {"parentId": parent_id}
@@ -1515,9 +1521,7 @@ def reproject_entity_artwork(
     return MetadataSearchProjection(db).reproject_entity_artwork(entity_id, locales)
 
 
-def repair_music_track_contexts(
-    db, library_id: str, should_terminate=None
-) -> int:
+def repair_music_track_contexts(db, library_id: str, should_terminate=None) -> int:
     """Repair stale track album fields without contacting a provider.
 
     This is deliberately cache/read-model only. It can correct catalogs that

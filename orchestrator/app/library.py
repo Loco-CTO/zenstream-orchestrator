@@ -1504,7 +1504,9 @@ class LibraryScanner:
             if removed:
                 self._refresh_dependent_collections(library_id)
             self.db.schedule_maintenance(scan_complete=True)
-            if not getattr(self.store, "runtime", None) or not self.store.runtime.notifications_suppressed(library_id):
+            if not getattr(
+                self.store, "runtime", None
+            ) or not self.store.runtime.notifications_suppressed(library_id):
                 try:
                     from app.notifications import NotificationService
 
@@ -2374,9 +2376,7 @@ class LibraryScanner:
                     "A local NFO sidecar could not be assigned to this music entity by a conventional filename",
                     {
                         "anchor": str(anchor),
-                        "candidates": sorted(
-                            str(path.name) for path in nfo_candidates
-                        ),
+                        "candidates": sorted(str(path.name) for path in nfo_candidates),
                     },
                 )
             if previous is None:
@@ -2569,11 +2569,7 @@ class LibraryScanner:
                 provider_id,
                 missing,
                 force=False,
-                **(
-                    {"target_entity_id": task_key[3]}
-                    if len(task_key) > 3
-                    else {}
-                ),
+                **({"target_entity_id": task_key[3]} if len(task_key) > 3 else {}),
             )
 
         for task, _result, error in metadata_task_results(
@@ -2600,7 +2596,11 @@ class LibraryScanner:
             (entity_id,),
         )
         entity_type = row[0][0] if row else ""
-        if row and entity_type in {"artist", "release", "track"} and row[0][1] == "manual":
+        if (
+            row
+            and entity_type in {"artist", "release", "track"}
+            and row[0][1] == "manual"
+        ):
             # An administrator match is an explicit override. Scanner/NFO
             # discovery may enrich it, but must not replace its identity.
             return
@@ -2637,7 +2637,11 @@ class LibraryScanner:
             (entity_id,),
         )
         entity_type = row[0][0] if row else ""
-        if row and entity_type in {"artist", "release", "track"} and row[0][1] == "manual":
+        if (
+            row
+            and entity_type in {"artist", "release", "track"}
+            and row[0][1] == "manual"
+        ):
             # Preserve administrator-selected identities during inventory
             # refresh; source tags remain available as local evidence.
             return
@@ -5902,17 +5906,30 @@ class LibraryScanner:
             if isinstance(value, dict) and value.get("name")
         ]
         provider_artist = _music_normalize(document.get("albumArtist"))
-        if local_artist and provider_artist and local_artist not in {
-            provider_artist,
-            *provider_artists,
-        }:
+        if (
+            local_artist
+            and provider_artist
+            and local_artist
+            not in {
+                provider_artist,
+                *provider_artists,
+            }
+        ):
             return False, "release artist differs from local metadata", evidence
 
         local_year = str(local.get("year") or local.get("date") or "")[:4]
         provider_year = str(
-            document.get("year") or document.get("date") or document.get("releaseDate") or ""
+            document.get("year")
+            or document.get("date")
+            or document.get("releaseDate")
+            or ""
         )[:4]
-        if local_year and provider_year and local_year.isdigit() and provider_year.isdigit():
+        if (
+            local_year
+            and provider_year
+            and local_year.isdigit()
+            and provider_year.isdigit()
+        ):
             if local_year != provider_year:
                 return False, "release year differs from local metadata", evidence
 
@@ -5922,7 +5939,9 @@ class LibraryScanner:
             return False, "release type differs from local metadata", evidence
 
         provider_tracks = [
-            value for value in document.get("tracks", []) or [] if isinstance(value, dict)
+            value
+            for value in document.get("tracks", []) or []
+            if isinstance(value, dict)
         ]
         explicit_ids = {
             str(value[2])
@@ -5936,7 +5955,11 @@ class LibraryScanner:
         missing_ids = sorted(explicit_ids - provider_ids)
         if missing_ids:
             evidence["missingRecordingIds"] = missing_ids
-            return False, "release does not contain explicitly tagged recordings", evidence
+            return (
+                False,
+                "release does not contain explicitly tagged recordings",
+                evidence,
+            )
         return True, "", evidence
 
     @staticmethod
@@ -6077,8 +6100,12 @@ class LibraryScanner:
             "disc": "disc number",
             "localEvidence": "local track evidence",
         }
-        rendered = ", ".join(dict.fromkeys(labels.get(field, field) for field in fields))
-        prefix = "The explicitly tagged recording" if explicit else "The selected recording"
+        rendered = ", ".join(
+            dict.fromkeys(labels.get(field, field) for field in fields)
+        )
+        prefix = (
+            "The explicitly tagged recording" if explicit else "The selected recording"
+        )
         return (
             f"{prefix} differs in {rendered or 'track context'}"
             "; local metadata was retained"
@@ -6381,13 +6408,18 @@ class LibraryScanner:
             )
             self._music_local_metadata[entity] = local
             track_identity_values = [
-                ("track", _music_identity_key_text((
+                (
                     "track",
-                    _music_normalize(local.get("title")),
-                    str(disc_number or ""),
-                    str(track_number or ""),
-                    str(local.get("durationSeconds") or ""),
-                )))
+                    _music_identity_key_text(
+                        (
+                            "track",
+                            _music_normalize(local.get("title")),
+                            str(disc_number or ""),
+                            str(track_number or ""),
+                            str(local.get("durationSeconds") or ""),
+                        )
+                    ),
+                )
             ]
             self._persist_music_identity_keys(
                 entity,
@@ -6746,9 +6778,7 @@ class LibraryScanner:
         pending_release_ids = set(
             getattr(self, "_music_pending_release_ids", {}).pop(release, set())
         )
-        release_conflicted = release in getattr(
-            self, "_music_release_conflicts", set()
-        )
+        release_conflicted = release in getattr(self, "_music_release_conflicts", set())
         release_conflict = release_conflicted
         release_id = (
             sorted(pending_release_ids)[0]
@@ -6821,9 +6851,7 @@ class LibraryScanner:
                             )
                             self._music_mark_identity_changed(release)
                         for locale, normalized in release_documents.items():
-                            self._persist_normalized_ids(
-                                release, "release", normalized
-                            )
+                            self._persist_normalized_ids(release, "release", normalized)
                             self._persist_child_ids(release, normalized)
                             from app.metadata_services import MetadataSearchProjection
 
@@ -6847,7 +6875,11 @@ class LibraryScanner:
         else:
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method=?,updated_at=? WHERE id=?",
-                ("local_conflict" if release_conflict else "local_metadata", now(), release),
+                (
+                    "local_conflict" if release_conflict else "local_metadata",
+                    now(),
+                    release,
+                ),
             )
             self._queue_metadata_repair(
                 release,
@@ -7005,9 +7037,7 @@ class LibraryScanner:
                         entity_id,
                         "track",
                         "provider_recording_conflict",
-                        self._music_recording_context_reason(
-                            mismatches, explicit=True
-                        ),
+                        self._music_recording_context_reason(mismatches, explicit=True),
                         {
                             "recordingId": str(explicit_id),
                             "releaseId": release_id,
@@ -7064,8 +7094,11 @@ class LibraryScanner:
                         ),
                         None,
                     )
-                    if candidate is not None and not self._music_recording_context_matches(
-                        local, candidate, require_release_context=False
+                    if (
+                        candidate is not None
+                        and not self._music_recording_context_matches(
+                            local, candidate, require_release_context=False
+                        )
                     ):
                         mismatches = self._music_recording_context_mismatches(
                             local, candidate, require_release_context=False
@@ -10053,9 +10086,7 @@ class LibraryRuntime:
                     job_id,
                     self._cancel_events[job_id].is_set,
                     targets=(
-                        None
-                        if kind != "reconcile" or full_music_reconcile
-                        else targets
+                        None if kind != "reconcile" or full_music_reconcile else targets
                     ),
                 )
             else:

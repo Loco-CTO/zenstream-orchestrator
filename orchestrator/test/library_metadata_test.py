@@ -2338,7 +2338,9 @@ class LibraryMetadataTest(unittest.TestCase):
 
         self.assertEqual([mismatch["field"] for mismatch in mismatches], ["duration"])
         self.assertEqual(mismatches[0]["severity"], "advisory")
-        self.assertTrue(LibraryScanner._music_recording_context_matches(local, candidate))
+        self.assertTrue(
+            LibraryScanner._music_recording_context_matches(local, candidate)
+        )
 
     def test_music_track_documents_fall_back_to_local_positions(self):
         scanner = LibraryScanner.__new__(LibraryScanner)

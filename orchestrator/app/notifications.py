@@ -925,9 +925,11 @@ class NotificationService:
                 provider_ids = [
                     provider_id
                     for artist_id in artist_ids
-                    if (provider_id := self._provider(
-                        cursor, artist_id, "musicbrainz", "artist"
-                    ))
+                    if (
+                        provider_id := self._provider(
+                            cursor, artist_id, "musicbrainz", "artist"
+                        )
+                    )
                 ]
                 artist_placeholders = ",".join("?" for _ in artist_ids)
                 match_clauses = [
@@ -962,12 +964,14 @@ class NotificationService:
                     "SELECT relative_path FROM library_entities WHERE id=?",
                     (display_artist_id,),
                 ).fetchone()
-                release_fallback = (release_row[3] or "").replace("\\", "/").rsplit(
-                    "/", 1
-                )[-1]
+                release_fallback = (
+                    (release_row[3] or "").replace("\\", "/").rsplit("/", 1)[-1]
+                )
                 artist_fallback = (
-                    (artist_path[0] if artist_path else "") or ""
-                ).replace("\\", "/").rsplit("/", 1)[-1]
+                    ((artist_path[0] if artist_path else "") or "")
+                    .replace("\\", "/")
+                    .rsplit("/", 1)[-1]
+                )
                 batch_key = min(track_ids)
                 for (user_id,) in matches:
                     metadata_locale, interface_locale, configured = self._user_locales(

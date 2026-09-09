@@ -2317,6 +2317,61 @@ class LibraryMetadataTest(unittest.TestCase):
         )
         self.assertEqual(candidate["id"], "right")
 
+    def test_music_recording_duration_difference_is_advisory(self):
+        local = {
+            "title": "First Love",
+            "discNumber": 2,
+            "trackNumber": 8,
+            "durationSeconds": 261.7849,
+        }
+        candidate = {
+            "id": "recording",
+            "title": "First Love",
+            "disc": 2,
+            "position": 8,
+            "durationSeconds": 452.306,
+        }
+
+        mismatches = LibraryScanner._music_recording_context_mismatches(
+            local, candidate
+        )
+
+        self.assertEqual([mismatch["field"] for mismatch in mismatches], ["duration"])
+        self.assertEqual(mismatches[0]["severity"], "advisory")
+        self.assertTrue(LibraryScanner._music_recording_context_matches(local, candidate))
+
+    def test_music_track_documents_fall_back_to_local_positions(self):
+        scanner = LibraryScanner.__new__(LibraryScanner)
+        scanner._music_local_metadata = {
+            "track-1": {
+                "title": "Track",
+                "album": "Album",
+                "trackNumber": 3,
+                "discNumber": 2,
+            }
+        }
+        release_documents = {
+            "release-1": {
+                "en": {
+                    "providerId": "release-mbid",
+                    "title": "Album",
+                    "tracks": [{"id": "track-1", "title": "Track"}],
+                }
+            }
+        }
+
+        values = scanner._music_track_documents(
+            "track-1",
+            "release-1",
+            "track-1",
+            release_documents,
+            MagicMock(),
+            ["en"],
+        )
+
+        self.assertEqual(values["en"]["discNumber"], 2)
+        self.assertEqual(values["en"]["trackNumber"], 3)
+
     def test_jellyfin_style_provider_ids_are_extracted(self):
         self.assertEqual(
             provider_ids("The Matrix (1999) [tmdbid-603] [tvdbid-Movie-123]"),

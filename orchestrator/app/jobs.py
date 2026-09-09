@@ -23,6 +23,7 @@ from app.metadata_services import (
     TEXT_FIELDS,
     MetadataIngestService,
     metadata_task_results,
+    repair_music_track_contexts,
 )
 from app.models.metadata import MetadataLanguageSettings
 from app.progress import (
@@ -926,6 +927,36 @@ class JobStore:
             self.db.execute(
                 "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
                 (now(), now(), upgrade["id"]),
+            )
+        music_repair = self.ensure(
+            "music_catalog_repair",
+            "Repair music catalog identities",
+            "Run the deterministic tag-first music inventory and repair release-context metadata without changing source files or user state.",
+            "music_catalog_repair",
+            1440,
+            {"repairVersion": MusicCatalogRepairJob.REPAIR_VERSION},
+            enabled=False,
+        )
+        repair_version = int(
+            (music_repair.get("config") or {}).get("repairVersion") or 0
+        )
+        if music_repair["lastRunAt"] is None and repair_version < MusicCatalogRepairJob.REPAIR_VERSION:
+            self.db.execute(
+                "UPDATE job_definitions SET config=?,next_run_at=?,updated_at=? WHERE id=?",
+                (
+                    json.dumps(
+                        {"repairVersion": MusicCatalogRepairJob.REPAIR_VERSION},
+                        ensure_ascii=False,
+                    ),
+                    now(),
+                    now(),
+                    music_repair["id"],
+                ),
+            )
+        elif music_repair["lastRunAt"] is None:
+            self.db.execute(
+                "UPDATE job_definitions SET next_run_at=?,updated_at=? WHERE id=?",
+                (now(), now(), music_repair["id"]),
             )
         self.ensure(
             "metadata_refresh",
@@ -2327,6 +2358,142 @@ class MetadataUpgradeJob(MetadataMissingJob):
         )
 
 
+class MusicCatalogRepairJob:
+    """Run the versioned deterministic music inventory repair once."""
+
+    REPAIR_VERSION = 1
+
+    def __init__(self, store: JobStore, library_runtime=None):
+        self.store = store
+        self.db = store.db
+        self.library_runtime = library_runtime or globals().get("library_runtime")
+
+    def run(self, run_id: str, definition: dict, should_terminate=None) -> None:
+        should_terminate = should_terminate or (lambda: False)
+        libraries = self.db.execute(
+            "SELECT id,name FROM libraries WHERE type='music' ORDER BY id"
+        )
+        total = len(libraries)
+        self.store.update_run(
+            run_id,
+            progress_current=0,
+            progress_total=max(1, total),
+            progress_phase="inventory",
+            progress_label="Repairing music catalog identities",
+            progress_stage_current=0,
+            progress_stage_total=max(1, total),
+            progress_stage_unit="libraries",
+            message=f"Repairing music catalog identities · 0/{total} libraries",
+            thread_name=threading.current_thread().name,
+        )
+        runtime = self.library_runtime
+        if runtime is None:
+            raise RuntimeError("Library runtime is unavailable for music repair")
+        if not getattr(getattr(runtime, "thread", None), "is_alive", lambda: False)():
+            runtime.start()
+        repaired = 0
+        failed: list[dict] = []
+        suppressed: list[str] = []
+        try:
+            for index, (library_id, name) in enumerate(libraries, start=1):
+                if should_terminate():
+                    raise JobTerminated()
+                runtime.suppress_library_notifications(str(library_id), True)
+                suppressed.append(str(library_id))
+                job = runtime.enqueue(str(library_id), "scan")
+                if not job:
+                    raise RuntimeError(f"Music library {library_id} is unavailable")
+                result = runtime.wait_for_job(
+                    job["id"], should_terminate=should_terminate
+                )
+                if not result or result.get("state") not in {
+                    "completed",
+                    "completed_with_warnings",
+                }:
+                    failed.append(
+                        {
+                            "libraryId": library_id,
+                            "name": name,
+                            "jobId": job["id"],
+                            "state": result.get("state") if result else "missing",
+                            "error": result.get("error") if result else None,
+                        }
+                    )
+                    continue
+                repaired += 1
+                repair_music_track_contexts(self.db, str(library_id), should_terminate)
+                self.store.update_run(
+                    run_id,
+                    progress_current=index,
+                    progress_total=max(1, total),
+                    progress_phase="inventory",
+                    progress_label="Repairing music catalog identities",
+                    progress_stage_current=index,
+                    progress_stage_total=max(1, total),
+                    progress_stage_unit="libraries",
+                    message=(
+                        f"Repaired music library {name} · {index}/{total}"
+                    ),
+                )
+            if failed:
+                failure_time = now()
+                retry_at = (
+                    datetime.now(timezone.utc) + timedelta(minutes=5)
+                ).isoformat()
+                failure_message = (
+                    f"Music catalog repair failed for {len(failed)} library(s)"
+                )
+                self.store.update_run(
+                    run_id,
+                    state="failed",
+                    progress_current=repaired,
+                    progress_total=max(1, total),
+                    error="One or more music libraries could not be repaired.",
+                    error_details=json.dumps(
+                        {
+                            "repairVersion": self.REPAIR_VERSION,
+                            "repairedLibraries": repaired,
+                            "failed": failed,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    finished_at=failure_time,
+                    message=failure_message,
+                )
+                # Keep the one-time repair eligible for a bounded retry. The
+                # repair definition deliberately has no recurring trigger;
+                # last_run_at remains NULL until every music library succeeds.
+                self.db.execute(
+                    "UPDATE job_definitions SET next_run_at=?,last_state='failed',last_message=?,updated_at=? WHERE id=? AND last_run_at IS NULL",
+                    (retry_at, failure_message, failure_time, definition["id"]),
+                )
+                return
+            finished = now()
+            message = f"Repaired {repaired}/{total} music libraries"
+            self.store.update_run(
+                run_id,
+                state="completed",
+                progress_current=max(1, total),
+                progress_total=max(1, total),
+                finished_at=finished,
+                message=message,
+                error_details=json.dumps(
+                    {
+                        "repairVersion": self.REPAIR_VERSION,
+                        "repairedLibraries": repaired,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            self.db.execute(
+                "UPDATE job_definitions SET next_run_at=NULL,last_run_at=?,last_run_id=?,last_state='completed',last_message=?,updated_at=? WHERE id=?",
+                (finished, run_id, message, finished, definition["id"]),
+            )
+        finally:
+            for library_id in suppressed:
+                runtime.suppress_library_notifications(library_id, False)
+
+
 class MetadataCleanupJob:
     def __init__(self, store: JobStore):
         self.store = store
@@ -2812,6 +2979,28 @@ class JobScheduler:
                         )
 
     def _schedule_due(self):
+        # Versioned repairs are one-time work items rather than recurring
+        # triggers. Clear the arm atomically before dispatch; a failed run
+        # remains eligible on the next process startup because last_run_at is
+        # left unset by MusicCatalogRepairJob.
+        try:
+            one_time_rows = self.store.db.execute(
+                "SELECT id FROM job_definitions WHERE kind='music_catalog_repair' "
+                "AND next_run_at IS NOT NULL AND next_run_at<=? AND last_run_at IS NULL",
+                (now(),),
+            )
+        except Exception:
+            one_time_rows = []
+        for (definition_id,) in one_time_rows:
+            definition = self.store.definition(definition_id)
+            if not definition or self.store.queued_or_running(definition_id):
+                continue
+            run, created = self.store.create_or_get_active_run(definition)
+            if created:
+                self.store.db.execute(
+                    "UPDATE job_definitions SET next_run_at=NULL,updated_at=? WHERE id=? AND last_run_at IS NULL",
+                    (now(), definition_id),
+                )
         for due in self.store.due_triggers():
             definition = due["definition"]
             trigger = due["trigger"]
@@ -2926,6 +3115,10 @@ class JobScheduler:
                 MetadataUpgradeJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
                 )
+            elif kind == "music_catalog_repair":
+                MusicCatalogRepairJob(
+                    self.store, self.library_runtime
+                ).run(run_id, definition, self.cancel_events[run_id].is_set)
             elif kind == "metadata_refresh":
                 if bool(run_options.get("refreshAll", False)):
                     MetadataMissingJob(self.store).run(

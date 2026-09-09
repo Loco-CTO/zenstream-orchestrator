@@ -95,6 +95,8 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "SELECT name FROM sqlite_master WHERE type='table'"
                     )
                 }
+                self.assertIn("music_identity_keys", tables)
+                self.assertNotIn("music_scan_diagnostics", tables)
                 self.assertTrue(
                     {
                         "catalog_library_summary",

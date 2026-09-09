@@ -979,7 +979,10 @@ class Catalog:
             raise HTTPException(400, "Unsupported metadata language or image type.")
         service = self._read_service()
         raw = service.resolve_raw(
-            row[3], self._provider_ids(entity_id, row[3]), language
+            row[3],
+            self._provider_ids(entity_id, row[3]),
+            language,
+            entity_id=entity_id,
         )
         return service.ready_artwork(
             row[3],

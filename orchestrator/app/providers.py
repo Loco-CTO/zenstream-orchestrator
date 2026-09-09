@@ -2905,6 +2905,7 @@ class MetadataService:
         *,
         project: bool = True,
         cache=None,
+        target_entity_id: str | None = None,
     ) -> dict[str, dict]:
         cache_store = cache or self.cache
         locales = list(dict.fromkeys(locales))
@@ -2973,7 +2974,12 @@ class MetadataService:
                     from app.metadata_services import MetadataSearchProjection
 
                     MetadataSearchProjection(cache_store.db).project(
-                        provider, entity_type, provider_id, locale, normalized
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        normalized,
+                        target_entity_id=target_entity_id,
                     )
                 logger.info(
                     "metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d",
@@ -2994,13 +3000,19 @@ class MetadataService:
         locale: str,
         client,
         payload: dict,
+        target_entity_id: str | None = None,
     ) -> dict:
         normalized = client.normalize(entity_type, provider_id, payload)
         self.cache.put(provider, entity_type, provider_id, locale, normalized)
         from app.metadata_services import MetadataSearchProjection
 
         MetadataSearchProjection(self.cache.db).project(
-            provider, entity_type, provider_id, locale, normalized
+            provider,
+            entity_type,
+            provider_id,
+            locale,
+            normalized,
+            target_entity_id=target_entity_id,
         )
         logger.info(
             "metadata cached provider=%s entity_type=%s provider_id=%s locale=%s images=%d",

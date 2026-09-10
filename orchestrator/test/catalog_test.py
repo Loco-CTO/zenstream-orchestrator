@@ -1531,10 +1531,18 @@ class CatalogTest(unittest.TestCase):
 
         titles = {}
         insert_music_album(
-            "allowed", "album-artist", "favorite-release", "favorite-track", "Album Favorite"
+            "allowed",
+            "album-artist",
+            "favorite-release",
+            "favorite-track",
+            "Album Favorite",
         )
         insert_music_album(
-            "music-first", "first-album-artist", "first-release", "first-track", "First Album"
+            "music-first",
+            "first-album-artist",
+            "first-release",
+            "first-track",
+            "First Album",
         )
         for index in range(18):
             entity_id = f"favorite-artist-{index:02d}"

@@ -1473,6 +1473,139 @@ class CatalogTest(unittest.TestCase):
         )
         self.assertNotIn("hidden-movie", str(derived))
 
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_groups_permission_filtered_favorite_music_and_orders_library_rows(
+        self, _languages
+    ):
+        user_id = self.account().create("music-home", "password-123")["id"]
+        self.db.execute("ALTER TABLE libraries ADD COLUMN sort_order INTEGER DEFAULT 0")
+        self.db.execute(
+            "UPDATE libraries SET type='music',name='Allowed Music',sort_order=1 WHERE id='allowed'"
+        )
+        self.db.execute(
+            "UPDATE libraries SET type='music',name='Hidden Music',sort_order=0 WHERE id='hidden'"
+        )
+        self.db.execute(
+            "INSERT INTO libraries(id,name,type,scan_state,last_scan_finished_at,directory,sort_order) "
+            "VALUES(?,?,?,?,?,?,?)",
+            ("music-first", "First Music", "music", "ready", None, None, 2),
+        )
+        for library_id in ("allowed", "music-first"):
+            self.db.execute(
+                "INSERT INTO user_library_access VALUES(?,?,?)",
+                (user_id, library_id, "now"),
+            )
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
+        )
+
+        def insert_entity(
+            entity_id, library_id, parent_id, entity_type, relative_path=None
+        ):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    library_id,
+                    parent_id,
+                    entity_type,
+                    relative_path or entity_id,
+                    None,
+                    None,
+                    None,
+                    1 if entity_type == "track" else None,
+                    "2026",
+                    "2026",
+                ),
+            )
+
+        def insert_music_album(library_id, artist_id, release_id, track_id, title):
+            insert_entity(artist_id, library_id, None, "artist")
+            insert_entity(release_id, library_id, artist_id, "release")
+            insert_entity(track_id, library_id, release_id, "track")
+            self.db.execute(
+                "INSERT INTO media_files VALUES(?,?,?,?,?)",
+                (f"file-{track_id}", track_id, f"{track_id}.flac", "media", 2_000),
+            )
+            titles[release_id] = title
+
+        titles = {}
+        insert_music_album(
+            "allowed", "album-artist", "favorite-release", "favorite-track", "Album Favorite"
+        )
+        insert_music_album(
+            "music-first", "first-album-artist", "first-release", "first-track", "First Album"
+        )
+        for index in range(18):
+            entity_id = f"favorite-artist-{index:02d}"
+            insert_entity(entity_id, "allowed", None, "artist")
+            titles[entity_id] = f"Artist {index:02d}"
+        insert_entity("cross-library-artist", "music-first", None, "artist")
+        titles["cross-library-artist"] = "Aardvark Artist"
+        titles["favorite-track"] = "Aardvark Track"
+        titles["favorite-release"] = "Aardvark Album"
+        insert_entity("favorite-movie", "allowed", None, "movie")
+        titles["favorite-movie"] = "Movie Favorite"
+        insert_entity("hidden-artist", "hidden", None, "artist")
+        titles["hidden-artist"] = "Hidden Artist"
+
+        favorite_ids = [
+            "favorite-release",
+            "favorite-track",
+            "cross-library-artist",
+            *(f"favorite-artist-{index:02d}" for index in range(18)),
+            "favorite-movie",
+            "hidden-artist",
+        ]
+        for entity_id in favorite_ids:
+            self.db.execute(
+                "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+                (user_id, entity_id, 1, 0, 0, 0, 0, None, "2026"),
+            )
+
+        catalog = self.catalog()
+        catalog.metadata = lambda _user_id, entity_id, _language: {
+            "metadata": {"title": titles.get(entity_id, entity_id)}
+        }
+        with (
+            patch.object(catalog, "_home_discovery_items", return_value=[]),
+            patch.object(catalog, "home_continue_watching", return_value=[]),
+            patch.object(catalog, "home_next_up", return_value=[]),
+        ):
+            home = catalog._home_uncached(
+                user_id,
+                "en",
+                {"allowed", "music-first"},
+            )
+
+        favorite_music = home["favoriteMusic"]
+        expected_names = sorted(
+            [
+                "Aardvark Album",
+                "Aardvark Artist",
+                "Aardvark Track",
+                *(f"Artist {index:02d}" for index in range(18)),
+            ],
+            key=str.casefold,
+        )[:18]
+        self.assertEqual([item["name"] for item in favorite_music], expected_names)
+        self.assertEqual(len(favorite_music), 18)
+        self.assertEqual(
+            {item["type"] for item in favorite_music}, {"artist", "release", "track"}
+        )
+        self.assertIn("music-first", {item["libraryId"] for item in favorite_music})
+        self.assertNotIn("favorite-movie", {item["id"] for item in favorite_music})
+        self.assertNotIn("hidden-artist", {item["id"] for item in favorite_music})
+        self.assertEqual(
+            [row["libraryId"] for row in home["libraryRows"]],
+            ["music-first", "allowed"],
+        )
+        self.assertTrue(all(row["variant"] == "square" for row in home["libraryRows"]))
+        self.assertEqual(
+            [item["type"] for row in home["libraryRows"] for item in row["items"]],
+            ["release", "release"],
+        )
+
     def test_argon_session_revocation_and_legacy_password_upgrade(self):
         account = self.account()
         created = account.create("local", "password-123")

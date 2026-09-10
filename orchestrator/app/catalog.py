@@ -4171,6 +4171,7 @@ class Catalog:
         allowed = self.allowed_libraries(user_id)
         empty = {
             "myList": [],
+            "favoriteMusic": [],
             "recentlyPlayed": [],
             "genreRows": [],
             "audioRows": [],
@@ -4237,59 +4238,34 @@ class Catalog:
             for library in self.libraries(user_id)
             if library["id"] in allowed and library["type"] == "music"
         }
-        audio_rows: list[dict] = []
+        favorite_music: list[dict] = []
         if music_allowed:
-            new_albums = self.music_albums(
-                user_id,
-                language,
-                page=1,
-                page_size=18,
-                sort_by="added",
-                sort_order="descending",
-            )["items"]
-            if new_albums:
-                audio_rows.append(
-                    {
-                        "key": "newAlbums",
-                        "titleKey": "newAlbums",
-                        "variant": "square",
-                        "items": new_albums[:18],
-                    }
-                )
             music_placeholders = ",".join("?" for _ in music_allowed)
-            playable_filter = (
-                " AND EXISTS (SELECT 1 FROM media_files media "
-                "WHERE media.entity_id=e.id AND media.role='media')"
-                if self._has_table("media_files")
-                else ""
-            )
-            audio_recent_rows = self.db.execute(
+            favorite_music_rows = self.db.execute(
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
                 "e.season_number,e.episode_number,e.episode_end_number,e.created_at,"
                 "e.updated_at "
                 "FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
                 f"WHERE s.user_id=? AND e.library_id IN ({music_placeholders}) "
-                "AND e.entity_type='track' AND s.last_played_at IS NOT NULL"
-                + playable_filter
-                + " ORDER BY s.last_played_at DESC,e.id LIMIT 18",
+                "AND s.favorite=1 AND e.entity_type IN ('artist','release','track') "
+                "ORDER BY e.id",
                 [user_id, *sorted(music_allowed)],
             )
-            if audio_recent_rows:
-                self._seed_hydration_rows(user_id, audio_recent_rows, language)
+            if favorite_music_rows:
+                self._seed_hydration_rows(user_id, favorite_music_rows, language)
                 self._preload_projected_metadata(
-                    user_id, [row[0] for row in audio_recent_rows], language
+                    user_id, [row[0] for row in favorite_music_rows], language
                 )
-                recently_played_audio = self._hydrate_rows(
-                    user_id, audio_recent_rows, language
+                favorite_music = self._hydrate_rows(
+                    user_id, favorite_music_rows, language
                 )
-                audio_rows.append(
-                    {
-                        "key": "recentlyPlayedAudio",
-                        "titleKey": "recentlyPlayedAudio",
-                        "variant": "square",
-                        "items": recently_played_audio[:18],
-                    }
+                favorite_music.sort(
+                    key=lambda value: (
+                        str(value.get("name") or "").casefold(),
+                        value["id"],
+                    )
                 )
+                favorite_music = favorite_music[:18]
 
         candidates = discovery_items or self._home_discovery_items(
             user_id, language, allowed
@@ -4331,9 +4307,10 @@ class Catalog:
                 genre_rows.append({"genre": genre_names[key], "items": items})
         return {
             "myList": my_list[:18],
+            "favoriteMusic": favorite_music,
             "recentlyPlayed": recently_played,
             "genreRows": genre_rows,
-            "audioRows": audio_rows,
+            "audioRows": [],
         }
 
     def _newly_added_rows(self, library_id: str, entity_type: str) -> list[tuple]:
@@ -4405,6 +4382,26 @@ class Catalog:
         library: dict,
         series_names: dict[str, str] | None = None,
     ) -> dict | None:
+        if library["type"] == "music":
+            items = self.music_albums(
+                user_id,
+                language,
+                library["id"],
+                page=1,
+                page_size=18,
+                sort_by="added",
+                sort_order="descending",
+            )["items"]
+            if not items:
+                return None
+            return {
+                "libraryId": library["id"],
+                "libraryName": library["name"],
+                "titleKey": "newlyAddedOn",
+                "stackEpisodes": False,
+                "variant": "square",
+                "items": items[:18],
+            }
         if not self._has_table("media_files") or library["type"] not in {
             "movies",
             "tv_series",
@@ -4624,6 +4621,7 @@ class Catalog:
                 "nextUp": [],
                 "libraryRows": [],
                 "myList": [],
+                "favoriteMusic": [],
                 "recentlyPlayed": [],
                 "genreRows": [],
                 "audioRows": [],
@@ -4647,7 +4645,6 @@ class Catalog:
             row = self._home_library_row(user_id, language, library, series_names)
             if row:
                 library_rows.append(row)
-        for library in libraries:
             row = self._home_top_rated_row(user_id, language, library, series_names)
             if row:
                 library_rows.append(row)

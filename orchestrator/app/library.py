@@ -34,11 +34,11 @@ from app.progress import WholeJobProgress
 from app.worker_config import configured_worker_limit
 
 try:
+    from app.filesystem_watcher import create_library_observer
     from watchdog.events import FileSystemEventHandler
-    from watchdog.observers import Observer
 except ImportError:  # pragma: no cover - optional in minimal installations
     FileSystemEventHandler = object  # type: ignore[assignment,misc]
-    Observer = None  # type: ignore[assignment,misc]
+    create_library_observer = None  # type: ignore[assignment,misc]
 
 
 LIBRARY_TYPES = {"tv_series", "movies", "music", "collection"}
@@ -1275,22 +1275,16 @@ class LibraryScanner:
         rows = self.db.execute(query + " ORDER BY path_key", params)
         return {str(row[0]): tuple(row[1:]) for row in rows}
 
-    def _music_inventory_lookup(
+    def _music_inventory_snapshot(
         self,
-        library_id: str,
-        path_key: str,
+        entity_id: str | None,
+        size: int | None,
+        modified_ns: int | None,
+        version: int | None,
+        payload: str | None,
+        group_value: str | None,
         file_stat: os.stat_result,
     ) -> tuple[dict[str, str], tuple[str, ...], bool, str | None] | None:
-        if not self._music_inventory_enabled():
-            return None
-        rows = self.db.execute(
-            "SELECT entity_id,size,modified_ns,tag_snapshot_version,tag_payload,group_key "
-            "FROM music_file_inventory WHERE library_id=? AND path_key=?",
-            (library_id, path_key),
-        )
-        if not rows:
-            return None
-        entity_id, size, modified_ns, version, payload, group_value = rows[0]
         previous_group = _music_group_key_from_text(group_value)
         if previous_group is None:
             return None
@@ -1309,6 +1303,28 @@ class LibraryScanner:
             and int(version or 0) == MUSIC_TAG_SNAPSHOT_VERSION
         )
         return tags, previous_group, unchanged, str(entity_id) if entity_id else None
+
+    def _music_inventory_lookup(
+        self,
+        library_id: str,
+        path_key: str,
+        file_stat: os.stat_result,
+    ) -> tuple[dict[str, str], tuple[str, ...], bool, str | None] | None:
+        """Look up one inventory row for compatibility callers.
+
+        The music scanner uses its already-prefetched target rows instead of
+        calling this query once per audio file.
+        """
+        if not self._music_inventory_enabled():
+            return None
+        rows = self.db.execute(
+            "SELECT entity_id,size,modified_ns,tag_snapshot_version,tag_payload,group_key "
+            "FROM music_file_inventory WHERE library_id=? AND path_key=?",
+            (library_id, path_key),
+        )
+        if not rows:
+            return None
+        return self._music_inventory_snapshot(*rows[0], file_stat)
 
     def _music_inventory_upsert(
         self,
@@ -2857,12 +2873,13 @@ class LibraryScanner:
 
     def _replace_ids(
         self, entity_id: str, values: Iterable[tuple[str, str, str]]
-    ) -> None:
-        """Replace scanner-discovered IDs, preserving the merge-style _ids API."""
+    ) -> bool:
+        """Apply scanner identities and return whether the identity set changed."""
         from app.providers import PRIMARY_PROVIDER_BY_ENTITY
 
         row = self.db.execute(
-            "SELECT entity_type,match_method FROM library_entities WHERE id=?",
+            "SELECT entity_type,match_method,match_status,match_confidence "
+            "FROM library_entities WHERE id=?",
             (entity_id,),
         )
         entity_type = row[0][0] if row else ""
@@ -2873,7 +2890,7 @@ class LibraryScanner:
         ):
             # Preserve administrator-selected identities during inventory
             # refresh; source tags remain available as local evidence.
-            return
+            return False
         primary_provider = PRIMARY_PROVIDER_BY_ENTITY.get(entity_type)
         normalized = []
         for provider, identifier_type, value in values:
@@ -2924,7 +2941,27 @@ class LibraryScanner:
                 if value[0] == "lastfm" and value not in normalized_keys
             )
             normalized = list(dict.fromkeys(normalized))
-        if set(normalized) != set(current):
+            # Music tags are intentionally sparse: a track may contain a
+            # release-track or work ID without containing the validated
+            # recording ID. Only replace a provider/type when new scanner
+            # evidence for that exact type exists.
+            supplied_music_types = {
+                (provider, identifier_type)
+                for provider, identifier_type, _value in normalized
+                if provider == "musicbrainz"
+            }
+            normalized_keys = set(normalized)
+            normalized.extend(
+                value
+                for value in current
+                if value[0] == "musicbrainz"
+                and (value[0], value[1]) not in supplied_music_types
+                and value not in normalized_keys
+            )
+            normalized = list(dict.fromkeys(normalized))
+
+        identity_changed = set(normalized) != set(current)
+        if identity_changed:
             self.db.execute(
                 "DELETE FROM entity_provider_ids WHERE entity_id=?", (entity_id,)
             )
@@ -2939,14 +2976,22 @@ class LibraryScanner:
                         int(provider == primary_provider),
                     ),
                 )
-            if current:
+            if row and entity_id not in self._scan_created_ids:
                 self._scan_provider_identity_changed.add(entity_id)
                 self._mark_changed(entity_id)
-        if normalized:
+
+        match_state_changed = bool(normalized) and (
+            not row
+            or row[0][1] != "explicit_id"
+            or row[0][2] != "matched"
+            or float(row[0][3] or 0) != 1.0
+        )
+        if normalized and (identity_changed or match_state_changed):
             self.db.execute(
                 "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='explicit_id',updated_at=? WHERE id=?",
                 (now(), entity_id),
             )
+        return identity_changed
 
     def _music_provider_document(
         self, entity_id: str, entity_type: str, provider_id: str | None
@@ -6693,10 +6738,15 @@ class LibraryScanner:
                 "track",
                 track_identity_values,
             )
+            relative_track = relative(str(root), str(track))
+            observation = self._music_file_observations.get(_path_key(relative_track))
             music_ids = _music_ids(tags, "track")
-            if music_ids:
+            if music_ids and (
+                observation is None
+                or observation.changed
+                or observation.cached_entity_id != entity
+            ):
                 self._replace_ids(entity, music_ids)
-                self._music_mark_identity_changed(entity)
             directory_files = self._music_directory_files(track.parent)
             if directory_files is None:
                 sidecars = []
@@ -6722,8 +6772,6 @@ class LibraryScanner:
                     )
                     and sidecar != track
                 ]
-            relative_track = relative(str(root), str(track))
-            observation = self._music_file_observations.get(_path_key(relative_track))
             track_file = (
                 (track, observation.file_stat) if observation is not None else track
             )
@@ -7139,7 +7187,6 @@ class LibraryScanner:
                             self._replace_ids(
                                 release, [("musicbrainz", "release", release_id)]
                             )
-                            self._music_mark_identity_changed(release)
                         for locale, normalized in release_documents.items():
                             self._persist_normalized_ids(release, "release", normalized)
                             self._persist_child_ids(release, normalized)
@@ -7253,7 +7300,6 @@ class LibraryScanner:
                         artist,
                         [("musicbrainz", "artist", artist_provider_id)],
                     )
-                    self._music_mark_identity_changed(artist)
                     break
         if artist_provider_id:
             try:
@@ -7366,7 +7412,6 @@ class LibraryScanner:
                     self._replace_ids(
                         entity_id, [("musicbrainz", "recording", recording_id)]
                     )
-                    self._music_mark_identity_changed(entity_id)
                     track_documents = ingest.ingest_locales(
                         "musicbrainz",
                         "track",
@@ -7436,7 +7481,6 @@ class LibraryScanner:
                         entity_id,
                         identities,
                     )
-                    self._music_mark_identity_changed(entity_id)
                 if candidate_id:
                     used_release_track_ids.add(str(candidate_id))
                     for document in release_documents.values():
@@ -7583,7 +7627,6 @@ class LibraryScanner:
             self._persist_music_local_artist(entity, name, ingest)
             if provider_id:
                 self._replace_ids(entity, [("musicbrainz", "artist", provider_id)])
-                self._music_mark_identity_changed(entity)
                 if not resolve_provider_metadata:
                     self.db.execute(
                         "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
@@ -8071,7 +8114,6 @@ class LibraryScanner:
                     target_artist_id,
                     [("musicbrainz", "artist", str(primary_provider_id))],
                 )
-                self._music_mark_identity_changed(target_artist_id)
 
             album_artist_id = target_artist_id
             affected_libraries.add(library_id)
@@ -8274,19 +8316,40 @@ class LibraryScanner:
         service = None
         ingest = None
         last_progress = time.monotonic()
+        inventory_cache_hits = 0
+        tag_parses = 0
+        dirty_groups = 0
+        metadata_groups = 0
+        unchanged_groups = 0
 
         def inspect_audio(path: Path, file_stat: os.stat_result) -> None:
+            nonlocal inventory_cache_hits, tag_parses
             relative_path = relative(str(root), str(path))
             path_key = _path_key(relative_path)
             current_inventory_paths.add(path_key)
-            cached = self._music_inventory_lookup(library_id, path_key, file_stat)
+            inventory_row = previous_inventory.get(path_key)
+            cached = (
+                self._music_inventory_snapshot(
+                    inventory_row[1],
+                    inventory_row[2],
+                    inventory_row[3],
+                    inventory_row[4],
+                    inventory_row[6],
+                    inventory_row[7],
+                    file_stat,
+                )
+                if inventory_row is not None
+                else None
+            )
             previous_group_key = cached[1] if cached else None
             cached_entity_id = cached[3] if cached else None
             if cached and cached[2]:
+                inventory_cache_hits += 1
                 tags = dict(cached[0])
                 probe = None
                 changed = False
             else:
+                tag_parses += 1
                 parsed = parse_audio_tags(path)
                 tags = dict(parsed)
                 probe = getattr(parsed, "probe", None)
@@ -8320,6 +8383,7 @@ class LibraryScanner:
             group_entries: list[tuple[Path, dict[str, str]]],
         ) -> None:
             nonlocal group_count, count, service, ingest
+            nonlocal dirty_groups, metadata_groups, unchanged_groups
             if not group_entries:
                 return
             self._check_termination(should_terminate)
@@ -8358,6 +8422,7 @@ class LibraryScanner:
                 artist, release, tracks
             )
             if not group_dirty:
+                unchanged_groups += 1
                 self._scan_refresh_root_ids.add(artist)
                 self._publish_root(artist)
                 self._flush_publications()
@@ -8370,6 +8435,7 @@ class LibraryScanner:
                     message=f"Indexed unchanged music album {group_count}",
                 )
                 return
+            dirty_groups += 1
             self._music_dirty_release_ids.add(release)
             if service is None:
                 from app.metadata_services import MetadataIngestService
@@ -8393,6 +8459,7 @@ class LibraryScanner:
             )
             try:
                 if has_metadata_context:
+                    metadata_groups += 1
                     self._set_stage(
                         job_id,
                         f"Resolving music album {group_count + 1}",
@@ -8629,6 +8696,18 @@ class LibraryScanner:
             current_inventory_paths,
             previous_inventory,
             targets,
+        )
+        logger.info(
+            "music scan summary library_id=%s job_id=%s files=%s inventory_cache_hits=%s "
+            "tag_parses=%s dirty_groups=%s metadata_groups=%s unchanged_groups=%s",
+            library_id,
+            job_id,
+            inspected_files,
+            inventory_cache_hits,
+            tag_parses,
+            dirty_groups,
+            metadata_groups,
+            unchanged_groups,
         )
         self._scan_complete = True
         return count
@@ -10270,9 +10349,11 @@ class LibraryRuntime:
             self.store.set_scan_state(library_id, "scanning", error=None)
 
     def _configure_watchers(self) -> None:
-        if Observer is None:
+        if create_library_observer is None:
             return
-        observer = Observer()
+        observer = create_library_observer()
+        if observer is None:
+            return
         for library in self.store.list():
             directory = library.get("directory")
             if (

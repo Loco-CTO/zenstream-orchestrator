@@ -34,8 +34,8 @@ from app.progress import WholeJobProgress
 from app.worker_config import configured_worker_limit
 
 try:
-    from watchdog.events import FileSystemEventHandler
     from app.filesystem_watcher import create_library_observer
+    from watchdog.events import FileSystemEventHandler
 except ImportError:  # pragma: no cover - optional in minimal installations
     FileSystemEventHandler = object  # type: ignore[assignment,misc]
     create_library_observer = None  # type: ignore[assignment,misc]

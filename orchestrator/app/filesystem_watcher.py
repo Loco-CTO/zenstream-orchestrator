@@ -27,12 +27,12 @@ if sys.platform == "win32":
     try:
         from ctypes.wintypes import DWORD, HANDLE
 
+        from watchdog.observers import winapi
         from watchdog.observers.api import (
             DEFAULT_OBSERVER_TIMEOUT,
             BaseObserver,
         )
         from watchdog.observers.read_directory_changes import WindowsApiEmitter
-        from watchdog.observers import winapi
 
         _LIBRARY_NOTIFY_FLAGS = (
             winapi.FILE_NOTIFY_CHANGE_FILE_NAME
@@ -124,14 +124,18 @@ if sys.platform == "win32":
                 super().__init__(_LibraryWindowsApiEmitter, timeout=timeout)
 
         _WindowsApiObserver = _LibraryWindowsApiObserver
-    except (AttributeError, ImportError, OSError):  # pragma: no cover - platform fallback
+    except (
+        AttributeError,
+        ImportError,
+        OSError,
+    ):  # pragma: no cover - platform fallback
         logger.warning(
             "custom Windows library watcher unavailable; using polling observer",
             exc_info=True,
         )
 
 
-def create_library_observer() -> "BaseObserver | None":
+def create_library_observer() -> BaseObserver | None:
     """Create an observer that cannot react to file access-time updates."""
     if _WindowsApiObserver is not None:
         return _WindowsApiObserver()

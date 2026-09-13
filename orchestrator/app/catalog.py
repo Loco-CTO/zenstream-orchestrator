@@ -35,6 +35,25 @@ from fastapi import HTTPException
 
 logger = get_logger("catalog")
 
+SEARCH_ENTITY_TYPES = ("movie", "series", "collection", "release", "artist", "track")
+
+
+def _search_facets(counts: dict[str, int] | None = None) -> dict[str, int]:
+    values = counts or {}
+    facets = {entity_type: int(values.get(entity_type, 0)) for entity_type in SEARCH_ENTITY_TYPES}
+    facets["all"] = sum(facets.values())
+    return {"all": facets.pop("all"), **facets}
+
+
+def _empty_search_page(page: int, page_size: int) -> dict:
+    return {
+        "items": [],
+        "page": page,
+        "pageSize": page_size,
+        "total": 0,
+        "facets": _search_facets(),
+    }
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -3191,14 +3210,25 @@ class Catalog:
 
     @_catalog_read
     def search(
-        self, user_id: str, query: str, language: str, page: int, page_size: int
+        self,
+        user_id: str,
+        query: str,
+        language: str,
+        page: int,
+        page_size: int,
+        entity_type: str | None = None,
     ) -> dict:
         wanted = self._search_text(query)
+        entity_type = entity_type.strip().lower() if entity_type is not None else None
+        if entity_type == "all":
+            entity_type = None
+        if entity_type is not None and entity_type not in SEARCH_ENTITY_TYPES:
+            raise HTTPException(400, "Unsupported search type.")
         if not wanted:
-            return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+            return _empty_search_page(page, page_size)
         allowed = self.allowed_libraries(user_id)
         if not allowed:
-            return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+            return _empty_search_page(page, page_size)
         configured_language = normalize_metadata_locale(language)
         if configured_language not in MetadataLanguageSettings().get():
             raise HTTPException(400, "Metadata language is not configured.")
@@ -3232,7 +3262,7 @@ class Catalog:
                 title_expression = "p.title_sort"
                 source_join = "JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale JOIN library_entities e ON e.id=g.entity_id"
                 root_filter = "(p.entity_type IN ('artist','release','track') OR (p.parent_id IS NULL AND p.entity_type IN ('movie','series','collection')))"
-            source = (
+            match_cte = (
                 "WITH scored AS ("
                 "SELECT g.entity_id,g.locale," + title_expression + " AS title_sort,"
                 "catalog_match_score(?,"
@@ -3247,11 +3277,8 @@ class Catalog:
                 "SELECT entity_id,locale,title_sort,score,locale_rank,"
                 "ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY score DESC,locale_rank,title_sort,entity_id) AS locale_choice "
                 "FROM scored), matches AS ("
-                "SELECT entity_id,score,locale_rank,title_sort,COUNT(*) OVER() AS total "
+                "SELECT entity_id,score,locale_rank,title_sort "
                 "FROM best WHERE locale_choice=1 AND score>0) "
-                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,matches.total "
-                "FROM matches JOIN library_entities e ON e.id=matches.entity_id "
-                "ORDER BY matches.score DESC,matches.locale_rank,matches.title_sort,matches.entity_id LIMIT ? OFFSET ?"
             )
             match_params = [
                 wanted,
@@ -3260,14 +3287,39 @@ class Catalog:
                 *allowed,
                 *locale_order,
             ]
-            page_rows = self.db.execute(
-                source,
-                [*match_params, page_size, max(0, page - 1) * page_size],
+            facet_rows = self.db.execute(
+                match_cte
+                + "SELECT e.entity_type,COUNT(*) FROM matches "
+                "JOIN library_entities e ON e.id=matches.entity_id "
+                "GROUP BY e.entity_type",
+                match_params,
             )
-            total = int(page_rows[0][10] or 0) if page_rows else 0
-            if not page_rows and page > 1:
-                first_match = self.db.execute(source, [*match_params, 1, 0])
-                total = int(first_match[0][10] or 0) if first_match else 0
+            facets = _search_facets(
+                {str(row[0]): int(row[1] or 0) for row in facet_rows}
+            )
+            type_clause = ""
+            type_params: list[str] = []
+            if entity_type is not None:
+                type_clause = " WHERE e.entity_type=?"
+                type_params = [entity_type]
+            page_source = (
+                match_cte
+                + "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+                "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                "FROM matches JOIN library_entities e ON e.id=matches.entity_id"
+                + type_clause
+                + " ORDER BY matches.score DESC,matches.locale_rank,matches.title_sort,matches.entity_id LIMIT ? OFFSET ?"
+            )
+            page_rows = self.db.execute(
+                page_source,
+                [
+                    *match_params,
+                    *type_params,
+                    page_size,
+                    max(0, page - 1) * page_size,
+                ],
+            )
+            total = facets[entity_type] if entity_type else facets["all"]
             values = self._hydrate_rows(
                 user_id, [row[:10] for row in page_rows], language
             )
@@ -3276,9 +3328,10 @@ class Catalog:
                 "page": page,
                 "pageSize": page_size,
                 "total": total,
+                "facets": facets,
             }
         if not self._has_table("catalog_search"):
-            return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+            return _empty_search_page(page, page_size)
         indexed = self.db.execute(
             "SELECT s.entity_id,s.locale,s.title,0 "
             "FROM catalog_search s JOIN library_entities e ON e.id=s.entity_id "
@@ -3290,13 +3343,14 @@ class Catalog:
         for indexed_row in indexed:
             indexed_by_entity.setdefault(indexed_row[0], []).append(indexed_row)
         if not indexed_by_entity:
-            return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+            return _empty_search_page(page, page_size)
         entity_placeholders = ",".join("?" for _ in indexed_by_entity)
         rows = self.db.execute(
             f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE id IN ({entity_placeholders}) AND library_id IN ({placeholders}) AND (entity_type IN ('artist','release','track') OR (parent_id IS NULL AND entity_type IN ('movie','series','collection')))",
             [*indexed_by_entity, *allowed],
         )
         ranked = []
+        facet_counts: dict[str, int] = {}
         for row in rows:
             candidates = indexed_by_entity[row[0]]
             best = None
@@ -3310,22 +3364,30 @@ class Catalog:
                 best = min(best, candidate) if best is not None else candidate
             if best is None:
                 continue
+            facet_counts[row[3]] = facet_counts.get(row[3], 0) + 1
             metadata = self.metadata(user_id, row[0], language)["metadata"]
             ranked.append(
                 (
                     *best,
                     row[0],
+                    row[3],
                     self._serialize(user_id, row, metadata, language=language),
                 )
             )
         ranked.sort(key=lambda value: (*value[:3], value[3]))
-        values = [value[4] for value in ranked]
+        values = [
+            value[5]
+            for value in ranked
+            if entity_type is None or value[4] == entity_type
+        ]
         start = (page - 1) * page_size
+        facets = _search_facets(facet_counts)
         return {
             "items": values[start : start + page_size],
             "page": page,
             "pageSize": page_size,
             "total": len(values),
+            "facets": facets,
         }
 
     def update_progress(self, user_id: str, entity_id: str, changes: dict) -> dict:

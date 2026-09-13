@@ -1089,6 +1089,7 @@ async def search(
     pageSize: int = Query(40, ge=1, le=100),
     view: str | None = Query(None),
     limit: int | None = Query(None, ge=1, le=100),
+    type: str | None = Query(None),
 ):
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
@@ -1100,6 +1101,7 @@ async def search(
         preferred,
         page,
         effective_page_size,
+        type,
     )
     return _catalog_response(result, view)
 

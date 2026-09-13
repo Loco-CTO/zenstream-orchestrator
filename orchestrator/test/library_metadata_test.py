@@ -2375,6 +2375,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     "ALBUM": "Album",
                     "ALBUMARTIST": "Artist",
                     "TRACKNUMBER": "1",
+                    "MUSICBRAINZ_TRACKID": "recording-1",
                 }
                 probe = {
                     "format": {"format_name": "flac"},
@@ -2401,7 +2402,23 @@ class LibraryMetadataTest(unittest.TestCase):
                     playback.return_value.probe_entity.reset_mock()
                     resolve.reset_mock()
                     self._prepare_incremental_scan(scanner)
-                    with patch("app.providers.MetadataService") as metadata:
+                    with (
+                        patch("app.providers.MetadataService") as metadata,
+                        patch.object(
+                            scanner,
+                            "_music_inventory_lookup",
+                            side_effect=AssertionError(
+                                "unchanged music scans must use prefetched inventory"
+                            ),
+                        ),
+                        patch.object(
+                            scanner,
+                            "_replace_ids",
+                            side_effect=AssertionError(
+                                "unchanged music tracks must not reconcile IDs"
+                            ),
+                        ),
+                    ):
                         scanner._scan_music("library-1", root, "job-2", lambda: False)
 
                     parse.assert_not_called()
@@ -2412,6 +2429,72 @@ class LibraryMetadataTest(unittest.TestCase):
                         db.execute("SELECT COUNT(*) FROM music_file_inventory")[0][0],
                         1,
                     )
+        finally:
+            db.close()
+
+    def test_music_identity_reconciliation_preserves_sparse_validated_ids(self):
+        db, scanner = self._scanner_db()
+        try:
+            db.execute(
+                "INSERT INTO library_entities(id,library_id,entity_type,relative_path,created_at,updated_at,match_status,match_confidence,match_method) "
+                "VALUES('track-1','library-1','track','Artist/Album/01. Track.flac','now','now','matched',1.0,'explicit_id')"
+            )
+            db.execute(
+                "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+                ("track-1", "musicbrainz", "recording", "recording-1", 1),
+            )
+            db.execute(
+                "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+                ("track-1", "musicbrainz", "release_track", "release-track-1", 0),
+            )
+            db.execute(
+                "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+                ("track-1", "musicbrainz", "work", "work-1", 0),
+            )
+
+            self.assertFalse(
+                scanner._replace_ids(
+                    "track-1",
+                    [
+                        ("musicbrainz", "release_track", "release-track-1"),
+                        ("musicbrainz", "work", "work-1"),
+                    ],
+                )
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT provider,identifier_type,provider_id FROM entity_provider_ids "
+                    "WHERE entity_id='track-1' ORDER BY identifier_type"
+                ),
+                [
+                    ("musicbrainz", "recording", "recording-1"),
+                    ("musicbrainz", "release_track", "release-track-1"),
+                    ("musicbrainz", "work", "work-1"),
+                ],
+            )
+            self.assertEqual(scanner._scan_provider_identity_changed, set())
+
+            self.assertTrue(
+                scanner._replace_ids(
+                    "track-1",
+                    [
+                        ("musicbrainz", "release_track", "release-track-2"),
+                        ("musicbrainz", "work", "work-1"),
+                    ],
+                )
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT provider,identifier_type,provider_id FROM entity_provider_ids "
+                    "WHERE entity_id='track-1' ORDER BY identifier_type"
+                ),
+                [
+                    ("musicbrainz", "recording", "recording-1"),
+                    ("musicbrainz", "release_track", "release-track-2"),
+                    ("musicbrainz", "work", "work-1"),
+                ],
+            )
+            self.assertEqual(scanner._scan_provider_identity_changed, {"track-1"})
         finally:
             db.close()
 

@@ -40,7 +40,10 @@ SEARCH_ENTITY_TYPES = ("movie", "series", "collection", "release", "artist", "tr
 
 def _search_facets(counts: dict[str, int] | None = None) -> dict[str, int]:
     values = counts or {}
-    facets = {entity_type: int(values.get(entity_type, 0)) for entity_type in SEARCH_ENTITY_TYPES}
+    facets = {
+        entity_type: int(values.get(entity_type, 0))
+        for entity_type in SEARCH_ENTITY_TYPES
+    }
     facets["all"] = sum(facets.values())
     return {"all": facets.pop("all"), **facets}
 
@@ -3288,8 +3291,7 @@ class Catalog:
                 *locale_order,
             ]
             facet_rows = self.db.execute(
-                match_cte
-                + "SELECT e.entity_type,COUNT(*) FROM matches "
+                match_cte + "SELECT e.entity_type,COUNT(*) FROM matches "
                 "JOIN library_entities e ON e.id=matches.entity_id "
                 "GROUP BY e.entity_type",
                 match_params,

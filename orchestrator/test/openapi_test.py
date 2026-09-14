@@ -5,7 +5,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 _ORCHESTRATOR_ROOT = str(Path(__file__).resolve().parents[1])
 if _ORCHESTRATOR_ROOT not in sys.path:
     sys.path.insert(0, _ORCHESTRATOR_ROOT)
@@ -18,6 +17,7 @@ from api.zenstream.openapi import (
     _iter_api_routes,
 )
 from app.app import app
+
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 
 
@@ -86,10 +86,14 @@ class OpenApiContractTest(unittest.TestCase):
             self.assertNotIn(path, self.schema["paths"])
 
     def test_operation_ids_are_explicit_stable_and_unique(self):
-        operation_ids = [operation["operationId"] for _, _, operation in self.operations]
+        operation_ids = [
+            operation["operationId"] for _, _, operation in self.operations
+        ]
         self.assertEqual(len(operation_ids), len(set(operation_ids)))
         for path, method, operation in self.operations:
-            self.assertRegex(operation["operationId"], rf"^{method.lower()}_[a-z0-9_]+$")
+            self.assertRegex(
+                operation["operationId"], rf"^{method.lower()}_[a-z0-9_]+$"
+            )
             self.assertTrue(operation.get("summary"), (method, path))
             self.assertTrue(operation.get("description"), (method, path))
 
@@ -111,9 +115,7 @@ class OpenApiContractTest(unittest.TestCase):
             if not isinstance(value, dict) or "$ref" not in value:
                 continue
             reference = value["$ref"]
-            self.assertTrue(
-                reference.startswith("#/components/schemas/"), reference
-            )
+            self.assertTrue(reference.startswith("#/components/schemas/"), reference)
             self.assertIn(reference.rsplit("/", 1)[-1], schemas, reference)
 
     def test_json_responses_have_reusable_schemas_or_explicit_empty_status(self):
@@ -157,12 +159,24 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertTrue(
             any(
                 "UserBearerAuth" in requirement
-                for requirement in self.schema["paths"]["/api/catalog/items"]["get"]["security"]
+                for requirement in self.schema["paths"]["/api/catalog/items"]["get"][
+                    "security"
+                ]
             )
         )
-        self.assertIn("ResourceTicket", self.schema["paths"]["/api/playback/items/{entity_id}/stream"]["get"]["security"][-1])
-        self.assertIn("AdminSessionCookie", self.schema["paths"]["/api/admin/libraries"]["get"]["security"][0])
-        self.assertEqual(set(self.schema["x-zenstream-websockets"]), set(REALTIME_CHANNELS))
+        self.assertIn(
+            "ResourceTicket",
+            self.schema["paths"]["/api/playback/items/{entity_id}/stream"]["get"][
+                "security"
+            ][-1],
+        )
+        self.assertIn(
+            "AdminSessionCookie",
+            self.schema["paths"]["/api/admin/libraries"]["get"]["security"][0],
+        )
+        self.assertEqual(
+            set(self.schema["x-zenstream-websockets"]), set(REALTIME_CHANNELS)
+        )
         self.assertIn("/api/ws/catalog", self.schema["info"]["description"])
         self.assertIn("/api/ws/syncplay", self.schema["info"]["description"])
 
@@ -172,14 +186,33 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertIn("416", stream["get"]["responses"])
         self.assertIn("Accept-Ranges", stream["get"]["responses"]["206"]["headers"])
         self.assertIn("Content-Range", stream["get"]["responses"]["416"]["headers"])
-        self.assertIn("application/vnd.apple.mpegurl", self.schema["paths"]["/api/playback/sessions/{session_id}/{filename}"]["get"]["responses"]["200"]["content"])
-        self.assertIn("video/mp2t", self.schema["paths"]["/api/playback/sessions/{session_id}/{filename}"]["get"]["responses"]["200"]["content"])
-        self.assertIn("text/vtt", self.schema["paths"]["/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt"]["get"]["responses"]["200"]["content"])
-        image = self.schema["paths"]["/api/catalog/items/{entity_id}/images/{image_type}"]["get"]["responses"]
+        self.assertIn(
+            "application/vnd.apple.mpegurl",
+            self.schema["paths"]["/api/playback/sessions/{session_id}/{filename}"][
+                "get"
+            ]["responses"]["200"]["content"],
+        )
+        self.assertIn(
+            "video/mp2t",
+            self.schema["paths"]["/api/playback/sessions/{session_id}/{filename}"][
+                "get"
+            ]["responses"]["200"]["content"],
+        )
+        self.assertIn(
+            "text/vtt",
+            self.schema["paths"][
+                "/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt"
+            ]["get"]["responses"]["200"]["content"],
+        )
+        image = self.schema["paths"][
+            "/api/catalog/items/{entity_id}/images/{image_type}"
+        ]["get"]["responses"]
         self.assertIn("202", image)
         self.assertIn("Retry-After", image["202"]["headers"])
         self.assertIn("X-ZenStream-Image-State", image["202"]["headers"])
-        trickplay = self.schema["paths"]["/api/playback/items/{entity_id}/trickplay"]["get"]["responses"]
+        trickplay = self.schema["paths"]["/api/playback/items/{entity_id}/trickplay"][
+            "get"
+        ]["responses"]
         self.assertIn("Retry-After", trickplay["202"]["headers"])
 
     def test_documented_success_statuses_match_known_mutations(self):
@@ -208,14 +241,18 @@ class OpenApiContractTest(unittest.TestCase):
             ("POST", "/api/syncplay/groups"),
         )
         for method, path in created:
-            self.assertIn("201", self.schema["paths"][path][method.lower()]["responses"])
+            self.assertIn(
+                "201", self.schema["paths"][path][method.lower()]["responses"]
+            )
 
         accepted = (
             ("POST", "/api/admin/libraries/{library_id}/scan"),
             ("POST", "/api/admin/jobs/{job_id}/run"),
         )
         for method, path in accepted:
-            self.assertIn("202", self.schema["paths"][path][method.lower()]["responses"])
+            self.assertIn(
+                "202", self.schema["paths"][path][method.lower()]["responses"]
+            )
 
         self.assertIn(
             "audioLanguages",
@@ -223,10 +260,14 @@ class OpenApiContractTest(unittest.TestCase):
         )
         self.assertIn(
             "initialPage",
-            self.schema["components"]["schemas"]["CatalogLibrariesResponse"]["properties"],
+            self.schema["components"]["schemas"]["CatalogLibrariesResponse"][
+                "properties"
+            ],
         )
 
-    def test_examples_are_synthetic_and_have_no_absolute_paths_or_real_secret_shapes(self):
+    def test_examples_are_synthetic_and_have_no_absolute_paths_or_real_secret_shapes(
+        self,
+    ):
         forbidden = (
             re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]"),
             re.compile(r"(?:^|/)(?:Users|home|var|tmp)(?:/|$)", re.IGNORECASE),

@@ -8,16 +8,15 @@ never installs runtime validation or response filtering.
 
 from __future__ import annotations
 
-from copy import deepcopy
 import re
-from typing import Any
 import warnings
+from copy import deepcopy
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
-
 
 SCHEMA_REF = "#/components/schemas/{model}"
 
@@ -101,7 +100,9 @@ class DeviceMetadata(DocsModel):
 
 
 class CredentialsRequest(DocsModel):
-    username: str = Field(default="", description="Account name.", examples=["example-user"])
+    username: str = Field(
+        default="", description="Account name.", examples=["example-user"]
+    )
     password: str = Field(
         default="",
         description="Account password. Never log or persist this value.",
@@ -153,7 +154,9 @@ class SessionResponse(DocsModel):
         description="Bearer session token returned to non-browser clients.",
         json_schema_extra={"readOnly": True},
     )
-    expiresIn: int | None = Field(default=None, description="Session lifetime in seconds.")
+    expiresIn: int | None = Field(
+        default=None, description="Session lifetime in seconds."
+    )
     user: User | None = None
 
 
@@ -171,9 +174,13 @@ class UserResponse(DocsModel):
 
 class BootstrapResponse(DocsModel):
     user: User | None = None
-    resourceTicket: str | None = Field(default=None, json_schema_extra={"readOnly": True})
+    resourceTicket: str | None = Field(
+        default=None, json_schema_extra={"readOnly": True}
+    )
     resourceTicketExpiresIn: int | None = None
-    artworkTicket: str | None = Field(default=None, json_schema_extra={"readOnly": True})
+    artworkTicket: str | None = Field(
+        default=None, json_schema_extra={"readOnly": True}
+    )
     artworkTicketExpiresIn: int | None = None
     locale: str | None = Field(default=None, examples=["en-US"])
     metadataLanguage: str | None = Field(default=None, examples=["en"])
@@ -224,8 +231,12 @@ class WatchHistoryPreferences(DocsModel):
 
 
 class CatalogArtwork(DocsModel):
-    url: str | None = Field(default=None, examples=["/api/catalog/items/item-0001/images/Primary"])
-    blurHash: str | None = Field(default=None, examples=["LEHV6nWB2yk8pyo0adR*.7kCMdnj"])
+    url: str | None = Field(
+        default=None, examples=["/api/catalog/items/item-0001/images/Primary"]
+    )
+    blurHash: str | None = Field(
+        default=None, examples=["LEHV6nWB2yk8pyo0adR*.7kCMdnj"]
+    )
     width: int | None = Field(default=None, examples=[1280])
     height: int | None = Field(default=None, examples=[720])
     language: str | None = Field(default=None, examples=["en"])
@@ -242,7 +253,9 @@ class CatalogCredit(DocsModel):
 class CatalogMetadata(DocsModel):
     title: str | None = Field(default=None, examples=["Example Feature"])
     originalTitle: str | None = Field(default=None, examples=["Example Feature"])
-    overview: str | None = Field(default=None, examples=["A credential-free example catalog item."])
+    overview: str | None = Field(
+        default=None, examples=["A credential-free example catalog item."]
+    )
     date: str | None = Field(default=None, examples=["2025-01-15"])
     year: int | None = Field(default=None, examples=[2025])
     runtimeMinutes: int | None = Field(default=None, examples=[104])
@@ -286,7 +299,9 @@ class CatalogPage(DocsModel):
     total: int | None = Field(default=None, examples=[1])
     hasNext: bool | None = Field(default=None, examples=[False])
     totalPages: int | None = Field(default=None, examples=[1])
-    facets: dict[str, int] = Field(default_factory=dict, examples=[{"all": 1, "movie": 1}])
+    facets: dict[str, int] = Field(
+        default_factory=dict, examples=[{"all": 1, "movie": 1}]
+    )
     libraryRows: list[Any] = Field(default_factory=list)
     sections: list[Any] = Field(default_factory=list)
 
@@ -297,7 +312,9 @@ class CatalogLibrary(DocsModel):
     type: str | None = Field(default=None, examples=["movies"])
     sortOrder: int | None = Field(default=None, examples=[0])
     scanState: str | None = Field(default=None, examples=["ready"])
-    lastScanFinishedAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
+    lastScanFinishedAt: str | None = Field(
+        default=None, examples=["2025-01-15T12:00:00Z"]
+    )
     supportsLastAdded: bool | None = Field(default=None, examples=[True])
     catalogGeneration: int | None = Field(default=None, examples=[12])
 
@@ -317,13 +334,15 @@ class CatalogStatusResponse(DocsModel):
     state: str | None = Field(default=None, examples=["ready"])
     generation: int | None = Field(default=None, examples=[12])
     updatedAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
-    libraries: list["CatalogLibraryStatus"] = Field(default_factory=list)
+    libraries: list[CatalogLibraryStatus] = Field(default_factory=list)
 
 
 class CatalogLibraryStatus(DocsModel):
     id: str | None = Field(default=None, examples=["library-0001"])
     scanState: str | None = Field(default=None, examples=["ready"])
-    lastScanFinishedAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
+    lastScanFinishedAt: str | None = Field(
+        default=None, examples=["2025-01-15T12:00:00Z"]
+    )
     catalogGeneration: int | None = Field(default=None, examples=[12])
     lastRootEntityId: str | None = Field(default=None, examples=["entity-0001"])
 
@@ -457,7 +476,9 @@ class PlaybackCapabilityRequest(DocsModel):
 class MediaSource(DocsModel):
     id: str | None = Field(default=None, examples=["source-0001"])
     sourceId: str | None = Field(default=None, examples=["source-0001"])
-    url: str | None = Field(default=None, examples=["/api/playback/items/item-0001/stream"])
+    url: str | None = Field(
+        default=None, examples=["/api/playback/items/item-0001/stream"]
+    )
     mediaType: str | None = Field(default=None, examples=["video/mp4"])
     container: str | None = Field(default=None, examples=["mp4"])
     duration: float | None = Field(default=None, examples=[3600.0])
@@ -469,7 +490,9 @@ class PlaybackNegotiationResponse(DocsModel):
     sourceId: str | None = Field(default=None, examples=["source-0001"])
     mediaType: str | None = Field(default=None, examples=["video/mp4"])
     sources: list[MediaSource] = Field(default_factory=list)
-    url: str | None = Field(default=None, examples=["/api/playback/items/item-0001/stream"])
+    url: str | None = Field(
+        default=None, examples=["/api/playback/items/item-0001/stream"]
+    )
 
 
 class PlaybackAccessRequest(DocsModel):
@@ -535,8 +558,12 @@ class LyricsResponse(DocsModel):
 
 
 class NotificationThumbnail(DocsModel):
-    url: str | None = Field(default=None, examples=["/api/catalog/items/item-0001/images/Primary"])
-    blurHash: str | None = Field(default=None, examples=["LEHV6nWB2yk8pyo0adR*.7kCMdnj"])
+    url: str | None = Field(
+        default=None, examples=["/api/catalog/items/item-0001/images/Primary"]
+    )
+    blurHash: str | None = Field(
+        default=None, examples=["LEHV6nWB2yk8pyo0adR*.7kCMdnj"]
+    )
 
 
 class Notification(DocsModel):
@@ -545,7 +572,9 @@ class Notification(DocsModel):
     itemId: str | None = Field(default=None, examples=["release-0001"])
     artistId: str | None = Field(default=None, examples=["artist-0001"])
     title: str | None = Field(default=None, examples=["New release available"])
-    message: str | None = Field(default=None, examples=["Example Artist released Example Album."])
+    message: str | None = Field(
+        default=None, examples=["Example Artist released Example Album."]
+    )
     createdAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
     read: bool | None = Field(default=None, examples=[False])
     thumbnail: NotificationThumbnail | None = None
@@ -671,7 +700,10 @@ class Library(DocsModel):
     id: str | None = Field(default=None, examples=["library-0001"])
     name: str | None = Field(default=None, examples=["Movies"])
     type: str | None = Field(default=None, examples=["movie"])
-    directory: str | None = Field(default=None, description="Configured library root; returned only to administrators.")
+    directory: str | None = Field(
+        default=None,
+        description="Configured library root; returned only to administrators.",
+    )
     enabled: bool | None = Field(default=None, examples=[True])
     sortOrder: int | None = Field(default=None, examples=[0])
 
@@ -679,7 +711,9 @@ class Library(DocsModel):
 class LibraryRequest(DocsModel):
     name: str = Field(default="Movies", examples=["Movies"])
     type: str = Field(default="movie", examples=["movie"])
-    directory: str = Field(default="<configured-library-root>", examples=["<configured-library-root>"])
+    directory: str = Field(
+        default="<configured-library-root>", examples=["<configured-library-root>"]
+    )
     enabled: bool | None = Field(default=True, examples=[True])
 
 
@@ -1224,11 +1258,13 @@ REALTIME_CHANNELS = {
 }
 
 
-DOCUMENTATION_EXCLUDED_PATHS = frozenset({
-    "/api/docs/",
-    "/favicon.ico",
-    "/web/{path}",
-})
+DOCUMENTATION_EXCLUDED_PATHS = frozenset(
+    {
+        "/api/docs/",
+        "/favicon.ico",
+        "/web/{path}",
+    }
+)
 
 
 _PARAMETER_DESCRIPTIONS = {
@@ -1384,8 +1420,14 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/catalog/items/{entity_id}"): "Get a catalog item",
     ("GET", "/api/catalog/items/{entity_id}/similar"): "List similar items",
     ("GET", "/api/catalog/items/{entity_id}/metadata"): "Get item metadata",
-    ("GET", "/api/catalog/items/{entity_id}/images/{image_type}"): "Get catalog artwork",
-    ("GET", "/api/catalog/items/{entity_id}/people/{person_id}/image"): "Get a person image",
+    (
+        "GET",
+        "/api/catalog/items/{entity_id}/images/{image_type}",
+    ): "Get catalog artwork",
+    (
+        "GET",
+        "/api/catalog/items/{entity_id}/people/{person_id}/image",
+    ): "Get a person image",
     ("GET", "/api/catalog/items/{entity_id}/detail"): "Get item detail sections",
     ("PATCH", "/api/catalog/items/{entity_id}/state"): "Update item state",
     ("PATCH", "/api/catalog/items/{entity_id}/progress"): "Update item progress",
@@ -1398,14 +1440,20 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/playback/items/{entity_id}/source"): "Get playback source metadata",
     ("GET", "/api/playback/items/{entity_id}/trickplay"): "Get the trickplay manifest",
     ("GET", "/api/playback/items/{entity_id}/segments"): "List intro/outro segments",
-    ("GET", "/api/playback/items/{entity_id}/trickplay/{generation}/{sheet_index}.webp"): "Get a trickplay sheet",
+    (
+        "GET",
+        "/api/playback/items/{entity_id}/trickplay/{generation}/{sheet_index}.webp",
+    ): "Get a trickplay sheet",
     ("GET", "/api/playback/items/{entity_id}/stream"): "Stream media",
     ("HEAD", "/api/playback/items/{entity_id}/stream"): "Inspect media headers",
     ("GET", "/api/playback/sessions/{session_id}/{filename}"): "Get an HLS output",
     ("GET", "/api/playback/sessions/{session_id}"): "Get playback session status",
     ("DELETE", "/api/playback/sessions/{session_id}"): "Cancel a playback session",
     ("GET", "/api/playback/items/{entity_id}/lyrics"): "Get item lyrics",
-    ("GET", "/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt"): "Get a subtitle track",
+    (
+        "GET",
+        "/api/playback/items/{entity_id}/subtitles/{media_file_id}.vtt",
+    ): "Get a subtitle track",
     ("GET", "/api/admin/users"): "List users",
     ("POST", "/api/admin/users"): "Create a user",
     ("GET", "/api/admin/users/{user_id}/avatar"): "Get a user avatar as administrator",
@@ -1413,9 +1461,15 @@ _SUMMARY_OVERRIDES = {
     ("POST", "/api/admin/users/{user_id}/reset-password"): "Reset a user password",
     ("PATCH", "/api/admin/users/{user_id}"): "Update a user",
     ("DELETE", "/api/admin/users/{user_id}"): "Delete a user",
-    ("GET", "/api/catalog/items/{entity_id}/bazarr/status"): "Get Bazarr subtitle status",
+    (
+        "GET",
+        "/api/catalog/items/{entity_id}/bazarr/status",
+    ): "Get Bazarr subtitle status",
     ("POST", "/api/catalog/items/{entity_id}/bazarr/search"): "Search Bazarr subtitles",
-    ("POST", "/api/catalog/items/{entity_id}/bazarr/download"): "Download a Bazarr subtitle",
+    (
+        "POST",
+        "/api/catalog/items/{entity_id}/bazarr/download",
+    ): "Download a Bazarr subtitle",
     ("GET", "/api/admin/bazarr/settings"): "Get Bazarr settings",
     ("PUT", "/api/admin/bazarr/settings"): "Update Bazarr settings",
     ("GET", "/api/calendar"): "List calendar events",
@@ -1434,29 +1488,53 @@ _SUMMARY_OVERRIDES = {
     ("PUT", "/api/admin/metadata/refresh/settings"): "Update metadata refresh settings",
     ("POST", "/api/admin/metadata/refresh"): "Queue metadata refresh",
     ("PUT", "/api/admin/metadata/providers/{provider}"): "Update provider credentials",
-    ("POST", "/api/admin/metadata/providers/{provider}/test"): "Test a metadata provider",
+    (
+        "POST",
+        "/api/admin/metadata/providers/{provider}/test",
+    ): "Test a metadata provider",
     ("GET", "/api/admin/libraries"): "List administrator libraries",
     ("POST", "/api/admin/libraries"): "Create a library",
     ("GET", "/api/admin/libraries/{library_id}"): "Get a library",
     ("PATCH", "/api/admin/libraries/{library_id}"): "Update a library",
     ("DELETE", "/api/admin/libraries/{library_id}"): "Delete a library",
     ("POST", "/api/admin/libraries/{library_id}/scan"): "Queue a library scan",
-    ("POST", "/api/admin/libraries/{library_id}/move"): "Move a library in display order",
+    (
+        "POST",
+        "/api/admin/libraries/{library_id}/move",
+    ): "Move a library in display order",
     ("GET", "/api/admin/library-jobs/{job_id}"): "Get a library job",
     ("GET", "/api/admin/jobs"): "List scheduled jobs",
     ("GET", "/api/admin/jobs/{job_id}"): "Get a scheduled job",
     ("PATCH", "/api/admin/jobs/{job_id}"): "Update a scheduled job",
     ("POST", "/api/admin/jobs/{job_id}/triggers"): "Add a job trigger",
-    ("DELETE", "/api/admin/jobs/{job_id}/triggers/{trigger_id}"): "Remove a job trigger",
+    (
+        "DELETE",
+        "/api/admin/jobs/{job_id}/triggers/{trigger_id}",
+    ): "Remove a job trigger",
     ("POST", "/api/admin/jobs/{job_id}/run"): "Run a job now",
     ("POST", "/api/admin/jobs/{job_id}/runs/{run_id}/terminate"): "Terminate a job run",
-    ("GET", "/api/admin/libraries/{library_id}/catalog-status"): "Get library catalog status",
+    (
+        "GET",
+        "/api/admin/libraries/{library_id}/catalog-status",
+    ): "Get library catalog status",
     ("GET", "/api/admin/libraries/{library_id}/items"): "Inspect library items",
     ("GET", "/api/admin/library-items/{entity_id}"): "Inspect a catalog item",
-    ("POST", "/api/admin/library-items/{entity_id}/metadata/refresh"): "Refresh item metadata",
-    ("GET", "/api/admin/library-items/{entity_id}/trickplay/{generation}/{sheet_index}.webp"): "Get an administrator trickplay sheet",
-    ("GET", "/api/admin/library-items/{entity_id}/intro-outro"): "Inspect intro/outro data",
-    ("GET", "/api/admin/library-items/{entity_id}/intro-outro/{kind}.mp3"): "Preview an intro/outro segment",
+    (
+        "POST",
+        "/api/admin/library-items/{entity_id}/metadata/refresh",
+    ): "Refresh item metadata",
+    (
+        "GET",
+        "/api/admin/library-items/{entity_id}/trickplay/{generation}/{sheet_index}.webp",
+    ): "Get an administrator trickplay sheet",
+    (
+        "GET",
+        "/api/admin/library-items/{entity_id}/intro-outro",
+    ): "Inspect intro/outro data",
+    (
+        "GET",
+        "/api/admin/library-items/{entity_id}/intro-outro/{kind}.mp3",
+    ): "Preview an intro/outro segment",
     ("GET", "/api/admin/library-items/{entity_id}/matches"): "Find metadata matches",
     ("POST", "/api/admin/library-items/{entity_id}/match"): "Set a metadata match",
     ("GET", "/api/admin/library-items/{entity_id}/image"): "Get administrator artwork",
@@ -1478,7 +1556,10 @@ _SUMMARY_OVERRIDES = {
     ("POST", "/api/admin/trickplay/clear"): "Clear trickplay data",
     ("GET", "/api/admin/accounts"): "List administrator accounts",
     ("POST", "/api/admin/accounts"): "Create an administrator account",
-    ("PATCH", "/api/admin/accounts/{target_username}"): "Enable or disable an administrator",
+    (
+        "PATCH",
+        "/api/admin/accounts/{target_username}",
+    ): "Enable or disable an administrator",
     ("POST", "/api/admin/invites"): "Create an invitation",
     ("GET", "/api/admin/invites"): "List invitations",
     ("DELETE", "/api/admin/invites/{invite_id}"): "Delete an invitation",
@@ -1493,10 +1574,16 @@ _SUMMARY_OVERRIDES = {
     ("DELETE", "/api/syncplay/groups/{group_id}"): "Leave a SyncPlay group",
     ("PATCH", "/api/syncplay/groups/{group_id}"): "Update SyncPlay settings",
     ("POST", "/api/syncplay/groups/{group_id}/join"): "Join a SyncPlay group",
-    ("DELETE", "/api/syncplay/groups/{group_id}/members/{member_id}"): "Remove a SyncPlay member",
+    (
+        "DELETE",
+        "/api/syncplay/groups/{group_id}/members/{member_id}",
+    ): "Remove a SyncPlay member",
     ("POST", "/api/syncplay/groups/{group_id}/command"): "Send a SyncPlay command",
     ("POST", "/api/syncplay/groups/{group_id}/presence"): "Report SyncPlay presence",
-    ("POST", "/api/syncplay/groups/{group_id}/participation"): "Set SyncPlay participation",
+    (
+        "POST",
+        "/api/syncplay/groups/{group_id}/participation",
+    ): "Set SyncPlay participation",
 }
 
 
@@ -1521,7 +1608,11 @@ def _tag_for_path(path: str) -> str:
         return "System & Client Bootstrap"
     if path.startswith("/api/auth/"):
         return "Authentication"
-    if path.startswith("/api/account/") or path.startswith("/api/preferences/") or path == "/api/users/{user_id}/avatar":
+    if (
+        path.startswith("/api/account/")
+        or path.startswith("/api/preferences/")
+        or path == "/api/users/{user_id}/avatar"
+    ):
         return "Account & Preferences"
     if path.startswith("/api/catalog/music/"):
         return "Music"
@@ -1536,9 +1627,15 @@ def _tag_for_path(path: str) -> str:
     if path.startswith("/api/syncplay/"):
         return "SyncPlay & Realtime"
     if path.startswith("/api/admin/"):
-        if path.startswith("/api/admin/metadata/") or path.startswith("/api/admin/calendar/"):
+        if path.startswith("/api/admin/metadata/") or path.startswith(
+            "/api/admin/calendar/"
+        ):
             return "Admin · Metadata & Integrations"
-        if path.startswith("/api/admin/libraries") or path.startswith("/api/admin/library") or path.startswith("/api/admin/jobs"):
+        if (
+            path.startswith("/api/admin/libraries")
+            or path.startswith("/api/admin/library")
+            or path.startswith("/api/admin/jobs")
+        ):
             return "Admin · Libraries & Jobs"
         if any(
             path.startswith(prefix)
@@ -1593,13 +1690,18 @@ def _json_response(
     example: Any | None = None,
     headers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    value: dict[str, Any] = {"description": description, "content": _json_content(model, example)}
+    value: dict[str, Any] = {
+        "description": description,
+        "content": _json_content(model, example),
+    }
     if headers:
         value["headers"] = headers
     return value
 
 
-def _empty_response(description: str, headers: dict[str, Any] | None = None) -> dict[str, Any]:
+def _empty_response(
+    description: str, headers: dict[str, Any] | None = None
+) -> dict[str, Any]:
     value: dict[str, Any] = {"description": description}
     if headers:
         value["headers"] = headers
@@ -1671,7 +1773,10 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PUT", "/api/admin/metadata/refresh/settings"): MetadataRefreshSettings,
     ("POST", "/api/admin/metadata/refresh"): MetadataRefreshRequest,
     ("PUT", "/api/admin/metadata/providers/{provider}"): ProviderCredentialRequest,
-    ("POST", "/api/admin/metadata/providers/{provider}/test"): ProviderCredentialRequest,
+    (
+        "POST",
+        "/api/admin/metadata/providers/{provider}/test",
+    ): ProviderCredentialRequest,
     ("POST", "/api/admin/libraries"): LibraryRequest,
     ("PATCH", "/api/admin/libraries/{library_id}"): LibraryRequest,
     ("POST", "/api/admin/libraries/{library_id}/move"): LibraryMoveRequest,
@@ -1692,52 +1797,62 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("POST", "/api/syncplay/groups/{group_id}/join"): SyncplayMutationRequest,
     ("DELETE", "/api/syncplay/groups/{group_id}"): SyncplayMutationRequest,
     ("PATCH", "/api/syncplay/groups/{group_id}"): SyncplaySettingsRequest,
-    ("DELETE", "/api/syncplay/groups/{group_id}/members/{member_id}"): SyncplayMutationRequest,
+    (
+        "DELETE",
+        "/api/syncplay/groups/{group_id}/members/{member_id}",
+    ): SyncplayMutationRequest,
     ("POST", "/api/syncplay/groups/{group_id}/command"): SyncplayCommandRequest,
     ("POST", "/api/syncplay/groups/{group_id}/presence"): SyncplayPresenceRequest,
-    ("POST", "/api/syncplay/groups/{group_id}/participation"): SyncplayParticipationRequest,
+    (
+        "POST",
+        "/api/syncplay/groups/{group_id}/participation",
+    ): SyncplayParticipationRequest,
 }
 
 
-_NO_REQUEST_BODY = frozenset({
-    ("POST", "/api/auth/logout"),
-    ("POST", "/api/auth/socket-ticket"),
-    ("DELETE", "/api/account/avatar"),
-    ("DELETE", "/api/account/watch-history"),
-    ("DELETE", "/api/playback/viewers/{viewer_id}"),
-    ("DELETE", "/api/playback/sessions/{session_id}"),
-    ("DELETE", "/api/notifications/{notification_id}"),
-    ("POST", "/api/admin/login"),
-    ("POST", "/api/admin/logout"),
-    ("DELETE", "/api/admin/users/{user_id}"),
-    ("DELETE", "/api/admin/libraries/{library_id}"),
-    ("DELETE", "/api/admin/devices/{device_id}"),
-    ("DELETE", "/api/admin/invites/{invite_id}"),
-    ("DELETE", "/api/admin/jobs/{job_id}/triggers/{trigger_id}"),
-    ("POST", "/api/admin/libraries/{library_id}/scan"),
-    ("POST", "/api/admin/library-items/{entity_id}/metadata/refresh"),
-    ("POST", "/api/admin/jobs/{job_id}/runs/{run_id}/terminate"),
-    ("PATCH", "/api/admin/profile"),
-    ("POST", "/api/admin/accounts"),
-    ("PATCH", "/api/admin/accounts/{target_username}"),
-    ("POST", "/api/syncplay/groups"),
-})
+_NO_REQUEST_BODY = frozenset(
+    {
+        ("POST", "/api/auth/logout"),
+        ("POST", "/api/auth/socket-ticket"),
+        ("DELETE", "/api/account/avatar"),
+        ("DELETE", "/api/account/watch-history"),
+        ("DELETE", "/api/playback/viewers/{viewer_id}"),
+        ("DELETE", "/api/playback/sessions/{session_id}"),
+        ("DELETE", "/api/notifications/{notification_id}"),
+        ("POST", "/api/admin/login"),
+        ("POST", "/api/admin/logout"),
+        ("DELETE", "/api/admin/users/{user_id}"),
+        ("DELETE", "/api/admin/libraries/{library_id}"),
+        ("DELETE", "/api/admin/devices/{device_id}"),
+        ("DELETE", "/api/admin/invites/{invite_id}"),
+        ("DELETE", "/api/admin/jobs/{job_id}/triggers/{trigger_id}"),
+        ("POST", "/api/admin/libraries/{library_id}/scan"),
+        ("POST", "/api/admin/library-items/{entity_id}/metadata/refresh"),
+        ("POST", "/api/admin/jobs/{job_id}/runs/{run_id}/terminate"),
+        ("PATCH", "/api/admin/profile"),
+        ("POST", "/api/admin/accounts"),
+        ("PATCH", "/api/admin/accounts/{target_username}"),
+        ("POST", "/api/syncplay/groups"),
+    }
+)
 
 # Public for contract tests and future route additions. These writes are
 # intentionally header-only or action-only in the existing wire contract.
 NO_REQUEST_BODY_ROUTES = _NO_REQUEST_BODY
 
 
-_NO_CONTENT_RESPONSES = frozenset({
-    ("POST", "/api/account/password"),
-    ("POST", "/api/auth/logout"),
-    ("DELETE", "/api/account/watch-history"),
-    ("DELETE", "/api/admin/users/{user_id}"),
-    ("DELETE", "/api/admin/libraries/{library_id}"),
-    ("DELETE", "/api/admin/invites/{invite_id}"),
-    ("POST", "/api/admin/logout"),
-    ("DELETE", "/api/syncplay/groups/{group_id}"),
-})
+_NO_CONTENT_RESPONSES = frozenset(
+    {
+        ("POST", "/api/account/password"),
+        ("POST", "/api/auth/logout"),
+        ("DELETE", "/api/account/watch-history"),
+        ("DELETE", "/api/admin/users/{user_id}"),
+        ("DELETE", "/api/admin/libraries/{library_id}"),
+        ("DELETE", "/api/admin/invites/{invite_id}"),
+        ("POST", "/api/admin/logout"),
+        ("DELETE", "/api/syncplay/groups/{group_id}"),
+    }
+)
 
 
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
@@ -1883,9 +1998,21 @@ _RESPONSE_ARRAY_ITEMS: dict[tuple[str, str], type[BaseModel]] = {
 
 
 _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
-    CredentialsRequest: {"username": "example-user", "password": "example-password", "deviceId": "web-demo"},
-    RegisterRequest: {"invite": "invite-example", "username": "example-user", "password": "example-password"},
-    PasswordChangeRequest: {"currentPassword": "example-current-password", "newPassword": "example-new-password", "confirmNewPassword": "example-new-password"},
+    CredentialsRequest: {
+        "username": "example-user",
+        "password": "example-password",
+        "deviceId": "web-demo",
+    },
+    RegisterRequest: {
+        "invite": "invite-example",
+        "username": "example-user",
+        "password": "example-password",
+    },
+    PasswordChangeRequest: {
+        "currentPassword": "example-current-password",
+        "newPassword": "example-new-password",
+        "confirmNewPassword": "example-new-password",
+    },
     PasswordResetRequest: {"password": "example-new-password"},
     LocalePatchRequest: {"locale": "en-US"},
     MetadataLanguagePatchRequest: {"language": "en"},
@@ -1894,7 +2021,11 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     CatalogStatePatchRequest: {"favorite": True, "played": False, "following": True},
     ProgressPatchRequest: {"position": 120.5, "duration": 3600.0},
     PlayStartRequest: {"sourceId": "source-0001", "position": 0},
-    PlaybackCapabilityRequest: {"sourceId": "source-0001", "directPlay": True, "playerEngine": "media3"},
+    PlaybackCapabilityRequest: {
+        "sourceId": "source-0001",
+        "directPlay": True,
+        "playerEngine": "media3",
+    },
     PlaybackAccessRequest: {"sourceId": "source-0001", "sessionId": "session-0001"},
     ViewerHeartbeatRequest: {"position": 120.5, "duration": 3600.0, "playing": True},
     NotificationPatchRequest: {"read": True},
@@ -1902,36 +2033,98 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     BazarrSearchRequest: {"sourceId": "source-0001", "languages": ["eng"]},
     BazarrDownloadRequest: {"sourceId": "source-0001", "matchId": "match-0001"},
     CalendarFollowRequest: {"following": True},
-    InviteRequest: {"libraryIds": ["library-0001"], "maxUses": 1, "expiresInSeconds": 604800},
+    InviteRequest: {
+        "libraryIds": ["library-0001"],
+        "maxUses": 1,
+        "expiresInSeconds": 604800,
+    },
     LibraryMoveRequest: {"direction": "up"},
-    SyncplaySettingsRequest: {"expectedRevision": 4, "operationId": "operation-0001", "allowViewerControls": False},
-    SyncplayCommandRequest: {"expectedRevision": 4, "operationId": "operation-0001", "action": "play", "position": 120.5},
-    SyncplayPresenceRequest: {"mediaGeneration": 1, "timelineRevision": 2, "presenceSequence": 5, "viewing": True, "loading": False},
-    SyncplayParticipationRequest: {"operationId": "operation-0001", "watchingTogether": True},
+    SyncplaySettingsRequest: {
+        "expectedRevision": 4,
+        "operationId": "operation-0001",
+        "allowViewerControls": False,
+    },
+    SyncplayCommandRequest: {
+        "expectedRevision": 4,
+        "operationId": "operation-0001",
+        "action": "play",
+        "position": 120.5,
+    },
+    SyncplayPresenceRequest: {
+        "mediaGeneration": 1,
+        "timelineRevision": 2,
+        "presenceSequence": 5,
+        "viewing": True,
+        "loading": False,
+    },
+    SyncplayParticipationRequest: {
+        "operationId": "operation-0001",
+        "watchingTogether": True,
+    },
 }
 
 
 _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
     HealthResponse: {"status": "ok"},
-    SessionResponse: {"token": "session-example", "expiresIn": 604800, "user": {"id": "user-0001", "username": "example-user"}},
-    UserResponse: {"user": {"id": "user-0001", "username": "example-user", "disabled": False}},
-    BootstrapResponse: {"user": {"id": "user-0001", "username": "example-user"}, "resourceTicket": "ticket-example", "resourceTicketExpiresIn": 900, "artworkTicket": "ticket-example", "artworkTicketExpiresIn": 900, "locale": "en-US", "metadataLanguage": "en", "languages": [], "languageOptions": []},
+    SessionResponse: {
+        "token": "session-example",
+        "expiresIn": 604800,
+        "user": {"id": "user-0001", "username": "example-user"},
+    },
+    UserResponse: {
+        "user": {"id": "user-0001", "username": "example-user", "disabled": False}
+    },
+    BootstrapResponse: {
+        "user": {"id": "user-0001", "username": "example-user"},
+        "resourceTicket": "ticket-example",
+        "resourceTicketExpiresIn": 900,
+        "artworkTicket": "ticket-example",
+        "artworkTicketExpiresIn": 900,
+        "locale": "en-US",
+        "metadataLanguage": "en",
+        "languages": [],
+        "languageOptions": [],
+    },
     VersionResponse: {"version": "1.5.1", "main": "1.5.1"},
-    PublicConfigResponse: {"apiVersion": 2, "catalog": True, "playback": True, "version": "1.5.1", "main": "1.5.1"},
+    PublicConfigResponse: {
+        "apiVersion": 2,
+        "catalog": True,
+        "playback": True,
+        "version": "1.5.1",
+        "main": "1.5.1",
+    },
     PublicWebUrlResponse: {"publicWebUrl": ""},
     TicketResponse: {"ticket": "ticket-example", "expiresIn": 900},
     AvatarVersionResponse: {"avatarVersion": "avatar-1"},
     MetadataLanguagesResponse: {"languages": ["en", "ja"]},
     MetadataLanguageResponse: {"mode": "auto", "language": "en"},
-    PlaybackPreferences: {"audioLanguage": "en", "subtitleLanguage": "off", "audioLanguages": [], "subtitleLanguages": []},
-    CatalogStatusResponse: {"state": "ready", "generation": 12, "updatedAt": "2025-01-15T12:00:00Z", "libraries": []},
+    PlaybackPreferences: {
+        "audioLanguage": "en",
+        "subtitleLanguage": "off",
+        "audioLanguages": [],
+        "subtitleLanguages": [],
+    },
+    CatalogStatusResponse: {
+        "state": "ready",
+        "generation": 12,
+        "updatedAt": "2025-01-15T12:00:00Z",
+        "libraries": [],
+    },
     CatalogPage: {"items": [], "page": 1, "pageSize": 40, "total": 0, "hasNext": False},
-    MusicAlbumPage: {"items": [], "page": 1, "pageSize": 40, "total": 0, "hasNext": False},
+    MusicAlbumPage: {
+        "items": [],
+        "page": 1,
+        "pageSize": 40,
+        "total": 0,
+        "hasNext": False,
+    },
     NotificationPage: {"notifications": [], "nextCursor": None, "hasMore": False},
     CalendarPage: {"events": [], "start": "2025-01-01", "end": "2025-02-01"},
     SyncplayGroupsResponse: {"groups": []},
     SyncplayGroup: {"id": "group-0001", "revision": 4, "members": [], "ended": False},
-    JobRunResponse: {"run": {"id": "run-0001", "state": "queued", "progressTotal": 10000}},
+    JobRunResponse: {
+        "run": {"id": "run-0001", "state": "queued", "progressTotal": 10000}
+    },
     RefreshQueueResponse: {"backfill": {"id": "run-0001", "state": "queued"}},
 }
 
@@ -1958,11 +2151,20 @@ def _ensure_parameter(
 ) -> None:
     parameters = operation.setdefault("parameters", [])
     current = next(
-        (item for item in parameters if item.get("name") == name and item.get("in") == location),
+        (
+            item
+            for item in parameters
+            if item.get("name") == name and item.get("in") == location
+        ),
         None,
     )
     if current is None:
-        current = {"name": name, "in": location, "required": required, "schema": schema or {"type": "string"}}
+        current = {
+            "name": name,
+            "in": location,
+            "required": required,
+            "schema": schema or {"type": "string"},
+        }
         parameters.append(current)
     if description:
         current["description"] = description
@@ -1978,14 +2180,24 @@ def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
         if name in _PARAMETER_EXAMPLES and "example" not in parameter:
             parameter["example"] = _PARAMETER_EXAMPLES[name]
         if name in {"TOKEN", "Password", "New-Password", "New_Password"}:
-            parameter["description"] = "Sensitive legacy administrator credential; never log this value."
+            parameter["description"] = (
+                "Sensitive legacy administrator credential; never log this value."
+            )
             parameter.setdefault("schema", {})["writeOnly"] = True
         if name in {"Username", "New-Username", "New_Username"}:
-            parameter["description"] = "Legacy administrator identity header retained for dashboard compatibility."
+            parameter["description"] = (
+                "Legacy administrator identity header retained for dashboard compatibility."
+            )
         if name == "view":
             parameter.setdefault("schema", {})["enum"] = ["full", "card"]
         if name == "section":
-            parameter.setdefault("schema", {})["enum"] = ["featured", "continueWatching", "nextUp", "derived", "library"]
+            parameter.setdefault("schema", {})["enum"] = [
+                "featured",
+                "continueWatching",
+                "nextUp",
+                "derived",
+                "library",
+            ]
         if name == "sortOrder":
             parameter.setdefault("schema", {})["enum"] = ["ascending", "descending"]
         if name == "image_type":
@@ -1993,20 +2205,31 @@ def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
         if name == "kind":
             parameter.setdefault("schema", {})["enum"] = ["intro", "outro"]
         if name == "action":
-            parameter.setdefault("schema", {})["enum"] = ["media", "play", "pause", "seek"]
+            parameter.setdefault("schema", {})["enum"] = [
+                "media",
+                "play",
+                "pause",
+                "seek",
+            ]
         if name == "provider":
             parameter.setdefault("schema", {})["enum"] = ["tmdb", "tvdb", "lastfm"]
         if name == "imageType":
             parameter.setdefault("schema", {})["enum"] = ["Primary", "Backdrop", "Logo"]
         if "description" not in parameter:
-            parameter["description"] = f"{name} value supplied in the {parameter.get('in', 'request')} component."
+            parameter["description"] = (
+                f"{name} value supplied in the {parameter.get('in', 'request')} component."
+            )
         if (
             "example" not in parameter
             and name not in {"TOKEN", "Password", "New-Password", "New_Password"}
             and parameter.get("schema", {}).get("default") is not None
         ):
             parameter["example"] = parameter["schema"]["default"]
-    if path.startswith("/api/playback/") or path.startswith("/api/catalog/items/") and ("/images/" in path or "/people/" in path):
+    if (
+        path.startswith("/api/playback/")
+        or path.startswith("/api/catalog/items/")
+        and ("/images/" in path or "/people/" in path)
+    ):
         _ensure_parameter(
             operation,
             "access",
@@ -2017,7 +2240,17 @@ def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
 
 
 def _security_for(path: str, method: str) -> list[dict[str, list[Any]]] | list[Any]:
-    if path in {"/", "/api/version", "/api/config", "/api/config/public-web-url", "/api/user/check_invite", "/api/user/register", "/api/auth/login", "/api/auth/browser-login", "/api/admin/login"}:
+    if path in {
+        "/",
+        "/api/version",
+        "/api/config",
+        "/api/config/public-web-url",
+        "/api/user/check_invite",
+        "/api/user/register",
+        "/api/auth/login",
+        "/api/auth/browser-login",
+        "/api/admin/login",
+    }:
         return []
     if path.startswith("/api/admin/"):
         return [
@@ -2045,9 +2278,22 @@ def _response_for(path: str, method: str) -> dict[str, Any]:
             ("video/mp4", "audio/mpeg", "application/octet-stream"),
             "Media headers; the body is empty for HEAD.",
             headers={
-                "Accept-Ranges": {"description": "Always `bytes` for direct media.", "schema": {"type": "string", "example": "bytes"}},
-                "Content-Length": {"description": "Selected media size in bytes.", "schema": {"type": "integer", "format": "int64", "example": 1048576}},
-                "Content-Range": {"description": "Present for a partial response or an invalid range.", "schema": {"type": "string", "example": "bytes 0-1023/1048576"}},
+                "Accept-Ranges": {
+                    "description": "Always `bytes` for direct media.",
+                    "schema": {"type": "string", "example": "bytes"},
+                },
+                "Content-Length": {
+                    "description": "Selected media size in bytes.",
+                    "schema": {
+                        "type": "integer",
+                        "format": "int64",
+                        "example": 1048576,
+                    },
+                },
+                "Content-Range": {
+                    "description": "Present for a partial response or an invalid range.",
+                    "schema": {"type": "string", "example": "bytes 0-1023/1048576"},
+                },
             },
         )
         response["content"] = {}
@@ -2066,40 +2312,110 @@ def _response_for(path: str, method: str) -> dict[str, Any]:
         }
     if path == "/api/playback/items/{entity_id}/stream":
         headers = {
-            "Accept-Ranges": {"description": "Byte-range support indicator.", "schema": {"type": "string", "example": "bytes"}},
-            "Content-Length": {"description": "Returned media length in bytes.", "schema": {"type": "integer", "format": "int64", "example": 1048576}},
-            "Content-Range": {"description": "Range served for a `206` response.", "schema": {"type": "string", "example": "bytes 0-1023/1048576"}},
+            "Accept-Ranges": {
+                "description": "Byte-range support indicator.",
+                "schema": {"type": "string", "example": "bytes"},
+            },
+            "Content-Length": {
+                "description": "Returned media length in bytes.",
+                "schema": {"type": "integer", "format": "int64", "example": 1048576},
+            },
+            "Content-Range": {
+                "description": "Range served for a `206` response.",
+                "schema": {"type": "string", "example": "bytes 0-1023/1048576"},
+            },
         }
         return {
-            "200": _binary_response(("video/mp4", "audio/mpeg", "application/octet-stream"), "Complete or directly playable media.", headers),
-            "206": _binary_response(("video/mp4", "audio/mpeg", "application/octet-stream"), "Partial media selected by the `Range` request header.", headers),
-            "416": _empty_response("Invalid or unsatisfiable byte range.", {"Content-Range": {"description": "The valid size is returned as `bytes */size`.", "schema": {"type": "string", "example": "bytes */1048576"}}}),
+            "200": _binary_response(
+                ("video/mp4", "audio/mpeg", "application/octet-stream"),
+                "Complete or directly playable media.",
+                headers,
+            ),
+            "206": _binary_response(
+                ("video/mp4", "audio/mpeg", "application/octet-stream"),
+                "Partial media selected by the `Range` request header.",
+                headers,
+            ),
+            "416": _empty_response(
+                "Invalid or unsatisfiable byte range.",
+                {
+                    "Content-Range": {
+                        "description": "The valid size is returned as `bytes */size`.",
+                        "schema": {"type": "string", "example": "bytes */1048576"},
+                    }
+                },
+            ),
         }
     if path == "/api/playback/sessions/{session_id}/{filename}":
         return {
-            "200": _binary_response(("application/vnd.apple.mpegurl", "video/mp2t"), "HLS playlist or MPEG-TS segment."),
+            "200": _binary_response(
+                ("application/vnd.apple.mpegurl", "video/mp2t"),
+                "HLS playlist or MPEG-TS segment.",
+            ),
         }
     if path.endswith(".vtt"):
         return {"200": _binary_response(("text/vtt",), "WebVTT subtitle content.")}
     if path.endswith(".mp3"):
         return {"200": _binary_response(("audio/mpeg",), "MP3 intro/outro preview.")}
     if (method, path) in _NO_CONTENT_RESPONSES:
-        return {"204": _empty_response("The operation completed without a response body.")}
-    if path.endswith(".webp") or path.endswith("/image") or "/images/" in path or "/people/" in path or (path.endswith("/avatar") and method == "GET"):
-        media_types = ("image/webp", "image/gif") if path.endswith("/avatar") else ("image/webp",)
+        return {
+            "204": _empty_response("The operation completed without a response body.")
+        }
+    if (
+        path.endswith(".webp")
+        or path.endswith("/image")
+        or "/images/" in path
+        or "/people/" in path
+        or (path.endswith("/avatar") and method == "GET")
+    ):
+        media_types = (
+            ("image/webp", "image/gif") if path.endswith("/avatar") else ("image/webp",)
+        )
         result = {
-            "200": _binary_response(media_types, "Private image content.", {"Cache-Control": {"description": "Private cache policy for the selected image.", "schema": {"type": "string"}}}),
+            "200": _binary_response(
+                media_types,
+                "Private image content.",
+                {
+                    "Cache-Control": {
+                        "description": "Private cache policy for the selected image.",
+                        "schema": {"type": "string"},
+                    }
+                },
+            ),
         }
         if path == "/api/catalog/items/{entity_id}/images/{image_type}":
-            result["202"] = _empty_response("Image materialization is pending.", {"Retry-After": {"description": "Seconds before retrying.", "schema": {"type": "integer", "example": 2}}, "X-ZenStream-Image-State": {"description": "Pending image state.", "schema": {"type": "string", "example": "pending"}}})
+            result["202"] = _empty_response(
+                "Image materialization is pending.",
+                {
+                    "Retry-After": {
+                        "description": "Seconds before retrying.",
+                        "schema": {"type": "integer", "example": 2},
+                    },
+                    "X-ZenStream-Image-State": {
+                        "description": "Pending image state.",
+                        "schema": {"type": "string", "example": "pending"},
+                    },
+                },
+            )
         return result
     model = _RESPONSE_MODELS.get((method, path), FlexibleObject)
     array_item = _RESPONSE_ARRAY_ITEMS.get((method, path))
-    if method == "POST" and path in {"/api/admin/users", "/api/admin/libraries", "/api/admin/accounts", "/api/admin/invites", "/api/user/register", "/api/syncplay/groups"}:
+    if method == "POST" and path in {
+        "/api/admin/users",
+        "/api/admin/libraries",
+        "/api/admin/accounts",
+        "/api/admin/invites",
+        "/api/user/register",
+        "/api/syncplay/groups",
+    }:
         status = "201"
-    elif method == "POST" and path in {"/api/admin/libraries/{library_id}/scan", "/api/admin/jobs/{job_id}/run"}:
-        status = "202"
-    elif method == "POST" and path == "/api/admin/login":
+    elif (
+        method == "POST"
+        and path
+        in {"/api/admin/libraries/{library_id}/scan", "/api/admin/jobs/{job_id}/run"}
+        or method == "POST"
+        and path == "/api/admin/login"
+    ):
         status = "202"
     else:
         status = "200"
@@ -2112,7 +2428,13 @@ def _response_for(path: str, method: str) -> dict[str, Any]:
             )
         }
     else:
-        result = {status: _json_response(model, "The operation completed successfully.", _RESPONSE_EXAMPLES.get(model))}
+        result = {
+            status: _json_response(
+                model,
+                "The operation completed successfully.",
+                _RESPONSE_EXAMPLES.get(model),
+            )
+        }
     if path in {"/api/auth/browser-login", "/api/user/register", "/api/admin/login"}:
         result[status].setdefault("headers", {})["Set-Cookie"] = {
             "description": "HttpOnly session cookie set by the browser flow; the value is generated by the server.",
@@ -2123,12 +2445,26 @@ def _response_for(path: str, method: str) -> dict[str, Any]:
             TrickplayManifest,
             "Trickplay generation is still pending.",
             {"state": "pending", "generation": "generation-1"},
-            {"Retry-After": {"description": "Seconds before polling again.", "schema": {"type": "integer", "example": 5}}},
+            {
+                "Retry-After": {
+                    "description": "Seconds before polling again.",
+                    "schema": {"type": "integer", "example": 5},
+                }
+            },
         )
     if method == "GET" and path == "/api/catalog/items/{entity_id}/images/{image_type}":
         result["202"] = _empty_response(
             "Artwork materialization is pending.",
-            {"Retry-After": {"description": "Seconds before retrying.", "schema": {"type": "integer", "example": 2}}, "X-ZenStream-Image-State": {"description": "Pending image state.", "schema": {"type": "string", "example": "pending"}}},
+            {
+                "Retry-After": {
+                    "description": "Seconds before retrying.",
+                    "schema": {"type": "integer", "example": 2},
+                },
+                "X-ZenStream-Image-State": {
+                    "description": "Pending image state.",
+                    "schema": {"type": "string", "example": "pending"},
+                },
+            },
         )
     return result
 
@@ -2150,7 +2486,13 @@ def _error_statuses(path: str, method: str) -> tuple[int, ...]:
         return (401, 403, 404)
     if path.endswith(".vtt") or path.endswith(".mp3"):
         return (401, 403, 404, 422, 503)
-    if path.endswith(".webp") or path.endswith("/image") or "/images/" in path or "/people/" in path or (path.endswith("/avatar") and method == "GET"):
+    if (
+        path.endswith(".webp")
+        or path.endswith("/image")
+        or "/images/" in path
+        or "/people/" in path
+        or (path.endswith("/avatar") and method == "GET")
+    ):
         return (401, 403, 404)
     if path.startswith("/api/admin/"):
         return (400, 401, 403, 404, 409)
@@ -2161,7 +2503,9 @@ def _error_statuses(path: str, method: str) -> tuple[int, ...]:
     return (400, 401, 404)
 
 
-def _apply_operation_contract(operation: dict[str, Any], path: str, method: str) -> None:
+def _apply_operation_contract(
+    operation: dict[str, Any], path: str, method: str
+) -> None:
     method = method.upper()
     tag = _tag_for_path(path)
     summary = _SUMMARY_OVERRIDES.get((method, path), f"{method.title()} {path}")
@@ -2172,16 +2516,27 @@ def _apply_operation_contract(operation: dict[str, Any], path: str, method: str)
     operation["security"] = _security_for(path, method)
     _annotate_parameters(operation, path)
 
-    if method in {"POST", "PUT", "PATCH", "DELETE"} and (method, path) not in _NO_REQUEST_BODY:
+    if (
+        method in {"POST", "PUT", "PATCH", "DELETE"}
+        and (method, path) not in _NO_REQUEST_BODY
+    ):
         model = _REQUEST_MODELS.get((method, path), FlexibleObject)
-        body: dict[str, Any] = {"required": False, "content": _json_content(model, _REQUEST_EXAMPLES.get(model))}
+        body: dict[str, Any] = {
+            "required": False,
+            "content": _json_content(model, _REQUEST_EXAMPLES.get(model)),
+        }
         if path == "/api/account/avatar":
             body = {
                 "required": True,
                 "description": "Raw JPEG, PNG, WebP, or GIF bytes. The crop query parameters describe the transform.",
                 "content": {
                     media_type: {"schema": {"type": "string", "format": "binary"}}
-                    for media_type in ("image/jpeg", "image/png", "image/webp", "image/gif")
+                    for media_type in (
+                        "image/jpeg",
+                        "image/png",
+                        "image/webp",
+                        "image/gif",
+                    )
                 },
             }
         operation["requestBody"] = body
@@ -2192,7 +2547,15 @@ def _apply_operation_contract(operation: dict[str, Any], path: str, method: str)
         responses["422"] = _json_response(
             ValidationErrorResponse,
             "Request validation failed.",
-            {"detail": [{"loc": ["query", "page"], "msg": "Input should be greater than or equal to 1", "type": "greater_than_equal"}]},
+            {
+                "detail": [
+                    {
+                        "loc": ["query", "page"],
+                        "msg": "Input should be greater than or equal to 1",
+                        "type": "greater_than_equal",
+                    }
+                ]
+            },
         )
     operation["responses"] = responses
 
@@ -2220,9 +2583,14 @@ def configure_routes(app: FastAPI) -> None:
             route.include_in_schema = False
             continue
         methods = sorted(route.methods or ())
-        method = next((value for value in methods if value != "HEAD"), methods[0] if methods else "GET")
+        method = next(
+            (value for value in methods if value != "HEAD"),
+            methods[0] if methods else "GET",
+        )
         tag = _tag_for_path(route.path)
-        summary = _SUMMARY_OVERRIDES.get((method, route.path), f"{method.title()} {route.path}")
+        summary = _SUMMARY_OVERRIDES.get(
+            (method, route.path), f"{method.title()} {route.path}"
+        )
         route.tags = [tag]
         route.summary = summary
         route.description = _description_for(tag, method, route.path, summary)
@@ -2301,7 +2669,15 @@ def build_openapi(app: FastAPI) -> dict[str, Any]:
             paths.pop(path, None)
             continue
         for method, operation in list(paths[path].items()):
-            if method.lower() not in {"get", "post", "put", "patch", "delete", "head", "options"}:
+            if method.lower() not in {
+                "get",
+                "post",
+                "put",
+                "patch",
+                "delete",
+                "head",
+                "options",
+            }:
                 continue
             _apply_operation_contract(operation, path, method.upper())
     components = schema.setdefault("components", {})

@@ -636,6 +636,29 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_music_metadata_worker_stage_records_progress(self):
+        db, scanner = self._scanner_db()
+        try:
+            scanner._music_metadata_worker_mode = True
+            scanner._music_metadata_progress = []
+
+            scanner._set_stage(
+                "job-1",
+                "Resolving music album 1",
+                entityId="release-1",
+                current=0,
+                total=1,
+            )
+
+            self.assertEqual(len(scanner._music_metadata_progress), 1)
+            job_id, update = scanner._music_metadata_progress[0]
+            self.assertEqual(job_id, "job-1")
+            self.assertEqual(update["message"], "Resolving music album 1 · 0/1")
+            self.assertEqual(update["progress_stage_current"], 0)
+            self.assertEqual(update["progress_stage_total"], 1)
+        finally:
+            db.close()
+
     def test_incremental_movie_scan_preserves_ids_and_reconciles_files(self):
         db, scanner = self._scanner_db()
         try:

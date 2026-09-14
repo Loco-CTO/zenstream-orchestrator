@@ -428,9 +428,7 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.db.execute(
             "CREATE TABLE libraries(id TEXT PRIMARY KEY,name TEXT,type TEXT)"
         )
-        self.db.execute(
-            "INSERT INTO libraries VALUES('library-1','Music','music')"
-        )
+        self.db.execute("INSERT INTO libraries VALUES('library-1','Music','music')")
         self.db.execute(
             "INSERT INTO library_entities VALUES('release-1','library-1','release')"
         )

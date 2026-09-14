@@ -3813,8 +3813,7 @@ class LibraryScanner:
         try:
             provider_ids = explicit
             if not any(
-                value.get("provider") == "tmdb"
-                and value.get("id")
+                value.get("provider") == "tmdb" and value.get("id")
                 for value in provider_ids
             ):
                 result = service.resolve_inventory_entity(entity_type, query, year, [])
@@ -4290,7 +4289,9 @@ class LibraryScanner:
 
         def needs_localized_metadata(row: tuple) -> bool:
             entity_id, entity_type = row[0], row[1]
-            missing_primary = force_metadata and self._missing_primary_metadata(entity_id)
+            missing_primary = force_metadata and self._missing_primary_metadata(
+                entity_id
+            )
             if entity_id not in metadata_candidates and not missing_primary:
                 return False
             if missing_primary:
@@ -6008,10 +6009,7 @@ class LibraryScanner:
                         (season, season),
                     )
                     if not any(
-                        (
-                            row[0] in season_candidates
-                            and self._needs_metadata(row[0])
-                        )
+                        (row[0] in season_candidates and self._needs_metadata(row[0]))
                         or (
                             getattr(self, "_force_metadata_scan", False)
                             and self._missing_primary_metadata(row[0])
@@ -6048,9 +6046,7 @@ class LibraryScanner:
                             should_terminate,
                             series_metadata=series_metadata,
                             tvdb_identity=tvdb_identity,
-                            force_metadata=getattr(
-                                self, "_force_metadata_scan", False
-                            ),
+                            force_metadata=getattr(self, "_force_metadata_scan", False),
                         )
                         self._persist_nfo_metadata(
                             season, "season", season_dir, season_files

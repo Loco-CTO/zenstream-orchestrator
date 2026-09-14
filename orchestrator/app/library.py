@@ -1463,6 +1463,8 @@ class LibraryScanner:
             stage,
             context,
         )
+        current = context.get("current")
+        total = context.get("total")
         if getattr(self, "_music_metadata_worker_mode", False):
             self._music_metadata_progress.append(
                 (
@@ -1483,8 +1485,6 @@ class LibraryScanner:
             )
             return
         if persist:
-            current = context.get("current")
-            total = context.get("total")
             self.store.update_job(
                 job_id,
                 message=(

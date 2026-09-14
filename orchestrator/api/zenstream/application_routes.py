@@ -529,12 +529,12 @@ async def root():
     return {"status": "ok"}
 
 
-@router.get("/api/docs/")
+@router.get("/api/docs/", include_in_schema=False)
 async def docs_alias():
     return RedirectResponse("/api/swagger/")
 
 
-@router.get("/favicon.ico")
+@router.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     path = await run_control(_contained_static_file, web_root, "favicon.ico")
     if path is None:
@@ -542,7 +542,7 @@ async def favicon():
     return FileResponse(path)
 
 
-@router.get("/web/{path:path}")
+@router.get("/web/{path:path}", include_in_schema=False)
 async def dashboard(path: str = ""):
     requested, page, fallback = await run_control(_dashboard_files, path)
     if requested is not None:

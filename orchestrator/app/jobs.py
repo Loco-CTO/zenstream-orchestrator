@@ -627,6 +627,14 @@ class JobStore:
         return value
 
     @staticmethod
+    def _scan_stats(value) -> dict | None:
+        try:
+            parsed = json.loads(value or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
     def _definition(row) -> dict:
         # Keep the mapper tolerant of pre-trigger test databases while the
         # production schema is migrated to trigger-owned scheduling.
@@ -772,13 +780,19 @@ class JobStore:
             "threadName": row[13],
         }
         value["progressDetail"] = JobStore._progress_detail(row, 14)
-        option_offset = 20
+        if len(row) >= 23:
+            value["scanStats"] = JobStore._scan_stats(row[20])
+            option_offset = 21
+        else:
+            value["scanStats"] = None
+            option_offset = 20
         if len(row) > option_offset:
             value["sourceTriggerId"] = row[option_offset]
-            try:
-                value["options"] = json.loads(row[option_offset + 1] or "{}")
-            except (TypeError, json.JSONDecodeError):
-                value["options"] = {}
+            if len(row) > option_offset + 1:
+                try:
+                    value["options"] = json.loads(row[option_offset + 1] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    value["options"] = {}
         return value
 
     def definitions(self) -> list[dict]:
@@ -1384,6 +1398,7 @@ class JobStore:
     def runs(self, definition_id: str | None = None, limit: int = 100) -> list[dict]:
         detail = ",".join(self._progress_columns("job_runs"))
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}
+        scan_stats = "scan_stats" if "scan_stats" in columns else "NULL AS scan_stats"
         snapshot = (
             ",source_trigger_id,options"
             if {"source_trigger_id", "options"}.issubset(columns)
@@ -1391,12 +1406,12 @@ class JobStore:
         )
         if definition_id:
             rows = self.db.execute(
-                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail}{snapshot} FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
+                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail},{scan_stats}{snapshot} FROM job_runs WHERE definition_id=? ORDER BY created_at DESC LIMIT ?",
                 (definition_id, limit),
             )
         else:
             rows = self.db.execute(
-                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail}{snapshot} FROM job_runs ORDER BY created_at DESC LIMIT ?",
+                f"SELECT id,definition_id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,thread_name,{detail},{scan_stats}{snapshot} FROM job_runs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
         return [self._run(row) for row in rows]
@@ -1410,6 +1425,15 @@ class JobStore:
         query = (
             "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,"
             + ",".join(self._progress_columns("library_jobs"))
+            + ","
+            + (
+                "scan_stats"
+                if "scan_stats"
+                in {
+                    row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")
+                }
+                else "NULL AS scan_stats"
+            )
             + ",NULL,NULL "
             "FROM library_jobs WHERE library_id=?"
         )
@@ -1438,6 +1462,7 @@ class JobStore:
                 "finishedAt": row[11],
                 "threadName": None,
                 "progressDetail": self._progress_detail(row, 12),
+                "scanStats": self._scan_stats(row[18]),
             }
             for row in rows
         ]
@@ -1636,6 +1661,7 @@ class JobStore:
             "progress_stage_total",
             "progress_stage_unit",
             "progress_current_item",
+            "scan_stats",
         }
         try:
             columns = {row[1] for row in self.db.execute("PRAGMA table_info(job_runs)")}

@@ -80,6 +80,30 @@ class DatabaseHandlerTest(unittest.TestCase):
         finally:
             database.close()
 
+    def test_nested_writes_and_reads_share_the_outer_transaction(self):
+        database = DatabaseHandler("sqlite", {}, ":memory:")
+        database.execute("CREATE TABLE values_table(value INTEGER)")
+        try:
+            with database.transaction():
+                database.execute("INSERT INTO values_table VALUES(?)", (1,))
+                database.write_many(
+                    [
+                        ("INSERT INTO values_table VALUES(?)", (2,)),
+                        ("INSERT INTO values_table VALUES(?)", (3,)),
+                    ]
+                )
+                self.assertEqual(
+                    database.read_execute(
+                        "SELECT value FROM values_table ORDER BY value"
+                    ),
+                    [(1,), (2,), (3,)],
+                )
+            self.assertEqual(
+                database.execute("SELECT COUNT(*) FROM values_table"), [(3,)]
+            )
+        finally:
+            database.close()
+
     def test_writer_gate_admits_waiters_in_arrival_order(self):
         database = DatabaseHandler("sqlite", {}, ":memory:")
         database.execute("CREATE TABLE values_table(value INTEGER)")

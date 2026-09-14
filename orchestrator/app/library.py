@@ -11,9 +11,10 @@ import time
 import traceback
 import unicodedata
 import uuid
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable, Iterable
-from concurrent.futures import Future, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -549,6 +550,8 @@ _AUDIO_ALBUM_ARTIST_TAG_PRIORITIES = {
 }
 
 MUSIC_TAG_SNAPSHOT_VERSION = 1
+MUSIC_SCAN_TAG_WORKERS = 4
+MUSIC_SCAN_TAG_WORKER_MAX = 8
 
 
 @dataclass(frozen=True)
@@ -571,6 +574,40 @@ class MusicFileObservation:
     changed: bool
     previous_group_key: tuple[str, ...] | None = None
     cached_entity_id: str | None = None
+
+
+@dataclass
+class MusicScanStats:
+    """Bounded counters for diagnosing music scan cost without storing paths."""
+
+    enumerated_files: int = 0
+    audio_candidates: int = 0
+    inventory_cache_hits: int = 0
+    tag_parses: int = 0
+    tag_parse_failures: int = 0
+    content_fingerprint_count: int = 0
+    content_fingerprint_bytes: int = 0
+    groups_discovered: int = 0
+    groups_processed: int = 0
+    groups_reprocessed: int = 0
+    metadata_groups: int = 0
+    unchanged_groups: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "enumeratedFiles": self.enumerated_files,
+            "audioCandidates": self.audio_candidates,
+            "inventoryCacheHits": self.inventory_cache_hits,
+            "tagParses": self.tag_parses,
+            "tagParseFailures": self.tag_parse_failures,
+            "contentFingerprintCount": self.content_fingerprint_count,
+            "contentFingerprintBytes": self.content_fingerprint_bytes,
+            "groupsDiscovered": self.groups_discovered,
+            "groupsProcessed": self.groups_processed,
+            "groupsReprocessed": self.groups_reprocessed,
+            "metadataGroups": self.metadata_groups,
+            "unchangedGroups": self.unchanged_groups,
+        }
 
 
 def _music_tag_fingerprint(tags: dict[str, str]) -> str:
@@ -1120,9 +1157,14 @@ class LibraryStore:
                 "progress_current_item",
             )
         ]
+        scan_stats_column = (
+            "scan_stats" if "scan_stats" in columns else "NULL AS scan_stats"
+        )
         rows = self.db.execute(
             "SELECT id,library_id,kind,state,progress_current,progress_total,message,error,error_details,created_at,started_at,finished_at,"
             + ",".join(detail_columns)
+            + ","
+            + scan_stats_column
             + " FROM library_jobs WHERE id=?",
             (job_id,),
         )
@@ -1151,6 +1193,12 @@ class LibraryStore:
             else []
         )
         detail_values = row[12:18]
+        try:
+            scan_stats = json.loads(row[18] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            scan_stats = None
+        if not isinstance(scan_stats, dict):
+            scan_stats = None
         return {
             "id": row[0],
             "libraryId": row[1],
@@ -1178,6 +1226,7 @@ class LibraryStore:
                 if any(value is not None for value in detail_values)
                 else None
             ),
+            "scanStats": scan_stats,
         }
 
     def jobs(self, library_id: str) -> list[dict]:
@@ -1209,6 +1258,7 @@ class LibraryStore:
             "progress_stage_total",
             "progress_stage_unit",
             "progress_current_item",
+            "scan_stats",
         }
         try:
             columns = {
@@ -1249,6 +1299,7 @@ class LibraryScanner:
         self._scan_deferred_roots: set[str] = set()
         self._scan_access_errors: set[Path] = set()
         self._scan_refresh_root_ids: set[str] = set()
+        self._scan_published_music_roots: set[str] = set()
         self._music_local_metadata: dict[str, dict] = {}
         self._local_nfo_sources: dict[str, tuple[str, Path, list]] = {}
         self._music_pending_release_ids: dict[str, set[str]] = {}
@@ -1258,9 +1309,11 @@ class LibraryScanner:
         self._music_dirty_release_ids: set[str] = set()
         self._music_directory_cache: dict[Path, list[Path] | None] = {}
         self._music_file_stats: dict[str, os.stat_result] = {}
+        self._music_artist_assets_processed: set[str] = set()
         self._music_state_lock = threading.RLock()
         self._music_lastfm_lock = threading.Lock()
         self._music_lastfm_reservation_set: set[str] | None = None
+        self._music_scan_stats: MusicScanStats | dict[str, int] = {}
         self._force_metadata_scan = False
         self._scan_complete = False
         self._stage_lock = threading.RLock()
@@ -1274,6 +1327,7 @@ class LibraryScanner:
         self._pending_publication_roots: dict[str, None] = {}
         self._last_publication_at = 0.0
         self._music_inventory_available: bool | None = None
+        self._music_inventory_pending_writes: list[tuple[str, tuple]] | None = None
 
     def _has_table(self, name: str) -> bool:
         return bool(
@@ -1281,6 +1335,20 @@ class LibraryScanner:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
             )
         )
+
+    def _increment_music_scan_stat(self, field: str, amount: int = 1) -> None:
+        stats = getattr(self, "_music_scan_stats", None)
+        if not isinstance(stats, MusicScanStats):
+            return
+        setattr(stats, field, getattr(stats, field, 0) + int(amount))
+
+    def _music_scan_stats_json(self) -> str | None:
+        stats = getattr(self, "_music_scan_stats", None)
+        if isinstance(stats, MusicScanStats):
+            stats = stats.as_dict()
+        if not isinstance(stats, dict) or not stats:
+            return None
+        return json.dumps(stats, ensure_ascii=False, sort_keys=True)
 
     def _music_inventory_enabled(self) -> bool:
         if self._music_inventory_available is None:
@@ -1383,7 +1451,7 @@ class LibraryScanner:
             sort_keys=True,
             separators=(",", ":"),
         )
-        self.db.execute(
+        statement = (
             "INSERT INTO music_file_inventory("
             "library_id,path_key,relative_path,entity_id,size,modified_ns,"
             "tag_snapshot_version,tag_fingerprint,tag_payload,group_key,updated_at"
@@ -1395,21 +1463,33 @@ class LibraryScanner:
             "tag_snapshot_version=excluded.tag_snapshot_version,"
             "tag_fingerprint=excluded.tag_fingerprint,"
             "tag_payload=excluded.tag_payload,group_key=excluded.group_key,"
-            "updated_at=excluded.updated_at",
-            (
-                library_id,
-                path_key,
-                relative_path,
-                entity_id,
-                int(file_stat.st_size),
-                int(file_stat.st_mtime_ns),
-                MUSIC_TAG_SNAPSHOT_VERSION,
-                _music_tag_fingerprint(tags),
-                encoded_tags,
-                _music_group_key_text(group_key),
-                now(),
-            ),
+            "updated_at=excluded.updated_at"
         )
+        params = (
+            library_id,
+            path_key,
+            relative_path,
+            entity_id,
+            int(file_stat.st_size),
+            int(file_stat.st_mtime_ns),
+            MUSIC_TAG_SNAPSHOT_VERSION,
+            _music_tag_fingerprint(tags),
+            encoded_tags,
+            _music_group_key_text(group_key),
+            now(),
+        )
+        pending = getattr(self, "_music_inventory_pending_writes", None)
+        if pending is not None:
+            pending.append((statement, params))
+        else:
+            self.db.execute(statement, params)
+
+    def _flush_music_inventory_writes(self) -> None:
+        pending = getattr(self, "_music_inventory_pending_writes", None)
+        if not pending:
+            return
+        self.db.write_many(pending)
+        pending.clear()
 
     def _music_inventory_prune(
         self,
@@ -1423,6 +1503,7 @@ class LibraryScanner:
         normalized_deferred = {
             _top_level_key(_path_key(value)) for value in self._scan_deferred_roots
         }
+        pending_writes = []
         for path_key, row in previous_rows.items():
             if path_key in current_paths:
                 continue
@@ -1434,10 +1515,14 @@ class LibraryScanner:
                 _top_level_key(target) for target in targets
             }:
                 continue
-            self.db.execute(
-                "DELETE FROM music_file_inventory WHERE library_id=? AND path_key=?",
-                (library_id, path_key),
+            pending_writes.append(
+                (
+                    "DELETE FROM music_file_inventory WHERE library_id=? AND path_key=?",
+                    (library_id, path_key),
+                )
             )
+        for offset in range(0, len(pending_writes), 500):
+            self.db.write_many(pending_writes[offset : offset + 500])
 
     def _music_directory_files(self, directory: Path) -> list[Path] | None:
         cached = self._music_directory_cache.get(directory)
@@ -1446,22 +1531,79 @@ class LibraryScanner:
         file_stats = getattr(self, "_music_file_stats", None)
         if file_stats is None:
             file_stats = self._music_file_stats = {}
+        relevant_suffixes = (
+            AUDIO_EXTENSIONS
+            | IMAGE_EXTENSIONS
+            | NFO_EXTENSIONS
+            | SUBTITLE_EXTENSIONS
+            | LYRIC_EXTENSIONS
+        )
         try:
             files = []
-            for path in directory.iterdir():
-                try:
-                    file_stat = path.stat()
-                except OSError:
-                    continue
-                if not stat.S_ISREG(file_stat.st_mode):
-                    continue
-                files.append(path)
-                file_stats[_filesystem_path_key(path)] = file_stat
-        except OSError:
+            with os.scandir(directory) as entries:
+                ordered = sorted(entries, key=lambda entry: entry.name.casefold())
+                for entry in ordered:
+                    path = Path(entry.path)
+                    suffix = path.suffix.lower()
+                    if suffix not in relevant_suffixes:
+                        continue
+                    if entry.is_symlink() or entry.is_dir(follow_symlinks=False):
+                        continue
+                    path_key = _filesystem_path_key(path)
+                    file_stat = file_stats.get(path_key)
+                    if file_stat is None:
+                        file_stat = entry.stat(follow_symlinks=False)
+                        file_stats[path_key] = file_stat
+                    if not stat.S_ISREG(file_stat.st_mode):
+                        continue
+                    files.append(path)
+        except OSError as error:
+            self._record_access_error(
+                Path(getattr(error, "filename", None) or directory)
+            )
             self._music_directory_cache[directory] = None
             return None
         self._music_directory_cache[directory] = files
         return list(files)
+
+    @staticmethod
+    def _music_sidecars_by_track(
+        directory_files: list[Path], tracks: Iterable[Path]
+    ) -> dict[Path, list[Path]]:
+        """Index sidecars by filename prefix with one sorted directory pass."""
+        track_paths = list(tracks)
+        sidecars = [
+            path
+            for path in directory_files
+            if path.suffix.casefold() not in AUDIO_EXTENSIONS
+        ]
+        ordered_sidecars = sorted(
+            ((path.stem.casefold(), path) for path in sidecars),
+            key=lambda value: value[0],
+        )
+        stem_keys = [value[0] for value in ordered_sidecars]
+        audio_sibling_count = len(directory_files) - len(sidecars)
+        indexed: dict[Path, list[Path]] = {}
+        for track in track_paths:
+            prefix = track.stem.casefold()
+            matches: list[Path] = []
+            index = bisect_left(stem_keys, prefix)
+            while index < len(ordered_sidecars):
+                stem, sidecar = ordered_sidecars[index]
+                if not stem.startswith(prefix):
+                    break
+                if sidecar != track:
+                    matches.append(sidecar)
+                index += 1
+            if audio_sibling_count == 1:
+                matches.extend(
+                    path
+                    for path in sidecars
+                    if path.name.casefold() in {"track.nfo", "recording.nfo"}
+                    and path not in matches
+                )
+            indexed[track] = matches
+        return indexed
 
     def _set_stage(
         self, job_id: str, stage: str, *, persist: bool = True, **context
@@ -1682,6 +1824,7 @@ class LibraryScanner:
         self._scan_deferred_roots = set()
         self._scan_access_errors = set()
         self._scan_refresh_root_ids = set()
+        self._scan_published_music_roots = set()
         self._music_local_metadata = {}
         self._local_nfo_sources = {}
         self._music_pending_release_ids = {}
@@ -1691,6 +1834,9 @@ class LibraryScanner:
         self._music_dirty_release_ids = set()
         self._music_directory_cache = {}
         self._music_inventory_available = None
+        self._music_inventory_pending_writes = None
+        self._music_scan_stats = {}
+        self._music_artist_assets_processed = set()
         self._last_stage_persisted_at = 0.0
         self._scan_complete = False
         try:
@@ -1728,6 +1874,7 @@ class LibraryScanner:
                 )
             self._scan_complete = True
             if library["type"] == "music":
+                self.store.update_job(job_id, scan_stats=self._music_scan_stats_json())
                 self._set_stage(job_id, "Populating changed metadata locales")
                 self._fetch_seen_locales(should_terminate)
                 self._set_stage(job_id, "Repairing music release context")
@@ -1809,6 +1956,11 @@ class LibraryScanner:
                 progress_total=count,
                 finished_at=finished,
                 message=completion_message,
+                scan_stats=(
+                    self._music_scan_stats_json()
+                    if library["type"] == "music"
+                    else None
+                ),
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
             if library["type"] in {"tv_series", "movies"} and bazarr_mapping_changed:
@@ -1855,6 +2007,11 @@ class LibraryScanner:
                 message="Terminated by administrator",
                 error=None,
                 finished_at=finished,
+                scan_stats=(
+                    self._music_scan_stats_json()
+                    if library["type"] == "music"
+                    else None
+                ),
             )
             self.store.set_scan_state(library_id, "ready", finished=finished)
         except Exception as error:
@@ -1876,6 +2033,11 @@ class LibraryScanner:
                 error=summary,
                 error_details=json.dumps(details),
                 finished_at=now(),
+                scan_stats=(
+                    self._music_scan_stats_json()
+                    if library["type"] == "music"
+                    else None
+                ),
             )
             self.store.set_scan_state(
                 library_id, "error", error=summary, finished=now()
@@ -1883,6 +2045,7 @@ class LibraryScanner:
             raise
         finally:
             self.store.end_progress(job_id)
+            self._music_inventory_pending_writes = None
             self._stop_heartbeat()
 
     @staticmethod
@@ -2171,6 +2334,12 @@ class LibraryScanner:
 
         model = CatalogReadModel(self.db)
         roots = sorted(self._scan_refresh_root_ids)
+        if not self._scan_delta.get("removed"):
+            roots = [
+                root_id
+                for root_id in roots
+                if root_id not in self._scan_published_music_roots
+            ]
         for offset in range(0, len(roots), 300):
             model.refresh_roots(roots[offset : offset + 300])
         if len(roots) != 1 or self._scan_delta.get("removed"):
@@ -2199,12 +2368,30 @@ class LibraryScanner:
                 exc_info=True,
             )
 
-    def _publish_root(self, root_id: str) -> None:
+    def _publish_root(self, root_id: str, music_release_id: str | None = None) -> bool:
+        if music_release_id is not None:
+            try:
+                from app.catalog_read_model import CatalogReadModel
+
+                CatalogReadModel(self.db).refresh_music_publication(
+                    music_release_id, root_id
+                )
+                return True
+            except Exception:
+                # The terminal cleanup refresh retries the artist subtree if a
+                # per-album publication is temporarily unavailable.
+                logger.exception(
+                    "music catalog publication failed artist_id=%s release_id=%s",
+                    root_id,
+                    music_release_id,
+                )
+                return False
         with self._publication_lock:
             self._pending_publication_roots[root_id] = None
             if time.monotonic() - self._last_publication_at < 2.0:
-                return
+                return True
             self._flush_publications_locked()
+        return True
 
     def _flush_publications(self) -> None:
         with self._publication_lock:
@@ -4989,6 +5176,7 @@ class LibraryScanner:
             "metadata_changed": False,
             "artwork_changed": False,
         }
+        pending_writes: list[tuple[str, tuple]] = []
         for file_entry in files:
             if isinstance(file_entry, tuple):
                 path, discovered_stat = file_entry
@@ -5076,39 +5264,45 @@ class LibraryScanner:
                 continue
             if role in {"subtitle", "lyrics"}:
                 if old:
-                    self.db.execute(
-                        f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=NULL' if has_fingerprint else ''} WHERE id=?",
-                        (language, None, file_size, modified_ns, old[0]),
+                    pending_writes.append(
+                        (
+                            f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=NULL' if has_fingerprint else ''} WHERE id=?",
+                            (language, None, file_size, modified_ns, old[0]),
+                        )
                     )
                     result["updated"] += 1
                 elif has_fingerprint:
-                    self.db.execute(
-                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,NULL)",
+                    pending_writes.append(
                         (
-                            new_id(),
-                            entity_id,
-                            relative_path,
-                            role,
-                            language,
-                            None,
-                            file_size,
-                            modified_ns,
-                        ),
+                            "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,NULL)",
+                            (
+                                new_id(),
+                                entity_id,
+                                relative_path,
+                                role,
+                                language,
+                                None,
+                                file_size,
+                                modified_ns,
+                            ),
+                        )
                     )
                     result["added"] += 1
                 else:
-                    self.db.execute(
-                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
+                    pending_writes.append(
                         (
-                            new_id(),
-                            entity_id,
-                            relative_path,
-                            role,
-                            language,
-                            None,
-                            file_size,
-                            modified_ns,
-                        ),
+                            "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
+                            (
+                                new_id(),
+                                entity_id,
+                                relative_path,
+                                role,
+                                language,
+                                None,
+                                file_size,
+                                modified_ns,
+                            ),
+                        )
                     )
                     result["added"] += 1
                 continue
@@ -5151,24 +5345,28 @@ class LibraryScanner:
                 bytes_read,
                 time.monotonic() - fingerprint_started,
             )
+            self._increment_music_scan_stat("content_fingerprint_count")
+            self._increment_music_scan_stat("content_fingerprint_bytes", bytes_read)
             if old:
                 content_changed = (
                     old_fingerprint != quick_fingerprint if has_fingerprint else True
                 )
-                self.db.execute(
-                    f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=?' if has_fingerprint else ''} WHERE id=?",
+                pending_writes.append(
                     (
-                        [
-                            language,
-                            None,
-                            file_size,
-                            modified_ns,
-                            quick_fingerprint,
-                            old[0],
-                        ]
-                        if has_fingerprint
-                        else [language, None, file_size, modified_ns, old[0]]
-                    ),
+                        f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=?' if has_fingerprint else ''} WHERE id=?",
+                        (
+                            [
+                                language,
+                                None,
+                                file_size,
+                                modified_ns,
+                                quick_fingerprint,
+                                old[0],
+                            ]
+                            if has_fingerprint
+                            else [language, None, file_size, modified_ns, old[0]]
+                        ),
+                    )
                 )
                 result["updated"] += 1
                 if content_changed:
@@ -5180,33 +5378,37 @@ class LibraryScanner:
                         result["artwork_changed"] = True
             else:
                 if has_fingerprint:
-                    self.db.execute(
-                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
+                    pending_writes.append(
                         (
-                            new_id(),
-                            entity_id,
-                            relative_path,
-                            role,
-                            language,
-                            None,
-                            file_size,
-                            modified_ns,
-                            quick_fingerprint,
-                        ),
+                            "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
+                            (
+                                new_id(),
+                                entity_id,
+                                relative_path,
+                                role,
+                                language,
+                                None,
+                                file_size,
+                                modified_ns,
+                                quick_fingerprint,
+                            ),
+                        )
                     )
                 else:
-                    self.db.execute(
-                        "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
+                    pending_writes.append(
                         (
-                            new_id(),
-                            entity_id,
-                            relative_path,
-                            role,
-                            language,
-                            None,
-                            file_size,
-                            modified_ns,
-                        ),
+                            "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
+                            (
+                                new_id(),
+                                entity_id,
+                                relative_path,
+                                role,
+                                language,
+                                None,
+                                file_size,
+                                modified_ns,
+                            ),
+                        )
                     )
                 result["added"] += 1
                 if role == "media":
@@ -5218,7 +5420,7 @@ class LibraryScanner:
         for key, old in existing.items():
             if key in seen:
                 continue
-            self.db.execute("DELETE FROM media_files WHERE id=?", (old[0],))
+            pending_writes.append(("DELETE FROM media_files WHERE id=?", (old[0],)))
             result["removed"] += 1
             if old[2] == "media":
                 result["content_changed"] = True
@@ -5226,6 +5428,8 @@ class LibraryScanner:
                 result["metadata_changed"] = True
             elif old[2] == "image":
                 result["artwork_changed"] = True
+        if pending_writes:
+            self.db.write_many(pending_writes)
         if has_fingerprint:
             self._materialize_local_artwork(entity_id, root)
         if (
@@ -5391,6 +5595,59 @@ class LibraryScanner:
                         stat_seconds,
                     )
                 yield path, file_stat
+
+    def _walk_music_entries(self, directory: Path):
+        """Walk music-relevant entries with one directory-entry stat.
+
+        The generic walker is shared with video admission and intentionally
+        keeps its conservative behavior. Music scans can avoid stat'ing every
+        unrelated file and can reuse ``DirEntry``'s cached type/stat data,
+        which matters on network filesystems.
+        """
+
+        relevant_suffixes = (
+            AUDIO_EXTENSIONS
+            | IMAGE_EXTENSIONS
+            | NFO_EXTENSIONS
+            | SUBTITLE_EXTENSIONS
+            | LYRIC_EXTENSIONS
+        )
+
+        def walk(current: Path):
+            try:
+                with os.scandir(current) as entries:
+                    ordered = sorted(entries, key=lambda entry: entry.name.casefold())
+                    for entry in ordered:
+                        path = Path(entry.path)
+                        suffix = path.suffix.lower()
+                        try:
+                            if entry.is_symlink():
+                                if suffix in relevant_suffixes:
+                                    self._record_access_error(path)
+                                    yield path, None
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                yield from walk(path)
+                                continue
+                            if suffix not in relevant_suffixes:
+                                continue
+                            file_stat = entry.stat(follow_symlinks=False)
+                            if not stat.S_ISREG(file_stat.st_mode):
+                                continue
+                            self._music_file_stats[_filesystem_path_key(path)] = (
+                                file_stat
+                            )
+                            yield path, file_stat
+                        except OSError:
+                            if suffix in relevant_suffixes:
+                                self._record_access_error(path)
+                                yield path, None
+            except OSError as error:
+                self._record_access_error(
+                    Path(getattr(error, "filename", None) or current)
+                )
+
+        yield from walk(directory)
 
     @staticmethod
     def _target_entries(root: Path, targets: set[str] | None) -> list[Path]:
@@ -6227,13 +6484,25 @@ class LibraryScanner:
         ):
             return True
         if self._has_table("music_artist_credits"):
-            for track in tracks:
-                if not isinstance(track, dict) or not track.get("entity_id"):
-                    continue
-                if not self.db.execute(
-                    "SELECT 1 FROM music_artist_credits WHERE track_id=? LIMIT 1",
-                    (str(track["entity_id"]),),
-                ):
+            track_ids = list(
+                dict.fromkeys(
+                    str(track["entity_id"])
+                    for track in tracks
+                    if isinstance(track, dict) and track.get("entity_id")
+                )
+            )
+            for offset in range(0, len(track_ids), 500):
+                chunk = track_ids[offset : offset + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                credited = {
+                    row[0]
+                    for row in self.db.execute(
+                        "SELECT DISTINCT track_id FROM music_artist_credits "
+                        f"WHERE track_id IN ({placeholders})",
+                        chunk,
+                    )
+                }
+                if len(credited) != len(chunk):
                     return True
         return False
 
@@ -6610,34 +6879,38 @@ class LibraryScanner:
             if relative_first.parts and (root / relative_first.parts[0]).is_dir()
             else first_path.parent
         )
-        artist_directory_files = self._music_directory_files(artist_directory)
-        if artist_directory_files is None:
-            artist_assets = []
-            self._defer_root(
-                relative(str(root), str(artist_directory)),
-                "artist artwork directory is inaccessible",
+        processed_artist_assets = getattr(self, "_music_artist_assets_processed", set())
+        if artist not in processed_artist_assets:
+            artist_directory_files = self._music_directory_files(artist_directory)
+            if artist_directory_files is None:
+                artist_assets = []
+                self._defer_root(
+                    relative(str(root), str(artist_directory)),
+                    "artist artwork directory is inaccessible",
+                )
+            else:
+                artist_assets = [
+                    path
+                    for path in artist_directory_files
+                    if path.suffix.lower() in IMAGE_EXTENSIONS
+                    or path.suffix.casefold() in NFO_EXTENSIONS
+                ]
+            self._files(
+                artist,
+                root,
+                artist_assets,
+                job_id=job_id,
+                discovered_stats=getattr(self, "_music_file_stats", None),
             )
-        else:
-            artist_assets = [
-                path
-                for path in artist_directory_files
-                if path.suffix.lower() in IMAGE_EXTENSIONS
-                or path.suffix.casefold() in NFO_EXTENSIONS
-            ]
-        self._files(
-            artist,
-            root,
-            artist_assets,
-            job_id=job_id,
-            discovered_stats=getattr(self, "_music_file_stats", None),
-        )
-        self._persist_nfo_metadata(
-            artist,
-            "artist",
-            artist_directory,
-            artist_assets,
-            base_document=self._music_local_metadata.get(artist),
-        )
+            self._persist_nfo_metadata(
+                artist,
+                "artist",
+                artist_directory,
+                artist_assets,
+                base_document=self._music_local_metadata.get(artist),
+            )
+            processed_artist_assets.add(artist)
+            self._music_artist_assets_processed = processed_artist_assets
         if embedded_artist_id:
             self._replace_ids(artist, [("musicbrainz", "artist", embedded_artist_id)])
 
@@ -6896,6 +7169,22 @@ class LibraryScanner:
                 relative(str(root), str(value[0])).casefold(),
             ),
         )
+        sidecars_by_directory: dict[Path, dict[Path, list[Path]] | None] = {}
+        tracks_by_directory: dict[Path, list[Path]] = {}
+        for track, _tags in ordered_entries:
+            tracks_by_directory.setdefault(track.parent, []).append(track)
+        for directory, directory_tracks in tracks_by_directory.items():
+            directory_files = self._music_directory_files(directory)
+            if directory_files is None:
+                sidecars_by_directory[directory] = None
+                self._defer_root(
+                    relative(str(root), str(directory)),
+                    "track sidecars are inaccessible",
+                )
+                continue
+            sidecars_by_directory[directory] = self._music_sidecars_by_track(
+                directory_files, directory_tracks
+            )
         tracks = []
         for track, tags in ordered_entries:
             self._check_termination(should_terminate)
@@ -6955,31 +7244,11 @@ class LibraryScanner:
                 or observation.cached_entity_id != entity
             ):
                 self._replace_ids(entity, music_ids)
-            directory_files = self._music_directory_files(track.parent)
-            if directory_files is None:
+            directory_sidecars = sidecars_by_directory.get(track.parent)
+            if directory_sidecars is None:
                 sidecars = []
-                self._defer_root(
-                    relative(str(root), str(track.parent)),
-                    "track sidecars are inaccessible",
-                )
             else:
-                audio_sibling_count = sum(
-                    1
-                    for sibling in directory_files
-                    if sibling.suffix.casefold() in AUDIO_EXTENSIONS
-                )
-                sidecars = [
-                    sidecar
-                    for sidecar in directory_files
-                    if (
-                        sidecar.stem.casefold().startswith(track.stem.casefold())
-                        or (
-                            sidecar.name.casefold() in {"track.nfo", "recording.nfo"}
-                            and audio_sibling_count == 1
-                        )
-                    )
-                    and sidecar != track
-                ]
+                sidecars = directory_sidecars.get(track, [])
             track_file = (
                 (track, observation.file_stat) if observation is not None else track
             )
@@ -7058,13 +7327,6 @@ class LibraryScanner:
                 image_paths,
                 base_document=self._music_local_metadata.get(release),
             )
-        self._persist_nfo_metadata(
-            artist,
-            "artist",
-            artist_directory,
-            artist_assets,
-            base_document=self._music_local_metadata.get(artist),
-        )
         return artist, release, tracks, len(tracks)
 
     def _enrich_music_lastfm_group(
@@ -8522,44 +8784,99 @@ class LibraryScanner:
             artist_entities = dict(getattr(self, "_music_artist_entities", {}))
             release_entities = dict(getattr(self, "_music_release_entities", {}))
         else:
+            scoped_ids = set(entity_ids)
+
+            def scoped(values: Iterable[str]) -> set[str]:
+                return set(values) & scoped_ids
+
             local_metadata = {
                 entity_id: deepcopy(self._music_local_metadata[entity_id])
                 for entity_id in entity_ids
                 if entity_id in self._music_local_metadata
             }
-            local_nfo_sources = {}
+            local_nfo_sources = {
+                entity_id: deepcopy(self._local_nfo_sources[entity_id])
+                for entity_id in entity_ids
+                if entity_id in self._local_nfo_sources
+            }
             file_observations = {}
             directory_cache = {}
             file_stats = {}
             artist_entities = {}
             release_entities = {}
-        scan_delta = {
-            key: set(value) if isinstance(value, set) else deepcopy(value)
-            for key, value in self._scan_delta.items()
-        }
+            scan_delta = {
+                key: scoped(value) if isinstance(value, set) else deepcopy(value)
+                for key, value in self._scan_delta.items()
+            }
+        if entity_ids is None:
+            scan_delta = {
+                key: set(value) if isinstance(value, set) else deepcopy(value)
+                for key, value in self._scan_delta.items()
+            }
         return {
-            "_scan_seen_ids": set(self._scan_seen_ids),
-            "_scan_created_ids": list(self._scan_created_ids),
-            "_scan_delta": scan_delta,
-            "_scan_provider_identity_changed": set(
-                self._scan_provider_identity_changed
+            "_scan_seen_ids": (
+                set(self._scan_seen_ids)
+                if entity_ids is None
+                else scoped(self._scan_seen_ids)
             ),
-            "_scan_lastfm_attempted_ids": set(self._scan_lastfm_attempted_ids),
-            "_scan_rejected_ids": set(self._scan_rejected_ids),
-            "_scan_reconciled_ids": set(self._scan_reconciled_ids),
-            "_scan_deferred_roots": set(self._scan_deferred_roots),
-            "_scan_access_errors": set(self._scan_access_errors),
-            "_scan_refresh_root_ids": set(self._scan_refresh_root_ids),
+            "_scan_created_ids": (
+                list(self._scan_created_ids)
+                if entity_ids is None
+                else [value for value in self._scan_created_ids if value in scoped_ids]
+            ),
+            "_scan_delta": scan_delta,
+            "_scan_provider_identity_changed": (
+                set(self._scan_provider_identity_changed)
+                if entity_ids is None
+                else scoped(self._scan_provider_identity_changed)
+            ),
+            "_scan_lastfm_attempted_ids": (
+                set(self._scan_lastfm_attempted_ids)
+                if entity_ids is None
+                else scoped(self._scan_lastfm_attempted_ids)
+            ),
+            "_scan_rejected_ids": (
+                set(self._scan_rejected_ids)
+                if entity_ids is None
+                else scoped(self._scan_rejected_ids)
+            ),
+            "_scan_reconciled_ids": (
+                set(self._scan_reconciled_ids)
+                if entity_ids is None
+                else scoped(self._scan_reconciled_ids)
+            ),
+            "_scan_deferred_roots": (
+                set(self._scan_deferred_roots) if entity_ids is None else set()
+            ),
+            "_scan_access_errors": (
+                set(self._scan_access_errors) if entity_ids is None else set()
+            ),
+            "_scan_refresh_root_ids": (
+                set(self._scan_refresh_root_ids)
+                if entity_ids is None
+                else scoped(self._scan_refresh_root_ids)
+            ),
             "_music_local_metadata": local_metadata,
             "_local_nfo_sources": local_nfo_sources,
             "_music_pending_release_ids": {
                 key: set(value)
                 for key, value in self._music_pending_release_ids.items()
+                if entity_ids is None or key in scoped_ids
             },
-            "_music_release_conflicts": set(self._music_release_conflicts),
+            "_music_release_conflicts": (
+                set(self._music_release_conflicts)
+                if entity_ids is None
+                else scoped(self._music_release_conflicts)
+            ),
             "_music_file_observations": file_observations,
-            "_music_dirty_group_keys": set(self._music_dirty_group_keys),
-            "_music_dirty_release_ids": set(self._music_dirty_release_ids),
+            "_music_dirty_group_keys": (
+                set(self._music_dirty_group_keys) if entity_ids is None else set()
+            ),
+            "_music_dirty_release_ids": (
+                set(self._music_dirty_release_ids)
+                if entity_ids is None
+                else scoped(self._music_dirty_release_ids)
+            ),
             "_music_directory_cache": directory_cache,
             "_music_file_stats": file_stats,
             "_music_inventory_available": self._music_inventory_available,
@@ -8572,8 +8889,10 @@ class LibraryScanner:
         for name, value in state.items():
             setattr(self, name, deepcopy(value))
 
-    def _music_metadata_state_delta(self, baseline: dict) -> dict:
-        current = self._music_metadata_state_snapshot()
+    def _music_metadata_state_delta(
+        self, baseline: dict, entity_ids: set[str] | None = None
+    ) -> dict:
+        current = self._music_metadata_state_snapshot(entity_ids)
         set_fields = (
             "_scan_seen_ids",
             "_scan_provider_identity_changed",
@@ -8843,7 +9162,16 @@ class LibraryScanner:
         worker._music_metadata_progress = progress_updates
         worker._music_lastfm_reservation_set = lastfm_reservation_set
         worker._music_lastfm_lock = lastfm_lock
-        baseline = worker._music_metadata_state_snapshot()
+        metadata_scope = {
+            str(artist),
+            str(release),
+            *{
+                str(track["entity_id"])
+                for track in tracks
+                if isinstance(track, dict) and track.get("entity_id")
+            },
+        }
+        baseline = worker._music_metadata_state_snapshot(metadata_scope)
         error_text = None
         terminated = False
         ingest = None
@@ -8893,7 +9221,7 @@ class LibraryScanner:
                     release,
                 )
         return {
-            "state": worker._music_metadata_state_delta(baseline),
+            "state": worker._music_metadata_state_delta(baseline, metadata_scope),
             "error": error_text,
             "terminated": terminated,
         }
@@ -8920,6 +9248,8 @@ class LibraryScanner:
         self._music_dirty_release_ids = set()
         self._music_directory_cache = {}
         self._music_file_stats = {}
+        self._music_inventory_pending_writes = []
+        self._music_artist_assets_processed = set()
         scan_roots = [root] if targets is None else self._target_entries(root, targets)
         self._set_stage(
             job_id,
@@ -8934,7 +9264,17 @@ class LibraryScanner:
         group_count = 0
         count = 0
         groups: dict[tuple[str, ...], list[tuple[Path, dict[str, str]]]] = {}
+        audio_entries: list[tuple[Path, os.stat_result]] = []
+        parsed_audio: dict[str, AudioTags | dict[str, str]] = {}
+        cached_audio: dict[
+            str, tuple[dict[str, str], tuple[str, ...], bool, str | None] | None
+        ] = {}
         previous_inventory = self._music_inventory_rows(library_id, targets)
+        previous_group_keys = {
+            group_key
+            for row in previous_inventory.values()
+            if (group_key := _music_group_key_from_text(row[7])) is not None
+        }
         current_inventory_paths: set[str] = set()
         last_progress = time.monotonic()
         inventory_cache_hits = 0
@@ -8942,12 +9282,16 @@ class LibraryScanner:
         dirty_groups = 0
         metadata_groups = 0
         unchanged_groups = 0
+        scan_stats = MusicScanStats()
+        self._music_scan_stats = scan_stats
 
-        def inspect_audio(path: Path, file_stat: os.stat_result) -> tuple[str, ...]:
-            nonlocal inventory_cache_hits, tag_parses
+        def inventory_cache_for(
+            path: Path, file_stat: os.stat_result
+        ) -> tuple[dict[str, str], tuple[str, ...], bool, str | None] | None:
             relative_path = relative(str(root), str(path))
             path_key = _path_key(relative_path)
-            current_inventory_paths.add(path_key)
+            if path_key in cached_audio:
+                return cached_audio[path_key]
             inventory_row = previous_inventory.get(path_key)
             cached = (
                 self._music_inventory_snapshot(
@@ -8962,18 +9306,33 @@ class LibraryScanner:
                 if inventory_row is not None
                 else None
             )
+            cached_audio[path_key] = cached
+            return cached
+
+        def inspect_audio(
+            path: Path,
+            file_stat: os.stat_result,
+            parsed: AudioTags | dict[str, str] | None = None,
+        ) -> tuple[str, ...]:
+            nonlocal inventory_cache_hits, tag_parses
+            relative_path = relative(str(root), str(path))
+            path_key = _path_key(relative_path)
+            current_inventory_paths.add(path_key)
+            cached = inventory_cache_for(path, file_stat)
             previous_group_key = cached[1] if cached else None
             cached_entity_id = cached[3] if cached else None
             if cached and cached[2]:
                 inventory_cache_hits += 1
+                scan_stats.inventory_cache_hits += 1
                 tags = dict(cached[0])
                 probe = None
                 changed = False
             else:
                 tag_parses += 1
-                parsed = parse_audio_tags(path)
-                tags = dict(parsed)
-                probe = getattr(parsed, "probe", None)
+                scan_stats.tag_parses += 1
+                parsed_value = parsed if parsed is not None else parse_audio_tags(path)
+                tags = dict(parsed_value)
+                probe = getattr(parsed_value, "probe", None)
                 changed = True
             group_key = _music_group_key(root, path, tags)
             if changed:
@@ -8988,15 +9347,6 @@ class LibraryScanner:
                 previous_group_key,
                 cached_entity_id,
             )
-            if not cached or not cached[2]:
-                self._music_inventory_upsert(
-                    library_id,
-                    root,
-                    path,
-                    file_stat,
-                    tags,
-                    group_key,
-                )
             groups.setdefault(group_key, []).append((path, tags))
             return group_key
 
@@ -9004,13 +9354,17 @@ class LibraryScanner:
         pending_by_group: dict[tuple[str, ...], Future] = {}
         pending_by_release: dict[str, Future] = {}
         pending_by_identity: dict[str, Future] = {}
-        flushed_groups: set[tuple[str, ...]] = set()
-        group_track_ids: dict[tuple[str, ...], set[str]] = {}
         counted_track_ids: set[str] = set()
         synchronous_service = None
         synchronous_ingest = None
 
-        def publish_group(record: dict, result: dict | None = None, *, publish=True):
+        def publish_group(
+            record: dict,
+            result: dict | None = None,
+            *,
+            publish=True,
+            advance=True,
+        ):
             nonlocal group_count, count
             if result is not None:
                 state = result.get("state") or {}
@@ -9028,17 +9382,22 @@ class LibraryScanner:
                         job_id,
                         f"Music album worker failed; local music metadata retained: {error_text}",
                     )
-            if not publish:
+            if not publish and not advance:
                 return
-            self._repersist_nfo_metadata(
-                [record["artist"], record["release"], *record["track_ids"]]
-            )
+            if publish:
+                self._repersist_nfo_metadata(
+                    [record["artist"], record["release"], *record["track_ids"]]
+                )
+                with self._music_state_lock:
+                    self._scan_refresh_root_ids.add(record["artist"])
+                if self._publish_root(record["artist"], record["release"]):
+                    self._scan_published_music_roots.add(record["artist"])
+            if not advance:
+                return
             with self._music_state_lock:
-                self._scan_refresh_root_ids.add(record["artist"])
-                self._publish_root(record["artist"])
-                self._flush_publications()
                 group_count += 1
                 count += record["new_track_count"]
+                scan_stats.groups_processed += 1
                 current_group = group_count
             progress_updates = (
                 (result or {}).get("state", {}).get("progress_updates", [])
@@ -9101,7 +9460,7 @@ class LibraryScanner:
                 if publish:
                     raise JobTerminated()
                 return
-            publish_group(record, result, publish=publish)
+            publish_group(record, result, publish=publish, advance=publish)
 
         def drain_pending(
             wait_for: Future | None = None, *, publish=True, all_pending=False
@@ -9163,6 +9522,8 @@ class LibraryScanner:
             nonlocal dirty_groups, metadata_groups, unchanged_groups
             if not group_entries:
                 return
+            if group_key in previous_group_keys:
+                scan_stats.groups_reprocessed += 1
             prior_future = pending_release_future(group_key, group_entries)
             if prior_future is not None:
                 drain_pending(wait_for=prior_future)
@@ -9186,8 +9547,6 @@ class LibraryScanner:
                 if isinstance(track, dict) and track.get("entity_id")
             }
             group_entity_ids = {artist, release, *track_ids}
-            previous_track_ids = group_track_ids.get(group_key, set())
-            group_was_flushed = group_key in flushed_groups
             group_dirty = group_key in self._music_dirty_group_keys
             group_dirty = group_dirty or bool(
                 group_entity_ids
@@ -9200,16 +9559,12 @@ class LibraryScanner:
                 group_entity_ids
                 & (set(self._scan_provider_identity_changed) - provider_changed_before)
             )
-            if not group_was_flushed:
-                group_dirty = group_dirty or self._music_group_needs_metadata(
-                    artist, release, tracks
-                )
-            else:
-                group_dirty = group_dirty or bool(track_ids - previous_track_ids)
+            group_dirty = group_dirty or self._music_group_needs_metadata(
+                artist, release, tracks
+            )
             self._music_dirty_group_keys.discard(group_key)
             new_track_count = len(track_ids - counted_track_ids)
             counted_track_ids.update(track_ids)
-            group_track_ids[group_key] = set(track_ids)
             record = {
                 "group_key": group_key,
                 "artist": artist,
@@ -9223,16 +9578,22 @@ class LibraryScanner:
                     )
                 ],
                 "new_track_count": new_track_count,
-                "group_was_flushed": group_was_flushed,
+                "group_was_flushed": False,
             }
             if not group_dirty:
                 unchanged_groups += 1
-                publish_group(record)
-                flushed_groups.add(group_key)
+                scan_stats.unchanged_groups += 1
+                publish_group(record, publish=False)
                 return
             dirty_groups += 1
+            scan_stats.metadata_groups += 1
             self._music_dirty_release_ids.add(release)
             metadata_groups += 1
+            max_pending = max(
+                1, int(getattr(metadata_root_executor, "max_workers", 1)) * 2
+            )
+            while len(pending_metadata) >= max_pending:
+                drain_pending(wait_for=next(iter(pending_metadata)))
             group_number = group_count + len(pending_metadata) + 1
             if self._music_metadata_worker_enabled():
                 self._set_stage(
@@ -9272,7 +9633,6 @@ class LibraryScanner:
                 pending_by_release[release] = future
                 for identity_key in dict.fromkeys(record["identity_keys"]):
                     pending_by_identity[identity_key] = future
-                flushed_groups.add(group_key)
                 return
             if synchronous_service is None:
                 from app.metadata_services import MetadataIngestService
@@ -9297,7 +9657,6 @@ class LibraryScanner:
                 group_number,
             )
             publish_group(record)
-            flushed_groups.add(group_key)
 
         def flush_group(
             group_key: tuple[str, ...],
@@ -9311,6 +9670,8 @@ class LibraryScanner:
             except BaseException:
                 cancel_pending_metadata()
                 raise
+            finally:
+                self._flush_music_inventory_writes()
 
         def scan_check_termination() -> None:
             try:
@@ -9322,27 +9683,31 @@ class LibraryScanner:
         for root_index, scan_root in enumerate(scan_roots, start=1):
             scan_check_termination()
             try:
-                is_directory = scan_root.is_dir()
+                is_symlink = scan_root.is_symlink()
+                is_directory = not is_symlink and scan_root.is_dir()
             except OSError:
+                is_symlink = False
                 is_directory = False
             if not is_directory:
                 # The normal watcher promotes a root-level audio file to a
                 # full scan, but keep targeted scans safe for callers that
-                # provide a file directly.  The music inventory is allowed
-                # to admit that one file; it must not call os.walk(file).
+                # provide a file directly. The discovery pass still defers
+                # inaccessible files instead of treating them as removed.
                 try:
                     file_stat = scan_root.stat()
                 except OSError:
                     file_stat = None
                 if (
-                    file_stat is not None
+                    not is_symlink
+                    and file_stat is not None
                     and scan_root.suffix.lower() in AUDIO_EXTENSIONS
                     and stat.S_ISREG(file_stat.st_mode)
                 ):
+                    self._music_file_stats[_filesystem_path_key(scan_root)] = file_stat
+                    audio_entries.append((scan_root, file_stat))
                     inspected_files += 1
-                    group_key = inspect_audio(scan_root, file_stat)
-                    flush_group(group_key, groups[group_key])
-                    drain_pending()
+                    scan_stats.enumerated_files += 1
+                    scan_stats.audio_candidates += 1
                 else:
                     self._defer_root(
                         relative(str(root), str(scan_root)),
@@ -9357,35 +9722,20 @@ class LibraryScanner:
                     message=f"Discovered {inspected_files} music files",
                 )
                 continue
-            active_directory: Path | None = None
-            directory_groups: list[tuple[str, ...]] = []
-
-            def flush_directory() -> None:
-                nonlocal active_directory
-                for group_key in directory_groups:
-                    flush_group(group_key, groups[group_key])
-                directory_groups.clear()
-                active_directory = None
 
             try:
-                for path, file_stat in self._walk_file_entries(scan_root):
+                for path, file_stat in self._walk_music_entries(scan_root):
                     scan_check_termination()
-                    if active_directory is None:
-                        active_directory = path.parent
-                    elif path.parent != active_directory:
-                        flush_directory()
-                        drain_pending()
-                        active_directory = path.parent
+                    scan_stats.enumerated_files += 1
                     if (
                         path.suffix.lower() not in AUDIO_EXTENSIONS
                         or file_stat is None
                         or not stat.S_ISREG(file_stat.st_mode)
                     ):
                         continue
+                    audio_entries.append((path, file_stat))
                     inspected_files += 1
-                    group_key = inspect_audio(path, file_stat)
-                    if group_key not in directory_groups:
-                        directory_groups.append(group_key)
+                    scan_stats.audio_candidates += 1
                     if (
                         inspected_files % 250 == 0
                         or time.monotonic() - last_progress >= 2.0
@@ -9399,12 +9749,9 @@ class LibraryScanner:
                             message=f"Discovered {inspected_files} music files",
                         )
                         last_progress = time.monotonic()
-                flush_directory()
-                drain_pending()
             except OSError:
-                flush_directory()
-                drain_pending()
                 self._record_access_error(scan_root)
+
             for inaccessible in list(self._scan_access_errors):
                 try:
                     inaccessible.relative_to(scan_root)
@@ -9423,7 +9770,101 @@ class LibraryScanner:
                 files=inspected_files,
                 message=f"Discovered {inspected_files} music files",
             )
+
+        audio_entries.sort(
+            key=lambda value: relative(str(root), str(value[0])).casefold()
+        )
+        parse_workers = configured_worker_limit(
+            "MUSIC_SCAN_TAG_WORKERS",
+            MUSIC_SCAN_TAG_WORKER_MAX,
+            default=MUSIC_SCAN_TAG_WORKERS,
+        )
+        self._set_stage(
+            job_id,
+            "Parsing changed music tags",
+            files=len(audio_entries),
+            workers=parse_workers,
+        )
+        pending_parses: dict[str, tuple[Path, Future]] = {}
+        max_pending_parses = max(1, parse_workers * 4)
+
+        def finish_parse(path_key: str, future: Future) -> None:
+            try:
+                parsed_audio[path_key] = future.result()
+            except BaseException as error:
+                scan_stats.tag_parse_failures += 1
+                logger.warning(
+                    "music tag parse failed path_key=%s error=%s",
+                    path_key,
+                    error,
+                    exc_info=True,
+                )
+                parsed_audio[path_key] = AudioTags({})
+
+        with ThreadPoolExecutor(
+            max_workers=parse_workers,
+            thread_name_prefix="zenstream-music-tags",
+        ) as parser:
+            for path, file_stat in audio_entries:
+                path_key = _path_key(relative(str(root), str(path)))
+                cached = inventory_cache_for(path, file_stat)
+                if cached and cached[2]:
+                    continue
+                pending_parses[path_key] = (path, parser.submit(parse_audio_tags, path))
+                if len(pending_parses) >= max_pending_parses:
+                    oldest_key, (_oldest_path, oldest_future) = next(
+                        iter(pending_parses.items())
+                    )
+                    finish_parse(oldest_key, oldest_future)
+                    pending_parses.pop(oldest_key, None)
+            for path_key, (_path, future) in list(pending_parses.items()):
+                finish_parse(path_key, future)
+            pending_parses.clear()
+
+        self._set_stage(
+            job_id,
+            "Assembling music albums",
+            files=len(audio_entries),
+            current=0,
+            total=max(1, len(audio_entries)),
+            unit="files",
+        )
+        for index, (path, file_stat) in enumerate(audio_entries, start=1):
+            scan_check_termination()
+            path_key = _path_key(relative(str(root), str(path)))
+            inspect_audio(path, file_stat, parsed_audio.get(path_key))
+            if index % 250 == 0 or index == len(audio_entries):
+                self._update_stage_progress(
+                    job_id,
+                    current=index,
+                    total=max(1, len(audio_entries)),
+                    item=path.name,
+                    files=inspected_files,
+                    message=f"Assembled {index} music files",
+                )
+
+        scan_stats.groups_discovered = len(groups)
+        self._set_stage(
+            job_id,
+            "Indexing discovered music albums",
+            groups=len(groups),
+            current=0,
+            total=max(1, len(groups)),
+            unit="albums",
+        )
+        for index, group_key in enumerate(sorted(groups), start=1):
+            scan_check_termination()
+            flush_group(group_key, groups[group_key])
             drain_pending()
+            if index % 25 == 0 or index == len(groups):
+                self._update_stage_progress(
+                    job_id,
+                    current=index,
+                    total=max(1, len(groups)),
+                    item=str(index),
+                    files=inspected_files,
+                    message=f"Indexed {index} music albums",
+                )
         for path_key, row in previous_inventory.items():
             if path_key in current_inventory_paths:
                 continue
@@ -9437,6 +9878,7 @@ class LibraryScanner:
             self._music_dirty_group_keys.add(previous_group_key)
         scan_check_termination()
         drain_pending(publish=True, all_pending=True)
+        self._flush_music_inventory_writes()
         self._remove_orphan_music_artists(library_id)
         self._music_inventory_prune(
             library_id,
@@ -9444,6 +9886,7 @@ class LibraryScanner:
             previous_inventory,
             targets,
         )
+        self._music_inventory_pending_writes = None
         logger.info(
             "music scan summary library_id=%s job_id=%s files=%s inventory_cache_hits=%s "
             "tag_parses=%s dirty_groups=%s metadata_groups=%s unchanged_groups=%s",
@@ -9455,6 +9898,13 @@ class LibraryScanner:
             dirty_groups,
             metadata_groups,
             unchanged_groups,
+        )
+        self._music_scan_stats = scan_stats.as_dict()
+        logger.info(
+            "music scan diagnostics library_id=%s job_id=%s stats=%s",
+            library_id,
+            job_id,
+            self._music_scan_stats,
         )
         self._scan_complete = True
         return count
@@ -9682,6 +10132,7 @@ class LibraryScanner:
             "removed": set(),
         }
         self._scan_refresh_root_ids = set()
+        self._scan_published_music_roots = set()
         self._scan_complete = False
         try:
             from app.library_cleanup import cleanup_entities

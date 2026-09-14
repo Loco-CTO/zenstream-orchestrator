@@ -1202,6 +1202,269 @@ class CatalogReadModel:
                     _latest_root_by_library.pop(library_id, None)
         return len(summaries)
 
+    def refresh_music_publication(self, release_id: str, artist_id: str) -> int:
+        """Refresh one music release and its artist without walking the artist tree."""
+        if not self.available():
+            return 0
+        release_rows = self.db.read_execute(
+            "WITH RECURSIVE subtree(id) AS ("
+            "SELECT id FROM library_entities WHERE id=? "
+            "UNION ALL SELECT e.id FROM library_entities e JOIN subtree s ON e.parent_id=s.id) "
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.created_at "
+            "FROM library_entities e JOIN subtree s ON s.id=e.id",
+            (release_id,),
+        )
+        artist_rows = self.db.read_execute(
+            "SELECT id,library_id,parent_id,entity_type,relative_path,created_at "
+            "FROM library_entities WHERE id=?",
+            (artist_id,),
+        )
+        if not release_rows or not artist_rows:
+            return 0
+
+        artist = artist_rows[0]
+        entities = {row[0]: row for row in release_rows}
+        entities[artist[0]] = artist
+        release_entities = {row[0]: row for row in release_rows}
+        children: dict[str, list[str]] = defaultdict(list)
+        for row in release_rows:
+            if row[2] in release_entities:
+                children[row[2]].append(row[0])
+        summaries, _ = self._summary_values(
+            release_entities, children, release_entities
+        )
+
+        direct_children = self.db.read_execute(
+            "SELECT id,library_id,parent_id,entity_type,relative_path,created_at "
+            "FROM library_entities WHERE parent_id=?",
+            (artist_id,),
+        )
+        child_ids = [row[0] for row in direct_children]
+        child_summary_rows = []
+        if child_ids and self._has_table("catalog_entity_summary"):
+            placeholders = ",".join("?" for _ in child_ids)
+            child_summary_rows = self.db.read_execute(
+                "SELECT entity_id,playable_leaf_count,media_file_count,media_added_ns,"
+                "media_last_added_ns,added_sort_ns,last_added_sort_ns "
+                f"FROM catalog_entity_summary WHERE entity_id IN ({placeholders})",
+                child_ids,
+            )
+        child_summaries = {row[0]: row[1:] for row in child_summary_rows}
+        child_summaries.update(
+            {row[0]: row[4:10] for row in summaries if row[0] in child_ids}
+        )
+        own_media = self.db.read_execute(
+            "SELECT MIN(modified_ns),MAX(modified_ns),COUNT(*) FROM media_files "
+            "WHERE entity_id=? AND role='media'",
+            (artist_id,),
+        )[0]
+        leaf_count = 0
+        media_count = int(own_media[2] or 0)
+        added_values = [own_media[0]] if own_media[0] is not None else []
+        last_values = [own_media[1]] if own_media[1] is not None else []
+        for child in direct_children:
+            child_summary = child_summaries.get(child[0])
+            if child_summary is None:
+                continue
+            leaf_count += int(child_summary[0] or 0)
+            media_count += int(child_summary[1] or 0)
+            if child_summary[2] is not None:
+                added_values.append(child_summary[2])
+            if child_summary[3] is not None:
+                last_values.append(child_summary[3])
+        fallback = _created_ns(artist[5])
+        artist_summary = (
+            artist_id,
+            artist[1],
+            artist[2],
+            artist[3],
+            leaf_count,
+            media_count,
+            min(added_values) if added_values else None,
+            max(last_values) if last_values else None,
+            min(added_values) if added_values else fallback,
+            max(last_values) if last_values else fallback,
+            1,
+            _now(),
+        )
+        summaries.append(artist_summary)
+
+        locales = list(MetadataLanguageSettings().get()) or ["en"]
+        entity_ids = list(entities)
+        placeholders = ",".join("?" for _ in entity_ids)
+        existing_payloads = {
+            (row[0], row[1]): row[2]
+            for row in self.db.read_execute(
+                "SELECT entity_id,locale,payload FROM catalog_item_projection "
+                f"WHERE entity_id IN ({placeholders})",
+                entity_ids,
+            )
+        }
+        now = _now()
+        projection_rows = []
+        gram_rows = []
+        for entity_id, row in entities.items():
+            for locale in locales:
+                payload = existing_payloads.get((entity_id, locale))
+                try:
+                    payload_value = (
+                        json.loads(payload) if payload else self._fallback_payload(row)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload_value = self._fallback_payload(row)
+                if not isinstance(payload_value, dict):
+                    payload_value = self._fallback_payload(row)
+                payload_text = json.dumps(payload_value, ensure_ascii=False)
+                title = normalize_search_text(
+                    payload_value.get("title") or row[4] or row[3]
+                )
+                rating = _numeric(payload_value.get("communityRating"))
+                release = str(
+                    payload_value.get("date") or payload_value.get("releaseDate") or ""
+                )
+                runtime = _numeric(payload_value.get("runtimeMinutes"))
+                projection_rows.append(
+                    (
+                        entity_id,
+                        locale,
+                        row[1],
+                        row[2],
+                        row[3],
+                        payload_text,
+                        title,
+                        rating,
+                        release,
+                        runtime,
+                        now,
+                        1,
+                    )
+                )
+                if row[3] in {"artist", "release", "track"}:
+                    documents = [
+                        (locale, payload_value.get("title") or row[4] or row[3])
+                    ]
+                    if payload_value.get("originalTitle"):
+                        documents.append(("original", payload_value["originalTitle"]))
+                    for document_locale, document_title in documents:
+                        document_sort = normalize_search_text(document_title)
+                        gram_rows.extend(
+                            (
+                                gram,
+                                entity_id,
+                                document_locale,
+                                row[1],
+                                document_sort,
+                            )
+                            for gram in search_grams(document_title)
+                        )
+
+        affected_collections: list[str] = []
+        if self._has_table("collection_members"):
+            affected_collections = [
+                row[0]
+                for row in self.db.read_execute(
+                    "SELECT DISTINCT collection_entity_id FROM collection_members "
+                    f"WHERE source_entity_id IN ({placeholders}) OR collection_entity_id IN ({placeholders})",
+                    [*entity_ids, *entity_ids],
+                )
+            ]
+        with self.db.transaction() as cursor:
+            cursor.executemany(
+                "INSERT INTO catalog_entity_summary(entity_id,library_id,parent_id,entity_type,"
+                "playable_leaf_count,media_file_count,media_added_ns,media_last_added_ns,"
+                "added_sort_ns,last_added_sort_ns,generation,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(entity_id) DO UPDATE SET library_id=excluded.library_id,"
+                "parent_id=excluded.parent_id,entity_type=excluded.entity_type,"
+                "playable_leaf_count=excluded.playable_leaf_count,media_file_count=excluded.media_file_count,"
+                "media_added_ns=excluded.media_added_ns,media_last_added_ns=excluded.media_last_added_ns,"
+                "added_sort_ns=excluded.added_sort_ns,last_added_sort_ns=excluded.last_added_sort_ns,"
+                "generation=excluded.generation,updated_at=excluded.updated_at",
+                summaries,
+            )
+            cursor.executemany(
+                "INSERT INTO catalog_item_projection(entity_id,locale,library_id,parent_id,entity_type,"
+                "payload,title_sort,rating_sort,release_sort,runtime_sort,updated_at,generation) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(entity_id,locale) DO UPDATE SET "
+                "library_id=excluded.library_id,parent_id=excluded.parent_id,entity_type=excluded.entity_type",
+                projection_rows,
+            )
+            if self._has_table("catalog_search_grams"):
+                cursor.execute(
+                    f"DELETE FROM catalog_search_grams WHERE entity_id IN ({placeholders})",
+                    entity_ids,
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO catalog_search_grams(gram,entity_id,locale,library_id,parent_id) "
+                    "VALUES(?,?,?,?,NULL)",
+                    [row[:4] for row in gram_rows],
+                )
+            if self._has_table("catalog_root_search_grams"):
+                cursor.execute(
+                    f"DELETE FROM catalog_root_search_grams WHERE entity_id IN ({placeholders})",
+                    entity_ids,
+                )
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO catalog_root_search_grams(gram,entity_id,locale,library_id,title_sort) "
+                    "VALUES(?,?,?,?,?)",
+                    gram_rows,
+                )
+            if affected_collections:
+                collection_placeholders = ",".join("?" for _ in affected_collections)
+                cursor.execute(
+                    f"DELETE FROM catalog_collection_summary WHERE collection_entity_id IN ({collection_placeholders})",
+                    affected_collections,
+                )
+                cursor.execute(
+                    "INSERT INTO catalog_collection_summary(collection_entity_id,collection_library_id,"
+                    "source_library_id,playable_leaf_count,media_file_count,added_sort_ns,last_added_sort_ns,updated_at) "
+                    "SELECT m.collection_entity_id,c.library_id,s.library_id,SUM(x.playable_leaf_count),"
+                    "SUM(x.media_file_count),MIN(x.added_sort_ns),MAX(x.last_added_sort_ns),? "
+                    "FROM collection_members m JOIN library_entities c ON c.id=m.collection_entity_id "
+                    "JOIN library_entities s ON s.id=m.source_entity_id "
+                    "JOIN catalog_entity_summary x ON x.entity_id=m.source_entity_id "
+                    f"WHERE m.collection_entity_id IN ({collection_placeholders}) "
+                    "GROUP BY m.collection_entity_id,s.library_id",
+                    [now, *affected_collections],
+                )
+                if self._has_table("catalog_collection_member_projection"):
+                    cursor.execute(
+                        f"DELETE FROM catalog_collection_member_projection WHERE collection_entity_id IN ({collection_placeholders})",
+                        affected_collections,
+                    )
+                    cursor.execute(
+                        "INSERT INTO catalog_collection_member_projection(collection_entity_id,source_entity_id,"
+                        "source_library_id,position,updated_at) SELECT m.collection_entity_id,m.source_entity_id,"
+                        "e.library_id,m.position,? FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id "
+                        f"WHERE m.collection_entity_id IN ({collection_placeholders})",
+                        [now, *affected_collections],
+                    )
+            cursor.execute(
+                "UPDATE catalog_read_model_status SET state='ready',generation=generation+1,updated_at=?,error=NULL WHERE id=1",
+                (now,),
+            )
+            library_id = artist[1]
+            if self._has_table("catalog_library_summary"):
+                cursor.execute(
+                    "INSERT INTO catalog_library_summary(library_id,generation,supports_last_added,"
+                    "last_root_entity_id,updated_at) VALUES(?,1,EXISTS(SELECT 1 FROM catalog_entity_summary "
+                    "WHERE library_id=? AND parent_id IS NOT NULL),?,?) ON CONFLICT(library_id) DO UPDATE SET "
+                    "generation=catalog_library_summary.generation+1,supports_last_added=excluded.supports_last_added,"
+                    "last_root_entity_id=excluded.last_root_entity_id,updated_at=excluded.updated_at",
+                    (library_id, library_id, artist_id, now),
+                )
+            if self._has_table("catalog_projection_status"):
+                cursor.execute(
+                    "INSERT INTO catalog_projection_status(library_id,generation,state,progress_current,"
+                    "progress_total,error,updated_at) VALUES(?,COALESCE((SELECT generation FROM "
+                    "catalog_projection_status WHERE library_id=?),0)+1,'ready',0,0,NULL,?) "
+                    "ON CONFLICT(library_id) DO UPDATE SET generation=excluded.generation,state='ready',"
+                    "error=NULL,updated_at=excluded.updated_at",
+                    (library_id, library_id, now),
+                )
+        with _latest_root_lock:
+            _latest_root_by_library[artist[1]] = artist_id
+        return len(summaries)
+
     def refresh_user_entities(self, user_id: str, entity_ids: Iterable[str]) -> int:
         if not self.available() or not self._has_table("catalog_user_summary"):
             return 0

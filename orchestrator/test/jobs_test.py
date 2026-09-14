@@ -1030,6 +1030,42 @@ class JobMappingTest(unittest.TestCase):
             },
         )
 
+    def test_run_mapping_accepts_music_scan_stats_after_progress_detail(self):
+        row = (
+            "run",
+            "definition",
+            "library-1",
+            "library_scan",
+            "completed",
+            10000,
+            10000,
+            "Completed",
+            None,
+            None,
+            "created",
+            "started",
+            "finished",
+            "worker",
+            "discovery",
+            "Indexing discovered music albums",
+            4,
+            4,
+            "albums",
+            "4",
+            '{"tagParses":4,"contentFingerprintBytes":0}',
+            "trigger-1",
+            '{"refreshAll":false}',
+        )
+
+        value = JobStore._run(row)
+
+        self.assertEqual(
+            value["scanStats"],
+            {"tagParses": 4, "contentFingerprintBytes": 0},
+        )
+        self.assertEqual(value["sourceTriggerId"], "trigger-1")
+        self.assertEqual(value["options"], {"refreshAll": False})
+
     def test_default_tasks_include_orphan_cleanup(self):
         db, store = self._scheduler_store()
         try:

@@ -733,6 +733,7 @@ class JobRun(DocsModel):
     progress: float | None = Field(default=None, examples=[0.0])
     progressTotal: int | None = Field(default=None, examples=[10000])
     progressDetail: dict[str, Any] | None = None
+    scanStats: dict[str, Any] | None = None
     createdAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
     finishedAt: str | None = Field(default=None, examples=["2025-01-15T12:05:00Z"])
 

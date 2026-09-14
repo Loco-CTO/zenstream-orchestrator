@@ -477,6 +477,53 @@ class MetadataServicesTest(unittest.TestCase):
             executor.shutdown()
         self.assertEqual(calls, [1])
 
+    def test_music_scan_asset_mode_queues_assets_while_video_mode_waits(self):
+        fetcher = _Fetcher()
+        image_ingest = MagicMock()
+        credit_ingest = MagicMock()
+        asset_queue = MagicMock()
+        document = {"title": "Album", "images": []}
+
+        with patch("app.metadata_services.asset_executor", asset_queue):
+            music_ingest = MetadataIngestService(
+                fetcher,
+                _Settings(["en"]),
+                image_ingest=image_ingest,
+                credit_ingest=credit_ingest,
+                background_assets=True,
+            )
+            music_ingest.ingest_document(
+                "musicbrainz",
+                "release",
+                "release-1",
+                "en",
+                document,
+                target_entity_id="release-entity",
+            )
+
+            asset_queue.submit.assert_called_once()
+            asset_queue.submit_wait.assert_not_called()
+
+            asset_queue.reset_mock()
+            video_ingest = MetadataIngestService(
+                fetcher,
+                _Settings(["en"]),
+                image_ingest=image_ingest,
+                credit_ingest=credit_ingest,
+                background_assets=False,
+            )
+            video_ingest.ingest_document(
+                "tmdb",
+                "movie",
+                "movie-1",
+                "en",
+                document,
+                target_entity_id="movie-entity",
+            )
+
+            asset_queue.submit.assert_not_called()
+            asset_queue.submit_wait.assert_called_once()
+
     def test_music_read_fallback_uses_requested_neutral_and_english_tiers(self):
         def cache(provider, provider_id, locale, payload):
             self.db.execute(

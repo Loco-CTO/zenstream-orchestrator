@@ -4880,6 +4880,7 @@ class LibraryJobControlTest(unittest.TestCase):
         self.runtime._reconcile_due = {}
         self.runtime._reconcile_targets = {}
         self.runtime._job_targets = {}
+        self.runtime._job_force_metadata = {}
         self.runtime._root_locks = {}
         self.runtime._root_locks_guard = threading.RLock()
         self.runtime._job_target_revisions = {}
@@ -5002,6 +5003,21 @@ class LibraryJobControlTest(unittest.TestCase):
 
         scan.assert_called_once_with(
             "library-1", job["id"], unittest.mock.ANY, targets=None
+        )
+
+    def test_forced_metadata_scan_propagates_to_the_scanner(self):
+        job = self.runtime.enqueue("library-1", "scan", force_metadata=True)
+        self.runtime._cancel_events[job["id"]] = threading.Event()
+
+        with patch("app.library.LibraryScanner.scan") as scan:
+            self.runtime._execute_job(job["id"], "library-1", "scan")
+
+        scan.assert_called_once_with(
+            "library-1",
+            job["id"],
+            unittest.mock.ANY,
+            targets=None,
+            force_metadata=True,
         )
 
     def test_watcher_reconcile_scopes_move_to_top_level_roots(self):

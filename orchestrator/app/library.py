@@ -140,6 +140,18 @@ ACTIVE_JOB_STATES = ("queued", "running", "terminating")
 WATCHER_RECONCILE_DEBOUNCE_SECONDS = 5.0
 WATCHER_RECONCILE_FLUSH_INTERVAL_SECONDS = 1.0
 MUSIC_FULL_RECONCILE_TARGET = "__zenstream_music_full__"
+# The metadata scheduler uses the same identity contract as admission.  A
+# secondary/local identity is useful for display, but it must not make an
+# entity look complete when its authoritative provider identity is absent.
+PRIMARY_METADATA_IDENTITIES = {
+    "movie": ("tmdb", "movie"),
+    "series": ("tvdb", "series"),
+    "season": ("tvdb", "season"),
+    "episode": ("tvdb", "episode"),
+    "artist": ("musicbrainz", "artist"),
+    "release": ("musicbrainz", "release"),
+    "track": ("musicbrainz", "recording"),
+}
 logger = get_logger("library")
 
 
@@ -1249,6 +1261,7 @@ class LibraryScanner:
         self._music_state_lock = threading.RLock()
         self._music_lastfm_lock = threading.Lock()
         self._music_lastfm_reservation_set: set[str] | None = None
+        self._force_metadata_scan = False
         self._scan_complete = False
         self._stage_lock = threading.RLock()
         self._stage = "idle"
@@ -1613,6 +1626,7 @@ class LibraryScanner:
         job_id: str,
         should_terminate: Callable[[], bool] | None = None,
         targets: set[str] | None = None,
+        force_metadata: bool = False,
     ) -> None:
         should_terminate = should_terminate or (lambda: False)
         library = self.store.get(library_id)
@@ -1624,6 +1638,7 @@ class LibraryScanner:
         root = Path(library["directory"])
         if not root.is_dir():
             raise ValueError("Library directory is no longer available")
+        self._force_metadata_scan = bool(force_metadata)
         progress_kind = (
             "reconcile" if targets is not None else f"scan:{library['type']}"
         )
@@ -1642,6 +1657,8 @@ class LibraryScanner:
             message=(
                 f"Reconciling changed {reconcile_root_label} roots ({len(targets)} roots)"
                 if targets is not None
+                else "Recovering missing provider metadata"
+                if force_metadata
                 else "Discovering media"
             ),
         )
@@ -2490,6 +2507,24 @@ class LibraryScanner:
 
         cleanup_entities(self.db, list(reversed(self._scan_created_ids)))
         self._scan_created_ids = []
+
+    def _missing_primary_metadata(self, entity_id: str) -> bool:
+        row = self.db.execute(
+            "SELECT entity_type FROM library_entities WHERE id=?", (entity_id,)
+        )
+        if not row:
+            return True
+        identity = PRIMARY_METADATA_IDENTITIES.get(str(row[0][0]))
+        if identity is None:
+            return False
+        return not bool(
+            self.db.execute(
+                "SELECT 1 FROM entity_provider_ids "
+                "WHERE entity_id=? AND provider=? AND identifier_type=? "
+                "AND provider_id IS NOT NULL AND TRIM(provider_id)<>'' LIMIT 1",
+                (entity_id, *identity),
+            )
+        )
 
     def _needs_metadata(self, entity_id: str) -> bool:
         row = self.db.execute(
@@ -3777,7 +3812,11 @@ class LibraryScanner:
         ]
         try:
             provider_ids = explicit
-            if not provider_ids:
+            if not any(
+                value.get("provider") == "tmdb"
+                and value.get("id")
+                for value in provider_ids
+            ):
                 result = service.resolve_inventory_entity(entity_type, query, year, [])
                 provider_ids = result["providerIds"]
                 self._ids(
@@ -3892,6 +3931,7 @@ class LibraryScanner:
         service,
         job_id: str,
         should_terminate: Callable[[], bool],
+        force_metadata: bool = False,
     ) -> dict | None:
         """Resolve one discovered series before processing its seasons."""
         from app.providers import ProviderError
@@ -3913,7 +3953,7 @@ class LibraryScanner:
                 (series_id,),
             )
         )
-        if self._needs_metadata(series_id) or not has_tmdb_identity:
+        if force_metadata or self._needs_metadata(series_id) or not has_tmdb_identity:
             query, year = _inventory_query(relative_path or "")
             explicit = [
                 {"provider": row[0], "id": row[2]}
@@ -4011,6 +4051,7 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
         series_metadata: dict | None = None,
         tvdb_identity: dict | None = None,
+        force_metadata: bool = False,
     ) -> None:
         """Attach provider IDs and fetch one season and all its episodes."""
         self._check_termination(should_terminate)
@@ -4065,6 +4106,7 @@ class LibraryScanner:
             job_id,
             should_terminate,
             season_id=season_id,
+            force_metadata=force_metadata,
         )
         logger.info(
             "metadata season complete series_id=%s season_id=%s season_number=%s path=%s",
@@ -4223,6 +4265,7 @@ class LibraryScanner:
         release_documents: dict[str, dict[str, dict]] | None = None,
         *,
         background_assets: bool = False,
+        force_metadata: bool = False,
     ) -> None:
         """Fetch common metadata and IDs for every season, episode, release, and track."""
         from app.metadata_services import MetadataIngestService
@@ -4247,8 +4290,11 @@ class LibraryScanner:
 
         def needs_localized_metadata(row: tuple) -> bool:
             entity_id, entity_type = row[0], row[1]
-            if entity_id not in metadata_candidates:
+            missing_primary = force_metadata and self._missing_primary_metadata(entity_id)
+            if entity_id not in metadata_candidates and not missing_primary:
                 return False
+            if missing_primary:
+                return True
             if (
                 entity_id in self._scan_created_ids
                 or entity_id in self._scan_provider_identity_changed
@@ -5612,6 +5658,10 @@ class LibraryScanner:
                 or file_delta["metadata_changed"]
                 or file_delta["artwork_changed"]
                 or entity in self._scan_provider_identity_changed
+                or (
+                    getattr(self, "_force_metadata_scan", False)
+                    and self._missing_primary_metadata(entity)
+                )
             )
             if requires_materialization:
                 self._set_stage(
@@ -5902,7 +5952,13 @@ class LibraryScanner:
             if not accepted_series_episodes:
                 self._scan_rejected_ids.add(series)
                 continue
-            if service and series in self._metadata_candidates():
+            if service and (
+                series in self._metadata_candidates()
+                or (
+                    getattr(self, "_force_metadata_scan", False)
+                    and self._missing_primary_metadata(series)
+                )
+            ):
                 self._set_stage(
                     job_id,
                     f"Starting metadata for {series_dir.name}",
@@ -5917,6 +5973,7 @@ class LibraryScanner:
                         service,
                         job_id,
                         should_terminate,
+                        force_metadata=getattr(self, "_force_metadata_scan", False),
                     )
                 except JobTerminated:
                     raise
@@ -5951,7 +6008,14 @@ class LibraryScanner:
                         (season, season),
                     )
                     if not any(
-                        row[0] in season_candidates and self._needs_metadata(row[0])
+                        (
+                            row[0] in season_candidates
+                            and self._needs_metadata(row[0])
+                        )
+                        or (
+                            getattr(self, "_force_metadata_scan", False)
+                            and self._missing_primary_metadata(row[0])
+                        )
                         for row in season_rows
                     ):
                         continue
@@ -5984,6 +6048,9 @@ class LibraryScanner:
                             should_terminate,
                             series_metadata=series_metadata,
                             tvdb_identity=tvdb_identity,
+                            force_metadata=getattr(
+                                self, "_force_metadata_scan", False
+                            ),
                         )
                         self._persist_nfo_metadata(
                             season, "season", season_dir, season_files
@@ -6157,6 +6224,10 @@ class LibraryScanner:
             entity_id in self._scan_created_ids
             or entity_id in self._scan_provider_identity_changed
             for entity_id in entity_ids
+        ):
+            return True
+        if getattr(self, "_force_metadata_scan", False) and any(
+            self._missing_primary_metadata(entity_id) for entity_id in entity_ids
         ):
             return True
         if self._has_table("music_artist_credits"):
@@ -10272,6 +10343,7 @@ class LibraryRuntime:
         self._reconcile_due: dict[str, float] = {}
         self._reconcile_targets: dict[str, set[str]] = {}
         self._job_targets: dict[str, set[str]] = {}
+        self._job_force_metadata: dict[str, bool] = {}
         self._job_target_revisions: dict[str, dict[str, int]] = {}
         self._active_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
@@ -10361,6 +10433,7 @@ class LibraryRuntime:
         self._watch_paths.clear()
         with self._active_lock:
             self._job_targets.clear()
+            getattr(self, "_job_force_metadata", {}).clear()
             self._job_target_revisions.clear()
 
     def refresh_watchers(self) -> None:
@@ -10378,6 +10451,8 @@ class LibraryRuntime:
         library_id: str,
         kind: str = "scan",
         targets: set[str] | None = None,
+        *,
+        force_metadata: bool = False,
     ) -> dict | None:
         # Full inventory work and watcher reconciliation retain separate
         # history rows, but the runtime serializes their mutable inventory
@@ -10415,6 +10490,10 @@ class LibraryRuntime:
             # watcher events use the table directly; this path keeps the
             # public enqueue API compatible for manual targeted scans/tests.
             self._job_targets[job_id] = set(targets)
+        if force_metadata and kind == "scan":
+            if not hasattr(self, "_job_force_metadata"):
+                self._job_force_metadata = {}
+            self._job_force_metadata[job_id] = True
         job = self.store.job(job_id)
         with self.condition:
             self.condition.notify_all()
@@ -10935,6 +11014,7 @@ class LibraryRuntime:
             active_job_ids = set(getattr(self, "_active_jobs", set()))
             for mapping in (
                 getattr(self, "_job_targets", {}),
+                getattr(self, "_job_force_metadata", {}),
                 getattr(self, "_job_target_revisions", {}),
             ):
                 for job_id in list(mapping):
@@ -11162,6 +11242,7 @@ class LibraryRuntime:
         locks: list[threading.Lock] = []
         inventory_lock: threading.Lock | None = None
         full_music_reconcile = False
+        force_metadata = getattr(self, "_job_force_metadata", {}).pop(job_id, False)
         try:
             if kind in {"scan", "reconcile", "collection_rebuild"}:
                 inventory_lock = self._inventory_lock(library_id)
@@ -11223,13 +11304,18 @@ class LibraryRuntime:
                 # scan could otherwise overwrite a TV scan's stage, delta, and
                 # heartbeat message.
                 scanner = LibraryScanner(self.store)
+                scan_kwargs = {
+                    "targets": (
+                        None if kind != "reconcile" or full_music_reconcile else targets
+                    )
+                }
+                if force_metadata:
+                    scan_kwargs["force_metadata"] = True
                 scanner.scan(
                     library_id,
                     job_id,
                     self._cancel_events[job_id].is_set,
-                    targets=(
-                        None if kind != "reconcile" or full_music_reconcile else targets
-                    ),
+                    **scan_kwargs,
                 )
             else:
                 self.store.update_job(

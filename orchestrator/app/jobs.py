@@ -11,7 +11,12 @@ from pathlib import Path
 from app.config import Config
 from app.foreground import active_requests
 from app.intro_outro import IntroOutroDetector
-from app.library import JobTerminated, LibraryScanner, LibraryStore
+from app.library import (
+    PRIMARY_METADATA_IDENTITIES,
+    JobTerminated,
+    LibraryScanner,
+    LibraryStore,
+)
 from app.library import runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.logging_config import get_logger
@@ -1656,9 +1661,215 @@ class JobStore:
 
 
 class MetadataMissingJob:
-    def __init__(self, store: JobStore):
+    def __init__(self, store: JobStore, library_runtime=None):
         self.store = store
         self.db = store.db
+        self.library_runtime = (
+            library_runtime
+            if library_runtime is not None
+            else globals().get("library_runtime")
+        )
+
+    def _missing_primary_library_rows(self) -> list[tuple[str, str]]:
+        """Find libraries containing entities invisible to provider-ID worklists."""
+        entity_types = sorted(PRIMARY_METADATA_IDENTITIES)
+        entity_placeholders = ",".join("?" for _ in entity_types)
+        identity_clauses = []
+        identity_params: list[str] = []
+        for entity_type, (provider, identifier_type) in sorted(
+            PRIMARY_METADATA_IDENTITIES.items()
+        ):
+            identity_clauses.append(
+                "(e.entity_type=? AND p.provider=? AND p.identifier_type=?)"
+            )
+            identity_params.extend((entity_type, provider, identifier_type))
+        try:
+            entity_columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(library_entities)")
+            }
+        except Exception:
+            entity_columns = set()
+        manual_filter = (
+            "AND COALESCE(e.match_method,'')<>'manual'"
+            if "match_method" in entity_columns
+            else ""
+        )
+        try:
+            rows = self.db.execute(
+                "SELECT DISTINCT e.library_id,COALESCE(l.name,e.library_id) "
+                "FROM library_entities e JOIN libraries l ON l.id=e.library_id "
+                f"WHERE l.type<>'collection' {manual_filter} "
+                f"AND e.entity_type IN ({entity_placeholders}) "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM entity_provider_ids p "
+                "WHERE p.entity_id=e.id "
+                "AND p.provider_id IS NOT NULL AND TRIM(p.provider_id)<>'' "
+                f"AND ({' OR '.join(identity_clauses)})"
+                ") ORDER BY e.library_id",
+                [*entity_types, *identity_params],
+            )
+        except Exception:
+            # Minimal/legacy test databases and an in-progress first install
+            # may not have the library inventory tables yet. The normal
+            # provider-ID worklist remains usable in that case.
+            logger.debug(
+                "providerless metadata recovery discovery unavailable",
+                exc_info=True,
+            )
+            return []
+        return [(str(library_id), str(name or library_id)) for library_id, name in rows]
+
+    def _recover_missing_primary_entities(
+        self,
+        run_id: str,
+        should_terminate,
+    ) -> tuple[list[dict], list[dict]]:
+        """Run a forced inventory pass for providerless catalog entities."""
+        libraries = self._missing_primary_library_rows()
+        if not libraries:
+            return [], []
+        runtime = self.library_runtime
+        if runtime is None:
+            return (
+                [
+                    {
+                        "kind": "identity_recovery",
+                        "error": "Library runtime is unavailable",
+                    }
+                ],
+                [],
+            )
+        thread = getattr(runtime, "thread", None)
+        if not thread or not getattr(thread, "is_alive", lambda: False)():
+            runtime.start()
+        failures: list[dict] = []
+        incomplete: list[dict] = []
+        missing_library_ids = {
+            library_id for library_id, _name in self._missing_primary_library_rows()
+        }
+        for index, (library_id, name) in enumerate(libraries, start=1):
+            if should_terminate():
+                raise JobTerminated()
+            runtime.suppress_library_notifications(library_id, True)
+            try:
+                job = runtime.enqueue(
+                    library_id,
+                    "scan",
+                    force_metadata=True,
+                )
+                if not job:
+                    failures.append(
+                        {
+                            "kind": "identity_recovery",
+                            "libraryId": library_id,
+                            "name": name,
+                            "error": "Library scan could not be queued",
+                        }
+                    )
+                    continue
+                was_active = job.get("state") in {
+                    "running",
+                    "terminating",
+                }
+                result = runtime.wait_for_job(
+                    job["id"],
+                    should_terminate=should_terminate,
+                )
+                if should_terminate():
+                    raise JobTerminated()
+                if not result or result.get("state") not in {
+                    "completed",
+                    "completed_with_warnings",
+                }:
+                    failures.append(
+                        {
+                            "kind": "identity_recovery",
+                            "libraryId": library_id,
+                            "name": name,
+                            "jobId": job.get("id"),
+                            "state": result.get("state") if result else "missing",
+                            "error": result.get("error") if result else None,
+                        }
+                    )
+                    continue
+                # If the scheduler attached itself to a scan that was already
+                # running, that scan may have taken its force flag before this
+                # request arrived. Give it one explicit recovery pass now.
+                if was_active and library_id in missing_library_ids:
+                    retry_job = runtime.enqueue(
+                        library_id,
+                        "scan",
+                        force_metadata=True,
+                    )
+                    if retry_job:
+                        retry_result = runtime.wait_for_job(
+                            retry_job["id"],
+                            should_terminate=should_terminate,
+                        )
+                        if should_terminate():
+                            raise JobTerminated()
+                        if not retry_result or retry_result.get("state") not in {
+                            "completed",
+                            "completed_with_warnings",
+                        }:
+                            failures.append(
+                                {
+                                    "kind": "identity_recovery",
+                                    "libraryId": library_id,
+                                    "name": name,
+                                    "jobId": retry_job.get("id"),
+                                    "state": (
+                                        retry_result.get("state")
+                                        if retry_result
+                                        else "missing"
+                                    ),
+                                    "error": (
+                                        retry_result.get("error")
+                                        if retry_result
+                                        else None
+                                    ),
+                                }
+                            )
+                            continue
+                if any(
+                    current_library_id == library_id
+                    for current_library_id, _current_name in self._missing_primary_library_rows()
+                ):
+                    incomplete.append(
+                        {
+                            "kind": "identity_recovery",
+                            "libraryId": library_id,
+                            "name": name,
+                            "error": "Required provider identities remain missing after recovery scan",
+                        }
+                    )
+            except JobTerminated:
+                raise
+            except Exception as error:
+                failures.append(
+                    {
+                        "kind": "identity_recovery",
+                        "libraryId": library_id,
+                        "name": name,
+                        "error": f"{type(error).__name__}: {error}",
+                    }
+                )
+                logger.exception(
+                    "providerless metadata recovery failed library_id=%s",
+                    library_id,
+                )
+            finally:
+                runtime.suppress_library_notifications(library_id, False)
+            self.store.update_run(
+                run_id,
+                progress_phase="identity_recovery",
+                progress_label="Recovering missing provider identities",
+                message=(
+                    f"Recovered provider identities for {name} · "
+                    f"{index}/{len(libraries)} libraries"
+                ),
+            )
+        return failures, incomplete
 
     def run(
         self,
@@ -1675,6 +1886,12 @@ class MetadataMissingJob:
         ingest = MetadataIngestService(background_assets=False)
         locales = ingest.locales()
         _repair_missing_tv_child_identities(self.db, ingest.metadata_service)
+        if operation == "metadata_missing":
+            identity_failures, identity_incomplete = (
+                self._recover_missing_primary_entities(run_id, should_terminate)
+            )
+        else:
+            identity_failures, identity_incomplete = [], []
         config = definition.get("config") or {}
         batch_size = max(1, min(500, int(config.get("batchSize") or 50)))
         has_enrichment_queue = bool(
@@ -2091,8 +2308,8 @@ class MetadataMissingJob:
 
         completed = 0
         repaired = 0
-        failures = []
-        incomplete_repairs = []
+        failures = list(identity_failures)
+        incomplete_repairs = list(identity_incomplete)
         for offset in range(0, len(items), batch_size):
             batch = items[offset : offset + batch_size]
             for item, result, error in metadata_task_results(

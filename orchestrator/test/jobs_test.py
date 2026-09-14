@@ -424,6 +424,50 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 1", store.updates[-1]["message"])
 
+    def test_providerless_entities_queue_a_forced_library_recovery_scan(self):
+        self.db.execute(
+            "CREATE TABLE libraries(id TEXT PRIMARY KEY,name TEXT,type TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO libraries VALUES('library-1','Music','music')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('release-1','library-1','release')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('release-1','lastfm','release','artist-album',0)"
+        )
+
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+        runtime = MagicMock()
+        runtime.thread = None
+        runtime.enqueue.return_value = {"id": "scan-1", "state": "queued"}
+        runtime.wait_for_job.return_value = {"id": "scan-1", "state": "completed"}
+
+        failures, incomplete = MetadataMissingJob(
+            store, runtime
+        )._recover_missing_primary_entities("run-1", lambda: False)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(incomplete[0]["libraryId"], "library-1")
+        runtime.start.assert_called_once_with()
+        runtime.enqueue.assert_called_once_with(
+            "library-1", "scan", force_metadata=True
+        )
+        runtime.wait_for_job.assert_called_once_with(
+            "scan-1", should_terminate=unittest.mock.ANY
+        )
+
     def test_job_does_not_refetch_complete_stale_cache_document(self):
         document = {"title": "Example", "images": [], "_stale": True}
         self.db.execute(

@@ -15,8 +15,10 @@ from api.zenstream.bazarr_routes import router as bazarr_router
 from api.zenstream.calendar_routes import router as calendar_router
 from api.zenstream.client_routes import prune_rate_limit_events
 from api.zenstream.client_routes import router as client_router
+from api.zenstream.documentation_routes import router as documentation_router
 from api.zenstream.library_routes import router as library_router
 from api.zenstream.notification_routes import router as notification_router
+from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_openapi
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import browser_origins
 from app.config import Config, load_config
@@ -130,12 +132,13 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="ZenStream API",
-    description="ZenStream Orchestrator API",
+    description=OPENAPI_DESCRIPTION,
     version=__version__,
     lifespan=lifespan,
-    docs_url="/api/swagger/",
+    docs_url=None,
     redoc_url="/api/redoc/",
     openapi_url="/api/openapi.json",
+    openapi_tags=OPENAPI_TAGS,
 )
 
 app.add_middleware(
@@ -186,6 +189,9 @@ app.include_router(calendar_router)
 app.include_router(notification_router)
 app.include_router(library_router)
 app.include_router(application_router)
+app.include_router(documentation_router)
+
+install_openapi(app)
 
 web_root, assets_root = _static_roots()
 if assets_root.is_dir():

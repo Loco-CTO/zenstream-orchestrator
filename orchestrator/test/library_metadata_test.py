@@ -2684,12 +2684,14 @@ class LibraryMetadataTest(unittest.TestCase):
                     db.execute(
                         "SELECT id,relative_path FROM library_entities WHERE entity_type='release'"
                     ),
-                    [(
-                        db.execute(
-                            "SELECT id FROM library_entities WHERE entity_type='release'"
-                        )[0][0],
-                        "Artist/Album",
-                    )],
+                    [
+                        (
+                            db.execute(
+                                "SELECT id FROM library_entities WHERE entity_type='release'"
+                            )[0][0],
+                            "Artist/Album",
+                        )
+                    ],
                 )
                 self.assertEqual(
                     db.execute(

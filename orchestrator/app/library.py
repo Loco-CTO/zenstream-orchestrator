@@ -212,7 +212,7 @@ metadata_root_executor = FairMetadataExecutor()
 class _MusicMetadataWorkerStore:
     """Delegate scanner storage while keeping worker progress local."""
 
-    def __init__(self, store: "LibraryStore", progress_updates: list[tuple]):
+    def __init__(self, store: LibraryStore, progress_updates: list[tuple]):
         self._store = store
         self.db = store.db
         self._progress_updates = progress_updates
@@ -6743,9 +6743,7 @@ class LibraryScanner:
                 current_path = str(existing_path[0][0] or "")
                 normalized_current_path = _path_key(current_path)
                 try:
-                    common_path = os.path.commonpath(
-                        [current_path, album_path]
-                    )
+                    common_path = os.path.commonpath([current_path, album_path])
                     common_path = str(common_path).replace("\\", "/")
                 except (ValueError, OSError):
                     common_path = current_path
@@ -8522,12 +8520,12 @@ class LibraryScanner:
             "_music_dirty_group_keys",
             "_music_dirty_release_ids",
         )
-        delta = {
-            name: current[name] - baseline.get(name, set()) for name in set_fields
-        }
+        delta = {name: current[name] - baseline.get(name, set()) for name in set_fields}
         baseline_created = baseline.get("_scan_created_ids", [])
         delta["_scan_created_ids"] = [
-            value for value in current["_scan_created_ids"] if value not in baseline_created
+            value
+            for value in current["_scan_created_ids"]
+            if value not in baseline_created
         ]
         scan_delta = {}
         baseline_scan_delta = baseline.get("_scan_delta", {})
@@ -8553,9 +8551,7 @@ class LibraryScanner:
             for release_id in baseline.get("_music_pending_release_ids", {})
             if release_id not in current["_music_pending_release_ids"]
         ]
-        delta["progress_updates"] = list(
-            getattr(self, "_music_metadata_progress", [])
-        )
+        delta["progress_updates"] = list(getattr(self, "_music_metadata_progress", []))
         return delta
 
     def _merge_music_metadata_state(self, delta: dict) -> None:
@@ -8580,26 +8576,18 @@ class LibraryScanner:
         self._scan_reconciled_ids.update(delta.get("_scan_reconciled_ids", set()))
         self._scan_deferred_roots.update(delta.get("_scan_deferred_roots", set()))
         self._scan_access_errors.update(delta.get("_scan_access_errors", set()))
-        self._scan_refresh_root_ids.update(
-            delta.get("_scan_refresh_root_ids", set())
-        )
+        self._scan_refresh_root_ids.update(delta.get("_scan_refresh_root_ids", set()))
         self._music_release_conflicts.update(
             delta.get("_music_release_conflicts", set())
         )
-        self._music_dirty_group_keys.update(
-            delta.get("_music_dirty_group_keys", set())
-        )
+        self._music_dirty_group_keys.update(delta.get("_music_dirty_group_keys", set()))
         self._music_dirty_release_ids.update(
             delta.get("_music_dirty_release_ids", set())
         )
         for entity_id, document in delta.get("_music_local_metadata", {}).items():
             self._music_local_metadata.setdefault(entity_id, document)
-        for release_id, values in delta.get(
-            "_music_pending_release_ids", {}
-        ).items():
-            self._music_pending_release_ids.setdefault(release_id, set()).update(
-                values
-            )
+        for release_id, values in delta.get("_music_pending_release_ids", {}).items():
+            self._music_pending_release_ids.setdefault(release_id, set()).update(values)
         for release_id in delta.get("_music_pending_release_ids_removed", []):
             self._music_pending_release_ids.pop(release_id, None)
 
@@ -8763,7 +8751,7 @@ class LibraryScanner:
 
     @staticmethod
     def _run_music_metadata_worker(
-        store: "LibraryStore",
+        store: LibraryStore,
         lastfm_reservation_set: set[str] | None,
         lastfm_lock: threading.Lock,
         state: dict,
@@ -8888,9 +8876,7 @@ class LibraryScanner:
         metadata_groups = 0
         unchanged_groups = 0
 
-        def inspect_audio(
-            path: Path, file_stat: os.stat_result
-        ) -> tuple[str, ...]:
+        def inspect_audio(path: Path, file_stat: os.stat_result) -> tuple[str, ...]:
             nonlocal inventory_cache_hits, tag_parses
             relative_path = relative(str(root), str(path))
             path_key = _path_key(relative_path)
@@ -8987,8 +8973,8 @@ class LibraryScanner:
                 group_count += 1
                 count += record["new_track_count"]
                 current_group = group_count
-            progress_updates = (result or {}).get("state", {}).get(
-                "progress_updates", []
+            progress_updates = (
+                (result or {}).get("state", {}).get("progress_updates", [])
             )
             latest_message = next(
                 (
@@ -9058,9 +9044,7 @@ class LibraryScanner:
                     complete_future(wait_for, publish=publish)
                 while pending_metadata:
                     done = [
-                        future
-                        for future in list(pending_metadata)
-                        if future.done()
+                        future for future in list(pending_metadata) if future.done()
                     ]
                     if not done:
                         if not all_pending:

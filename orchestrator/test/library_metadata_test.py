@@ -2441,13 +2441,19 @@ class LibraryMetadataTest(unittest.TestCase):
                                 "unchanged music tracks must not reconcile IDs"
                             ),
                         ),
+                        patch.object(scanner, "_publish_root") as publish,
                     ):
                         scanner._scan_music("library-1", root, "job-2", lambda: False)
 
                     parse.assert_not_called()
                     resolve.assert_not_called()
                     metadata.assert_not_called()
+                    publish.assert_not_called()
                     playback.return_value.probe_entity.assert_not_called()
+                    self.assertEqual(scanner._music_scan_stats["tagParses"], 0)
+                    self.assertEqual(
+                        scanner._music_scan_stats["contentFingerprintCount"], 0
+                    )
                     self.assertEqual(
                         db.execute("SELECT COUNT(*) FROM music_file_inventory")[0][0],
                         1,

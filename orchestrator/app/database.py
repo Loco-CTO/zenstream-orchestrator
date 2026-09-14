@@ -73,6 +73,7 @@ class DatabaseHandler:
         self.persistence = None
         self.lock = FairWriteGate()
         self.read_lock = threading.RLock()
+        self.write_local = threading.local()
         self.read_local = threading.local()
         self.read_connections = []
         self.read_connections_lock = threading.RLock()
@@ -116,6 +117,10 @@ class DatabaseHandler:
 
     def write(self, query, params=None):
         """Execute one serialized mutation and commit it."""
+        active = getattr(self.write_local, "cursor", None)
+        if active is not None:
+            active.execute(query, params or ())
+            return active.fetchall()
         wait_started = time.monotonic()
         wait_seconds = self.lock.acquire()
         acquired_at = time.monotonic()
@@ -146,6 +151,11 @@ class DatabaseHandler:
         statements = list(statements)
         if not statements:
             return True
+        active = getattr(self.write_local, "cursor", None)
+        if active is not None:
+            for query, params in statements:
+                active.execute(query, params or ())
+            return True
         with self.transaction() as cursor:
             for query, params in statements:
                 cursor.execute(query, params or ())
@@ -154,12 +164,17 @@ class DatabaseHandler:
     @contextmanager
     def transaction(self):
         """Run a sequence of statements as one serialized SQLite transaction."""
+        active = getattr(self.write_local, "cursor", None)
+        if active is not None:
+            yield active
+            return
         wait_started = time.monotonic()
         wait_seconds = self.lock.acquire()
         acquired_at = time.monotonic()
         try:
             cursor = self.connection.cursor()
             try:
+                self.write_local.cursor = cursor
                 cursor.execute("BEGIN IMMEDIATE")
                 yield cursor
                 self.connection.commit()
@@ -167,6 +182,7 @@ class DatabaseHandler:
                 self.connection.rollback()
                 raise
             finally:
+                self.write_local.cursor = None
                 cursor.close()
         finally:
             hold_seconds = time.monotonic() - acquired_at
@@ -206,6 +222,10 @@ class DatabaseHandler:
 
     def read_execute(self, query, params=None):
         """Execute a read without waiting on writer or unrelated reader locks."""
+        active = getattr(self.write_local, "cursor", None)
+        if active is not None:
+            active.execute(query, params or ())
+            return active.fetchall()
         started = time.monotonic()
         if self.db_file == ":memory:":
             connection = self.connection

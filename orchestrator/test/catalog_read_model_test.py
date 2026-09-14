@@ -227,6 +227,57 @@ class CatalogReadModelTest(unittest.TestCase):
         )
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_music_publication_refreshes_one_release_and_aggregates_artist(
+        self, _languages
+    ):
+        for values in (
+            ("artist", "library", None, "artist", "Artist"),
+            ("release-1", "library", "artist", "release", "Album One"),
+            ("track-1", "library", "release-1", "track", "Track One"),
+            ("release-2", "library", "artist", "release", "Album Two"),
+            ("track-2", "library", "release-2", "track", "Track Two"),
+        ):
+            self.db.execute(
+                "INSERT INTO library_entities(id,library_id,parent_id,entity_type,relative_path,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (*values, "2026", "2026"),
+            )
+        self.db.execute(
+            "INSERT INTO media_files VALUES('music-file-1','track-1','Track One.flac','media',30)"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES('music-file-2','track-2','Track Two.flac','media',40)"
+        )
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.db.execute(
+            "UPDATE media_files SET modified_ns=5 WHERE id='music-file-1'"
+        )
+
+        model.refresh_music_publication("release-1", "artist")
+
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT playable_leaf_count,media_file_count,added_sort_ns,last_added_sort_ns "
+                "FROM catalog_entity_summary WHERE entity_id='artist'"
+            ),
+            [(2, 2, 5, 40)],
+        )
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT playable_leaf_count,media_file_count,added_sort_ns,last_added_sort_ns "
+                "FROM catalog_entity_summary WHERE entity_id='release-1'"
+            ),
+            [(1, 1, 5, 5)],
+        )
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT last_root_entity_id FROM catalog_library_summary WHERE library_id='library'"
+            ),
+            [("artist",)],
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_refresh_root_admits_new_collection_entity(self, _languages):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])

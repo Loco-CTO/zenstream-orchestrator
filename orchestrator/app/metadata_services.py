@@ -554,6 +554,132 @@ class MetadataSearchProjection:
             result["album"] = title
         return result
 
+    def _music_track_context_batch(
+        self, entity_ids: Iterable[str], locale: str
+    ) -> dict[str, dict]:
+        """Resolve release context for many tracks with bounded reads."""
+        ids = list(dict.fromkeys(str(value) for value in entity_ids if value))
+        if not ids:
+            return {}
+        contexts: dict[str, dict] = {}
+        for offset in range(0, len(ids), 500):
+            chunk = ids[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.db.execute(
+                "SELECT track.id,track.parent_id,release.entity_type,"
+                "(SELECT provider_id FROM entity_provider_ids WHERE entity_id=track.parent_id "
+                "AND provider='musicbrainz' AND identifier_type='release' "
+                "ORDER BY is_primary DESC,provider_id LIMIT 1) "
+                "FROM library_entities track LEFT JOIN library_entities release "
+                "ON release.id=track.parent_id "
+                f"WHERE track.id IN ({placeholders}) AND track.entity_type='track'",
+                chunk,
+            )
+            rows_by_id = {str(row[0]): row for row in rows}
+            parent_ids = [
+                str(row[1])
+                for row in rows
+                if row[1] and row[2] == "release"
+            ]
+            parent_ids = list(dict.fromkeys(parent_ids))
+            release_ids = {
+                str(row[3]): str(row[1])
+                for row in rows
+                if row[1] and row[2] == "release" and row[3]
+            }
+            payloads = {}
+            if parent_ids and self._has_table("catalog_item_projection"):
+                parent_placeholders = ",".join("?" for _ in parent_ids)
+                payloads = {
+                    str(row[0]): row[1]
+                    for row in self.db.execute(
+                        "SELECT entity_id,payload FROM catalog_item_projection "
+                        f"WHERE entity_id IN ({parent_placeholders}) AND locale=?",
+                        [*parent_ids, locale],
+                    )
+                }
+
+            titles: dict[str, str] = {}
+            for parent_id, encoded in payloads.items():
+                try:
+                    value = json.loads(encoded or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    value = {}
+                if isinstance(value, dict):
+                    title = value.get("title") or value.get("album")
+                    if title:
+                        titles[parent_id] = title
+
+            missing_parents = [parent_id for parent_id in parent_ids if parent_id not in titles]
+            if missing_parents and self._has_table("metadata_cache"):
+                parent_placeholders = ",".join("?" for _ in missing_parents)
+                cache_rows = self.db.execute(
+                    "SELECT provider_id,payload,provider FROM metadata_cache "
+                    "WHERE entity_type='release' AND provider='local' "
+                    f"AND provider_id IN ({parent_placeholders}) AND locale IN (?, '') "
+                    "ORDER BY CASE WHEN locale=? THEN 0 ELSE 1 END,rowid DESC",
+                    [*missing_parents, locale, locale],
+                )
+                for parent_id, encoded, _provider in cache_rows:
+                    if parent_id in titles:
+                        continue
+                    try:
+                        value = json.loads(encoded or "{}")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        value = {}
+                    if isinstance(value, dict):
+                        title = value.get("title") or value.get("album")
+                        if title:
+                            titles[str(parent_id)] = title
+                missing_provider_ids = [
+                    provider_id
+                    for provider_id, parent_id in release_ids.items()
+                    if parent_id not in titles
+                ]
+                if missing_provider_ids:
+                    provider_placeholders = ",".join(
+                        "?" for _ in missing_provider_ids
+                    )
+                    provider_rows = self.db.execute(
+                        "SELECT provider_id,payload FROM metadata_cache "
+                        "WHERE entity_type='release' AND provider='musicbrainz' "
+                        f"AND provider_id IN ({provider_placeholders}) AND locale IN (?, '') "
+                        "ORDER BY CASE WHEN locale=? THEN 0 ELSE 1 END,rowid DESC",
+                        [*missing_provider_ids, locale, locale],
+                    )
+                    provider_parent_ids = {
+                        provider_id: parent_id
+                        for provider_id, parent_id in release_ids.items()
+                    }
+                    for provider_id, encoded in provider_rows:
+                        parent_id = provider_parent_ids.get(str(provider_id))
+                        if not parent_id or parent_id in titles:
+                            continue
+                        try:
+                            value = json.loads(encoded or "{}")
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            value = {}
+                        if isinstance(value, dict):
+                            title = value.get("title") or value.get("album")
+                            if title:
+                                titles[parent_id] = title
+
+            for entity_id in chunk:
+                row = rows_by_id.get(entity_id)
+                if row is None:
+                    continue
+                if not row[1] or row[2] != "release":
+                    contexts[entity_id] = {"unresolved": True}
+                    continue
+                parent_id = str(row[1])
+                result = {"parentId": parent_id}
+                if row[3]:
+                    result["albumId"] = str(row[3])
+                if titles.get(parent_id):
+                    result["album"] = titles[parent_id]
+                contexts[entity_id] = result
+        return contexts
+
     def _has_table(self, name: str) -> bool:
         return bool(
             self.db.execute(
@@ -1565,19 +1691,36 @@ def repair_music_track_contexts(
             "ORDER BY track.relative_path COLLATE NOCASE,track.id",
             (library_id, *sorted(scoped_releases)),
         )
+    track_ids = [str(entity_id) for (entity_id,) in rows]
     corrected = 0
-    for (entity_id,) in rows:
+    for locale in locales:
         if should_terminate():
             return corrected
-        for locale in locales:
-            values = db.execute(
-                "SELECT payload FROM catalog_item_projection WHERE entity_id=? AND locale=?",
-                (entity_id, locale),
+        payloads: dict[str, str] = {}
+        for offset in range(0, len(track_ids), 500):
+            chunk = track_ids[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            payloads.update(
+                {
+                    str(entity_id): payload
+                    for entity_id, payload in db.execute(
+                        "SELECT entity_id,payload FROM catalog_item_projection "
+                        f"WHERE entity_id IN ({placeholders}) AND locale=?",
+                        [*chunk, locale],
+                    )
+                }
             )
-            if not values:
+        contexts = projection._music_track_context_batch(track_ids, locale)
+        updates = []
+        for entity_id in track_ids:
+            if should_terminate():
+                return corrected
+            encoded = payloads.get(entity_id)
+            expected = contexts.get(entity_id)
+            if encoded is None or not expected:
                 continue
             try:
-                payload = json.loads(values[0][0] or "{}")
+                payload = json.loads(encoded or "{}")
             except (TypeError, ValueError, json.JSONDecodeError):
                 payload = {}
             if not isinstance(payload, dict):
@@ -1587,9 +1730,6 @@ def repair_music_track_contexts(
                 for field in payload.get("_localMetadataFields", [])
                 if isinstance(field, str)
             }
-            expected = projection._music_track_context(str(entity_id), locale)
-            if not expected:
-                continue
             before = (payload.get("albumId"), payload.get("album"))
             if expected.get("albumId"):
                 payload["albumId"] = expected["albumId"]
@@ -1603,11 +1743,21 @@ def repair_music_track_contexts(
             after = (payload.get("albumId"), payload.get("album"))
             if before == after:
                 continue
-            db.execute(
-                "UPDATE catalog_item_projection SET payload=?,updated_at=CURRENT_TIMESTAMP WHERE entity_id=? AND locale=?",
-                (json.dumps(payload, ensure_ascii=False), entity_id, locale),
+            updates.append(
+                (
+                    "UPDATE catalog_item_projection SET payload=?,updated_at=CURRENT_TIMESTAMP "
+                    "WHERE entity_id=? AND locale=?",
+                    (json.dumps(payload, ensure_ascii=False), entity_id, locale),
+                )
             )
-            corrected += 1
+        if updates:
+            write_many = getattr(db, "write_many", None)
+            if callable(write_many):
+                write_many(updates)
+            else:
+                for query, params in updates:
+                    db.execute(query, params)
+            corrected += len(updates)
     return corrected
 
 

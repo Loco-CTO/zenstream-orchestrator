@@ -149,6 +149,11 @@ def _path_key(value: str | os.PathLike[str]) -> str:
     return normalized.replace("\\", "/").strip("/")
 
 
+def _filesystem_path_key(value: str | os.PathLike[str]) -> str:
+    """Return a stable absolute key for cached filesystem observations."""
+    return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(value))))
+
+
 def _top_level_key(value: str | os.PathLike[str]) -> str:
     return _path_key(value).split("/", 1)[0]
 
@@ -202,6 +207,21 @@ class FairMetadataExecutor:
 
 
 metadata_root_executor = FairMetadataExecutor()
+
+
+class _MusicMetadataWorkerStore:
+    """Delegate scanner storage while keeping worker progress local."""
+
+    def __init__(self, store: "LibraryStore", progress_updates: list[tuple]):
+        self._store = store
+        self.db = store.db
+        self._progress_updates = progress_updates
+
+    def update_job(self, job_id: str, **values) -> None:
+        self._progress_updates.append((job_id, values))
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
 
 
 class JobTerminated(Exception):
@@ -1225,6 +1245,10 @@ class LibraryScanner:
         self._music_dirty_group_keys: set[tuple[str, ...]] = set()
         self._music_dirty_release_ids: set[str] = set()
         self._music_directory_cache: dict[Path, list[Path] | None] = {}
+        self._music_file_stats: dict[str, os.stat_result] = {}
+        self._music_state_lock = threading.RLock()
+        self._music_lastfm_lock = threading.Lock()
+        self._music_lastfm_reservation_set: set[str] | None = None
         self._scan_complete = False
         self._stage_lock = threading.RLock()
         self._stage = "idle"
@@ -1406,8 +1430,20 @@ class LibraryScanner:
         cached = self._music_directory_cache.get(directory)
         if directory in self._music_directory_cache:
             return list(cached) if cached is not None else None
+        file_stats = getattr(self, "_music_file_stats", None)
+        if file_stats is None:
+            file_stats = self._music_file_stats = {}
         try:
-            files = [path for path in directory.iterdir() if path.is_file()]
+            files = []
+            for path in directory.iterdir():
+                try:
+                    file_stat = path.stat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(file_stat.st_mode):
+                    continue
+                files.append(path)
+                file_stats[_filesystem_path_key(path)] = file_stat
         except OSError:
             self._music_directory_cache[directory] = None
             return None
@@ -1427,6 +1463,25 @@ class LibraryScanner:
             stage,
             context,
         )
+        if getattr(self, "_music_metadata_worker_mode", False):
+            self._music_metadata_progress.append(
+                (
+                    job_id,
+                    {
+                        "message": (
+                            stage
+                            if current is None or total is None
+                            else f"{stage} · {current}/{total}"
+                        ),
+                        "progress_label": stage,
+                        "progress_stage_current": current,
+                        "progress_stage_total": total,
+                        "progress_stage_unit": context.get("unit"),
+                        "progress_current_item": context.get("item"),
+                    },
+                )
+            )
+            return
         if persist:
             current = context.get("current")
             total = context.get("total")
@@ -1496,7 +1551,10 @@ class LibraryScanner:
                 if current is None or total is None
                 else f"{stage} · {current}/{total}"
             )
-        self.store.update_job(job_id, **values)
+        if getattr(self, "_music_metadata_worker_mode", False):
+            self._music_metadata_progress.append((job_id, values))
+        else:
+            self.store.update_job(job_id, **values)
 
     def _start_heartbeat(self, library_id: str, job_id: str) -> None:
         self._heartbeat_stop = threading.Event()
@@ -1601,6 +1659,7 @@ class LibraryScanner:
         }
         self._scan_provider_identity_changed = set()
         self._scan_lastfm_attempted_ids = set()
+        self._music_lastfm_reservation_set = self._scan_lastfm_attempted_ids
         self._scan_rejected_ids = set()
         self._scan_reconciled_ids = set()
         self._scan_deferred_roots = set()
@@ -3261,7 +3320,7 @@ class LibraryScanner:
         )
         service = MetadataService()
         ingest = (
-            MetadataIngestService(service, background_assets=False)
+            MetadataIngestService(service, background_assets=True)
             if library_type == "music"
             else None
         )
@@ -3408,6 +3467,7 @@ class LibraryScanner:
                         entity_type,
                         str(value["id"]),
                         required=True,
+                        background_assets=library_type == "music",
                         progress=lambda message: self.store.update_job(
                             job_id, message=message
                         ),
@@ -3463,7 +3523,13 @@ class LibraryScanner:
                 index,
                 len(rows),
             )
-        self._seed_all_children(library_id, service, job_id, should_terminate)
+        self._seed_all_children(
+            library_id,
+            service,
+            job_id,
+            should_terminate,
+            background_assets=library_type == "music",
+        )
 
     def _resolve_movies_parallel(
         self,
@@ -4155,11 +4221,13 @@ class LibraryScanner:
         parent_id: str | None = None,
         season_id: str | None = None,
         release_documents: dict[str, dict[str, dict]] | None = None,
+        *,
+        background_assets: bool = False,
     ) -> None:
         """Fetch common metadata and IDs for every season, episode, release, and track."""
         from app.metadata_services import MetadataIngestService
 
-        ingest = MetadataIngestService(service, background_assets=False)
+        ingest = MetadataIngestService(service, background_assets=background_assets)
         if season_id:
             rows = self.db.execute(
                 "SELECT id,entity_type,relative_path,parent_id,season_number,episode_number FROM library_entities WHERE library_id=? AND (id=? OR parent_id=?) ORDER BY CASE WHEN entity_type='season' THEN 0 ELSE 1 END, episode_number IS NULL, episode_number, relative_path COLLATE NOCASE",
@@ -4570,13 +4638,14 @@ class LibraryScanner:
         provider_id: str,
         required: bool = False,
         progress: Callable[[str], None] | None = None,
+        background_assets: bool = False,
     ) -> None:
         from app.metadata_services import MetadataIngestService
 
         if provider not in {"tmdb", "tvdb", "musicbrainz", "lastfm"}:
             return
 
-        ingest = MetadataIngestService(service, background_assets=False)
+        ingest = MetadataIngestService(service, background_assets=background_assets)
         locales = (
             ingest.provider_locales(provider, entity_type)
             if provider in {"musicbrainz", "lastfm"}
@@ -4852,6 +4921,7 @@ class LibraryScanner:
         files: Iterable[Path | tuple[Path, os.stat_result | None]],
         job_id: str | None = None,
         audio_probes: dict[str, dict] | None = None,
+        discovered_stats: dict[str, os.stat_result] | None = None,
     ) -> dict:
         """Reconcile media rows in place and return a scan delta."""
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(media_files)")}
@@ -4880,6 +4950,8 @@ class LibraryScanner:
             role = media_role(path)
             if not role:
                 continue
+            if discovered_stat is None and discovered_stats is not None:
+                discovered_stat = discovered_stats.get(_filesystem_path_key(path))
             if discovered_stat is None and path.is_symlink():
                 relative_path = relative(str(root), str(path))
                 if (relative_path, role) in existing:
@@ -6485,7 +6557,13 @@ class LibraryScanner:
                 if path.suffix.lower() in IMAGE_EXTENSIONS
                 or path.suffix.casefold() in NFO_EXTENSIONS
             ]
-        self._files(artist, root, artist_assets, job_id=job_id)
+        self._files(
+            artist,
+            root,
+            artist_assets,
+            job_id=job_id,
+            discovered_stats=getattr(self, "_music_file_stats", None),
+        )
         self._persist_nfo_metadata(
             artist,
             "artist",
@@ -6496,13 +6574,13 @@ class LibraryScanner:
         if embedded_artist_id:
             self._replace_ids(artist, [("musicbrainz", "artist", embedded_artist_id)])
 
-        release_ids = []
+        embedded_release_ids = []
         for _, tags in group_entries:
-            release_ids.extend(_music_ids(tags, "release"))
+            embedded_release_ids.extend(_music_ids(tags, "release"))
         release_id_values = sorted(
             {
                 str(value[2])
-                for value in release_ids
+                for value in embedded_release_ids
                 if value[1] == "release" and value[2]
             }
         )
@@ -6531,19 +6609,52 @@ class LibraryScanner:
         for path, tags in group_entries:
             identity_aliases.extend(self._music_identity_keys(root, path, tags))
         identity_aliases = list(dict.fromkeys(identity_aliases))
+
+        def stored_release_ids(entity_id: str) -> set[str]:
+            values = {
+                str(row[0])
+                for row in self.db.execute(
+                    "SELECT provider_id FROM entity_provider_ids "
+                    "WHERE entity_id=? AND provider='musicbrainz' "
+                    "AND identifier_type='release'",
+                    (entity_id,),
+                )
+            }
+            values.update(self._music_pending_release_ids.get(entity_id, set()))
+            return values
+
+        def compatible_alias(entity_id: str) -> bool:
+            known_ids = stored_release_ids(entity_id)
+            return (
+                not release_id_values
+                or not known_ids
+                or not known_ids.isdisjoint(release_id_values)
+            )
+
         release_key = tuple(group_key)
         release = release_entities.get(release_key)
+        if not release:
+            for identity_key, _source in identity_aliases:
+                candidate = release_entities.get(("identity", identity_key))
+                if candidate and compatible_alias(candidate):
+                    release = candidate
+                    break
         release = release or self._music_identity_entity(
             library_id, "release", release_key
         )
         # A tag-only alias can reconnect a release that previously lost its
-        # explicit ID. It must not reconnect two different explicit release
-        # IDs that happen to share title/artist/date tags.
-        if not release and not release_id_values and not release_identity_conflict:
+        # explicit ID. It must not reconnect a release with a known, different
+        # explicit ID that happens to share title/artist/date tags.
+        if not release and not release_identity_conflict:
             for identity_key, _source in identity_aliases:
-                release = self._music_identity_entity(
+                candidate_release = self._music_identity_entity(
                     library_id, "release", identity_key
                 )
+                if not candidate_release:
+                    continue
+                if not compatible_alias(candidate_release):
+                    continue
+                release = candidate_release
                 if release:
                     break
         if not release and release_id:
@@ -6604,7 +6715,9 @@ class LibraryScanner:
                                 (path_entity_id,),
                             )
                         }
-                        if stored_release_ids.isdisjoint(release_id_values):
+                        if stored_release_ids and stored_release_ids.isdisjoint(
+                            release_id_values
+                        ):
                             path_conflict = True
                             break
             if path_conflict:
@@ -6627,7 +6740,37 @@ class LibraryScanner:
             )
             if existing_path:
                 self._entity(library_id, artist, "release", existing_path[0][0])
+                current_path = str(existing_path[0][0] or "")
+                normalized_current_path = _path_key(current_path)
+                try:
+                    common_path = os.path.commonpath(
+                        [current_path, album_path]
+                    )
+                    common_path = str(common_path).replace("\\", "/")
+                except (ValueError, OSError):
+                    common_path = current_path
+                target_path = common_path or album_path
+                normalized_target_path = _path_key(target_path)
+                path_rows = self.db.execute(
+                    "SELECT id FROM library_entities WHERE library_id=? "
+                    "AND entity_type='release' AND relative_path IS ?",
+                    (library_id, target_path),
+                )
+                path_available = not path_rows or str(path_rows[0][0]) == str(release)
+                if (
+                    path_available
+                    and normalized_target_path
+                    and normalized_current_path
+                    and normalized_current_path != normalized_target_path
+                ):
+                    self.db.execute(
+                        "UPDATE library_entities SET relative_path=?,updated_at=? WHERE id=?",
+                        (target_path, now(), release),
+                    )
+                    self._mark_changed(release, metadata_changed=True)
         release_entities[release_key] = release
+        for identity_key, _source in identity_aliases:
+            release_entities[("identity", identity_key)] = release
         self._persist_music_identity_keys(
             release,
             library_id,
@@ -6787,6 +6930,7 @@ class LibraryScanner:
                 track_files,
                 job_id=job_id,
                 audio_probes=audio_probes,
+                discovered_stats=getattr(self, "_music_file_stats", None),
             )
             self._persist_nfo_metadata(
                 entity,
@@ -6835,7 +6979,13 @@ class LibraryScanner:
                 or path.suffix.casefold() in NFO_EXTENSIONS
             ]
         if artwork_accessible:
-            self._files(release, root, image_paths, job_id=job_id)
+            self._files(
+                release,
+                root,
+                image_paths,
+                job_id=job_id,
+                discovered_stats=getattr(self, "_music_file_stats", None),
+            )
             self._persist_nfo_metadata(
                 release,
                 "release",
@@ -6878,6 +7028,8 @@ class LibraryScanner:
             return
         attempted = getattr(self, "_scan_lastfm_attempted_ids", set())
         self._scan_lastfm_attempted_ids = attempted
+        reservation_set = getattr(self, "_music_lastfm_reservation_set", None)
+        reservation_lock = getattr(self, "_music_lastfm_lock", None)
 
         def provider_id(entity_id: str, identifier_type: str) -> str | None:
             rows = self.db.execute(
@@ -6923,15 +7075,22 @@ class LibraryScanner:
             year: str | None = None,
             duration_seconds: float | None = None,
         ) -> None:
-            if entity_id in attempted:
-                return
             if entity_type == "artist" and not artist_name:
                 return
             if entity_type == "release" and not (artist_name and album_name):
                 return
             if entity_type == "track" and not (track_name and artist_name):
                 return
-            attempted.add(entity_id)
+            if reservation_set is not None and reservation_lock is not None:
+                with reservation_lock:
+                    if entity_id in attempted or entity_id in reservation_set:
+                        return
+                    attempted.add(entity_id)
+                    reservation_set.add(entity_id)
+            else:
+                if entity_id in attempted:
+                    return
+                attempted.add(entity_id)
             current = provider_id(entity_id, entity_type)
             changed = (
                 entity_id in self._scan_created_ids
@@ -7510,6 +7669,7 @@ class LibraryScanner:
             should_terminate,
             parent_id=release,
             release_documents={release: release_documents},
+            background_assets=True,
         )
         self._enrich_music_lastfm_group(
             library_id,
@@ -8281,6 +8441,408 @@ class LibraryScanner:
             if entity_id not in orphan_ids
         ]
 
+    def _music_metadata_state_snapshot(
+        self, entity_ids: set[str] | None = None
+    ) -> dict:
+        """Copy scanner state that album metadata work is allowed to mutate."""
+        if entity_ids is None:
+            local_metadata = deepcopy(self._music_local_metadata)
+            local_nfo_sources = deepcopy(self._local_nfo_sources)
+            file_observations = deepcopy(self._music_file_observations)
+            directory_cache = {
+                key: list(value) if value is not None else None
+                for key, value in self._music_directory_cache.items()
+            }
+            file_stats = dict(getattr(self, "_music_file_stats", {}))
+            artist_entities = dict(getattr(self, "_music_artist_entities", {}))
+            release_entities = dict(getattr(self, "_music_release_entities", {}))
+        else:
+            local_metadata = {
+                entity_id: deepcopy(self._music_local_metadata[entity_id])
+                for entity_id in entity_ids
+                if entity_id in self._music_local_metadata
+            }
+            local_nfo_sources = {}
+            file_observations = {}
+            directory_cache = {}
+            file_stats = {}
+            artist_entities = {}
+            release_entities = {}
+        scan_delta = {
+            key: set(value) if isinstance(value, set) else deepcopy(value)
+            for key, value in self._scan_delta.items()
+        }
+        return {
+            "_scan_seen_ids": set(self._scan_seen_ids),
+            "_scan_created_ids": list(self._scan_created_ids),
+            "_scan_delta": scan_delta,
+            "_scan_provider_identity_changed": set(
+                self._scan_provider_identity_changed
+            ),
+            "_scan_lastfm_attempted_ids": set(self._scan_lastfm_attempted_ids),
+            "_scan_rejected_ids": set(self._scan_rejected_ids),
+            "_scan_reconciled_ids": set(self._scan_reconciled_ids),
+            "_scan_deferred_roots": set(self._scan_deferred_roots),
+            "_scan_access_errors": set(self._scan_access_errors),
+            "_scan_refresh_root_ids": set(self._scan_refresh_root_ids),
+            "_music_local_metadata": local_metadata,
+            "_local_nfo_sources": local_nfo_sources,
+            "_music_pending_release_ids": {
+                key: set(value)
+                for key, value in self._music_pending_release_ids.items()
+            },
+            "_music_release_conflicts": set(self._music_release_conflicts),
+            "_music_file_observations": file_observations,
+            "_music_dirty_group_keys": set(self._music_dirty_group_keys),
+            "_music_dirty_release_ids": set(self._music_dirty_release_ids),
+            "_music_directory_cache": directory_cache,
+            "_music_file_stats": file_stats,
+            "_music_inventory_available": self._music_inventory_available,
+            "_scan_complete": self._scan_complete,
+            "_music_artist_entities": artist_entities,
+            "_music_release_entities": release_entities,
+        }
+
+    def _restore_music_metadata_state(self, state: dict) -> None:
+        for name, value in state.items():
+            setattr(self, name, deepcopy(value))
+
+    def _music_metadata_state_delta(self, baseline: dict) -> dict:
+        current = self._music_metadata_state_snapshot()
+        set_fields = (
+            "_scan_seen_ids",
+            "_scan_provider_identity_changed",
+            "_scan_lastfm_attempted_ids",
+            "_scan_rejected_ids",
+            "_scan_reconciled_ids",
+            "_scan_deferred_roots",
+            "_scan_access_errors",
+            "_scan_refresh_root_ids",
+            "_music_release_conflicts",
+            "_music_dirty_group_keys",
+            "_music_dirty_release_ids",
+        )
+        delta = {
+            name: current[name] - baseline.get(name, set()) for name in set_fields
+        }
+        baseline_created = baseline.get("_scan_created_ids", [])
+        delta["_scan_created_ids"] = [
+            value for value in current["_scan_created_ids"] if value not in baseline_created
+        ]
+        scan_delta = {}
+        baseline_scan_delta = baseline.get("_scan_delta", {})
+        for key, values in current["_scan_delta"].items():
+            previous = baseline_scan_delta.get(key, set())
+            if isinstance(values, set):
+                scan_delta[key] = values - previous
+        delta["_scan_delta"] = scan_delta
+        delta["_music_local_metadata"] = {
+            entity_id: deepcopy(document)
+            for entity_id, document in current["_music_local_metadata"].items()
+            if baseline.get("_music_local_metadata", {}).get(entity_id) != document
+        }
+        delta["_music_pending_release_ids"] = {
+            release_id: set(values)
+            for release_id, values in current["_music_pending_release_ids"].items()
+            if values
+            and values
+            != baseline.get("_music_pending_release_ids", {}).get(release_id, set())
+        }
+        delta["_music_pending_release_ids_removed"] = [
+            release_id
+            for release_id in baseline.get("_music_pending_release_ids", {})
+            if release_id not in current["_music_pending_release_ids"]
+        ]
+        delta["progress_updates"] = list(
+            getattr(self, "_music_metadata_progress", [])
+        )
+        return delta
+
+    def _merge_music_metadata_state(self, delta: dict) -> None:
+        """Merge one worker's additions without overwriting newer scan state."""
+        self._scan_seen_ids.update(delta.get("_scan_seen_ids", set()))
+        self._scan_created_ids.extend(
+            value
+            for value in delta.get("_scan_created_ids", [])
+            if value not in self._scan_created_ids
+        )
+        for key, values in delta.get("_scan_delta", {}).items():
+            self._scan_delta.setdefault(key, set()).update(values)
+        for entity_id in delta.get("_scan_delta", {}).get("changed", set()):
+            self._scan_delta.setdefault("unchanged", set()).discard(entity_id)
+        self._scan_provider_identity_changed.update(
+            delta.get("_scan_provider_identity_changed", set())
+        )
+        self._scan_lastfm_attempted_ids.update(
+            delta.get("_scan_lastfm_attempted_ids", set())
+        )
+        self._scan_rejected_ids.update(delta.get("_scan_rejected_ids", set()))
+        self._scan_reconciled_ids.update(delta.get("_scan_reconciled_ids", set()))
+        self._scan_deferred_roots.update(delta.get("_scan_deferred_roots", set()))
+        self._scan_access_errors.update(delta.get("_scan_access_errors", set()))
+        self._scan_refresh_root_ids.update(
+            delta.get("_scan_refresh_root_ids", set())
+        )
+        self._music_release_conflicts.update(
+            delta.get("_music_release_conflicts", set())
+        )
+        self._music_dirty_group_keys.update(
+            delta.get("_music_dirty_group_keys", set())
+        )
+        self._music_dirty_release_ids.update(
+            delta.get("_music_dirty_release_ids", set())
+        )
+        for entity_id, document in delta.get("_music_local_metadata", {}).items():
+            self._music_local_metadata.setdefault(entity_id, document)
+        for release_id, values in delta.get(
+            "_music_pending_release_ids", {}
+        ).items():
+            self._music_pending_release_ids.setdefault(release_id, set()).update(
+                values
+            )
+        for release_id in delta.get("_music_pending_release_ids_removed", []):
+            self._music_pending_release_ids.pop(release_id, None)
+
+    def _music_metadata_worker_enabled(self) -> bool:
+        # Instance-level patches are used by scanner tests and by integrations
+        # that provide a custom resolver. Keep those calls on the scanner
+        # thread; normal production scans use isolated worker snapshots.
+        return not any(
+            name in self.__dict__
+            for name in (
+                "_resolve_music_group",
+                "_enrich_music_lastfm_group",
+                "_seed_all_children",
+            )
+        )
+
+    def _run_music_group_metadata(
+        self,
+        library_id: str,
+        root: Path,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        group_key: tuple[str, ...],
+        group_entries: list[tuple[Path, dict[str, str]]],
+        artist: str,
+        release: str,
+        tracks: list[dict],
+        service,
+        ingest,
+        group_number: int,
+    ) -> None:
+        """Resolve one album and leave its synchronous text state in the DB."""
+        artist_local = self._music_local_metadata.get(artist) or {}
+        self._persist_music_local_artist(
+            artist,
+            _music_display_value(artist_local.get("title"))
+            or _music_display_value(artist_local.get("albumArtist")),
+            ingest,
+        )
+        has_metadata_context = any(
+            tags.get("ALBUM")
+            or tags.get("ALBUMARTIST")
+            or _music_ids(tags, "release")
+            or _music_ids(tags, "track")
+            for _, tags in group_entries
+        )
+        try:
+            if has_metadata_context:
+                self._set_stage(
+                    job_id,
+                    f"Resolving music album {group_number}",
+                    entityId=release,
+                    current=max(group_number - 1, 0),
+                    total=max(group_number, 1),
+                )
+                self._resolve_music_group(
+                    library_id,
+                    root,
+                    job_id,
+                    should_terminate,
+                    artist,
+                    release,
+                    tracks,
+                    service,
+                    ingest,
+                )
+            else:
+                self.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
+                    (now(), artist, release),
+                )
+                self._materialize_music_artist_credits(
+                    library_id,
+                    artist,
+                    release,
+                    tracks,
+                    None,
+                    ingest,
+                    job_id,
+                    should_terminate,
+                )
+                self._seed_all_children(
+                    library_id,
+                    service,
+                    job_id,
+                    should_terminate,
+                    parent_id=release,
+                    background_assets=True,
+                )
+                self._enrich_music_lastfm_group(
+                    library_id,
+                    artist,
+                    release,
+                    tracks,
+                    service,
+                    ingest,
+                    job_id,
+                    should_terminate,
+                )
+                self._extract_and_reproject(release, "release", should_terminate)
+                self._extract_and_reproject(artist, "artist", should_terminate)
+        except JobTerminated:
+            raise
+        except Exception as error:
+            # Admission is independent from provider availability. The local
+            # entities are playable already; repair can retry provider work.
+            logger.warning(
+                "music album metadata failed; continuing library_id=%s release_id=%s error=%s",
+                library_id,
+                release,
+                error,
+                exc_info=True,
+            )
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
+                (now(), artist, release),
+            )
+            try:
+                self._materialize_music_artist_credits(
+                    library_id,
+                    artist,
+                    release,
+                    tracks,
+                    None,
+                    ingest,
+                    job_id,
+                    should_terminate,
+                )
+            except Exception:
+                logger.exception(
+                    "local music artist credit materialization failed release_id=%s",
+                    release,
+                )
+            self._queue_metadata_repair(
+                release,
+                library_id,
+                job_id,
+                f"MusicBrainz album resolution failed; local music metadata retained: {error}",
+                ingest.locales() if ingest else None,
+            )
+            self._seed_all_children(
+                library_id,
+                service,
+                job_id,
+                should_terminate,
+                parent_id=release,
+                background_assets=True,
+            )
+            self._enrich_music_lastfm_group(
+                library_id,
+                artist,
+                release,
+                tracks,
+                service,
+                ingest,
+                job_id,
+                should_terminate,
+            )
+            self._extract_and_reproject(release, "release", should_terminate)
+            self._extract_and_reproject(artist, "artist", should_terminate)
+
+    @staticmethod
+    def _run_music_metadata_worker(
+        store: "LibraryStore",
+        lastfm_reservation_set: set[str] | None,
+        lastfm_lock: threading.Lock,
+        state: dict,
+        library_id: str,
+        root: Path,
+        job_id: str,
+        should_terminate: Callable[[], bool],
+        group_key: tuple[str, ...],
+        group_entries: list[tuple[Path, dict[str, str]]],
+        artist: str,
+        release: str,
+        tracks: list[dict],
+        group_number: int,
+    ) -> dict:
+        from app.metadata_services import MetadataIngestService
+        from app.providers import MetadataService
+
+        progress_updates: list[tuple] = []
+        worker = LibraryScanner(_MusicMetadataWorkerStore(store, progress_updates))
+        worker._restore_music_metadata_state(state)
+        worker._music_metadata_worker_mode = True
+        worker._music_metadata_progress = progress_updates
+        worker._music_lastfm_reservation_set = lastfm_reservation_set
+        worker._music_lastfm_lock = lastfm_lock
+        baseline = worker._music_metadata_state_snapshot()
+        error_text = None
+        terminated = False
+        ingest = None
+        try:
+            service = MetadataService()
+            ingest = MetadataIngestService(service, background_assets=True)
+            worker._run_music_group_metadata(
+                library_id,
+                root,
+                job_id,
+                should_terminate,
+                group_key,
+                group_entries,
+                artist,
+                release,
+                tracks,
+                service,
+                ingest,
+                group_number,
+            )
+        except JobTerminated:
+            terminated = True
+        except Exception as error:
+            error_text = f"{type(error).__name__}: {error}"
+            logger.warning(
+                "music album worker failed library_id=%s release_id=%s error=%s",
+                library_id,
+                release,
+                error,
+                exc_info=True,
+            )
+            try:
+                worker.db.execute(
+                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
+                    (now(), artist, release),
+                )
+                worker._queue_metadata_repair(
+                    release,
+                    library_id,
+                    job_id,
+                    f"Music album worker failed; local music metadata retained: {error}",
+                    ingest.locales() if ingest else None,
+                )
+            except Exception:
+                logger.exception(
+                    "music album worker could not queue repair release_id=%s",
+                    release,
+                )
+        return {
+            "state": worker._music_metadata_state_delta(baseline),
+            "error": error_text,
+            "terminated": terminated,
+        }
+
     def _scan_music(
         self,
         library_id: str,
@@ -8291,12 +8853,18 @@ class LibraryScanner:
     ) -> int:
         self._music_local_metadata = {}
         self._local_nfo_sources = {}
+        if not hasattr(self, "_music_state_lock"):
+            self._music_state_lock = threading.RLock()
+        self._music_lastfm_reservation_set = self._scan_lastfm_attempted_ids
+        if not hasattr(self, "_music_lastfm_lock"):
+            self._music_lastfm_lock = threading.Lock()
         self._music_artist_entities: dict[str, str] = {}
         self._music_release_entities: dict[tuple[str, ...], str] = {}
         self._music_file_observations = {}
         self._music_dirty_group_keys = set()
         self._music_dirty_release_ids = set()
         self._music_directory_cache = {}
+        self._music_file_stats = {}
         scan_roots = [root] if targets is None else self._target_entries(root, targets)
         self._set_stage(
             job_id,
@@ -8313,8 +8881,6 @@ class LibraryScanner:
         groups: dict[tuple[str, ...], list[tuple[Path, dict[str, str]]]] = {}
         previous_inventory = self._music_inventory_rows(library_id, targets)
         current_inventory_paths: set[str] = set()
-        service = None
-        ingest = None
         last_progress = time.monotonic()
         inventory_cache_hits = 0
         tag_parses = 0
@@ -8322,7 +8888,9 @@ class LibraryScanner:
         metadata_groups = 0
         unchanged_groups = 0
 
-        def inspect_audio(path: Path, file_stat: os.stat_result) -> None:
+        def inspect_audio(
+            path: Path, file_stat: os.stat_result
+        ) -> tuple[str, ...]:
             nonlocal inventory_cache_hits, tag_parses
             relative_path = relative(str(root), str(path))
             path_key = _path_key(relative_path)
@@ -8377,20 +8945,181 @@ class LibraryScanner:
                     group_key,
                 )
             groups.setdefault(group_key, []).append((path, tags))
+            return group_key
 
-        def flush_group(
+        pending_metadata: dict[Future, dict] = {}
+        pending_by_group: dict[tuple[str, ...], Future] = {}
+        pending_by_release: dict[str, Future] = {}
+        pending_by_identity: dict[str, Future] = {}
+        flushed_groups: set[tuple[str, ...]] = set()
+        group_track_ids: dict[tuple[str, ...], set[str]] = {}
+        counted_track_ids: set[str] = set()
+        synchronous_service = None
+        synchronous_ingest = None
+
+        def publish_group(record: dict, result: dict | None = None, *, publish=True):
+            nonlocal group_count, count
+            if result is not None:
+                state = result.get("state") or {}
+                with self._music_state_lock:
+                    self._merge_music_metadata_state(state)
+                if result.get("error"):
+                    error_text = str(result["error"])
+                    self.db.execute(
+                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
+                        (now(), record["artist"], record["release"]),
+                    )
+                    self._queue_metadata_repair(
+                        record["release"],
+                        library_id,
+                        job_id,
+                        f"Music album worker failed; local music metadata retained: {error_text}",
+                    )
+            if not publish:
+                return
+            self._repersist_nfo_metadata(
+                [record["artist"], record["release"], *record["track_ids"]]
+            )
+            with self._music_state_lock:
+                self._scan_refresh_root_ids.add(record["artist"])
+                self._publish_root(record["artist"])
+                self._flush_publications()
+                group_count += 1
+                count += record["new_track_count"]
+                current_group = group_count
+            progress_updates = (result or {}).get("state", {}).get(
+                "progress_updates", []
+            )
+            latest_message = next(
+                (
+                    values.get("message")
+                    for _update_job_id, values in reversed(progress_updates)
+                    if values.get("message")
+                ),
+                None,
+            )
+            self.store.update_job(
+                job_id,
+                progress_current=current_group,
+                progress_total=max(current_group, 1),
+                message=latest_message
+                or (
+                    "Indexed music album update "
+                    if record["group_was_flushed"]
+                    else "Indexed music album "
+                )
+                + str(current_group),
+            )
+
+        def complete_future(future: Future, *, publish=True) -> None:
+            record = pending_metadata.pop(future, None)
+            if record is None:
+                return
+            if pending_by_group.get(record["group_key"]) is future:
+                pending_by_group.pop(record["group_key"], None)
+            if pending_by_release.get(record["release"]) is future:
+                pending_by_release.pop(record["release"], None)
+            for identity_key in record.get("identity_keys", ()):
+                if pending_by_identity.get(identity_key) is future:
+                    pending_by_identity.pop(identity_key, None)
+            if future.cancelled():
+                return
+            try:
+                result = future.result()
+            except JobTerminated:
+                if publish:
+                    raise
+                return
+            except Exception as error:
+                logger.warning(
+                    "music album metadata future failed release_id=%s error=%s",
+                    record["release"],
+                    error,
+                    exc_info=True,
+                )
+                result = {
+                    "state": {},
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            if result.get("terminated"):
+                state = result.get("state") or {}
+                with self._music_state_lock:
+                    self._merge_music_metadata_state(state)
+                if publish:
+                    raise JobTerminated()
+                return
+            publish_group(record, result, publish=publish)
+
+        def drain_pending(
+            wait_for: Future | None = None, *, publish=True, all_pending=False
+        ) -> None:
+            try:
+                if wait_for is not None:
+                    complete_future(wait_for, publish=publish)
+                while pending_metadata:
+                    done = [
+                        future
+                        for future in list(pending_metadata)
+                        if future.done()
+                    ]
+                    if not done:
+                        if not all_pending:
+                            return
+                        future = next(iter(pending_metadata))
+                        complete_future(future, publish=publish)
+                        continue
+                    for future in done:
+                        complete_future(future, publish=publish)
+            except BaseException:
+                if publish:
+                    cancel_pending_metadata()
+                raise
+
+        def cancel_pending_metadata() -> None:
+            for future in list(pending_metadata):
+                future.cancel()
+            drain_pending(publish=False, all_pending=True)
+
+        def pending_release_future(
+            group_key: tuple[str, ...],
+            group_entries: list[tuple[Path, dict[str, str]]],
+        ) -> Future | None:
+            future = pending_by_group.get(group_key)
+            if future is not None:
+                return future
+            release = self._music_release_entities.get(group_key)
+            if release is None:
+                release = self._music_identity_entity(library_id, "release", group_key)
+            if release:
+                future = pending_by_release.get(release)
+                if future is not None:
+                    return future
+            for identity_key, _source in dict.fromkeys(
+                identity
+                for path, tags in group_entries
+                for identity in self._music_identity_keys(root, path, tags)
+            ):
+                future = pending_by_identity.get(identity_key)
+                if future is not None:
+                    return future
+            return None
+
+        def _flush_group(
             group_key: tuple[str, ...],
             group_entries: list[tuple[Path, dict[str, str]]],
         ) -> None:
-            nonlocal group_count, count, service, ingest
+            nonlocal synchronous_service, synchronous_ingest
             nonlocal dirty_groups, metadata_groups, unchanged_groups
             if not group_entries:
                 return
+            prior_future = pending_release_future(group_key, group_entries)
+            if prior_future is not None:
+                drain_pending(wait_for=prior_future)
             self._check_termination(should_terminate)
             changed_before = set(self._scan_delta.get("changed", set()))
             created_before = set(self._scan_created_ids)
             provider_changed_before = set(self._scan_provider_identity_changed)
-            artist, release, tracks, indexed_count = self._index_music_group(
+            artist, release, tracks, _indexed_count = self._index_music_group(
                 library_id,
                 root,
                 job_id,
@@ -8406,6 +9135,8 @@ class LibraryScanner:
                 if isinstance(track, dict) and track.get("entity_id")
             }
             group_entity_ids = {artist, release, *track_ids}
+            previous_track_ids = group_track_ids.get(group_key, set())
+            group_was_flushed = group_key in flushed_groups
             group_dirty = group_key in self._music_dirty_group_keys
             group_dirty = group_dirty or bool(
                 group_entity_ids
@@ -8418,181 +9149,127 @@ class LibraryScanner:
                 group_entity_ids
                 & (set(self._scan_provider_identity_changed) - provider_changed_before)
             )
-            group_dirty = group_dirty or self._music_group_needs_metadata(
-                artist, release, tracks
-            )
+            if not group_was_flushed:
+                group_dirty = group_dirty or self._music_group_needs_metadata(
+                    artist, release, tracks
+                )
+            else:
+                group_dirty = group_dirty or bool(track_ids - previous_track_ids)
+            self._music_dirty_group_keys.discard(group_key)
+            new_track_count = len(track_ids - counted_track_ids)
+            counted_track_ids.update(track_ids)
+            group_track_ids[group_key] = set(track_ids)
+            record = {
+                "group_key": group_key,
+                "artist": artist,
+                "release": release,
+                "track_ids": sorted(track_ids),
+                "identity_keys": [
+                    identity_key
+                    for path, tags in group_entries
+                    for identity_key, _source in self._music_identity_keys(
+                        root, path, tags
+                    )
+                ],
+                "new_track_count": new_track_count,
+                "group_was_flushed": group_was_flushed,
+            }
             if not group_dirty:
                 unchanged_groups += 1
-                self._scan_refresh_root_ids.add(artist)
-                self._publish_root(artist)
-                self._flush_publications()
-                group_count += 1
-                count += indexed_count
-                self.store.update_job(
-                    job_id,
-                    progress_current=group_count,
-                    progress_total=max(group_count, 1),
-                    message=f"Indexed unchanged music album {group_count}",
-                )
+                publish_group(record)
+                flushed_groups.add(group_key)
                 return
             dirty_groups += 1
             self._music_dirty_release_ids.add(release)
-            if service is None:
+            metadata_groups += 1
+            group_number = group_count + len(pending_metadata) + 1
+            if self._music_metadata_worker_enabled():
+                self._set_stage(
+                    job_id,
+                    f"Resolving music album {group_number}",
+                    entityId=release,
+                    current=group_count,
+                    total=max(group_number, 1),
+                )
+                state = self._music_metadata_state_snapshot(
+                    {artist, release, *track_ids}
+                )
+                worker_entries = [
+                    (path, deepcopy(tags)) for path, tags in group_entries
+                ]
+                worker_tracks = deepcopy(tracks)
+                future = metadata_root_executor.submit(
+                    library_id,
+                    self._run_music_metadata_worker,
+                    self.store,
+                    self._music_lastfm_reservation_set,
+                    self._music_lastfm_lock,
+                    state,
+                    library_id,
+                    root,
+                    job_id,
+                    should_terminate,
+                    group_key,
+                    worker_entries,
+                    artist,
+                    release,
+                    worker_tracks,
+                    group_number,
+                )
+                pending_metadata[future] = record
+                pending_by_group[group_key] = future
+                pending_by_release[release] = future
+                for identity_key in dict.fromkeys(record["identity_keys"]):
+                    pending_by_identity[identity_key] = future
+                flushed_groups.add(group_key)
+                return
+            if synchronous_service is None:
                 from app.metadata_services import MetadataIngestService
                 from app.providers import MetadataService
 
-                service = MetadataService()
-                ingest = MetadataIngestService(service, background_assets=False)
-            artist_local = self._music_local_metadata.get(artist) or {}
-            self._persist_music_local_artist(
-                artist,
-                _music_display_value(artist_local.get("title"))
-                or _music_display_value(artist_local.get("albumArtist")),
-                ingest,
-            )
-            has_metadata_context = any(
-                tags.get("ALBUM")
-                or tags.get("ALBUMARTIST")
-                or _music_ids(tags, "release")
-                or _music_ids(tags, "track")
-                for _, tags in group_entries
-            )
-            try:
-                if has_metadata_context:
-                    metadata_groups += 1
-                    self._set_stage(
-                        job_id,
-                        f"Resolving music album {group_count + 1}",
-                        entityId=release,
-                        current=group_count,
-                        total=max(group_count + 1, 1),
-                    )
-                    self._resolve_music_group(
-                        library_id,
-                        root,
-                        job_id,
-                        should_terminate,
-                        artist,
-                        release,
-                        tracks,
-                        service,
-                        ingest,
-                    )
-                else:
-                    self.db.execute(
-                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
-                        (now(), artist, release),
-                    )
-                    self._materialize_music_artist_credits(
-                        library_id,
-                        artist,
-                        release,
-                        tracks,
-                        None,
-                        ingest,
-                        job_id,
-                        should_terminate,
-                    )
-                    self._seed_all_children(
-                        library_id,
-                        service,
-                        job_id,
-                        should_terminate,
-                        parent_id=release,
-                    )
-                    self._enrich_music_lastfm_group(
-                        library_id,
-                        artist,
-                        release,
-                        tracks,
-                        service,
-                        ingest,
-                        job_id,
-                        should_terminate,
-                    )
-                    self._extract_and_reproject(release, "release", should_terminate)
-                    self._extract_and_reproject(artist, "artist", should_terminate)
-            except JobTerminated:
-                raise
-            except Exception as error:
-                # Admission must remain independent from provider availability.
-                # The album and its tracks are already playable at this point;
-                # retain their local documents and let repair retry metadata.
-                logger.warning(
-                    "music album metadata failed; continuing library_id=%s release_id=%s error=%s",
-                    library_id,
-                    release,
-                    error,
-                    exc_info=True,
+                synchronous_service = MetadataService()
+                synchronous_ingest = MetadataIngestService(
+                    synchronous_service, background_assets=True
                 )
-                self.db.execute(
-                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id IN (?,?)",
-                    (now(), artist, release),
-                )
-                try:
-                    self._materialize_music_artist_credits(
-                        library_id,
-                        artist,
-                        release,
-                        tracks,
-                        None,
-                        ingest,
-                        job_id,
-                        should_terminate,
-                    )
-                except Exception:
-                    logger.exception(
-                        "local music artist credit materialization failed release_id=%s",
-                        release,
-                    )
-                self._queue_metadata_repair(
-                    release,
-                    library_id,
-                    job_id,
-                    f"MusicBrainz album resolution failed; local metadata retained: {error}",
-                    ingest.locales() if ingest else None,
-                )
-                self._seed_all_children(
-                    library_id,
-                    service,
-                    job_id,
-                    should_terminate,
-                    parent_id=release,
-                )
-                self._enrich_music_lastfm_group(
-                    library_id,
-                    artist,
-                    release,
-                    tracks,
-                    service,
-                    ingest,
-                    job_id,
-                    should_terminate,
-                )
-                self._extract_and_reproject(release, "release", should_terminate)
-                self._extract_and_reproject(artist, "artist", should_terminate)
-            self._repersist_nfo_metadata(
-                [artist, release]
-                + [
-                    str(track.get("entity_id"))
-                    for track in tracks
-                    if isinstance(track, dict) and track.get("entity_id")
-                ]
-            )
-            self._scan_refresh_root_ids.add(artist)
-            self._publish_root(artist)
-            self._flush_publications()
-            group_count += 1
-            count += indexed_count
-            self.store.update_job(
+            self._run_music_group_metadata(
+                library_id,
+                root,
                 job_id,
-                progress_current=group_count,
-                progress_total=max(group_count, 1),
-                message=f"Indexed music album {group_count}",
+                should_terminate,
+                group_key,
+                group_entries,
+                artist,
+                release,
+                tracks,
+                synchronous_service,
+                synchronous_ingest,
+                group_number,
             )
+            publish_group(record)
+            flushed_groups.add(group_key)
+
+        def flush_group(
+            group_key: tuple[str, ...],
+            group_entries: list[tuple[Path, dict[str, str]]],
+        ) -> None:
+            try:
+                _flush_group(group_key, group_entries)
+            except JobTerminated:
+                cancel_pending_metadata()
+                raise
+            except BaseException:
+                cancel_pending_metadata()
+                raise
+
+        def scan_check_termination() -> None:
+            try:
+                self._check_termination(should_terminate)
+            except JobTerminated:
+                cancel_pending_metadata()
+                raise
 
         for root_index, scan_root in enumerate(scan_roots, start=1):
-            self._check_termination(should_terminate)
+            scan_check_termination()
             try:
                 is_directory = scan_root.is_dir()
             except OSError:
@@ -8612,7 +9289,9 @@ class LibraryScanner:
                     and stat.S_ISREG(file_stat.st_mode)
                 ):
                     inspected_files += 1
-                    inspect_audio(scan_root, file_stat)
+                    group_key = inspect_audio(scan_root, file_stat)
+                    flush_group(group_key, groups[group_key])
+                    drain_pending()
                 else:
                     self._defer_root(
                         relative(str(root), str(scan_root)),
@@ -8627,9 +9306,25 @@ class LibraryScanner:
                     message=f"Discovered {inspected_files} music files",
                 )
                 continue
+            active_directory: Path | None = None
+            directory_groups: list[tuple[str, ...]] = []
+
+            def flush_directory() -> None:
+                nonlocal active_directory
+                for group_key in directory_groups:
+                    flush_group(group_key, groups[group_key])
+                directory_groups.clear()
+                active_directory = None
+
             try:
                 for path, file_stat in self._walk_file_entries(scan_root):
-                    self._check_termination(should_terminate)
+                    scan_check_termination()
+                    if active_directory is None:
+                        active_directory = path.parent
+                    elif path.parent != active_directory:
+                        flush_directory()
+                        drain_pending()
+                        active_directory = path.parent
                     if (
                         path.suffix.lower() not in AUDIO_EXTENSIONS
                         or file_stat is None
@@ -8637,7 +9332,9 @@ class LibraryScanner:
                     ):
                         continue
                     inspected_files += 1
-                    inspect_audio(path, file_stat)
+                    group_key = inspect_audio(path, file_stat)
+                    if group_key not in directory_groups:
+                        directory_groups.append(group_key)
                     if (
                         inspected_files % 250 == 0
                         or time.monotonic() - last_progress >= 2.0
@@ -8651,7 +9348,11 @@ class LibraryScanner:
                             message=f"Discovered {inspected_files} music files",
                         )
                         last_progress = time.monotonic()
+                flush_directory()
+                drain_pending()
             except OSError:
+                flush_directory()
+                drain_pending()
                 self._record_access_error(scan_root)
             for inaccessible in list(self._scan_access_errors):
                 try:
@@ -8671,6 +9372,7 @@ class LibraryScanner:
                 files=inspected_files,
                 message=f"Discovered {inspected_files} music files",
             )
+            drain_pending()
         for path_key, row in previous_inventory.items():
             if path_key in current_inventory_paths:
                 continue
@@ -8682,14 +9384,8 @@ class LibraryScanner:
             }:
                 continue
             self._music_dirty_group_keys.add(previous_group_key)
-        # Publish only after the complete inventory has been classified.  A
-        # filesystem walk is not an album boundary: files from one release
-        # can be interleaved with another release and can span directories.
-        for group_key in sorted(
-            groups, key=lambda value: tuple(str(part) for part in value)
-        ):
-            self._check_termination(should_terminate)
-            flush_group(group_key, groups[group_key])
+        scan_check_termination()
+        drain_pending(publish=True, all_pending=True)
         self._remove_orphan_music_artists(library_id)
         self._music_inventory_prune(
             library_id,

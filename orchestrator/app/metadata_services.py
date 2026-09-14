@@ -2357,6 +2357,26 @@ class MetadataIngestService:
     def locales(self) -> list[str]:
         return list(self._locales)
 
+    def _reproject_music_assets(self, entity_type: str, entity_id: str | None) -> None:
+        """Refresh music artwork selection after background assets complete."""
+        if entity_type not in MUSIC_ENTITY_TYPES or not entity_id:
+            return
+        cache = getattr(self.metadata_service, "cache", None)
+        db = getattr(cache, "db", None)
+        if db is None:
+            return
+        try:
+            MetadataSearchProjection(db).reproject_entity_artwork(
+                entity_id, self.locales()
+            )
+        except Exception as error:
+            logger.warning(
+                "music artwork reprojection failed entity_id=%s entity_type=%s error=%s",
+                entity_id,
+                entity_type,
+                error,
+            )
+
     @staticmethod
     def is_locale_neutral(provider: str, entity_type: str) -> bool:
         return (
@@ -2550,48 +2570,51 @@ class MetadataIngestService:
         asset_documents = {"": values[locales[0]]} if neutral else values
 
         def materialize_assets() -> None:
-            if self.image_ingest is not None:
-                batch_ingest = getattr(self.image_ingest, "ingest_documents", None)
-                if batch_ingest is not None:
-                    image_kwargs = {
-                        "force": force_assets,
-                        "complete_batch": complete_batch,
-                    }
-                    if target_entity_id:
-                        image_kwargs["target_entity_id"] = target_entity_id
-                    batch_ingest(
-                        provider,
-                        entity_type,
-                        provider_id,
-                        asset_documents,
-                        **image_kwargs,
-                    )
-                else:
-                    for locale in asset_documents:
+            try:
+                if self.image_ingest is not None:
+                    batch_ingest = getattr(self.image_ingest, "ingest_documents", None)
+                    if batch_ingest is not None:
                         image_kwargs = {
                             "force": force_assets,
                             "complete_batch": complete_batch,
                         }
                         if target_entity_id:
                             image_kwargs["target_entity_id"] = target_entity_id
-                        self.image_ingest.ingest(
+                        batch_ingest(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            asset_documents,
+                            **image_kwargs,
+                        )
+                    else:
+                        for locale in asset_documents:
+                            image_kwargs = {
+                                "force": force_assets,
+                                "complete_batch": complete_batch,
+                            }
+                            if target_entity_id:
+                                image_kwargs["target_entity_id"] = target_entity_id
+                            self.image_ingest.ingest(
+                                provider,
+                                entity_type,
+                                provider_id,
+                                locale,
+                                asset_documents[locale],
+                                **image_kwargs,
+                            )
+                if self.credit_ingest is not None:
+                    for locale in asset_documents:
+                        self.credit_ingest.ingest(
                             provider,
                             entity_type,
                             provider_id,
                             locale,
                             asset_documents[locale],
-                            **image_kwargs,
+                            force_images=force_assets,
                         )
-            if self.credit_ingest is not None:
-                for locale in asset_documents:
-                    self.credit_ingest.ingest(
-                        provider,
-                        entity_type,
-                        provider_id,
-                        locale,
-                        asset_documents[locale],
-                        force_images=force_assets,
-                    )
+            finally:
+                self._reproject_music_assets(entity_type, target_entity_id)
 
         if self.image_ingest is not None or self.credit_ingest is not None:
             digest = hashlib.sha256(
@@ -2675,32 +2698,35 @@ class MetadataIngestService:
         if self.image_ingest is not None or self.credit_ingest is not None:
 
             def materialize_assets() -> None:
-                # Cache hits also run this path so rows created before eager
-                # asset ingestion are repaired without blocking metadata.
-                if self.image_ingest is not None:
-                    image_kwargs = {
-                        "force": force_assets,
-                        "complete_batch": complete_batch,
-                    }
-                    if target_entity_id:
-                        image_kwargs["target_entity_id"] = target_entity_id
-                    self.image_ingest.ingest(
-                        provider,
-                        entity_type,
-                        provider_id,
-                        asset_locale,
-                        normalized,
-                        **image_kwargs,
-                    )
-                if self.credit_ingest is not None:
-                    self.credit_ingest.ingest(
-                        provider,
-                        entity_type,
-                        provider_id,
-                        asset_locale,
-                        normalized,
-                        force_images=force_assets,
-                    )
+                try:
+                    # Cache hits also run this path so rows created before eager
+                    # asset ingestion are repaired without blocking metadata.
+                    if self.image_ingest is not None:
+                        image_kwargs = {
+                            "force": force_assets,
+                            "complete_batch": complete_batch,
+                        }
+                        if target_entity_id:
+                            image_kwargs["target_entity_id"] = target_entity_id
+                        self.image_ingest.ingest(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            asset_locale,
+                            normalized,
+                            **image_kwargs,
+                        )
+                    if self.credit_ingest is not None:
+                        self.credit_ingest.ingest(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            asset_locale,
+                            normalized,
+                            force_images=force_assets,
+                        )
+                finally:
+                    self._reproject_music_assets(entity_type, target_entity_id)
 
             digest = hashlib.sha256(
                 json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")

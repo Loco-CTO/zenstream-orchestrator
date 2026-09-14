@@ -2608,6 +2608,98 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_music_directory_sidecar_stats_bypass_isolated_stat_fallback(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                album = root / "Artist" / "Album"
+                album.mkdir(parents=True)
+                track = album / "01. Track.flac"
+                sidecar = album / "01. Track.en.srt"
+                track.touch()
+                sidecar.write_text("subtitle", encoding="utf-8")
+                scanner._music_file_stats = {}
+
+                scanner._music_directory_files(album)
+                with patch(
+                    "app.library._bounded_sidecar_stat",
+                    side_effect=AssertionError("isolated stat should not run"),
+                ):
+                    result = scanner._files(
+                        "entity-1",
+                        root,
+                        [sidecar],
+                        discovered_stats=scanner._music_file_stats,
+                    )
+
+                self.assertEqual(result["added"], 1)
+                self.assertEqual(
+                    db.execute(
+                        "SELECT size FROM media_files WHERE entity_id='entity-1'"
+                    ),
+                    [(len("subtitle"),)],
+                )
+        finally:
+            db.close()
+
+    def test_music_late_provider_id_reuses_the_published_album_entity(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                disc_one = root / "Artist" / "Album" / "Disc 1"
+                disc_two = root / "Artist" / "Album" / "Disc 2"
+                disc_one.mkdir(parents=True)
+                disc_two.mkdir(parents=True)
+                first = disc_one / "01. First.flac"
+                second = disc_two / "02. Second.flac"
+                first.touch()
+                second.touch()
+                tags = {
+                    first: {
+                        "TITLE": "First",
+                        "ALBUM": "Album",
+                        "ALBUMARTIST": "Artist",
+                        "TRACKNUMBER": "1",
+                    },
+                    second: {
+                        "TITLE": "Second",
+                        "ALBUM": "Album",
+                        "ALBUMARTIST": "Artist",
+                        "TRACKNUMBER": "2",
+                        "MUSICBRAINZ_ALBUMID": "release-1",
+                    },
+                }
+
+                self._prepare_incremental_scan(scanner)
+                with (
+                    patch("app.library.parse_audio_tags", side_effect=tags.get),
+                    patch("app.playback.PlaybackManager"),
+                    patch.object(scanner, "_resolve_music_group"),
+                ):
+                    scanner._scan_music("library-1", root, "job-1", lambda: False)
+
+                self.assertEqual(
+                    db.execute(
+                        "SELECT id,relative_path FROM library_entities WHERE entity_type='release'"
+                    ),
+                    [(
+                        db.execute(
+                            "SELECT id FROM library_entities WHERE entity_type='release'"
+                        )[0][0],
+                        "Artist/Album",
+                    )],
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM library_entities WHERE entity_type='track'"
+                    )[0][0],
+                    2,
+                )
+        finally:
+            db.close()
+
     def test_music_sidecar_and_artwork_changes_dirty_only_the_own_group(self):
         db, scanner = self._scanner_db()
         try:

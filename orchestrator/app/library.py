@@ -1874,9 +1874,7 @@ class LibraryScanner:
                 )
             self._scan_complete = True
             if library["type"] == "music":
-                self.store.update_job(
-                    job_id, scan_stats=self._music_scan_stats_json()
-                )
+                self.store.update_job(job_id, scan_stats=self._music_scan_stats_json())
                 self._set_stage(job_id, "Populating changed metadata locales")
                 self._fetch_seen_locales(should_terminate)
                 self._set_stage(job_id, "Repairing music release context")
@@ -5636,7 +5634,9 @@ class LibraryScanner:
                             file_stat = entry.stat(follow_symlinks=False)
                             if not stat.S_ISREG(file_stat.st_mode):
                                 continue
-                            self._music_file_stats[_filesystem_path_key(path)] = file_stat
+                            self._music_file_stats[_filesystem_path_key(path)] = (
+                                file_stat
+                            )
                             yield path, file_stat
                         except OSError:
                             if suffix in relevant_suffixes:
@@ -6879,9 +6879,7 @@ class LibraryScanner:
             if relative_first.parts and (root / relative_first.parts[0]).is_dir()
             else first_path.parent
         )
-        processed_artist_assets = getattr(
-            self, "_music_artist_assets_processed", set()
-        )
+        processed_artist_assets = getattr(self, "_music_artist_assets_processed", set())
         if artist not in processed_artist_assets:
             artist_directory_files = self._music_directory_files(artist_directory)
             if artist_directory_files is None:
@@ -9591,7 +9589,9 @@ class LibraryScanner:
             scan_stats.metadata_groups += 1
             self._music_dirty_release_ids.add(release)
             metadata_groups += 1
-            max_pending = max(1, int(getattr(metadata_root_executor, "max_workers", 1)) * 2)
+            max_pending = max(
+                1, int(getattr(metadata_root_executor, "max_workers", 1)) * 2
+            )
             while len(pending_metadata) >= max_pending:
                 drain_pending(wait_for=next(iter(pending_metadata)))
             group_number = group_count + len(pending_metadata) + 1

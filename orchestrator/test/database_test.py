@@ -93,7 +93,9 @@ class DatabaseHandlerTest(unittest.TestCase):
                     ]
                 )
                 self.assertEqual(
-                    database.read_execute("SELECT value FROM values_table ORDER BY value"),
+                    database.read_execute(
+                        "SELECT value FROM values_table ORDER BY value"
+                    ),
                     [(1,), (2,), (3,)],
                 )
             self.assertEqual(

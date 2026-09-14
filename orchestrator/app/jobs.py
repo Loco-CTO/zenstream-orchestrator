@@ -1430,8 +1430,7 @@ class JobStore:
                 "scan_stats"
                 if "scan_stats"
                 in {
-                    row[1]
-                    for row in self.db.execute("PRAGMA table_info(library_jobs)")
+                    row[1] for row in self.db.execute("PRAGMA table_info(library_jobs)")
                 }
                 else "NULL AS scan_stats"
             )

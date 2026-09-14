@@ -576,11 +576,7 @@ class MetadataSearchProjection:
                 chunk,
             )
             rows_by_id = {str(row[0]): row for row in rows}
-            parent_ids = [
-                str(row[1])
-                for row in rows
-                if row[1] and row[2] == "release"
-            ]
+            parent_ids = [str(row[1]) for row in rows if row[1] and row[2] == "release"]
             parent_ids = list(dict.fromkeys(parent_ids))
             release_ids = {
                 str(row[3]): str(row[1])
@@ -610,7 +606,9 @@ class MetadataSearchProjection:
                     if title:
                         titles[parent_id] = title
 
-            missing_parents = [parent_id for parent_id in parent_ids if parent_id not in titles]
+            missing_parents = [
+                parent_id for parent_id in parent_ids if parent_id not in titles
+            ]
             if missing_parents and self._has_table("metadata_cache"):
                 parent_placeholders = ",".join("?" for _ in missing_parents)
                 cache_rows = self.db.execute(
@@ -637,9 +635,7 @@ class MetadataSearchProjection:
                     if parent_id not in titles
                 ]
                 if missing_provider_ids:
-                    provider_placeholders = ",".join(
-                        "?" for _ in missing_provider_ids
-                    )
+                    provider_placeholders = ",".join("?" for _ in missing_provider_ids)
                     provider_rows = self.db.execute(
                         "SELECT provider_id,payload FROM metadata_cache "
                         "WHERE entity_type='release' AND provider='musicbrainz' "

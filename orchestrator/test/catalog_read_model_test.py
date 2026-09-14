@@ -250,9 +250,7 @@ class CatalogReadModelTest(unittest.TestCase):
         )
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
-        self.db.execute(
-            "UPDATE media_files SET modified_ns=5 WHERE id='music-file-1'"
-        )
+        self.db.execute("UPDATE media_files SET modified_ns=5 WHERE id='music-file-1'")
 
         model.refresh_music_publication("release-1", "artist")
 

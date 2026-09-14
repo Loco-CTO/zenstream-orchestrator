@@ -1251,11 +1251,7 @@ class CatalogReadModel:
             )
         child_summaries = {row[0]: row[1:] for row in child_summary_rows}
         child_summaries.update(
-            {
-                row[0]: row[4:10]
-                for row in summaries
-                if row[0] in child_ids
-            }
+            {row[0]: row[4:10] for row in summaries if row[0] in child_ids}
         )
         own_media = self.db.read_execute(
             "SELECT MIN(modified_ns),MAX(modified_ns),COUNT(*) FROM media_files "
@@ -1324,9 +1320,7 @@ class CatalogReadModel:
                 )
                 rating = _numeric(payload_value.get("communityRating"))
                 release = str(
-                    payload_value.get("date")
-                    or payload_value.get("releaseDate")
-                    or ""
+                    payload_value.get("date") or payload_value.get("releaseDate") or ""
                 )
                 runtime = _numeric(payload_value.get("runtimeMinutes"))
                 projection_rows.append(

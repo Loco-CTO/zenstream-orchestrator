@@ -19,12 +19,12 @@
   "dependencies": {
     "@tabler/icons-react": "^3.44.0",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@types/node": "^26.5.0",
     "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.7",
+    "@types/react-dom": "^19.3.0",
     "@vitest/coverage-v8": "^5.0.0",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^10.0.5",

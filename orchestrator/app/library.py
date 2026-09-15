@@ -7332,7 +7332,9 @@ class LibraryScanner:
                 job_id=job_id,
                 audio_probes=audio_probes,
                 discovered_stats=getattr(self, "_music_file_stats", None),
-                pending_write_groups=(track_write_groups if defer_track_writes else None),
+                pending_write_groups=(
+                    track_write_groups if defer_track_writes else None
+                ),
             )
             self._persist_nfo_metadata(
                 entity,
@@ -7367,9 +7369,7 @@ class LibraryScanner:
 
         for offset in range(0, len(track_write_groups), 32):
             batch = track_write_groups[offset : offset + 32]
-            self.db.write_many(
-                [statement for group in batch for statement in group]
-            )
+            self.db.write_many([statement for group in batch for statement in group])
 
         album_directory_files = self._music_directory_files(album_dir)
         artwork_accessible = album_directory_files is not None
@@ -9407,7 +9407,7 @@ class LibraryScanner:
         provider_elapsed_ms = 0
         if service is not None:
             for client in getattr(service, "_clients", {}).values():
-                diagnostics = getattr(client, "diagnostics", lambda: {})()
+                diagnostics = getattr(client, "diagnostics", dict)()
                 provider_requests += int(diagnostics.get("requests", 0) or 0)
                 provider_elapsed_ms += int(
                     round(float(diagnostics.get("elapsed_seconds", 0.0) or 0.0) * 1000)
@@ -9659,9 +9659,7 @@ class LibraryScanner:
             scan_stats.metadata_worker_elapsed_ms += int(
                 result.get("elapsed_ms", 0) or 0
             )
-            scan_stats.provider_requests += int(
-                result.get("provider_requests", 0) or 0
-            )
+            scan_stats.provider_requests += int(result.get("provider_requests", 0) or 0)
             scan_stats.provider_elapsed_ms += int(
                 result.get("provider_elapsed_ms", 0) or 0
             )
@@ -9879,7 +9877,7 @@ class LibraryScanner:
                     synchronous_service, background_assets=True
                 )
             provider_before = {
-                provider: getattr(client, "diagnostics", lambda: {})()
+                provider: getattr(client, "diagnostics", dict)()
                 for provider, client in getattr(
                     synchronous_service, "_clients", {}
                 ).items()
@@ -9904,7 +9902,7 @@ class LibraryScanner:
             for provider, client in getattr(
                 synchronous_service, "_clients", {}
             ).items():
-                current = getattr(client, "diagnostics", lambda: {})()
+                current = getattr(client, "diagnostics", dict)()
                 previous = provider_before.get(provider, {})
                 scan_stats.provider_requests += int(
                     current.get("requests", 0) or 0
@@ -9921,9 +9919,7 @@ class LibraryScanner:
             scan_stats.projection_elapsed_ms += int(
                 round(
                     float(
-                        getattr(
-                            synchronous_ingest, "_projection_elapsed_ms", 0.0
-                        )
+                        getattr(synchronous_ingest, "_projection_elapsed_ms", 0.0)
                         or 0.0
                     )
                     - projection_before
@@ -10173,9 +10169,7 @@ class LibraryScanner:
         )
         self._music_inventory_pending_writes = None
         database_metrics_after = self.db.metrics()
-        scan_stats.elapsed_ms = int(
-            round((time.monotonic() - scan_started) * 1000)
-        )
+        scan_stats.elapsed_ms = int(round((time.monotonic() - scan_started) * 1000))
         scan_stats.writer_operations = max(
             0,
             int(database_metrics_after.get("writer_operations", 0))

@@ -1,7 +1,6 @@
 import sqlalchemy as sa
 from alembic import op
 
-
 revision = "0053_music_album_page"
 down_revision = "0052_music_scan_stats"
 branch_labels = None
@@ -26,9 +25,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["release_id"], ["library_entities.id"], ondelete="CASCADE"
         ),
-        sa.ForeignKeyConstraint(
-            ["library_id"], ["libraries.id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
             ["artist_id"], ["library_entities.id"], ondelete="CASCADE"
         ),
@@ -67,15 +64,15 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.Column("error", sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint("library_id"),
-        sa.ForeignKeyConstraint(
-            ["library_id"], ["libraries.id"], ondelete="CASCADE"
-        ),
+        sa.ForeignKeyConstraint(["library_id"], ["libraries.id"], ondelete="CASCADE"),
     )
 
 
 def downgrade() -> None:
     op.drop_table("catalog_music_album_page_status")
-    op.drop_index("idx_music_album_page_last_added", table_name="catalog_music_album_page")
+    op.drop_index(
+        "idx_music_album_page_last_added", table_name="catalog_music_album_page"
+    )
     op.drop_index("idx_music_album_page_added", table_name="catalog_music_album_page")
     op.drop_index("idx_music_album_page_release", table_name="catalog_music_album_page")
     op.drop_index("idx_music_album_page_title", table_name="catalog_music_album_page")

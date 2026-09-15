@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import httpx
 from app.providers import (
-    MusicBrainzClient,
     MetadataService,
+    MusicBrainzClient,
     ProviderClient,
     ProviderError,
     _select_music_match,

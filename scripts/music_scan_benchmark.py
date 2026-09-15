@@ -31,12 +31,11 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "orchestrator"))
 
-from alembic import command  # noqa: E402
-from alembic.config import Config  # noqa: E402
-
-from app.catalog import Catalog, _CatalogDatabase  # noqa: E402
-from app.database import DatabaseHandler  # noqa: E402
-from app.library import AudioTags, LibraryScanner, LibraryStore  # noqa: E402
+from alembic import command
+from alembic.config import Config
+from app.catalog import Catalog, _CatalogDatabase
+from app.database import DatabaseHandler
+from app.library import AudioTags, LibraryScanner, LibraryStore
 
 
 @dataclass
@@ -86,7 +85,9 @@ class MusicScanBenchmark:
 
     def _upgrade_database(self) -> None:
         config = Config(str(PROJECT_ROOT / "alembic.ini"))
-        config.set_main_option("script_location", (PROJECT_ROOT / "migrations").as_posix())
+        config.set_main_option(
+            "script_location", (PROJECT_ROOT / "migrations").as_posix()
+        )
         config.set_main_option(
             "sqlalchemy.url", f"sqlite:///{self.database_path.as_posix()}"
         )
@@ -159,12 +160,17 @@ class MusicScanBenchmark:
     def _scan_patches(self, gate: dict | None):
         stack = ExitStack()
         stack.enter_context(
-            patch("app.library.parse_audio_tags", side_effect=lambda path: self._parse_tags(path, gate))
+            patch(
+                "app.library.parse_audio_tags",
+                side_effect=lambda path: self._parse_tags(path, gate),
+            )
         )
         # An instance-level resolver makes the scanner use the synchronous
         # metadata path; the stub then keeps provider behavior repeatable.
         stack.enter_context(
-            patch.object(self.scanner, "_resolve_music_group", lambda *_args, **_kwargs: None)
+            patch.object(
+                self.scanner, "_resolve_music_group", lambda *_args, **_kwargs: None
+            )
         )
         stack.enter_context(
             patch.object(
@@ -184,12 +190,12 @@ class MusicScanBenchmark:
         stack.enter_context(patch.object(self.scanner, "_refresh_calendar_links"))
         stack.enter_context(patch.object(self.scanner, "_start_heartbeat"))
         stack.enter_context(patch.object(self.scanner, "_stop_heartbeat"))
-        stack.enter_context(
-            patch("app.metadata_services.repair_music_track_contexts")
-        )
+        stack.enter_context(patch("app.metadata_services.repair_music_track_contexts"))
         artwork = MagicMock()
         artwork.path.return_value = None
-        stack.enter_context(patch("app.library.LocalArtworkCache", return_value=artwork))
+        stack.enter_context(
+            patch("app.library.LocalArtworkCache", return_value=artwork)
+        )
         trickplay = MagicMock()
         trickplay.queue_pending.return_value = False
         stack.enter_context(
@@ -223,16 +229,17 @@ class MusicScanBenchmark:
             hydrated.append(row[0])
             return {"id": row[0], "childIds": list(children or [])}
 
-        with patch.object(
-            self.catalog, "allowed_libraries", return_value={self.library_id}
-        ), patch.object(
-            self.catalog,
-            "require_library",
-            return_value={"type": "music"},
-        ), patch.object(
-            self.catalog, "_configured_languages", return_value=["en"]
-        ), patch.object(
-            self.catalog, "_music_album_value", side_effect=hydrate
+        with (
+            patch.object(
+                self.catalog, "allowed_libraries", return_value={self.library_id}
+            ),
+            patch.object(
+                self.catalog,
+                "require_library",
+                return_value={"type": "music"},
+            ),
+            patch.object(self.catalog, "_configured_languages", return_value=["en"]),
+            patch.object(self.catalog, "_music_album_value", side_effect=hydrate),
         ):
             started = time.monotonic()
             try:
@@ -279,7 +286,11 @@ class MusicScanBenchmark:
             scan_target()
             if errors:
                 raise errors[0]
-            return PhaseResult(name, int(round((time.monotonic() - started) * 1000)), self._read_scan_stats(job_id))
+            return PhaseResult(
+                name,
+                int(round((time.monotonic() - started) * 1000)),
+                self._read_scan_stats(job_id),
+            )
 
         thread = threading.Thread(target=scan_target, name="music-benchmark-scan")
         thread.start()
@@ -325,9 +336,7 @@ class MusicScanBenchmark:
             "started": threading.Event(),
             "release": threading.Event(),
         }
-        changed = self._run_scan(
-            "oneChangedAlbum", gate=gate, request_during_scan=True
-        )
+        changed = self._run_scan("oneChangedAlbum", gate=gate, request_during_scan=True)
         return [initial, unchanged, changed]
 
     def close(self) -> None:
@@ -358,7 +367,10 @@ def main() -> int:
     phases = {phase["name"]: phase for phase in runs[0]}
     median = {}
     for name in phases:
-        phase_values = [run[next(i for i, item in enumerate(run) if item["name"] == name)] for run in runs]
+        phase_values = [
+            run[next(i for i, item in enumerate(run) if item["name"] == name)]
+            for run in runs
+        ]
         median[name] = {
             "elapsedMs": _median([item["elapsedMs"] for item in phase_values]),
             "scanElapsedMs": _median(

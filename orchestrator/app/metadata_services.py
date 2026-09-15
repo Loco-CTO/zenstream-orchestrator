@@ -2548,9 +2548,7 @@ class MetadataIngestService:
         try:
             tables = {
                 str(row[0])
-                for row in execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
+                for row in execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
         except Exception:
             return set()
@@ -2658,8 +2656,10 @@ class MetadataIngestService:
         )
         with self._projection_completion_lock:
             completed = key in self._completed_ingestion
-        if completed and target_entity_id and self._projection_is_complete(
-            db, target_entity_id, locale, normalized
+        if (
+            completed
+            and target_entity_id
+            and self._projection_is_complete(db, target_entity_id, locale, normalized)
         ):
             return
         started = time.monotonic()

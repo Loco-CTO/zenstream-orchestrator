@@ -116,9 +116,7 @@ class DatabaseHandlerTest(unittest.TestCase):
                 ]
             )
             after = database.metrics()
-            self.assertGreaterEqual(
-                after["commit_count"] - before["commit_count"], 1
-            )
+            self.assertGreaterEqual(after["commit_count"] - before["commit_count"], 1)
             self.assertIn("writer_hold_seconds", after)
         finally:
             database.close()

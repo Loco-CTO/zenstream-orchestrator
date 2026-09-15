@@ -43,7 +43,9 @@ class PlaybackTest(unittest.TestCase):
 
         self.assertEqual(value["streams"][0]["codec_name"], "opus")
 
-    def test_probe_entity_can_prepare_source_and_language_writes_without_committing(self):
+    def test_probe_entity_can_prepare_source_and_language_writes_without_committing(
+        self,
+    ):
         manager = object.__new__(PlaybackManager)
         manager.db = MagicMock()
         manager.db.execute.side_effect = [[(1,)], [(1,)]]

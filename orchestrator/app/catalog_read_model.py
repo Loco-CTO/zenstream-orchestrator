@@ -156,7 +156,9 @@ class CatalogReadModel:
                     payload = {}
                 title = str(
                     (projection[6] if projection is not None else None)
-                    or normalize_search_text(payload.get("title") or row[4] or "release")
+                    or normalize_search_text(
+                        payload.get("title") or row[4] or "release"
+                    )
                 )
                 release_date = str(
                     (projection[8] if projection is not None else None)
@@ -228,7 +230,10 @@ class CatalogReadModel:
                         cursor.executemany(
                             "INSERT INTO catalog_music_album_page_status(library_id,state,generation,updated_at,error) "
                             "VALUES(?,?,?,?,NULL) ON CONFLICT(library_id) DO UPDATE SET state=excluded.state,generation=catalog_music_album_page_status.generation+1,updated_at=excluded.updated_at,error=NULL",
-                            [(library_id, "ready", 1, _now()) for library_id in status_ids],
+                            [
+                                (library_id, "ready", 1, _now())
+                                for library_id in status_ids
+                            ],
                         )
             return 0
         placeholders = ",".join("?" for _ in selected_ids)
@@ -302,9 +307,7 @@ class CatalogReadModel:
             "SELECT entity_id,library_id,parent_id,entity_type,playable_leaf_count,"
             "media_file_count,media_added_ns,media_last_added_ns,added_sort_ns,"
             "last_added_sort_ns,generation,updated_at FROM catalog_entity_summary "
-            "WHERE entity_id IN ("
-            + placeholders
-            + ")",
+            "WHERE entity_id IN (" + placeholders + ")",
             ids,
         )
         locales = list(MetadataLanguageSettings().get()) or ["en"]

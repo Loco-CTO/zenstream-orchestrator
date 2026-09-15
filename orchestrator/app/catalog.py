@@ -2608,9 +2608,7 @@ class Catalog:
         date_rows = self.db.execute(
             "SELECT c.entity_id,c.added_sort_ns,c.last_added_sort_ns,e.created_at "
             "FROM catalog_entity_summary c JOIN library_entities e ON e.id=c.entity_id "
-            "WHERE c.entity_id IN ("
-            + release_placeholders
-            + ")",
+            "WHERE c.entity_id IN (" + release_placeholders + ")",
             release_ids,
         )
         dates = {

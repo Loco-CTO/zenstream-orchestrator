@@ -287,6 +287,16 @@ class ProviderClient:
         self.timeout = max(3.0, min(60.0, configured))
         self._http_clients = {}
         self._http_clients_lock = threading.Lock()
+        self._diagnostic_lock = threading.Lock()
+        self._request_count = 0
+        self._request_elapsed_seconds = 0.0
+
+    def diagnostics(self) -> dict[str, float | int]:
+        with self._diagnostic_lock:
+            return {
+                "requests": self._request_count,
+                "elapsed_seconds": self._request_elapsed_seconds,
+            }
 
     def _http_client(self, verify=True):
         key = (id(verify), self.timeout)
@@ -403,6 +413,10 @@ class ProviderClient:
             raise ProviderError(
                 f"provider request failed: {type(error).__name__}: {error}"
             ) from error
+        finally:
+            with self._diagnostic_lock:
+                self._request_count += 1
+                self._request_elapsed_seconds += max(0.0, time.monotonic() - started)
 
     def _get(self, url: str, **kwargs) -> dict:
         response = self._request_response(url, **kwargs)
@@ -1969,6 +1983,7 @@ class LastFmClient(ProviderClient):
         "extralarge": 4,
         "mega": 5,
     }
+    _MAX_RESOLVED_PAYLOADS = 4096
 
     def __init__(self, credentials: dict, timeout: float = 20):
         super().__init__(timeout)
@@ -2105,7 +2120,7 @@ class LastFmClient(ProviderClient):
 
     def details(self, entity_type: str, provider_id: str, locale: str) -> dict:
         cache_key = (entity_type, str(provider_id), str(locale or "en"))
-        cached = self._resolved_payloads.pop(cache_key, None)
+        cached = self._resolved_payloads.get(cache_key)
         if cached is not None:
             return copy.deepcopy(cached)
         return self._details_request(entity_type, provider_id, locale)
@@ -2358,9 +2373,11 @@ class LastFmClient(ProviderClient):
                 mbid=mbid if provider_id.startswith("mbid:") else None,
             ):
                 continue
-            self._resolved_payloads[(entity_type, provider_id, str(locale or "en"))] = (
-                copy.deepcopy(payload)
-            )
+            cache_key = (entity_type, provider_id, str(locale or "en"))
+            if cache_key not in self._resolved_payloads:
+                while len(self._resolved_payloads) >= self._MAX_RESOLVED_PAYLOADS:
+                    self._resolved_payloads.pop(next(iter(self._resolved_payloads)))
+            self._resolved_payloads[cache_key] = copy.deepcopy(payload)
             return provider_id, payload
         raise ProviderError(
             f"No strict Last.fm match for {entity_type} '{track_name or album_name or artist_name}'"
@@ -2781,6 +2798,88 @@ class MetadataService:
         self._tvdb_hierarchies: dict[str, dict] = {}
         self._clients = {}
         self._clients_lock = threading.Lock()
+        self._scan_cache: dict | None = None
+        self._scan_cache_lock: threading.Lock | None = None
+        self._scan_cache_inflight: dict | None = None
+
+    def set_scan_cache(
+        self,
+        cache: dict | None,
+        lock: threading.Lock | None,
+        inflight: dict | None = None,
+    ) -> None:
+        """Use a bounded cache shared by the album workers of one scan."""
+        self._scan_cache = cache
+        self._scan_cache_lock = lock
+        self._scan_cache_inflight = inflight
+
+    def _scan_cache_get(self, key: tuple):
+        cache = self._scan_cache
+        lock = self._scan_cache_lock
+        if cache is None or lock is None:
+            return None
+        with lock:
+            return cache.get(key)
+
+    def _scan_cache_put(self, key: tuple, value) -> None:
+        cache = self._scan_cache
+        lock = self._scan_cache_lock
+        if cache is None or lock is None:
+            return
+        with lock:
+            cache[key] = value
+            while len(cache) > 4096:
+                cache.pop(next(iter(cache)))
+
+    def _scan_cache_resolve(self, key: tuple, operation):
+        """Resolve one provider payload once while allowing other keys to run."""
+        cache = self._scan_cache
+        lock = self._scan_cache_lock
+        inflight = self._scan_cache_inflight
+        if cache is None or lock is None or inflight is None:
+            return operation()
+        owner = False
+        event = None
+        with lock:
+            entry = cache.get(key)
+            if entry is not None:
+                state, value = entry
+                if state == "not_found":
+                    raise ProviderNotFoundError(str(value))
+                return copy.deepcopy(value)
+            event = inflight.get(key)
+            if event is None:
+                event = threading.Event()
+                inflight[key] = event
+                owner = True
+        if not owner:
+            event.wait()
+            return self._scan_cache_resolve(key, operation)
+        try:
+            value = operation()
+        except ProviderNotFoundError as error:
+            with lock:
+                cache[key] = ("not_found", str(error))
+                while len(cache) > 4096:
+                    cache.pop(next(iter(cache)))
+                if inflight.get(key) is event:
+                    inflight.pop(key, None)
+                    event.set()
+            raise
+        except BaseException:
+            with lock:
+                if inflight.get(key) is event:
+                    inflight.pop(key, None)
+                    event.set()
+            raise
+        with lock:
+            cache[key] = ("ok", copy.deepcopy(value))
+            while len(cache) > 4096:
+                cache.pop(next(iter(cache)))
+            if inflight.get(key) is event:
+                inflight.pop(key, None)
+                event.set()
+        return value
 
     @staticmethod
     def language_options() -> list[dict[str, object]]:
@@ -2920,13 +3019,42 @@ class MetadataService:
                 stack.enter_context(lock)
             values = {}
             missing = []
+            shared_locales = []
             for locale in locales:
                 cached = cache_store.get(provider, entity_type, provider_id, locale)
                 if cached and not force and not cached.pop("_stale", False):
                     values[locale] = cached
+                elif not force:
+                    shared = self._scan_cache_get(
+                        ("document", provider, entity_type, provider_id, locale)
+                    )
+                    if shared is not None:
+                        state, value = shared
+                        if state == "not_found":
+                            raise ProviderNotFoundError(str(value))
+                        values[locale] = copy.deepcopy(value)
+                        cache_store.put(
+                            provider, entity_type, provider_id, locale, value
+                        )
+                        shared_locales.append(locale)
+                    else:
+                        missing.append(locale)
                 else:
                     missing.append(locale)
             if not missing:
+                if project and shared_locales:
+                    from app.metadata_services import MetadataSearchProjection
+
+                    projection = MetadataSearchProjection(cache_store.db)
+                    for locale in shared_locales:
+                        projection.project(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            locale,
+                            values[locale],
+                            target_entity_id=target_entity_id,
+                        )
                 return values
             logger.debug(
                 "metadata fetch provider=%s entity_type=%s provider_id=%s locales=%s force=%s",
@@ -2937,16 +3065,26 @@ class MetadataService:
                 force,
             )
             client = self.client(provider)
-            try:
+
+            def fetch_provider_payloads():
                 if hasattr(client, "details_all_locales"):
-                    payloads = client.details_all_locales(
-                        entity_type, provider_id, missing
-                    )
-                else:
-                    payloads = {
-                        locale: client.details(entity_type, provider_id, locale)
-                        for locale in missing
-                    }
+                    return client.details_all_locales(entity_type, provider_id, missing)
+                return {
+                    locale: client.details(entity_type, provider_id, locale)
+                    for locale in missing
+                }
+
+            try:
+                payloads = self._scan_cache_resolve(
+                    (
+                        "provider_payload",
+                        provider,
+                        entity_type,
+                        provider_id,
+                        tuple(missing),
+                    ),
+                    fetch_provider_payloads,
+                )
             except Exception as error:
                 logger.exception(
                     "metadata fetch failed provider=%s entity_type=%s provider_id=%s locales=%s",
@@ -2955,6 +3093,12 @@ class MetadataService:
                     provider_id,
                     missing,
                 )
+                if isinstance(error, ProviderNotFoundError):
+                    for locale in missing:
+                        self._scan_cache_put(
+                            ("document", provider, entity_type, provider_id, locale),
+                            ("not_found", str(error)),
+                        )
                 if isinstance(error, ProviderError):
                     raise
                 raise ProviderError(
@@ -2970,6 +3114,10 @@ class MetadataService:
                         f"{provider} {entity_type} {provider_id} {locale} normalization failed: {type(error).__name__}: {error}"
                     ) from error
                 cache_store.put(provider, entity_type, provider_id, locale, normalized)
+                self._scan_cache_put(
+                    ("document", provider, entity_type, provider_id, locale),
+                    ("ok", copy.deepcopy(normalized)),
+                )
                 if project:
                     from app.metadata_services import MetadataSearchProjection
 

@@ -14,7 +14,13 @@ import uuid
 from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable, Iterable
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -592,6 +598,20 @@ class MusicScanStats:
     groups_reprocessed: int = 0
     metadata_groups: int = 0
     unchanged_groups: int = 0
+    elapsed_ms: int = 0
+    discovery_elapsed_ms: int = 0
+    tag_parse_elapsed_ms: int = 0
+    album_assembly_elapsed_ms: int = 0
+    probe_elapsed_ms: int = 0
+    metadata_worker_elapsed_ms: int = 0
+    metadata_worker_wait_ms: int = 0
+    provider_requests: int = 0
+    provider_elapsed_ms: int = 0
+    projection_elapsed_ms: int = 0
+    writer_operations: int = 0
+    commit_count: int = 0
+    writer_wait_ms: int = 0
+    writer_hold_ms: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -607,6 +627,20 @@ class MusicScanStats:
             "groupsReprocessed": self.groups_reprocessed,
             "metadataGroups": self.metadata_groups,
             "unchangedGroups": self.unchanged_groups,
+            "elapsedMs": self.elapsed_ms,
+            "discoveryElapsedMs": self.discovery_elapsed_ms,
+            "tagParseElapsedMs": self.tag_parse_elapsed_ms,
+            "albumAssemblyElapsedMs": self.album_assembly_elapsed_ms,
+            "probeElapsedMs": self.probe_elapsed_ms,
+            "metadataWorkerElapsedMs": self.metadata_worker_elapsed_ms,
+            "metadataWorkerWaitMs": self.metadata_worker_wait_ms,
+            "providerRequests": self.provider_requests,
+            "providerElapsedMs": self.provider_elapsed_ms,
+            "projectionElapsedMs": self.projection_elapsed_ms,
+            "writerOperations": self.writer_operations,
+            "commitCount": self.commit_count,
+            "writerWaitMs": self.writer_wait_ms,
+            "writerHoldMs": self.writer_hold_ms,
         }
 
 
@@ -1328,6 +1362,7 @@ class LibraryScanner:
         self._last_publication_at = 0.0
         self._music_inventory_available: bool | None = None
         self._music_inventory_pending_writes: list[tuple[str, tuple]] | None = None
+        self._media_file_columns_cache: set[str] | None = None
 
     def _has_table(self, name: str) -> bool:
         return bool(
@@ -1335,6 +1370,16 @@ class LibraryScanner:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
             )
         )
+
+    def _media_file_columns(self) -> set[str]:
+        """Return the media-file schema once for the lifetime of this scanner."""
+        columns = self._media_file_columns_cache
+        if columns is None:
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
+            }
+            self._media_file_columns_cache = columns
+        return columns
 
     def _increment_music_scan_stat(self, field: str, amount: int = 1) -> None:
         stats = getattr(self, "_music_scan_stats", None)
@@ -1835,6 +1880,7 @@ class LibraryScanner:
         self._music_directory_cache = {}
         self._music_inventory_available = None
         self._music_inventory_pending_writes = None
+        self._media_file_columns_cache = None
         self._music_scan_stats = {}
         self._music_artist_assets_processed = set()
         self._last_stage_persisted_at = 0.0
@@ -2485,9 +2531,7 @@ class LibraryScanner:
                 model.refresh_roots([], affected_library_ids=dependent_ids)
 
     def _entity_fingerprint(self, entity_id: str) -> str | None:
-        if "quick_fingerprint" not in {
-            row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
-        }:
+        if "quick_fingerprint" not in self._media_file_columns():
             return None
         rows = self.db.execute(
             "SELECT role,quick_fingerprint FROM media_files WHERE entity_id=? AND role='media' ORDER BY role,relative_path",
@@ -2504,9 +2548,7 @@ class LibraryScanner:
         targets: set[str] | None = None,
     ) -> None:
         """Match newly discovered leaf entities to vanished paths by unique hash."""
-        if "quick_fingerprint" not in {
-            row[1] for row in self.db.execute("PRAGMA table_info(media_files)")
-        }:
+        if "quick_fingerprint" not in self._media_file_columns():
             return
         leaf_types = {"movie", "episode", "track", "release"}
         new_ids = [
@@ -5156,9 +5198,10 @@ class LibraryScanner:
         job_id: str | None = None,
         audio_probes: dict[str, dict] | None = None,
         discovered_stats: dict[str, os.stat_result] | None = None,
+        pending_write_groups: list[list[tuple[str, tuple]]] | None = None,
     ) -> dict:
         """Reconcile media rows in place and return a scan delta."""
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(media_files)")}
+        columns = self._media_file_columns()
         has_fingerprint = "quick_fingerprint" in columns
         select_fingerprint = ",quick_fingerprint" if has_fingerprint else ""
         existing_rows = self.db.execute(
@@ -5177,6 +5220,7 @@ class LibraryScanner:
             "artwork_changed": False,
         }
         pending_writes: list[tuple[str, tuple]] = []
+        probe_media_rows: list[tuple[str, str, str]] = []
         for file_entry in files:
             if isinstance(file_entry, tuple):
                 path, discovered_stat = file_entry
@@ -5351,6 +5395,8 @@ class LibraryScanner:
                 content_changed = (
                     old_fingerprint != quick_fingerprint if has_fingerprint else True
                 )
+                if content_changed and role == "media":
+                    probe_media_rows.append((old[0], str(root), relative_path))
                 pending_writes.append(
                     (
                         f"UPDATE media_files SET language=?,flags=?,size=?,modified_ns=?{',quick_fingerprint=?' if has_fingerprint else ''} WHERE id=?",
@@ -5377,12 +5423,13 @@ class LibraryScanner:
                     elif role == "image":
                         result["artwork_changed"] = True
             else:
+                media_file_id = new_id()
                 if has_fingerprint:
                     pending_writes.append(
                         (
                             "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns,quick_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)",
                             (
-                                new_id(),
+                                media_file_id,
                                 entity_id,
                                 relative_path,
                                 role,
@@ -5399,7 +5446,7 @@ class LibraryScanner:
                         (
                             "INSERT INTO media_files(id,entity_id,relative_path,role,language,flags,size,modified_ns) VALUES(?,?,?,?,?,?,?,?)",
                             (
-                                new_id(),
+                                media_file_id,
                                 entity_id,
                                 relative_path,
                                 role,
@@ -5413,6 +5460,7 @@ class LibraryScanner:
                 result["added"] += 1
                 if role == "media":
                     result["content_changed"] = True
+                    probe_media_rows.append((media_file_id, str(root), relative_path))
                 elif role == "metadata":
                     result["metadata_changed"] = True
                 elif role == "image":
@@ -5428,9 +5476,9 @@ class LibraryScanner:
                 result["metadata_changed"] = True
             elif old[2] == "image":
                 result["artwork_changed"] = True
-        if pending_writes:
+        if pending_write_groups is None and pending_writes:
             self.db.write_many(pending_writes)
-        if has_fingerprint:
+        if has_fingerprint and pending_write_groups is None:
             self._materialize_local_artwork(entity_id, root)
         if (
             result["added"]
@@ -5445,7 +5493,7 @@ class LibraryScanner:
                 metadata_changed=result["metadata_changed"],
                 artwork_changed=result["artwork_changed"],
             )
-        if result["artwork_changed"]:
+        if result["artwork_changed"] and pending_write_groups is None:
             try:
                 from app.metadata_services import reproject_entity_artwork
 
@@ -5476,20 +5524,34 @@ class LibraryScanner:
                 result["updated"],
                 result["removed"],
             )
-            PlaybackManager().probe_entity(
-                entity_id,
-                audio_probes=audio_probes,
+            if pending_write_groups is None:
+                PlaybackManager().probe_entity(
+                    entity_id,
+                    audio_probes=audio_probes,
+                )
+            else:
+                PlaybackManager(db=self.db).probe_entity(
+                    entity_id,
+                    audio_probes=audio_probes,
+                    media_file_rows=probe_media_rows,
+                    pending_writes=pending_writes,
+                )
+            self._increment_music_scan_stat(
+                "probe_elapsed_ms",
+                int(round((time.monotonic() - probe_started) * 1000)),
             )
             logger.debug(
                 "library scan probe complete entity_id=%s duration_seconds=%.1f",
                 entity_id,
                 time.monotonic() - probe_started,
             )
+        if pending_write_groups is not None and pending_writes:
+            pending_write_groups.append(pending_writes)
         return result
 
     def _materialize_local_artwork(self, entity_id: str, root: Path) -> None:
         cache = LocalArtworkCache(self.db)
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(media_files)")}
+        columns = self._media_file_columns()
         select_blur_hash = ",image_blur_hash" if "image_blur_hash" in columns else ""
         for values in self.db.execute(
             f"SELECT id,relative_path,quick_fingerprint{select_blur_hash} FROM media_files WHERE entity_id=? AND role='image'",
@@ -7171,6 +7233,7 @@ class LibraryScanner:
         )
         sidecars_by_directory: dict[Path, dict[Path, list[Path]] | None] = {}
         tracks_by_directory: dict[Path, list[Path]] = {}
+        track_write_groups: list[list[tuple[str, tuple]]] = []
         for track, _tags in ordered_entries:
             tracks_by_directory.setdefault(track.parent, []).append(track)
         for directory, directory_tracks in tracks_by_directory.items():
@@ -7258,6 +7321,10 @@ class LibraryScanner:
                 else None
             )
             track_files = [track_file, *sidecars]
+            defer_track_writes = not any(
+                media_role(path[0] if isinstance(path, tuple) else path) == "image"
+                for path in track_files
+            )
             self._files(
                 entity,
                 root,
@@ -7265,6 +7332,9 @@ class LibraryScanner:
                 job_id=job_id,
                 audio_probes=audio_probes,
                 discovered_stats=getattr(self, "_music_file_stats", None),
+                pending_write_groups=(
+                    track_write_groups if defer_track_writes else None
+                ),
             )
             self._persist_nfo_metadata(
                 entity,
@@ -7297,6 +7367,10 @@ class LibraryScanner:
                     entity_id=entity,
                 )
 
+        for offset in range(0, len(track_write_groups), 32):
+            batch = track_write_groups[offset : offset + 32]
+            self.db.write_many([statement for group in batch for statement in group])
+
         album_directory_files = self._music_directory_files(album_dir)
         artwork_accessible = album_directory_files is not None
         if not artwork_accessible:
@@ -7328,6 +7402,83 @@ class LibraryScanner:
                 base_document=self._music_local_metadata.get(release),
             )
         return artist, release, tracks, len(tracks)
+
+    def _music_provider_cached(self, key: tuple, operation: Callable):
+        """Share successful and definitive-empty music lookups for one scan."""
+        cache = getattr(self, "_music_provider_cache", None)
+        lock = getattr(self, "_music_provider_cache_lock", None)
+        if cache is None or lock is None:
+            return operation()
+        from app.providers import ProviderNotFoundError
+
+        inflight = getattr(self, "_music_provider_inflight", None)
+        if inflight is None:
+            # Keep compatibility with scanner doubles that provide only the
+            # original cache and lock attributes.
+            with lock:
+                entry = cache.get(key)
+                if entry is not None:
+                    state, value = entry
+                    if state == "not_found":
+                        raise ProviderNotFoundError(str(value))
+                    return deepcopy(value)
+                try:
+                    value = operation()
+                except ProviderNotFoundError as error:
+                    cache[key] = ("not_found", str(error))
+                    while len(cache) > 4096:
+                        cache.pop(next(iter(cache)))
+                    raise
+                cache[key] = ("ok", deepcopy(value))
+                while len(cache) > 4096:
+                    cache.pop(next(iter(cache)))
+                return value
+
+        owner = False
+        event = None
+        with lock:
+            entry = cache.get(key)
+            if entry is not None:
+                state, value = entry
+                if state == "not_found":
+                    raise ProviderNotFoundError(str(value))
+                return deepcopy(value)
+            event = inflight.get(key)
+            if event is None:
+                event = threading.Event()
+                inflight[key] = event
+                owner = True
+        if not owner:
+            event.wait()
+            # Transient failures are not cached, so a waiter retries while
+            # definitive empty responses are returned from the shared cache.
+            return self._music_provider_cached(key, operation)
+
+        try:
+            value = operation()
+        except ProviderNotFoundError as error:
+            with lock:
+                cache[key] = ("not_found", str(error))
+                while len(cache) > 4096:
+                    cache.pop(next(iter(cache)))
+                if inflight.get(key) is event:
+                    inflight.pop(key, None)
+                    event.set()
+            raise
+        except BaseException:
+            with lock:
+                if inflight.get(key) is event:
+                    inflight.pop(key, None)
+                    event.set()
+            raise
+        with lock:
+            cache[key] = ("ok", deepcopy(value))
+            while len(cache) > 4096:
+                cache.pop(next(iter(cache)))
+            if inflight.get(key) is event:
+                inflight.pop(key, None)
+                event.set()
+        return value
 
     def _enrich_music_lastfm_group(
         self,
@@ -7428,18 +7579,35 @@ class LibraryScanner:
                 if current and not changed:
                     lookup = current
                 else:
-                    lookup, _payload = client.resolve_lookup(
-                        entity_type,
-                        artist_name=artist_name,
-                        album_name=album_name,
-                        track_name=track_name,
-                        year=year,
-                        duration_seconds=duration_seconds,
-                        mbid=musicbrainz_id(
-                            entity_id,
-                            "recording" if entity_type == "track" else entity_type,
+                    lookup, _payload = self._music_provider_cached(
+                        (
+                            "lastfm",
+                            "resolve",
+                            entity_type,
+                            artist_name,
+                            album_name,
+                            track_name,
+                            year,
+                            duration_seconds,
+                            musicbrainz_id(
+                                entity_id,
+                                "recording" if entity_type == "track" else entity_type,
+                            ),
+                            locales[0],
                         ),
-                        locale=locales[0],
+                        lambda: client.resolve_lookup(
+                            entity_type,
+                            artist_name=artist_name,
+                            album_name=album_name,
+                            track_name=track_name,
+                            year=year,
+                            duration_seconds=duration_seconds,
+                            mbid=musicbrainz_id(
+                                entity_id,
+                                "recording" if entity_type == "track" else entity_type,
+                            ),
+                            locale=locales[0],
+                        ),
                     )
                 attach(entity_id, entity_type, lookup)
                 ingest.ingest_locales(
@@ -7623,7 +7791,10 @@ class LibraryScanner:
             and (release_local.get("album") or release_local.get("albumArtist"))
         ):
             try:
-                candidates = client.search_releases(album_name, artist_name, year)
+                candidates = self._music_provider_cached(
+                    ("musicbrainz", "search-release", album_name, artist_name, year),
+                    lambda: client.search_releases(album_name, artist_name, year),
+                )
                 release_id = _select_music_match(
                     candidates, album_name, artist_name, year
                 )
@@ -7639,6 +7810,7 @@ class LibraryScanner:
                     locales,
                     force=False,
                     target_entity_id=release,
+                    project=False,
                 )
                 validation_document = next(
                     (
@@ -7673,19 +7845,9 @@ class LibraryScanner:
                             self._replace_ids(
                                 release, [("musicbrainz", "release", release_id)]
                             )
-                        for locale, normalized in release_documents.items():
+                        for normalized in release_documents.values():
                             self._persist_normalized_ids(release, "release", normalized)
                             self._persist_child_ids(release, normalized)
-                            from app.metadata_services import MetadataSearchProjection
-
-                            MetadataSearchProjection(self.db).project(
-                                "musicbrainz",
-                                "release",
-                                release_id,
-                                locale,
-                                normalized,
-                                target_entity_id=release,
-                            )
             except Exception as error:
                 release_error = error
                 release_documents = {}
@@ -7714,29 +7876,28 @@ class LibraryScanner:
             )
 
         local_album_artist = _music_display_value(release_local.get("albumArtist"))
-        if release_documents and local_album_artist:
-            # MusicBrainz release credits are additive enrichment. Preserve
-            # the explicit embedded primary in the projected album payload;
-            # the provider's first credit is not an ownership decision.
+        if release_documents:
+            # MusicBrainz release credits are additive enrichment. Apply the
+            # local credit merge before the single ingestion projection so a
+            # fresh provider document is not projected twice.
             try:
-                from app.metadata_services import MetadataSearchProjection
-
-                projection = MetadataSearchProjection(self.db)
                 for locale, document in release_documents.items():
                     if not isinstance(document, dict):
                         continue
-                    local_credits = self._music_document_credits(release_local)
-                    if not local_credits:
-                        local_credits = [{"name": local_album_artist}]
-                    provider_credits = self._music_document_credits(document)
-                    merged_credits = self._merge_music_artist_credits(
-                        local_credits, provider_credits
-                    )
-                    if merged_credits:
-                        document["artists"] = merged_credits
-                        document["contributingArtists"] = deepcopy(merged_credits)
-                    document["albumArtist"] = local_album_artist
-                    projection.project(
+                    if local_album_artist:
+                        local_credits = self._music_document_credits(release_local)
+                        if not local_credits:
+                            local_credits = [{"name": local_album_artist}]
+                        provider_credits = self._music_document_credits(document)
+                        merged_credits = self._merge_music_artist_credits(
+                            local_credits, provider_credits
+                        )
+                        if merged_credits:
+                            document["artists"] = merged_credits
+                            document["contributingArtists"] = deepcopy(merged_credits)
+                        document["albumArtist"] = local_album_artist
+                    ingest._project(
+                        self.db,
                         "musicbrainz",
                         "release",
                         release_id,
@@ -7882,12 +8043,23 @@ class LibraryScanner:
                         if track_artists and isinstance(track_artists[0], dict)
                         else None
                     )
-                    recording_candidates = client.search_recordings(
-                        local.get("title") or "",
-                        track_artist or artist_name,
-                        album_name,
-                        year,
-                        local.get("durationSeconds"),
+                    recording_candidates = self._music_provider_cached(
+                        (
+                            "musicbrainz",
+                            "search-recording",
+                            local.get("title") or "",
+                            track_artist or artist_name,
+                            album_name,
+                            year,
+                            local.get("durationSeconds"),
+                        ),
+                        lambda: client.search_recordings(
+                            local.get("title") or "",
+                            track_artist or artist_name,
+                            album_name,
+                            year,
+                            local.get("durationSeconds"),
+                        ),
                     )
                     recording_id = _select_music_match(
                         recording_candidates,
@@ -9140,6 +9312,9 @@ class LibraryScanner:
         store: LibraryStore,
         lastfm_reservation_set: set[str] | None,
         lastfm_lock: threading.Lock,
+        provider_cache: dict | None,
+        provider_cache_lock: threading.Lock | None,
+        provider_inflight: dict | None,
         state: dict,
         library_id: str,
         root: Path,
@@ -9162,6 +9337,9 @@ class LibraryScanner:
         worker._music_metadata_progress = progress_updates
         worker._music_lastfm_reservation_set = lastfm_reservation_set
         worker._music_lastfm_lock = lastfm_lock
+        worker._music_provider_cache = provider_cache
+        worker._music_provider_cache_lock = provider_cache_lock
+        worker._music_provider_inflight = provider_inflight
         metadata_scope = {
             str(artist),
             str(release),
@@ -9175,8 +9353,13 @@ class LibraryScanner:
         error_text = None
         terminated = False
         ingest = None
+        service = None
+        worker_started = time.monotonic()
         try:
             service = MetadataService()
+            service.set_scan_cache(
+                provider_cache, provider_cache_lock, provider_inflight
+            )
             ingest = MetadataIngestService(service, background_assets=True)
             worker._run_music_group_metadata(
                 library_id,
@@ -9220,10 +9403,25 @@ class LibraryScanner:
                     "music album worker could not queue repair release_id=%s",
                     release,
                 )
+        provider_requests = 0
+        provider_elapsed_ms = 0
+        if service is not None:
+            for client in getattr(service, "_clients", {}).values():
+                diagnostics = getattr(client, "diagnostics", dict)()
+                provider_requests += int(diagnostics.get("requests", 0) or 0)
+                provider_elapsed_ms += int(
+                    round(float(diagnostics.get("elapsed_seconds", 0.0) or 0.0) * 1000)
+                )
         return {
             "state": worker._music_metadata_state_delta(baseline, metadata_scope),
             "error": error_text,
             "terminated": terminated,
+            "elapsed_ms": int(round((time.monotonic() - worker_started) * 1000)),
+            "provider_requests": provider_requests,
+            "provider_elapsed_ms": provider_elapsed_ms,
+            "projection_elapsed_ms": int(
+                round(float(getattr(ingest, "_projection_elapsed_ms", 0.0) or 0.0))
+            ),
         }
 
     def _scan_music(
@@ -9250,7 +9448,12 @@ class LibraryScanner:
         self._music_file_stats = {}
         self._music_inventory_pending_writes = []
         self._music_artist_assets_processed = set()
+        self._music_provider_cache = {}
+        self._music_provider_cache_lock = threading.Lock()
+        self._music_provider_inflight: dict[tuple, threading.Event] = {}
         scan_roots = [root] if targets is None else self._target_entries(root, targets)
+        scan_started = time.monotonic()
+        database_metrics_before = self.db.metrics()
         self._set_stage(
             job_id,
             "Discovering music albums",
@@ -9453,6 +9656,16 @@ class LibraryScanner:
                     "state": {},
                     "error": f"{type(error).__name__}: {error}",
                 }
+            scan_stats.metadata_worker_elapsed_ms += int(
+                result.get("elapsed_ms", 0) or 0
+            )
+            scan_stats.provider_requests += int(result.get("provider_requests", 0) or 0)
+            scan_stats.provider_elapsed_ms += int(
+                result.get("provider_elapsed_ms", 0) or 0
+            )
+            scan_stats.projection_elapsed_ms += int(
+                result.get("projection_elapsed_ms", 0) or 0
+            )
             if result.get("terminated"):
                 state = result.get("state") or {}
                 with self._music_state_lock:
@@ -9462,12 +9675,27 @@ class LibraryScanner:
                 return
             publish_group(record, result, publish=publish, advance=publish)
 
+        def wait_for_metadata_worker(futures: Iterable[Future]) -> set[Future]:
+            started = time.monotonic()
+            done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+            scan_stats.metadata_worker_wait_ms += int(
+                round((time.monotonic() - started) * 1000)
+            )
+            return done
+
         def drain_pending(
             wait_for: Future | None = None, *, publish=True, all_pending=False
         ) -> None:
             try:
                 if wait_for is not None:
-                    complete_future(wait_for, publish=publish)
+                    if wait_for.done():
+                        complete_future(wait_for, publish=publish)
+                    elif pending_metadata:
+                        done = wait_for_metadata_worker(pending_metadata)
+                        for future in done:
+                            complete_future(future, publish=publish)
+                    if not all_pending:
+                        return
                 while pending_metadata:
                     done = [
                         future for future in list(pending_metadata) if future.done()
@@ -9475,9 +9703,7 @@ class LibraryScanner:
                     if not done:
                         if not all_pending:
                             return
-                        future = next(iter(pending_metadata))
-                        complete_future(future, publish=publish)
-                        continue
+                        done = wait_for_metadata_worker(pending_metadata)
                     for future in done:
                         complete_future(future, publish=publish)
             except BaseException:
@@ -9616,6 +9842,9 @@ class LibraryScanner:
                     self.store,
                     self._music_lastfm_reservation_set,
                     self._music_lastfm_lock,
+                    self._music_provider_cache,
+                    self._music_provider_cache_lock,
+                    self._music_provider_inflight,
                     state,
                     library_id,
                     root,
@@ -9639,9 +9868,23 @@ class LibraryScanner:
                 from app.providers import MetadataService
 
                 synchronous_service = MetadataService()
+                synchronous_service.set_scan_cache(
+                    self._music_provider_cache,
+                    self._music_provider_cache_lock,
+                    self._music_provider_inflight,
+                )
                 synchronous_ingest = MetadataIngestService(
                     synchronous_service, background_assets=True
                 )
+            provider_before = {
+                provider: getattr(client, "diagnostics", dict)()
+                for provider, client in getattr(
+                    synchronous_service, "_clients", {}
+                ).items()
+            }
+            projection_before = float(
+                getattr(synchronous_ingest, "_projection_elapsed_ms", 0.0) or 0.0
+            )
             self._run_music_group_metadata(
                 library_id,
                 root,
@@ -9655,6 +9898,32 @@ class LibraryScanner:
                 synchronous_service,
                 synchronous_ingest,
                 group_number,
+            )
+            for provider, client in getattr(
+                synchronous_service, "_clients", {}
+            ).items():
+                current = getattr(client, "diagnostics", dict)()
+                previous = provider_before.get(provider, {})
+                scan_stats.provider_requests += int(
+                    current.get("requests", 0) or 0
+                ) - int(previous.get("requests", 0) or 0)
+                scan_stats.provider_elapsed_ms += int(
+                    round(
+                        (
+                            float(current.get("elapsed_seconds", 0.0) or 0.0)
+                            - float(previous.get("elapsed_seconds", 0.0) or 0.0)
+                        )
+                        * 1000
+                    )
+                )
+            scan_stats.projection_elapsed_ms += int(
+                round(
+                    float(
+                        getattr(synchronous_ingest, "_projection_elapsed_ms", 0.0)
+                        or 0.0
+                    )
+                    - projection_before
+                )
             )
             publish_group(record)
 
@@ -9680,6 +9949,7 @@ class LibraryScanner:
                 cancel_pending_metadata()
                 raise
 
+        discovery_started = time.monotonic()
         for root_index, scan_root in enumerate(scan_roots, start=1):
             scan_check_termination()
             try:
@@ -9771,6 +10041,9 @@ class LibraryScanner:
                 message=f"Discovered {inspected_files} music files",
             )
 
+        scan_stats.discovery_elapsed_ms = int(
+            round((time.monotonic() - discovery_started) * 1000)
+        )
         audio_entries.sort(
             key=lambda value: relative(str(root), str(value[0])).casefold()
         )
@@ -9801,6 +10074,7 @@ class LibraryScanner:
                 )
                 parsed_audio[path_key] = AudioTags({})
 
+        tag_parse_started = time.monotonic()
         with ThreadPoolExecutor(
             max_workers=parse_workers,
             thread_name_prefix="zenstream-music-tags",
@@ -9820,6 +10094,9 @@ class LibraryScanner:
             for path_key, (_path, future) in list(pending_parses.items()):
                 finish_parse(path_key, future)
             pending_parses.clear()
+        scan_stats.tag_parse_elapsed_ms = int(
+            round((time.monotonic() - tag_parse_started) * 1000)
+        )
 
         self._set_stage(
             job_id,
@@ -9829,6 +10106,7 @@ class LibraryScanner:
             total=max(1, len(audio_entries)),
             unit="files",
         )
+        album_assembly_started = time.monotonic()
         for index, (path, file_stat) in enumerate(audio_entries, start=1):
             scan_check_termination()
             path_key = _path_key(relative(str(root), str(path)))
@@ -9842,6 +10120,9 @@ class LibraryScanner:
                     files=inspected_files,
                     message=f"Assembled {index} music files",
                 )
+        scan_stats.album_assembly_elapsed_ms = int(
+            round((time.monotonic() - album_assembly_started) * 1000)
+        )
 
         scan_stats.groups_discovered = len(groups)
         self._set_stage(
@@ -9887,6 +10168,42 @@ class LibraryScanner:
             targets,
         )
         self._music_inventory_pending_writes = None
+        database_metrics_after = self.db.metrics()
+        scan_stats.elapsed_ms = int(round((time.monotonic() - scan_started) * 1000))
+        scan_stats.writer_operations = max(
+            0,
+            int(database_metrics_after.get("writer_operations", 0))
+            - int(database_metrics_before.get("writer_operations", 0)),
+        )
+        scan_stats.commit_count = max(
+            0,
+            int(database_metrics_after.get("commit_count", 0))
+            - int(database_metrics_before.get("commit_count", 0)),
+        )
+        scan_stats.writer_wait_ms = max(
+            0,
+            int(
+                round(
+                    (
+                        float(database_metrics_after.get("writer_wait_seconds", 0.0))
+                        - float(database_metrics_before.get("writer_wait_seconds", 0.0))
+                    )
+                    * 1000
+                )
+            ),
+        )
+        scan_stats.writer_hold_ms = max(
+            0,
+            int(
+                round(
+                    (
+                        float(database_metrics_after.get("writer_hold_seconds", 0.0))
+                        - float(database_metrics_before.get("writer_hold_seconds", 0.0))
+                    )
+                    * 1000
+                )
+            ),
+        )
         logger.info(
             "music scan summary library_id=%s job_id=%s files=%s inventory_cache_hits=%s "
             "tag_parses=%s dirty_groups=%s metadata_groups=%s unchanged_groups=%s",

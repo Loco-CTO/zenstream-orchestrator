@@ -119,9 +119,9 @@ class PlaybackManager:
             value = 45.0
         return max(15.0, min(value, 3600.0))
 
-    def __init__(self):
-        self.db = Config().database
-        self.catalog = Catalog()
+    def __init__(self, db=None, catalog=None):
+        self.db = db if db is not None else Config().database
+        self.catalog = catalog if catalog is not None else Catalog()
         self._start_cleanup_thread()
 
     def _start_cleanup_thread(self) -> None:
@@ -372,14 +372,27 @@ class PlaybackManager:
         entity_id: str,
         *,
         audio_probes: dict[str, dict] | None = None,
+        media_file_rows: list[tuple[str, str, str]] | None = None,
+        pending_writes: list[tuple[str, tuple]] | None = None,
     ) -> list[dict]:
         executable = ffprobe_path()
-        rows = self.db.execute(
-            "SELECT f.id,l.directory,f.relative_path FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.entity_id=? AND f.role=?",
-            (entity_id, PLAYABLE_ROLE),
+        if media_file_rows is not None and not self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_sources'"
+        ):
+            # Older scanner-only databases do not have playback projections;
+            # keep admission compatible with those schemas while migrations
+            # are being applied.
+            return []
+        rows = (
+            media_file_rows
+            if media_file_rows is not None
+            else self.db.execute(
+                "SELECT f.id,l.directory,f.relative_path FROM media_files f JOIN library_entities e ON e.id=f.entity_id JOIN libraries l ON l.id=e.library_id WHERE f.entity_id=? AND f.role=?",
+                (entity_id, PLAYABLE_ROLE),
+            )
         )
         values = []
-        track_index_statements = []
+        probe_write_groups: list[list[tuple[str, tuple]]] = []
         has_track_index = bool(
             self.db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_track_languages'"
@@ -460,26 +473,28 @@ class PlaybackManager:
                 "audioCodec": audio.get("codec_name"),
                 "streams": streams,
             }
-            self.db.execute(
-                "INSERT INTO media_sources(id,entity_id,media_file_id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload,probed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(entity_id,media_file_id) DO UPDATE SET container=excluded.container,duration_seconds=excluded.duration_seconds,bitrate=excluded.bitrate,width=excluded.width,height=excluded.height,video_codec=excluded.video_codec,audio_codec=excluded.audio_codec,probe_payload=excluded.probe_payload,probed_at=excluded.probed_at",
+            writes = [
                 (
-                    source_id,
-                    entity_id,
-                    media_file_id,
-                    value["container"],
-                    value["durationSeconds"],
-                    value["bitrate"],
-                    value["width"],
-                    value["height"],
-                    value["videoCodec"],
-                    value["audioCodec"],
-                    json.dumps(payload),
-                    _iso(),
-                ),
-            )
+                    "INSERT INTO media_sources(id,entity_id,media_file_id,container,duration_seconds,bitrate,width,height,video_codec,audio_codec,probe_payload,probed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(entity_id,media_file_id) DO UPDATE SET container=excluded.container,duration_seconds=excluded.duration_seconds,bitrate=excluded.bitrate,width=excluded.width,height=excluded.height,video_codec=excluded.video_codec,audio_codec=excluded.audio_codec,probe_payload=excluded.probe_payload,probed_at=excluded.probed_at",
+                    (
+                        source_id,
+                        entity_id,
+                        media_file_id,
+                        value["container"],
+                        value["durationSeconds"],
+                        value["bitrate"],
+                        value["width"],
+                        value["height"],
+                        value["videoCodec"],
+                        value["audioCodec"],
+                        json.dumps(payload),
+                        _iso(),
+                    ),
+                )
+            ]
             if has_track_index:
-                track_index_statements.append(
+                writes.append(
                     (
                         "DELETE FROM media_track_languages WHERE media_file_id=?",
                         (media_file_id,),
@@ -502,16 +517,27 @@ class PlaybackManager:
                     )
                     if language:
                         indexed_languages.add((track_type, language))
-                track_index_statements.extend(
+                writes.extend(
                     (
                         "INSERT OR IGNORE INTO media_track_languages(media_file_id,track_type,language) VALUES(?,?,?)",
                         (media_file_id, track_type, language),
                     )
                     for track_type, language in sorted(indexed_languages)
                 )
+            probe_write_groups.append(writes)
             values.append(value)
-        if track_index_statements:
-            self.db.write_many(track_index_statements)
+        # Keep each source row and its language-index rows in one transaction,
+        # while bounding a large multi-file entity to 32 probed tracks per
+        # SQLite writer transaction.
+        statements = [statement for group in probe_write_groups for statement in group]
+        if pending_writes is not None:
+            pending_writes.extend(statements)
+        else:
+            for offset in range(0, len(probe_write_groups), 32):
+                batch = probe_write_groups[offset : offset + 32]
+                self.db.write_many(
+                    [statement for group in batch for statement in group]
+                )
         return values
 
     def sources(self, user_id: str, entity_id: str) -> list[dict]:

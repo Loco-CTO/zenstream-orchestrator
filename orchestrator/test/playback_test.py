@@ -43,6 +43,45 @@ class PlaybackTest(unittest.TestCase):
 
         self.assertEqual(value["streams"][0]["codec_name"], "opus")
 
+    def test_probe_entity_can_prepare_source_and_language_writes_without_committing(
+        self,
+    ):
+        manager = object.__new__(PlaybackManager)
+        manager.db = MagicMock()
+        manager.db.execute.side_effect = [[(1,)], [(1,)]]
+        pending_writes = []
+        payload = {
+            "format": {
+                "format_name": "flac",
+                "duration": "12.5",
+                "bit_rate": "900000",
+            },
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "codec_name": "flac",
+                    "tags": {"language": "eng"},
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            track = Path(directory) / "track.flac"
+            track.touch()
+            values = manager.probe_entity(
+                "track-1",
+                audio_probes={"track.flac": payload},
+                media_file_rows=[("file-1", directory, "track.flac")],
+                pending_writes=pending_writes,
+            )
+
+        self.assertEqual(values[0]["durationSeconds"], 12.5)
+        self.assertTrue(any("media_sources" in query for query, _ in pending_writes))
+        self.assertTrue(
+            any("media_track_languages" in query for query, _ in pending_writes)
+        )
+        self.assertEqual(manager.db.write_many.call_count, 0)
+
     def test_progressive_playlist_is_ready_only_with_playlist_and_segment(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

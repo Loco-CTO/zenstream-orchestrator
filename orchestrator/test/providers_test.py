@@ -1,8 +1,12 @@
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 import httpx
 from app.providers import (
+    MetadataService,
     MusicBrainzClient,
     ProviderClient,
     ProviderError,
@@ -348,3 +352,50 @@ class MusicBrainzLookupTest(unittest.TestCase):
                 "https://archive.org/download/mbid-id/index.json",
             ],
         )
+
+
+class MetadataScanCacheTest(unittest.TestCase):
+    def test_scan_cache_single_flights_duplicate_provider_payloads(self):
+        service = MetadataService.__new__(MetadataService)
+        service._scan_cache = {}
+        service._scan_cache_lock = threading.Lock()
+        service._scan_cache_inflight = {}
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def operation():
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.02)
+            return {"title": "shared"}
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            values = list(
+                executor.map(
+                    lambda _index: service._scan_cache_resolve(
+                        ("provider_payload", "musicbrainz", "release", "id", ("",)),
+                        operation,
+                    ),
+                    range(8),
+                )
+            )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(values, [{"title": "shared"}] * 8)
+
+    def test_scan_cache_retries_transient_provider_failures(self):
+        service = MetadataService.__new__(MetadataService)
+        service._scan_cache = {}
+        service._scan_cache_lock = threading.Lock()
+        service._scan_cache_inflight = {}
+        with self.assertRaises(ProviderError):
+            service._scan_cache_resolve(
+                ("provider_payload", "musicbrainz", "release", "missing", ("",)),
+                lambda: (_ for _ in ()).throw(ProviderError("temporary")),
+            )
+        with self.assertRaises(ProviderError):
+            service._scan_cache_resolve(
+                ("provider_payload", "musicbrainz", "release", "missing", ("",)),
+                lambda: (_ for _ in ()).throw(ProviderError("temporary")),
+            )

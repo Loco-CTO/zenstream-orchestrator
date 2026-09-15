@@ -77,7 +77,7 @@ class CatalogReadModel:
     PROGRESS_BATCH_SIZE = 1000
 
     def __init__(self, db=None):
-        self.db = db or Config().database
+        self.db = db if db is not None else Config().database
 
     def available(self) -> bool:
         rows = self.db.read_execute(
@@ -118,6 +118,253 @@ class CatalogReadModel:
             row[1] for row in self.db.read_execute(f"PRAGMA table_info({table})")
         }
         return columns.issubset(existing)
+
+    def _music_album_page_rows(
+        self,
+        entities: dict[str, tuple],
+        summaries: Iterable[tuple],
+        projections: Iterable[tuple],
+        locales: Iterable[str],
+    ) -> list[tuple]:
+        """Build the small release index used by music album pages."""
+        if not self._has_table("catalog_music_album_page"):
+            return []
+        summary_by_id = {row[0]: row for row in summaries}
+        projection_by_key = {(row[0], row[1]): row for row in projections}
+        now = _now()
+        values = []
+        for release_id, row in entities.items():
+            parent = entities.get(row[2]) if row[2] else None
+            if row[3] != "release" or parent is None or parent[3] != "artist":
+                continue
+            summary = summary_by_id.get(release_id)
+            if (
+                summary is None
+                or int(summary[4] or 0) <= 0
+                or int(summary[5] or 0) <= 0
+            ):
+                continue
+            for locale in locales:
+                projection = projection_by_key.get((release_id, locale))
+                payload = {}
+                if projection is not None:
+                    try:
+                        payload = json.loads(projection[5] or "{}")
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                title = str(
+                    (projection[6] if projection is not None else None)
+                    or normalize_search_text(
+                        payload.get("title") or row[4] or "release"
+                    )
+                )
+                release_date = str(
+                    (projection[8] if projection is not None else None)
+                    or payload.get("date")
+                    or payload.get("releaseDate")
+                    or payload.get("year")
+                    or ""
+                )
+                values.append(
+                    (
+                        release_id,
+                        locale,
+                        row[1],
+                        row[2],
+                        title.casefold(),
+                        release_date,
+                        int(summary[8] or 0),
+                        int(summary[9] or 0),
+                        now,
+                    )
+                )
+        return values
+
+    def _music_album_page_status_ids(self, library_ids: Iterable[str]) -> list[str]:
+        if not self._has_table("catalog_music_album_page_status"):
+            return []
+        requested = set(library_ids)
+        if requested:
+            placeholders = ",".join("?" for _ in requested)
+            rows = self.db.read_execute(
+                f"SELECT id FROM libraries WHERE type='music' AND id IN ({placeholders})",
+                sorted(requested),
+            )
+        else:
+            rows = self.db.read_execute("SELECT id FROM libraries WHERE type='music'")
+        return [str(row[0]) for row in rows]
+
+    def rebuild_music_album_pages(self, library_ids: Iterable[str] = ()) -> int:
+        """Rebuild music album page rows from ready catalog projections."""
+        if not self._has_table("catalog_music_album_page"):
+            return 0
+        requested = set(library_ids)
+        library_filter = ""
+        params: list[object] = []
+        if requested:
+            placeholders = ",".join("?" for _ in requested)
+            library_filter = f" AND e.library_id IN ({placeholders})"
+            params.extend(sorted(requested))
+        entities_rows = self.db.read_execute(
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.created_at "
+            "FROM library_entities e WHERE e.entity_type IN ('release','artist')"
+            + library_filter,
+            params,
+        )
+        entities = {row[0]: row for row in entities_rows}
+        selected_ids = list(entities)
+        if not selected_ids:
+            status_ids = self._music_album_page_status_ids(requested)
+            with self.db.transaction() as cursor:
+                if requested:
+                    placeholders = ",".join("?" for _ in requested)
+                    cursor.execute(
+                        "DELETE FROM catalog_music_album_page WHERE library_id IN ("
+                        + placeholders
+                        + ")",
+                        sorted(requested),
+                    )
+                    if status_ids:
+                        cursor.executemany(
+                            "INSERT INTO catalog_music_album_page_status(library_id,state,generation,updated_at,error) "
+                            "VALUES(?,?,?,?,NULL) ON CONFLICT(library_id) DO UPDATE SET state=excluded.state,generation=catalog_music_album_page_status.generation+1,updated_at=excluded.updated_at,error=NULL",
+                            [
+                                (library_id, "ready", 1, _now())
+                                for library_id in status_ids
+                            ],
+                        )
+            return 0
+        placeholders = ",".join("?" for _ in selected_ids)
+        summaries = self.db.read_execute(
+            "SELECT entity_id,library_id,parent_id,entity_type,playable_leaf_count,"
+            "media_file_count,media_added_ns,media_last_added_ns,added_sort_ns,"
+            "last_added_sort_ns,generation,updated_at FROM catalog_entity_summary "
+            f"WHERE entity_id IN ({placeholders})",
+            selected_ids,
+        )
+        locales = list(MetadataLanguageSettings().get()) or ["en"]
+        locale_placeholders = ",".join("?" for _ in locales)
+        projections = self.db.read_execute(
+            "SELECT entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,"
+            "rating_sort,release_sort,runtime_sort,updated_at,generation "
+            "FROM catalog_item_projection "
+            f"WHERE entity_id IN ({placeholders}) AND locale IN ({locale_placeholders})",
+            [*selected_ids, *locales],
+        )
+        page_rows = self._music_album_page_rows(
+            entities, summaries, projections, locales
+        )
+        status_ids = self._music_album_page_status_ids(
+            requested or {row[1] for row in entities.values()}
+        )
+        target_libraries = requested or {row[1] for row in entities.values()}
+        with self.db.transaction() as cursor:
+            target_placeholders = ",".join("?" for _ in target_libraries)
+            cursor.execute(
+                "DELETE FROM catalog_music_album_page WHERE library_id IN ("
+                + target_placeholders
+                + ")",
+                sorted(target_libraries),
+            )
+            cursor.executemany(
+                "INSERT INTO catalog_music_album_page(release_id,locale,library_id,artist_id,title_sort,release_sort,added_sort_ns,last_added_sort_ns,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                page_rows,
+            )
+            if status_ids:
+                cursor.executemany(
+                    "INSERT INTO catalog_music_album_page_status(library_id,state,generation,updated_at,error) "
+                    "VALUES(?,?,?,?,NULL) ON CONFLICT(library_id) DO UPDATE SET state=excluded.state,generation=catalog_music_album_page_status.generation+1,updated_at=excluded.updated_at,error=NULL",
+                    [(library_id, "ready", 1, _now()) for library_id in status_ids],
+                )
+        return len(page_rows)
+
+    def refresh_music_album_pages(self, release_ids: Iterable[str]) -> int:
+        """Refresh page rows for releases published by an active scan."""
+        ids = list(dict.fromkeys(str(value) for value in release_ids if value))
+        if not ids or not self._has_table("catalog_music_album_page"):
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        entity_rows = self.db.read_execute(
+            "SELECT id,library_id,parent_id,entity_type,relative_path,created_at "
+            "FROM library_entities WHERE id IN ("
+            + placeholders
+            + ") AND entity_type='release'",
+            ids,
+        )
+        entities = {row[0]: row for row in entity_rows}
+        if not entities:
+            with self.db.transaction() as cursor:
+                cursor.execute(
+                    "DELETE FROM catalog_music_album_page WHERE release_id IN ("
+                    + placeholders
+                    + ")",
+                    ids,
+                )
+            return 0
+        summaries = self.db.read_execute(
+            "SELECT entity_id,library_id,parent_id,entity_type,playable_leaf_count,"
+            "media_file_count,media_added_ns,media_last_added_ns,added_sort_ns,"
+            "last_added_sort_ns,generation,updated_at FROM catalog_entity_summary "
+            "WHERE entity_id IN (" + placeholders + ")",
+            ids,
+        )
+        locales = list(MetadataLanguageSettings().get()) or ["en"]
+        locale_placeholders = ",".join("?" for _ in locales)
+        projections = self.db.read_execute(
+            "SELECT entity_id,locale,library_id,parent_id,entity_type,payload,title_sort,"
+            "rating_sort,release_sort,runtime_sort,updated_at,generation "
+            "FROM catalog_item_projection WHERE entity_id IN ("
+            + placeholders
+            + ") AND locale IN ("
+            + locale_placeholders
+            + ")",
+            [*ids, *locales],
+        )
+        page_rows = self._music_album_page_rows(
+            entities, summaries, projections, locales
+        )
+        library_ids = sorted({row[1] for row in entities.values()})
+        status_ids = self._music_album_page_status_ids(library_ids)
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM catalog_music_album_page WHERE release_id IN ("
+                + placeholders
+                + ")",
+                ids,
+            )
+            cursor.executemany(
+                "INSERT INTO catalog_music_album_page(release_id,locale,library_id,artist_id,title_sort,release_sort,added_sort_ns,last_added_sort_ns,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                page_rows,
+            )
+            if status_ids:
+                cursor.executemany(
+                    "INSERT INTO catalog_music_album_page_status(library_id,state,generation,updated_at,error) "
+                    "VALUES(?,?,?,?,NULL) ON CONFLICT(library_id) DO UPDATE SET state=excluded.state,generation=catalog_music_album_page_status.generation+1,updated_at=excluded.updated_at,error=NULL",
+                    [(library_id, "ready", 1, _now()) for library_id in status_ids],
+                )
+        return len(page_rows)
+
+    def _music_album_pages_ready(self) -> bool:
+        """Return whether the additive music page cache is ready to serve."""
+        if not self._has_table("catalog_music_album_page") or not self._has_table(
+            "catalog_music_album_page_status"
+        ):
+            return True
+        library_rows = self.db.read_execute(
+            "SELECT id FROM libraries WHERE type='music'"
+        )
+        if not library_rows:
+            return True
+        library_ids = [str(row[0]) for row in library_rows]
+        placeholders = ",".join("?" for _ in library_ids)
+        rows = self.db.read_execute(
+            "SELECT library_id FROM catalog_music_album_page_status "
+            f"WHERE library_id IN ({placeholders}) AND state='ready'",
+            library_ids,
+        )
+        return {str(row[0]) for row in rows} == set(library_ids)
 
     def _summary_values(self, entities, children, entity_ids=None, progress=None):
         media_query = (
@@ -433,6 +680,9 @@ class CatalogReadModel:
         projections, genres, grams = self._projection_values(
             entities, locales, progress
         )
+        music_album_page_rows = self._music_album_page_rows(
+            entities, summaries, projections, locales
+        )
         progress("projections", len(projections), projection_total, force=True)
         progress("user_summary", 0, 0, force=True)
         users = self._user_values(entities, children, progress)
@@ -457,6 +707,7 @@ class CatalogReadModel:
         write_total = (
             len(summaries)
             + len(projections)
+            + len(music_album_page_rows)
             + len(genres)
             + gram_write_count
             + len(users)
@@ -549,6 +800,26 @@ class CatalogReadModel:
                 cursor.executemany(
                     "INSERT INTO catalog_artwork_selection(entity_id,locale,image_type,provider,local_path,blur_hash,version,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                     artwork_selections,
+                )
+            if self._has_table("catalog_music_album_page"):
+                cursor.execute("DELETE FROM catalog_music_album_page")
+                write_rows(
+                    cursor,
+                    "INSERT INTO catalog_music_album_page(release_id,locale,library_id,artist_id,title_sort,release_sort,added_sort_ns,last_added_sort_ns,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    music_album_page_rows,
+                    "writing_music_album_pages",
+                )
+            if self._has_table("catalog_music_album_page_status"):
+                cursor.execute("DELETE FROM catalog_music_album_page_status")
+                music_library_ids = [
+                    row[0]
+                    for row in cursor.execute(
+                        "SELECT id FROM libraries WHERE type='music'"
+                    ).fetchall()
+                ]
+                cursor.executemany(
+                    "INSERT INTO catalog_music_album_page_status(library_id,state,generation,updated_at,error) VALUES(?,?,?,?,NULL)",
+                    [(library_id, "ready", 1, now) for library_id in music_library_ids],
                 )
             if self._has_progress_columns():
                 cursor.execute(
@@ -909,11 +1180,13 @@ class CatalogReadModel:
         entities, missing_summary_ids, missing_projection_ids = self._coverage_gaps(
             configured
         )
+        music_pages_ready = self._music_album_pages_ready()
         if (
             status
             and status[0] == "ready"
             and not missing_summary_ids
             and not missing_projection_ids
+            and music_pages_ready
         ):
             return entity_count
         missing_ids = list(
@@ -929,6 +1202,17 @@ class CatalogReadModel:
                 len(missing_ids),
             )
             return summary_count
+        if (
+            status
+            and status[0] == "ready"
+            and not missing_summary_ids
+            and not missing_projection_ids
+            and not music_pages_ready
+        ):
+            # This is a cache-only backfill for the additive page projection.
+            # It never walks library roots or calls metadata providers.
+            self.rebuild_music_album_pages()
+            return entity_count
         if status and status[0] == "ready" and 0 < len(missing_ids) <= 300:
             try:
                 roots = self._top_roots(entities, missing_ids)
@@ -1095,6 +1379,7 @@ class CatalogReadModel:
                     [*entities.keys(), *entities.keys()],
                 )
             ]
+        affected_libraries = explicit_libraries | {row[1] for row in summaries}
         with self.db.transaction() as cursor:
             cursor.executemany(
                 "INSERT INTO catalog_entity_summary(entity_id,library_id,parent_id,entity_type,playable_leaf_count,media_file_count,media_added_ns,media_last_added_ns,added_sort_ns,last_added_sort_ns,generation,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
@@ -1157,7 +1442,6 @@ class CatalogReadModel:
                 "UPDATE catalog_read_model_status SET state='ready',generation=generation+1,updated_at=?,error=NULL WHERE id=1",
                 (now,),
             )
-            affected_libraries = explicit_libraries | {row[1] for row in summaries}
             if self._has_table("catalog_library_summary"):
                 for library_id in affected_libraries:
                     library_roots = [
@@ -1200,6 +1484,14 @@ class CatalogReadModel:
                     _latest_root_by_library[library_id] = library_roots[0]
                 else:
                     _latest_root_by_library.pop(library_id, None)
+        if explicit_libraries:
+            # An explicit library refresh also covers removed releases, so the
+            # page cache must be rebuilt from the current catalog set.
+            self.rebuild_music_album_pages(explicit_libraries)
+        elif entities:
+            self.refresh_music_album_pages(
+                row[0] for row in entities.values() if row[3] == "release"
+            )
         return len(summaries)
 
     def refresh_music_publication(self, release_id: str, artist_id: str) -> int:
@@ -1461,6 +1753,7 @@ class CatalogReadModel:
                     "error=NULL,updated_at=excluded.updated_at",
                     (library_id, library_id, now),
                 )
+        self.refresh_music_album_pages([release_id])
         with _latest_root_lock:
             _latest_root_by_library[artist[1]] = artist_id
         return len(summaries)

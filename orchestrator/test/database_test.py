@@ -104,6 +104,25 @@ class DatabaseHandlerTest(unittest.TestCase):
         finally:
             database.close()
 
+    def test_writer_metrics_include_commit_and_hold_time(self):
+        database = DatabaseHandler("sqlite", {}, ":memory:")
+        try:
+            database.execute("CREATE TABLE values_table(value INTEGER)")
+            before = database.metrics()
+            database.write_many(
+                [
+                    ("INSERT INTO values_table VALUES(?)", (1,)),
+                    ("INSERT INTO values_table VALUES(?)", (2,)),
+                ]
+            )
+            after = database.metrics()
+            self.assertGreaterEqual(
+                after["commit_count"] - before["commit_count"], 1
+            )
+            self.assertIn("writer_hold_seconds", after)
+        finally:
+            database.close()
+
     def test_writer_gate_admits_waiters_in_arrival_order(self):
         database = DatabaseHandler("sqlite", {}, ":memory:")
         database.execute("CREATE TABLE values_table(value INTEGER)")

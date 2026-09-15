@@ -2494,11 +2494,189 @@ class MetadataIngestService:
                 image_ingest = MetadataImageIngestService(cache)
         self.image_ingest = image_ingest
         self.background_assets = background_assets
+        self._projection_elapsed_ms = 0.0
+        self._completed_ingestion: dict[tuple, None] = {}
+        self._projection_completion_lock = threading.Lock()
         if credit_ingest is None:
             cache = getattr(metadata_service, "cache", None)
             if cache is not None and getattr(cache, "db", None) is not None:
                 credit_ingest = PersonCreditIngestService(cache)
         self.credit_ingest = credit_ingest
+
+    @staticmethod
+    def _document_digest(document: dict) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                document,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @classmethod
+    def _local_release_context_digest(cls, document: dict) -> str:
+        context = {
+            key: document.get(key)
+            for key in (
+                "album",
+                "albumId",
+                "releaseId",
+                "releaseGroupId",
+                "title",
+                "trackNumber",
+                "discNumber",
+                "position",
+                "disc",
+                "albumArtist",
+                "artists",
+                "contributingArtists",
+            )
+            if key in document
+        }
+        return cls._document_digest(context)
+
+    def _projection_tables(self, db) -> set[str]:
+        execute = getattr(db, "execute", None)
+        if not callable(execute):
+            return set()
+        cache_key = id(db)
+        cached = getattr(self, "_projection_table_cache", {}).get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            tables = {
+                str(row[0])
+                for row in execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        except Exception:
+            return set()
+        if not hasattr(self, "_projection_table_cache"):
+            self._projection_table_cache = {}
+        self._projection_table_cache[cache_key] = tables
+        return tables
+
+    def _projection_is_complete(
+        self,
+        db,
+        entity_id: str,
+        locale: str,
+        normalized: dict,
+    ) -> bool:
+        """Conservatively verify the cached projection before skipping work."""
+        tables = self._projection_tables(db)
+        execute = getattr(db, "execute", None)
+        if "catalog_item_projection" not in tables or not callable(execute):
+            return False
+        try:
+            if not execute(
+                "SELECT 1 FROM catalog_item_projection WHERE entity_id=? AND locale=? LIMIT 1",
+                (entity_id, locale),
+            ):
+                return False
+            title = normalized.get("title")
+            if "catalog_search" in tables and title:
+                if not execute(
+                    "SELECT 1 FROM catalog_search WHERE entity_id=? AND locale=? LIMIT 1",
+                    (entity_id, locale),
+                ):
+                    return False
+            expected_genres = {
+                normalize_search_text(value)
+                for value in (normalized.get("genres") or normalized.get("tags") or [])
+                if isinstance(value, str) and value.strip()
+            }
+            if expected_genres and "catalog_item_genres" in tables:
+                rows = execute(
+                    "SELECT COUNT(*) FROM catalog_item_genres WHERE entity_id=? AND locale=?",
+                    (entity_id, locale),
+                )
+                if not rows or int(rows[0][0] or 0) < len(expected_genres):
+                    return False
+            expected_images = {
+                str(value.get("type"))
+                for value in normalized.get("images", []) or []
+                if isinstance(value, dict) and value.get("type") and value.get("url")
+            }
+            if expected_images and "catalog_artwork_selection" in tables:
+                rows = execute(
+                    "SELECT COUNT(DISTINCT image_type) FROM catalog_artwork_selection "
+                    "WHERE entity_id=? AND locale=?",
+                    (entity_id, locale),
+                )
+                if not rows or int(rows[0][0] or 0) < len(expected_images):
+                    return False
+        except Exception:
+            return False
+        return True
+
+    def _ingestion_key(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locale: str,
+        normalized: dict,
+        *,
+        replace_metadata: bool,
+        target_entity_id: str | None,
+    ) -> tuple:
+        return (
+            provider,
+            entity_type,
+            str(provider_id),
+            str(target_entity_id or ""),
+            locale,
+            self._document_digest(normalized),
+            self._local_release_context_digest(normalized),
+            bool(replace_metadata),
+        )
+
+    def _project(
+        self,
+        db,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        locale: str,
+        normalized: dict,
+        *,
+        replace_metadata: bool = False,
+        target_entity_id: str | None = None,
+    ) -> None:
+        key = self._ingestion_key(
+            provider,
+            entity_type,
+            provider_id,
+            locale,
+            normalized,
+            replace_metadata=replace_metadata,
+            target_entity_id=target_entity_id,
+        )
+        with self._projection_completion_lock:
+            completed = key in self._completed_ingestion
+        if completed and target_entity_id and self._projection_is_complete(
+            db, target_entity_id, locale, normalized
+        ):
+            return
+        started = time.monotonic()
+        MetadataSearchProjection(db).project(
+            provider,
+            entity_type,
+            provider_id,
+            locale,
+            normalized,
+            replace_metadata=replace_metadata,
+            target_entity_id=target_entity_id,
+        )
+        self._projection_elapsed_ms += max(0.0, time.monotonic() - started) * 1000.0
+        with self._projection_completion_lock:
+            self._completed_ingestion[key] = None
+            while len(self._completed_ingestion) > 4096:
+                self._completed_ingestion.pop(next(iter(self._completed_ingestion)))
 
     def locales(self) -> list[str]:
         return list(self._locales)
@@ -2591,6 +2769,7 @@ class MetadataIngestService:
         force_assets: bool | None = None,
         replace_metadata: bool = False,
         target_entity_id: str | None = None,
+        project: bool = True,
     ) -> dict[str, dict]:
         neutral = self.is_locale_neutral(provider, entity_type)
         locales = list(dict.fromkeys(self.locales() if locales is None else locales))
@@ -2616,7 +2795,10 @@ class MetadataIngestService:
             if hasattr(self.metadata_service, "fetch_locales"):
                 fetch_kwargs = {
                     "force": force,
-                    "project": not neutral,
+                    # Ingestion owns projection.  Fetching a fresh document
+                    # must not project it once here and then again in
+                    # ingest_document below.
+                    "project": False,
                 }
                 if target_entity_id:
                     fetch_kwargs["target_entity_id"] = target_entity_id
@@ -2696,14 +2878,16 @@ class MetadataIngestService:
                     replace_metadata=replace_metadata,
                     complete_batch=complete_batch,
                     target_entity_id=target_entity_id,
+                    project=project,
                 )
             }
 
         cache = getattr(self.metadata_service, "cache", None)
         db = getattr(cache, "db", None)
-        if db is not None:
+        if db is not None and project:
             for locale in locales:
-                MetadataSearchProjection(db).project(
+                self._project(
+                    db,
                     provider,
                     entity_type,
                     provider_id,
@@ -2817,6 +3001,7 @@ class MetadataIngestService:
         replace_metadata: bool = False,
         complete_batch: bool | None = None,
         target_entity_id: str | None = None,
+        project: bool = True,
     ) -> dict:
         """Materialize a normalized document, including documents cached by aggregation."""
         neutral = self.is_locale_neutral(provider, entity_type)
@@ -2827,12 +3012,13 @@ class MetadataIngestService:
         asset_locale = "" if neutral else locale
         cache = getattr(self.metadata_service, "cache", None)
         db = getattr(cache, "db", None)
-        if db is not None:
+        if db is not None and project:
             projection_locales = (
                 self.locales() if neutral and locale == "" else [locale]
             )
             for projection_locale in projection_locales:
-                MetadataSearchProjection(db).project(
+                self._project(
+                    db,
                     provider,
                     entity_type,
                     provider_id,

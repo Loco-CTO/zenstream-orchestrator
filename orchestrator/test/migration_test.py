@@ -112,8 +112,19 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "bazarr_episode_mappings",
                         "bazarr_movie_mappings",
                         "metadata_refresh_state",
+                        "catalog_music_album_page",
+                        "catalog_music_album_page_status",
                     }
                     <= tables
+                )
+                self.assertTrue(
+                    {
+                        "idx_music_album_page_title",
+                        "idx_music_album_page_release",
+                        "idx_music_album_page_added",
+                        "idx_music_album_page_last_added",
+                    }
+                    <= indexes
                 )
                 refresh_state_columns = {
                     row[1]

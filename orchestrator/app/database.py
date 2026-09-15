@@ -83,7 +83,9 @@ class DatabaseHandler:
         self._last_passive_checkpoint_clean = False
         self._timing_lock = threading.Lock()
         self._writer_wait_seconds = 0.0
+        self._writer_hold_seconds = 0.0
         self._writer_operations = 0
+        self._commit_count = 0
         self._reader_wait_seconds = 0.0
         self._reader_operations = 0
         self.connect()
@@ -409,7 +411,9 @@ class DatabaseHandler:
         with self._timing_lock:
             return {
                 "writer_operations": self._writer_operations,
+                "commit_count": self._commit_count,
                 "writer_wait_seconds": self._writer_wait_seconds,
+                "writer_hold_seconds": self._writer_hold_seconds,
                 "reader_operations": self._reader_operations,
                 "reader_wait_seconds": self._reader_wait_seconds,
             }
@@ -419,7 +423,9 @@ class DatabaseHandler:
     ) -> None:
         with self._timing_lock:
             self._writer_operations += 1
+            self._commit_count += 1
             self._writer_wait_seconds += max(0.0, wait_seconds)
+            self._writer_hold_seconds += max(0.0, hold_seconds)
         if wait_seconds >= 0.1 or hold_seconds >= 0.25:
             logger.warning(
                 "sqlite writer timing operation=%s wait_seconds=%.3f hold_seconds=%.3f total_seconds=%.3f",

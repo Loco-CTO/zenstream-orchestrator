@@ -27,6 +27,8 @@ class CatalogReadModelTest(unittest.TestCase):
             "CREATE TABLE catalog_root_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,title_sort TEXT,PRIMARY KEY(gram,entity_id,locale))",
             "CREATE TABLE catalog_library_summary(library_id TEXT PRIMARY KEY,generation INTEGER,supports_last_added INTEGER,last_root_entity_id TEXT,updated_at TEXT)",
             "CREATE TABLE catalog_artwork_selection(entity_id TEXT,locale TEXT,image_type TEXT,provider TEXT,local_path TEXT,blur_hash TEXT,version TEXT,updated_at TEXT,PRIMARY KEY(entity_id,locale,image_type))",
+            "CREATE TABLE catalog_music_album_page(release_id TEXT,locale TEXT,library_id TEXT,artist_id TEXT,title_sort TEXT,release_sort TEXT,added_sort_ns INTEGER,last_added_sort_ns INTEGER,updated_at TEXT,PRIMARY KEY(release_id,locale))",
+            "CREATE TABLE catalog_music_album_page_status(library_id TEXT PRIMARY KEY,state TEXT,generation INTEGER,updated_at TEXT,error TEXT)",
             "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,is_primary INTEGER)",
             "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT,fetched_at TEXT,blur_hash TEXT)",
             "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT,generation INTEGER,updated_at TEXT,error TEXT)",
@@ -98,6 +100,51 @@ class CatalogReadModelTest(unittest.TestCase):
             ),
             [("collection-item", "series", "library", 1)],
         )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_music_album_page_rebuild_indexes_only_playable_releases(self, _languages):
+        self.db.execute(
+            "INSERT INTO libraries VALUES('music','Music','music','ready',NULL,'2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('artist','music',NULL,'artist','Artist',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('release','music','artist','release','Album',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('track','music','release','track','Album/01.mp3',NULL,NULL,NULL,1,1,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('empty-release','music','artist','release','Empty',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES('audio','track','Album/01.mp3','media',10)"
+        )
+
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT release_id,locale,artist_id,title_sort,added_sort_ns,last_added_sort_ns FROM catalog_music_album_page"
+            ),
+            [("release", "en", "artist", "album", 10, 10)],
+        )
+        self.assertEqual(
+            self.db.read_execute(
+                "SELECT library_id,state FROM catalog_music_album_page_status"
+            ),
+            [("music", "ready")],
+        )
+        self.assertTrue(model._music_album_pages_ready())
+
+    def test_music_album_page_status_ids_filter_requested_music_libraries(self):
+        self.db.execute(
+            "INSERT INTO libraries VALUES('music','Music','music','ready',NULL,'2026')"
+        )
+        model = CatalogReadModel(self.db)
+        self.assertEqual(model._music_album_page_status_ids({"music"}), ["music"])
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
     def test_rebuild_backfills_cached_artwork_selection(self, _languages):

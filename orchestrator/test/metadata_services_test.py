@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -61,6 +62,29 @@ class _BulkFetcher(_Fetcher):
             (provider, entity_type, provider_id, tuple(locales), force)
         )
         return {locale: {"title": locale, "images": []} for locale in locales}
+
+
+class _ProjectAwareFetcher(_BulkFetcher):
+    def __init__(self):
+        super().__init__()
+        self.project_flags = []
+        self.cache = SimpleNamespace(db=object())
+
+    def fetch_locales(
+        self,
+        provider,
+        entity_type,
+        provider_id,
+        locales,
+        force=False,
+        *,
+        project=True,
+        target_entity_id=None,
+    ):
+        self.project_flags.append(project)
+        return super().fetch_locales(
+            provider, entity_type, provider_id, locales, force=force
+        )
 
 
 class _ImageCache:
@@ -1384,6 +1408,51 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(len(fetcher.bulk_calls), 1)
         self.assertEqual(fetcher.bulk_calls[0][3], ("en", "ja", "zh-TW"))
         self.assertEqual([value["title"] for value in values], ["en", "ja", "zh-TW"])
+
+    def test_ingest_projects_a_fresh_document_once(self):
+        fetcher = _ProjectAwareFetcher()
+        ingest = MetadataIngestService(fetcher, _Settings(["en"]))
+
+        with patch("app.metadata_services.MetadataSearchProjection.project") as project:
+            ingest.ingest_locales(
+                "tmdb",
+                "movie",
+                "movie-1",
+                ["en"],
+                target_entity_id="entity-1",
+            )
+
+        self.assertEqual(fetcher.project_flags, [False])
+        project.assert_called_once()
+
+    def test_ingest_skips_complete_duplicate_projection(self):
+        fetcher = _ProjectAwareFetcher()
+        ingest = MetadataIngestService(fetcher, _Settings(["en"]))
+        ingest._projection_is_complete = MagicMock(return_value=True)
+        document = {"title": "Cached", "images": []}
+
+        with patch("app.metadata_services.MetadataSearchProjection.project") as project:
+            ingest.ingest_document(
+                "tmdb",
+                "movie",
+                "movie-1",
+                "en",
+                document,
+                target_entity_id="entity-1",
+            )
+            ingest.ingest_document(
+                "tmdb",
+                "movie",
+                "movie-1",
+                "en",
+                document,
+                target_entity_id="entity-1",
+            )
+
+        project.assert_called_once()
+        ingest._projection_is_complete.assert_called_once_with(
+            fetcher.cache.db, "entity-1", "en", document
+        )
 
     def test_musicbrainz_ingest_fetches_one_neutral_document_for_all_catalog_locales(
         self,

@@ -2504,6 +2504,135 @@ class Catalog:
             key=track_sort_key,
         )
 
+    def _music_album_page_ready(
+        self, library_ids: set[str], language: str | None = None
+    ) -> bool:
+        if not library_ids:
+            return False
+        if not self._has_table("catalog_music_album_page") or not self._has_table(
+            "catalog_music_album_page_status"
+        ):
+            return False
+        placeholders = ",".join("?" for _ in library_ids)
+        rows = self.db.execute(
+            "SELECT library_id FROM catalog_music_album_page_status "
+            f"WHERE library_id IN ({placeholders}) AND state='ready'",
+            sorted(library_ids),
+        )
+        if {str(row[0]) for row in rows} != library_ids:
+            return False
+        if language is None:
+            return True
+        expected = self.db.execute(
+            "SELECT COUNT(*) FROM catalog_entity_summary "
+            "WHERE entity_type='release' AND parent_id IS NOT NULL "
+            "AND playable_leaf_count>0 AND media_file_count>0 "
+            f"AND library_id IN ({placeholders}) AND EXISTS ("
+            "SELECT 1 FROM library_entities artist "
+            "WHERE artist.id=catalog_entity_summary.parent_id AND artist.entity_type='artist')",
+            sorted(library_ids),
+        )
+        actual = self.db.execute(
+            "SELECT COUNT(*) FROM catalog_music_album_page "
+            f"WHERE locale=? AND library_id IN ({placeholders})",
+            [language, *sorted(library_ids)],
+        )
+        return bool(expected and actual and int(expected[0][0]) == int(actual[0][0]))
+
+    def _music_album_page(
+        self,
+        user_id: str,
+        language: str,
+        library_ids: set[str],
+        *,
+        page: int,
+        page_size: int,
+        sort_by: str | None,
+        sort_order: str,
+    ) -> dict:
+        placeholders = ",".join("?" for _ in library_ids)
+        count_rows = self.db.execute(
+            "SELECT COUNT(*) FROM catalog_music_album_page "
+            f"WHERE locale=? AND library_id IN ({placeholders})",
+            [language, *sorted(library_ids)],
+        )
+        total = int(count_rows[0][0] or 0) if count_rows else 0
+        direction = "DESC" if sort_order.casefold() == "descending" else "ASC"
+        sort_key = str(sort_by or "title").casefold()
+        order_column = (
+            "release_sort"
+            if sort_key in {"year", "release", "date"}
+            else "last_added_sort_ns"
+            if sort_key in {"added", "added-date", "dateadded", "lastadded"}
+            else "title_sort"
+        )
+        offset = max(0, page - 1) * page_size
+        rows = self.db.execute(
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+            "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+            "FROM catalog_music_album_page p JOIN library_entities e ON e.id=p.release_id "
+            f"WHERE p.locale=? AND p.library_id IN ({placeholders}) "
+            f"ORDER BY p.{order_column} {direction},p.title_sort {direction},p.release_id {direction} "
+            "LIMIT ? OFFSET ?",
+            [language, *sorted(library_ids), page_size, offset],
+        )
+        if not rows:
+            return {"items": [], "page": page, "pageSize": page_size, "total": total}
+
+        release_ids = [row[0] for row in rows]
+        release_placeholders = ",".join("?" for _ in release_ids)
+        try:
+            track_rows = self.db.execute(
+                "SELECT track.id,track.parent_id FROM library_entities track "
+                "WHERE track.parent_id IN ("
+                + release_placeholders
+                + ") AND track.entity_type='track' "
+                "AND EXISTS (SELECT 1 FROM media_files media WHERE media.entity_id=track.id AND media.role='media') "
+                "ORDER BY track.parent_id,track.disc_number IS NULL,track.disc_number,"
+                "track.track_number IS NULL,track.track_number,track.relative_path COLLATE NOCASE,track.id",
+                release_ids,
+            )
+        except Exception:
+            track_rows = self.db.execute(
+                "SELECT track.id,track.parent_id FROM library_entities track "
+                "WHERE track.parent_id IN ("
+                + release_placeholders
+                + ") AND track.entity_type='track' "
+                "ORDER BY track.parent_id,track.relative_path COLLATE NOCASE,track.id",
+                release_ids,
+            )
+        children: dict[str, list[str]] = {}
+        for track_id, parent_id in track_rows:
+            children.setdefault(str(parent_id), []).append(str(track_id))
+
+        date_rows = self.db.execute(
+            "SELECT c.entity_id,c.added_sort_ns,c.last_added_sort_ns,e.created_at "
+            "FROM catalog_entity_summary c JOIN library_entities e ON e.id=c.entity_id "
+            "WHERE c.entity_id IN ("
+            + release_placeholders
+            + ")",
+            release_ids,
+        )
+        dates = {
+            row[0]: {
+                "addedAt": _date_from_ns(row[1]) or row[3],
+                "lastAddedAt": _date_from_ns(row[2]) or row[3],
+            }
+            for row in date_rows
+        }
+        self._seed_hydration_rows(user_id, [row[:10] for row in rows], language)
+        values = [
+            self._music_album_value(
+                user_id,
+                row,
+                language,
+                dates,
+                children.get(row[0], []),
+            )
+            for row in rows
+        ]
+        return {"items": values, "page": page, "pageSize": page_size, "total": total}
+
     def _music_catalog_generation(self, library_id: str) -> int:
         if not self._has_table("catalog_library_summary"):
             return 0
@@ -2553,6 +2682,16 @@ class Catalog:
                 for library in self.libraries(user_id)
                 if library["type"] == "music"
             }
+        if self._music_album_page_ready(allowed, language):
+            return self._music_album_page(
+                user_id,
+                language,
+                allowed,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
         rows = self._music_release_rows(allowed)
         row_by_id = {row[0]: row for row in rows}
         if not rows:

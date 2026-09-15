@@ -487,6 +487,10 @@ class MetadataServicesTest(unittest.TestCase):
         finally:
             executor.shutdown()
         self.assertEqual(calls, [1])
+        diagnostics = executor.diagnostics()
+        self.assertEqual(diagnostics["submitted"], 1)
+        self.assertEqual(diagnostics["coalesced"], 1)
+        self.assertEqual(diagnostics["pending"], 0)
 
     def test_asset_executor_submit_once_deduplicates_completed_work(self):
         executor = MetadataAssetExecutor(max_workers=1)
@@ -547,6 +551,43 @@ class MetadataServicesTest(unittest.TestCase):
 
             asset_queue.submit.assert_not_called()
             asset_queue.submit_wait.assert_called_once()
+
+    def test_asset_work_key_keeps_target_entities_separate(self):
+        fetcher = _Fetcher()
+        image_ingest = MagicMock()
+        asset_queue = MagicMock()
+        document = {"title": "Album", "images": []}
+
+        with patch("app.metadata_services.asset_executor", asset_queue):
+            service = MetadataIngestService(
+                fetcher,
+                _Settings(["en"]),
+                image_ingest=image_ingest,
+                background_assets=True,
+            )
+            service.ingest_document(
+                "musicbrainz",
+                "release",
+                "release-1",
+                "en",
+                document,
+                target_entity_id="release-entity-a",
+            )
+            service.ingest_document(
+                "musicbrainz",
+                "release",
+                "release-1",
+                "en",
+                document,
+                target_entity_id="release-entity-b",
+            )
+
+        self.assertEqual(asset_queue.submit.call_count, 2)
+        first_key = asset_queue.submit.call_args_list[0].args[0]
+        second_key = asset_queue.submit.call_args_list[1].args[0]
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(first_key[3], "release-entity-a")
+        self.assertEqual(second_key[3], "release-entity-b")
 
     def test_music_read_fallback_uses_requested_neutral_and_english_tiers(self):
         def cache(provider, provider_id, locale, payload):
@@ -1139,6 +1180,39 @@ class MetadataServicesTest(unittest.TestCase):
                 self.assertNotIn("blurHash", value["images"]["Logo"])
             finally:
                 database.close()
+
+    def test_background_image_completion_uses_artwork_only_projection(self):
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_artwork_selection("
+            "entity_id TEXT,locale TEXT,image_type TEXT,provider TEXT,"
+            "local_path TEXT,blur_hash TEXT,version TEXT)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_ingest = MetadataImageIngestService(
+                SimpleNamespace(db=self.db),
+                directory,
+                downloader=lambda _url: b"image-data",
+                encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
+                hasher=lambda _target: "blur",
+            )
+            with patch.object(
+                MetadataSearchProjection, "project"
+            ) as project, patch.object(
+                MetadataSearchProjection, "reproject_entity_artwork"
+            ) as reproject:
+                image_ingest.ingest_documents(
+                    "tmdb",
+                    "movie",
+                    "1",
+                    {"en": {"images": []}},
+                    target_entity_id="movie-1",
+                )
+
+            project.assert_not_called()
+            reproject.assert_called_once_with("movie-1")
 
     def test_concurrent_projection_preparation_merges_after_writer_recheck(self):
         with tempfile.TemporaryDirectory() as directory:

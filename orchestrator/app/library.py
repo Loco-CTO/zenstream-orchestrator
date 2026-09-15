@@ -598,6 +598,7 @@ class MusicScanStats:
     groups_reprocessed: int = 0
     metadata_groups: int = 0
     unchanged_groups: int = 0
+    publications: int = 0
     elapsed_ms: int = 0
     discovery_elapsed_ms: int = 0
     tag_parse_elapsed_ms: int = 0
@@ -608,6 +609,10 @@ class MusicScanStats:
     provider_requests: int = 0
     provider_elapsed_ms: int = 0
     projection_elapsed_ms: int = 0
+    artwork_submissions: int = 0
+    artwork_coalesced: int = 0
+    artwork_completed: int = 0
+    artwork_pending: int = 0
     writer_operations: int = 0
     commit_count: int = 0
     writer_wait_ms: int = 0
@@ -627,6 +632,7 @@ class MusicScanStats:
             "groupsReprocessed": self.groups_reprocessed,
             "metadataGroups": self.metadata_groups,
             "unchangedGroups": self.unchanged_groups,
+            "publications": self.publications,
             "elapsedMs": self.elapsed_ms,
             "discoveryElapsedMs": self.discovery_elapsed_ms,
             "tagParseElapsedMs": self.tag_parse_elapsed_ms,
@@ -637,6 +643,10 @@ class MusicScanStats:
             "providerRequests": self.provider_requests,
             "providerElapsedMs": self.provider_elapsed_ms,
             "projectionElapsedMs": self.projection_elapsed_ms,
+            "artworkSubmissions": self.artwork_submissions,
+            "artworkCoalesced": self.artwork_coalesced,
+            "artworkCompleted": self.artwork_completed,
+            "artworkPending": self.artwork_pending,
             "writerOperations": self.writer_operations,
             "commitCount": self.commit_count,
             "writerWaitMs": self.writer_wait_ms,
@@ -9487,6 +9497,13 @@ class LibraryScanner:
         unchanged_groups = 0
         scan_stats = MusicScanStats()
         self._music_scan_stats = scan_stats
+        try:
+            from app.metadata_services import asset_executor
+
+            artwork_before = asset_executor.diagnostics()
+        except Exception:  # pragma: no cover - optional metadata runtime
+            asset_executor = None
+            artwork_before = {}
 
         def inventory_cache_for(
             path: Path, file_stat: os.stat_result
@@ -9588,6 +9605,7 @@ class LibraryScanner:
             if not publish and not advance:
                 return
             if publish:
+                scan_stats.publications += 1
                 self._repersist_nfo_metadata(
                     [record["artist"], record["release"], *record["track_ids"]]
                 )
@@ -10172,6 +10190,24 @@ class LibraryScanner:
             targets,
         )
         self._music_inventory_pending_writes = None
+        if asset_executor is not None:
+            artwork_after = asset_executor.diagnostics()
+            scan_stats.artwork_submissions = max(
+                0,
+                int(artwork_after.get("submitted", 0))
+                - int(artwork_before.get("submitted", 0)),
+            )
+            scan_stats.artwork_coalesced = max(
+                0,
+                int(artwork_after.get("coalesced", 0))
+                - int(artwork_before.get("coalesced", 0)),
+            )
+            scan_stats.artwork_completed = max(
+                0,
+                int(artwork_after.get("completed", 0))
+                - int(artwork_before.get("completed", 0)),
+            )
+            scan_stats.artwork_pending = int(artwork_after.get("pending", 0))
         database_metrics_after = self.db.metrics()
         scan_stats.elapsed_ms = int(
             round((time.monotonic() - scan_started) * 1000)

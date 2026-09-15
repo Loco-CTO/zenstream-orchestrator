@@ -241,6 +241,7 @@ def metadata_task_results(tasks, work, should_terminate=None, max_workers=None):
 class MetadataAssetExecutor:
     STATE_RETENTION_SECONDS = 15 * 60
     MAX_STATE_ENTRIES = 4096
+    MAX_PENDING = 256
 
     def __init__(self, max_workers: int | None = None):
         self.max_workers = (
@@ -256,6 +257,10 @@ class MetadataAssetExecutor:
         self._pending: dict[tuple, Future] = {}
         self._states: dict[tuple, str] = {}
         self._state_times: dict[tuple, float] = {}
+        self._pending_capacity = threading.BoundedSemaphore(self.MAX_PENDING)
+        self._submitted_count = 0
+        self._coalesced_count = 0
+        self._completed_count = 0
 
     def _prune_states_locked(self, now: float | None = None) -> None:
         current = time.monotonic() if now is None else now
@@ -286,8 +291,15 @@ class MetadataAssetExecutor:
     def _submit_future_locked(self, key: tuple, work) -> Future:
         self._states[key] = "pending"
         self._state_times[key] = time.monotonic()
+        self._submitted_count += 1
 
-        future = self._executor.submit(work)
+        try:
+            future = self._executor.submit(work)
+        except BaseException:
+            self._states.pop(key, None)
+            self._state_times.pop(key, None)
+            self._pending_capacity.release()
+            raise
         self._pending[key] = future
 
         def finished(done: Future) -> None:
@@ -301,7 +313,9 @@ class MetadataAssetExecutor:
                 self._states[key] = state
                 self._state_times[key] = time.monotonic()
                 self._pending.pop(key, None)
+                self._completed_count += 1
                 self._prune_states_locked()
+                self._pending_capacity.release()
 
         future.add_done_callback(finished)
         return future
@@ -311,6 +325,15 @@ class MetadataAssetExecutor:
             self._prune_states_locked()
             current = self._pending.get(key)
             if current is not None and not current.done():
+                self._coalesced_count += 1
+                return current
+        self._pending_capacity.acquire()
+        with self._lock:
+            self._prune_states_locked()
+            current = self._pending.get(key)
+            if current is not None and not current.done():
+                self._coalesced_count += 1
+                self._pending_capacity.release()
                 return current
             return self._submit_future_locked(key, work)
 
@@ -324,9 +347,24 @@ class MetadataAssetExecutor:
             self._prune_states_locked()
             current = self._pending.get(key)
             if current is not None and not current.done():
+                self._coalesced_count += 1
                 return "pending"
             state = self._states.get(key)
             if state in {"pending", "complete", "failed"}:
+                self._coalesced_count += 1
+                return state
+        self._pending_capacity.acquire()
+        with self._lock:
+            self._prune_states_locked()
+            current = self._pending.get(key)
+            if current is not None and not current.done():
+                self._coalesced_count += 1
+                self._pending_capacity.release()
+                return "pending"
+            state = self._states.get(key)
+            if state in {"pending", "complete", "failed"}:
+                self._coalesced_count += 1
+                self._pending_capacity.release()
                 return state
             self._submit_future_locked(key, work)
             return "pending"
@@ -348,6 +386,15 @@ class MetadataAssetExecutor:
         with self._lock:
             self._prune_states_locked()
             return self._states.get(key)
+
+    def diagnostics(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "submitted": self._submitted_count,
+                "coalesced": self._coalesced_count,
+                "completed": self._completed_count,
+                "pending": len(self._pending),
+            }
 
     def prune(self) -> None:
         with self._lock:
@@ -463,6 +510,73 @@ class MetadataSearchProjection:
 
     def __init__(self, db):
         self.db = db
+
+    @staticmethod
+    def _delete_legacy_search_rows(
+        cursor,
+        tables: set[str],
+        entity_id: str,
+        locale: str | None = None,
+    ) -> None:
+        """Delete legacy FTS rows through the indexed row-id shadow table."""
+        if "catalog_search" not in tables:
+            return
+        if "catalog_search_row_lookup" not in tables:
+            if locale is None:
+                cursor.execute(
+                    "DELETE FROM catalog_search WHERE entity_id=?", (entity_id,)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM catalog_search WHERE entity_id=? AND locale=?",
+                    (entity_id, locale),
+                )
+            return
+        query = (
+            "SELECT search_rowid FROM catalog_search_row_lookup "
+            "WHERE entity_id=?"
+        )
+        params: tuple[object, ...] = (entity_id,)
+        if locale is not None:
+            query += " AND locale=?"
+            params += (locale,)
+        rowids = [row[0] for row in cursor.execute(query, params).fetchall()]
+        if rowids:
+            cursor.executemany(
+                "DELETE FROM catalog_search WHERE rowid=?",
+                [(rowid,) for rowid in rowids],
+            )
+        if locale is None:
+            cursor.execute(
+                "DELETE FROM catalog_search_row_lookup WHERE entity_id=?",
+                (entity_id,),
+            )
+        else:
+            cursor.execute(
+                "DELETE FROM catalog_search_row_lookup WHERE entity_id=? AND locale=?",
+                (entity_id, locale),
+            )
+
+    @staticmethod
+    def _insert_legacy_search_row(
+        cursor,
+        tables: set[str],
+        entity_id: str,
+        library_id: str,
+        locale: str,
+        title: str,
+    ) -> None:
+        cursor.execute(
+            "INSERT INTO catalog_search(entity_id,library_id,locale,title) "
+            "VALUES(?,?,?,?)",
+            (entity_id, library_id, locale, title),
+        )
+        if "catalog_search_row_lookup" in tables:
+            cursor.execute(
+                "INSERT OR REPLACE INTO catalog_search_row_lookup(entity_id,locale,search_rowid) "
+                "VALUES(?,?,?)",
+                (entity_id, locale, cursor.lastrowid),
+            )
 
     def _music_track_context(self, entity_id: str, locale: str) -> dict:
         """Return the validated parent-release context for one track.
@@ -981,12 +1095,14 @@ class MetadataSearchProjection:
                 if projection_exists
                 else []
             )
+            original_text = payload_rows[0][0] if payload_rows else None
             try:
                 payload = json.loads(payload_rows[0][0]) if payload_rows else {}
             except (TypeError, ValueError, json.JSONDecodeError):
                 payload = {}
             if not isinstance(payload, dict):
                 payload = {}
+            original_payload = copy.deepcopy(payload)
             images = payload.get("images")
             images = dict(images) if isinstance(images, dict) else {}
             owners = payload.get("_catalogArtworkProviders")
@@ -1111,11 +1227,45 @@ class MetadataSearchProjection:
                 payload["images"] = images
                 payload["_catalogArtworkProviders"] = owners
                 payload["_catalogArtworkFallbacks"] = fallbacks
+                selection_values = {
+                    row[2]: tuple(row[3:]) for row in selection_rows
+                }
+                existing_values = {
+                    image_type: tuple(row)
+                    for image_type, row in existing.items()
+                }
+                if (
+                    payload == original_payload
+                    and selection_values == existing_values
+                ):
+                    continue
                 with self.db.transaction() as cursor:
+                    current_payload = cursor.execute(
+                        "SELECT payload FROM catalog_item_projection "
+                        "WHERE entity_id=? AND locale=?",
+                        (entity_id, locale),
+                    ).fetchone()
+                    if not current_payload or current_payload[0] != original_text:
+                        continue
+                    current_selection_rows = cursor.execute(
+                        "SELECT image_type,provider,local_path,blur_hash,version "
+                        "FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
+                        (entity_id, locale),
+                    ).fetchall()
+                    current_selection_values = {
+                        row[0]: tuple(row[1:]) for row in current_selection_rows
+                    }
+                    if current_selection_values != existing_values:
+                        continue
                     cursor.execute(
                         "UPDATE catalog_item_projection SET payload=?,updated_at=CURRENT_TIMESTAMP "
-                        "WHERE entity_id=? AND locale=?",
-                        (json.dumps(payload, ensure_ascii=False), entity_id, locale),
+                        "WHERE entity_id=? AND locale=? AND payload=?",
+                        (
+                            json.dumps(payload, ensure_ascii=False),
+                            entity_id,
+                            locale,
+                            original_text,
+                        ),
                     )
                     cursor.execute(
                         "DELETE FROM catalog_artwork_selection WHERE entity_id=? AND locale=?",
@@ -1537,28 +1687,34 @@ class MetadataSearchProjection:
                         current_text = current[0] if current else None
                         if current_text != previous_text:
                             continue
-                    cursor.execute(
-                        "DELETE FROM catalog_search WHERE entity_id=? AND locale=?",
-                        (entity_id, locale),
+                        if current_text == payload_text:
+                            # The provider result produced the same complete
+                            # projection. Avoid rewriting search grams,
+                            # genres, and artwork selections on every scan.
+                            break
+                    self._delete_legacy_search_rows(
+                        cursor, tables, entity_id, locale
                     )
                     if merged.get("title"):
-                        cursor.execute(
-                            "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
-                            (entity_id, library_id, locale, str(merged["title"])),
+                        self._insert_legacy_search_row(
+                            cursor,
+                            tables,
+                            entity_id,
+                            library_id,
+                            locale,
+                            str(merged["title"]),
                         )
                     if merged.get("originalTitle"):
-                        cursor.execute(
-                            "DELETE FROM catalog_search WHERE entity_id=? AND locale='original'",
-                            (entity_id,),
+                        self._delete_legacy_search_rows(
+                            cursor, tables, entity_id, "original"
                         )
-                        cursor.execute(
-                            "INSERT INTO catalog_search(entity_id,library_id,locale,title) VALUES(?,?,?,?)",
-                            (
-                                entity_id,
-                                library_id,
-                                "original",
-                                str(merged["originalTitle"]),
-                            ),
+                        self._insert_legacy_search_row(
+                            cursor,
+                            tables,
+                            entity_id,
+                            library_id,
+                            "original",
+                            str(merged["originalTitle"]),
                         )
                     if has_projection:
                         cursor.execute(
@@ -2954,9 +3110,11 @@ class MetadataIngestService:
                 provider,
                 entity_type,
                 provider_id,
+                str(target_entity_id or ""),
                 tuple(asset_documents),
                 digest,
                 int(force_assets),
+                int(bool(complete_batch)),
             )
             if self.background_assets:
                 asset_executor.submit(key, materialize_assets)
@@ -3067,9 +3225,11 @@ class MetadataIngestService:
                 provider,
                 entity_type,
                 provider_id,
+                str(target_entity_id or ""),
                 locale,
                 digest,
                 int(force_assets),
+                int(bool(complete_batch)),
             )
             if self.background_assets:
                 asset_executor.submit(key, materialize_assets)
@@ -3529,16 +3689,31 @@ class MetadataImageIngestService:
                 # never fan out through the full provider candidate list.
 
         projection = MetadataSearchProjection(self.db)
-        for locale, document in documents.items():
-            projection.project(
-                provider,
-                entity_type,
-                provider_id,
-                locale,
-                document,
-                preserve_artwork=preserved.get(locale),
-                target_entity_id=target_entity_id,
+        projection_tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
             )
+        }
+        if target_entity_id and {
+            "catalog_item_projection",
+            "catalog_artwork_selection",
+        } <= projection_tables:
+            # Metadata projection already ran before background artwork work.
+            # Rebuild only artwork selections here so image completion does not
+            # rewrite titles, search grams, genres, or the full payload.
+            projection.reproject_entity_artwork(target_entity_id)
+        else:
+            for locale, document in documents.items():
+                projection.project(
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    document,
+                    preserve_artwork=preserved.get(locale),
+                    target_entity_id=target_entity_id,
+                )
         # Pruning is safe only when the caller supplied the complete
         # configured-locale document batch.  A single-locale replay from a
         # multi-locale configuration must remain non-destructive, otherwise

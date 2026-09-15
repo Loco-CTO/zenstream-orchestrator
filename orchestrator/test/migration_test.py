@@ -45,6 +45,8 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "idx_entity_provider_ids_provider_id",
                         "idx_library_jobs_global_queue",
                         "idx_catalog_search_grams_entity_locale",
+                        "idx_catalog_root_search_grams_entity_locale",
+                        "idx_catalog_search_row_lookup_entity_locale",
                         "idx_catalog_root_search_grams_lookup",
                         "idx_catalog_item_genres_covering",
                         "idx_catalog_artwork_selection_lookup",
@@ -114,6 +116,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "metadata_refresh_state",
                         "catalog_music_album_page",
                         "catalog_music_album_page_status",
+                        "catalog_search_row_lookup",
                     }
                     <= tables
                 )
@@ -260,6 +263,75 @@ class PersistenceMigrationTest(unittest.TestCase):
                 self.assertIn(
                     "invite_library_access",
                     tables,
+                )
+            finally:
+                connection.close()
+
+    def test_search_write_index_migration_preserves_legacy_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            config = self._config(database_path)
+            command.upgrade(config, "0053_music_album_page")
+
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute(
+                    "INSERT INTO catalog_search(entity_id,library_id,locale,title) "
+                    "VALUES(?,?,?,?)",
+                    ("entity-1", "library-1", "en", "Example album"),
+                )
+                connection.execute(
+                    "INSERT INTO catalog_search(entity_id,library_id,locale,title) "
+                    "VALUES(?,?,?,?)",
+                    ("entity-1", "library-1", "en", "Example duplicate"),
+                )
+                legacy_rowids = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT rowid FROM catalog_search WHERE entity_id=?",
+                        ("entity-1",),
+                    )
+                }
+                connection.commit()
+            finally:
+                connection.close()
+
+            command.upgrade(config, "head")
+            connection = sqlite3.connect(database_path)
+            try:
+                mapped_rowids = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT search_rowid FROM catalog_search_row_lookup "
+                        "WHERE entity_id=? AND locale=?",
+                        ("entity-1", "en"),
+                    )
+                }
+                self.assertEqual(mapped_rowids, legacy_rowids)
+                plan = connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT search_rowid "
+                    "FROM catalog_search_row_lookup WHERE entity_id=? AND locale=?",
+                    ("entity-1", "en"),
+                ).fetchall()
+                self.assertTrue(
+                    any(
+                        "PRIMARY KEY" in str(row).upper()
+                        or "SEARCH" in str(row).upper()
+                        for row in plan
+                    ),
+                    plan,
+                )
+                root_plan = connection.execute(
+                    "EXPLAIN QUERY PLAN DELETE FROM catalog_root_search_grams "
+                    "WHERE entity_id=? AND locale=?",
+                    ("entity-1", "en"),
+                ).fetchall()
+                self.assertTrue(
+                    any(
+                        "idx_catalog_root_search_grams_entity_locale" in str(row)
+                        for row in root_plan
+                    ),
+                    root_plan,
                 )
             finally:
                 connection.close()

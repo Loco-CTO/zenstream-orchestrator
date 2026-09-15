@@ -532,10 +532,7 @@ class MetadataSearchProjection:
                     (entity_id, locale),
                 )
             return
-        query = (
-            "SELECT search_rowid FROM catalog_search_row_lookup "
-            "WHERE entity_id=?"
-        )
+        query = "SELECT search_rowid FROM catalog_search_row_lookup WHERE entity_id=?"
         params: tuple[object, ...] = (entity_id,)
         if locale is not None:
             query += " AND locale=?"
@@ -1227,17 +1224,11 @@ class MetadataSearchProjection:
                 payload["images"] = images
                 payload["_catalogArtworkProviders"] = owners
                 payload["_catalogArtworkFallbacks"] = fallbacks
-                selection_values = {
-                    row[2]: tuple(row[3:]) for row in selection_rows
-                }
+                selection_values = {row[2]: tuple(row[3:]) for row in selection_rows}
                 existing_values = {
-                    image_type: tuple(row)
-                    for image_type, row in existing.items()
+                    image_type: tuple(row) for image_type, row in existing.items()
                 }
-                if (
-                    payload == original_payload
-                    and selection_values == existing_values
-                ):
+                if payload == original_payload and selection_values == existing_values:
                     continue
                 with self.db.transaction() as cursor:
                     current_payload = cursor.execute(
@@ -1692,9 +1683,7 @@ class MetadataSearchProjection:
                             # projection. Avoid rewriting search grams,
                             # genres, and artwork selections on every scan.
                             break
-                    self._delete_legacy_search_rows(
-                        cursor, tables, entity_id, locale
-                    )
+                    self._delete_legacy_search_rows(cursor, tables, entity_id, locale)
                     if merged.get("title"):
                         self._insert_legacy_search_row(
                             cursor,
@@ -2704,9 +2693,7 @@ class MetadataIngestService:
         try:
             tables = {
                 str(row[0])
-                for row in execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
+                for row in execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
         except Exception:
             return set()
@@ -2814,8 +2801,10 @@ class MetadataIngestService:
         )
         with self._projection_completion_lock:
             completed = key in self._completed_ingestion
-        if completed and target_entity_id and self._projection_is_complete(
-            db, target_entity_id, locale, normalized
+        if (
+            completed
+            and target_entity_id
+            and self._projection_is_complete(db, target_entity_id, locale, normalized)
         ):
             return
         started = time.monotonic()
@@ -3695,10 +3684,14 @@ class MetadataImageIngestService:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        if target_entity_id and {
-            "catalog_item_projection",
-            "catalog_artwork_selection",
-        } <= projection_tables:
+        if (
+            target_entity_id
+            and {
+                "catalog_item_projection",
+                "catalog_artwork_selection",
+            }
+            <= projection_tables
+        ):
             # Metadata projection already ran before background artwork work.
             # Rebuild only artwork selections here so image completion does not
             # rewrite titles, search grams, genres, or the full payload.

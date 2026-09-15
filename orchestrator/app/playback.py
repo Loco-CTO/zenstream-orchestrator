@@ -535,7 +535,9 @@ class PlaybackManager:
         else:
             for offset in range(0, len(probe_write_groups), 32):
                 batch = probe_write_groups[offset : offset + 32]
-                self.db.write_many([statement for group in batch for statement in group])
+                self.db.write_many(
+                    [statement for group in batch for statement in group]
+                )
         return values
 
     def sources(self, user_id: str, entity_id: str) -> list[dict]:

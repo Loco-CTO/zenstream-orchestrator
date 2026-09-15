@@ -1198,11 +1198,12 @@ class MetadataServicesTest(unittest.TestCase):
                 encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
                 hasher=lambda _target: "blur",
             )
-            with patch.object(
-                MetadataSearchProjection, "project"
-            ) as project, patch.object(
-                MetadataSearchProjection, "reproject_entity_artwork"
-            ) as reproject:
+            with (
+                patch.object(MetadataSearchProjection, "project") as project,
+                patch.object(
+                    MetadataSearchProjection, "reproject_entity_artwork"
+                ) as reproject,
+            ):
                 image_ingest.ingest_documents(
                     "tmdb",
                     "movie",

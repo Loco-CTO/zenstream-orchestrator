@@ -1,7 +1,6 @@
 import sqlalchemy as sa
 from alembic import op
 
-
 revision = "0054_catalog_search_write_indexes"
 down_revision = "0053_music_album_page"
 branch_labels = None

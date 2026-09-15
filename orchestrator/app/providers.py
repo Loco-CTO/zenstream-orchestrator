@@ -416,9 +416,7 @@ class ProviderClient:
         finally:
             with self._diagnostic_lock:
                 self._request_count += 1
-                self._request_elapsed_seconds += max(
-                    0.0, time.monotonic() - started
-                )
+                self._request_elapsed_seconds += max(0.0, time.monotonic() - started)
 
     def _get(self, url: str, **kwargs) -> dict:
         response = self._request_response(url, **kwargs)
@@ -3067,11 +3065,10 @@ class MetadataService:
                 force,
             )
             client = self.client(provider)
+
             def fetch_provider_payloads():
                 if hasattr(client, "details_all_locales"):
-                    return client.details_all_locales(
-                        entity_type, provider_id, missing
-                    )
+                    return client.details_all_locales(entity_type, provider_id, missing)
                 return {
                     locale: client.details(entity_type, provider_id, locale)
                     for locale in missing

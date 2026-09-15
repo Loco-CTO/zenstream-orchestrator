@@ -9639,7 +9639,6 @@ class LibraryScanner:
                     pending_by_identity.pop(identity_key, None)
             if future.cancelled():
                 return
-            wait_started = time.monotonic()
             try:
                 result = future.result()
             except JobTerminated:
@@ -9657,10 +9656,6 @@ class LibraryScanner:
                     "state": {},
                     "error": f"{type(error).__name__}: {error}",
                 }
-            finally:
-                scan_stats.metadata_worker_wait_ms += int(
-                    round((time.monotonic() - wait_started) * 1000)
-                )
             scan_stats.metadata_worker_elapsed_ms += int(
                 result.get("elapsed_ms", 0) or 0
             )
@@ -9682,6 +9677,14 @@ class LibraryScanner:
                 return
             publish_group(record, result, publish=publish, advance=publish)
 
+        def wait_for_metadata_worker(futures: Iterable[Future]) -> set[Future]:
+            started = time.monotonic()
+            done, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+            scan_stats.metadata_worker_wait_ms += int(
+                round((time.monotonic() - started) * 1000)
+            )
+            return done
+
         def drain_pending(
             wait_for: Future | None = None, *, publish=True, all_pending=False
         ) -> None:
@@ -9690,9 +9693,7 @@ class LibraryScanner:
                     if wait_for.done():
                         complete_future(wait_for, publish=publish)
                     elif pending_metadata:
-                        done, _ = wait(
-                            tuple(pending_metadata), return_when=FIRST_COMPLETED
-                        )
+                        done = wait_for_metadata_worker(pending_metadata)
                         for future in done:
                             complete_future(future, publish=publish)
                     if not all_pending:
@@ -9704,9 +9705,7 @@ class LibraryScanner:
                     if not done:
                         if not all_pending:
                             return
-                        done, _ = wait(
-                            tuple(pending_metadata), return_when=FIRST_COMPLETED
-                        )
+                        done = wait_for_metadata_worker(pending_metadata)
                     for future in done:
                         complete_future(future, publish=publish)
             except BaseException:

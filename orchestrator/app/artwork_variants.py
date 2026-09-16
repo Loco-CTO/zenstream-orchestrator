@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import time
 from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.images import LocalArtworkCache, encode_webp_variant
@@ -18,6 +20,21 @@ ARTWORK_VARIANT_ALGORITHM_VERSION = 1
 VARIANT_CACHE_DIRECTORY = "artwork-variant-cache"
 PREWARM_MAX_ACTIVE = 2
 STALE_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
+ARTWORK_VARIANT_STATES = frozenset(
+    {"starting", "warming", "ready", "degraded", "unavailable"}
+)
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _safe_error(error: BaseException | str) -> str:
+    message = " ".join(str(error).split())
+    message = re.sub(r"(?i)(?:[a-z]:[\\/]|\\\\)[^\s,;]+", "<path>", message)
+    if len(message) > 240:
+        message = message[:237].rstrip() + "..."
+    return message or type(error).__name__
 
 
 @dataclass(frozen=True)
@@ -61,6 +78,10 @@ class ArtworkVariantCache:
         self._lock = threading.RLock()
         self._pending: dict[str, Future] = {}
         self._last_pruned_at = 0.0
+        self._last_files = 0
+        self._last_bytes = 0
+        self._failed_conversions = 0
+        self._last_error: str | None = None
 
     @staticmethod
     def _key(source: ArtworkVariantSource, width: int) -> str:
@@ -133,8 +154,19 @@ class ArtworkVariantCache:
             self._pending[key] = future
 
         def finished(_done: Future) -> None:
+            error = None
+            if _done.cancelled():
+                error = "conversion cancelled"
+            else:
+                try:
+                    error = _done.exception()
+                except Exception as exception:
+                    error = exception
             with self._lock:
                 self._pending.pop(key, None)
+                if error is not None:
+                    self._failed_conversions += 1
+                    self._last_error = _safe_error(error)
 
         future.add_done_callback(finished)
         return future
@@ -181,7 +213,17 @@ class ArtworkVariantCache:
 
     def diagnostics(self) -> dict[str, int]:
         if self.root is None or not self.root.is_dir():
-            return {"files": 0, "bytes": 0, "pending": len(self._pending)}
+            with self._lock:
+                self._last_files = 0
+                self._last_bytes = 0
+                pending = len(self._pending)
+                failed = self._failed_conversions
+            return {
+                "files": 0,
+                "bytes": 0,
+                "pending": pending,
+                "failed": failed,
+            }
         files = 0
         total = 0
         try:
@@ -196,8 +238,22 @@ class ArtworkVariantCache:
         except OSError:
             pass
         with self._lock:
+            self._last_files = files
+            self._last_bytes = total
             pending = len(self._pending)
-        return {"files": files, "bytes": total, "pending": pending}
+            failed = self._failed_conversions
+        return {"files": files, "bytes": total, "pending": pending, "failed": failed}
+
+    def status_diagnostics(self) -> dict[str, int | str | None]:
+        """Return the last sweep's cache totals without traversing the cache."""
+        with self._lock:
+            return {
+                "files": self._last_files,
+                "bytes": self._last_bytes,
+                "pending": len(self._pending),
+                "failed": self._failed_conversions,
+                "last_error": self._last_error,
+            }
 
 
 class ArtworkVariantPrewarmer:
@@ -209,6 +265,16 @@ class ArtworkVariantPrewarmer:
         self._active = 0
         self._executor = None
         self._stopped = False
+        self._source_count = 0
+        self._expected_keys: set[str] = set()
+        self._ready_keys: set[str] = set()
+        self._failed_keys: set[str] = set()
+        self._selection_complete = False
+        self._has_sweep = False
+        self._state = "starting"
+        self._last_sweep_at: str | None = None
+        self._last_successful_sweep_at: str | None = None
+        self._last_error: str | None = None
 
     @staticmethod
     def _key(cache: ArtworkVariantCache, source: ArtworkVariantSource, width: int):
@@ -229,12 +295,59 @@ class ArtworkVariantPrewarmer:
                         self._queue.append((source, width))
             self._pump_locked()
 
+    def mark_sweep_started(self) -> None:
+        with self._lock:
+            self._state = "warming"
+
+    def update_selection(
+        self, sources: list[ArtworkVariantSource], complete: bool
+    ) -> None:
+        expected_keys = {
+            self._key(self.cache, source, width)
+            for source in sources
+            for width in VARIANT_WIDTHS
+        }
+        ready_keys = {
+            self._key(self.cache, source, width)
+            for source in sources
+            for width in VARIANT_WIDTHS
+            if self.cache.get(source, width) is not None
+        }
+        with self._lock:
+            self._source_count = len(sources)
+            self._expected_keys = expected_keys
+            self._ready_keys = ready_keys
+            self._failed_keys.intersection_update(expected_keys)
+            self._queue = deque(
+                (source, width)
+                for source, width in self._queue
+                if self._key(self.cache, source, width) in expected_keys
+            )
+            self._queued.intersection_update(expected_keys)
+            self._selection_complete = complete
+            self._state = "warming" if complete else "unavailable"
+
+    def _update_state_locked(self, cache_failed: int = 0) -> None:
+        if not self._selection_complete:
+            self._state = "unavailable" if self._has_sweep else "starting"
+        elif self._failed_keys or cache_failed:
+            self._state = "degraded"
+        elif (
+            self._active
+            or self._queue
+            or len(self._ready_keys) < len(self._expected_keys)
+        ):
+            self._state = "warming"
+        else:
+            self._state = "ready"
+
     def _pump_locked(self) -> None:
         while self._active < PREWARM_MAX_ACTIVE and self._queue and not self._stopped:
             source, width = self._queue.popleft()
             key = self._key(self.cache, source, width)
             self._queued.discard(key)
             if self.cache.get(source, width) is not None:
+                self._ready_keys.add(key)
                 continue
             future = self.cache.submit(source, width, self._executor)
             if future is None:
@@ -242,12 +355,28 @@ class ArtworkVariantPrewarmer:
                 self._queue.appendleft((source, width))
                 return
             self._active += 1
-            future.add_done_callback(self._finished)
+            future.add_done_callback(
+                lambda done, target_key=key: self._finished(target_key, done)
+            )
 
-    def _finished(self, _future: Future) -> None:
+    def _finished(self, key: str, future: Future) -> None:
+        succeeded = False
+        if not future.cancelled():
+            try:
+                succeeded = future.exception() is None
+            except Exception:
+                succeeded = False
         with self._lock:
             self._active = max(0, self._active - 1)
+            if key in self._expected_keys:
+                if succeeded:
+                    self._ready_keys.add(key)
+                    self._failed_keys.discard(key)
+                else:
+                    self._failed_keys.add(key)
+                    self._last_error = "Artwork variant conversion failed."
             self._pump_locked()
+            self._update_state_locked()
 
     def stop(self) -> None:
         with self._lock:
@@ -258,6 +387,61 @@ class ArtworkVariantPrewarmer:
     def diagnostics(self) -> dict[str, int]:
         with self._lock:
             return {"queued": len(self._queue), "active": self._active}
+
+    def complete_sweep(self) -> None:
+        cache_status = self.cache.status_diagnostics()
+        with self._lock:
+            now = _timestamp()
+            self._has_sweep = True
+            self._last_sweep_at = now
+            if self._selection_complete:
+                self._last_successful_sweep_at = now
+            if self._failed_keys:
+                self._last_error = "One or more artwork variant conversions failed."
+            elif not self._selection_complete:
+                self._last_error = "Artwork selection data is incomplete."
+            elif cache_status.get("last_error") is None:
+                self._last_error = None
+            self._update_state_locked(int(cache_status.get("failed", 0) or 0))
+
+    def record_sweep_error(self, error: BaseException | str) -> None:
+        with self._lock:
+            self._has_sweep = True
+            self._last_sweep_at = _timestamp()
+            self._last_error = _safe_error(error)
+            self._state = "degraded" if self._last_successful_sweep_at else "unavailable"
+
+    def status(self) -> dict[str, int | str | None]:
+        with self._lock:
+            source_count = self._source_count
+            expected = len(self._expected_keys)
+            ready = min(expected, len(self._ready_keys))
+            state = self._state
+            queued = len(self._queue)
+            active = self._active
+            last_sweep_at = self._last_sweep_at
+            last_successful_sweep_at = self._last_successful_sweep_at
+            last_error = self._last_error
+        cache_status = self.cache.status_diagnostics()
+        cache_failed = int(cache_status.get("failed", 0) or 0)
+        if cache_failed and state in {"starting", "warming", "ready"}:
+            state = "degraded"
+        return {
+            "state": state,
+            "sourceCount": source_count,
+            "expectedVariants": expected,
+            "readyVariants": ready,
+            "remainingVariants": max(0, expected - ready),
+            "queuedConversions": queued,
+            "activeConversions": active,
+            "pendingConversions": int(cache_status.get("pending", 0) or 0),
+            "cacheFileCount": int(cache_status.get("files", 0) or 0),
+            "cacheBytes": int(cache_status.get("bytes", 0) or 0),
+            "failedConversions": cache_failed,
+            "lastSweepAt": last_sweep_at,
+            "lastSuccessfulSweepAt": last_successful_sweep_at,
+            "lastError": last_error or cache_status.get("last_error"),
+        }
 
 
 _cache_lock = threading.RLock()
@@ -361,7 +545,10 @@ def queue_selected(db, executor) -> dict[str, int]:
     if not isinstance(db_file, (str, Path)):
         db_file = None
     cache = cache_for(db_file)
+    prewarmer = prewarmer_for(db_file)
+    prewarmer.mark_sweep_started()
     sources, complete = selected_sources(db)
+    prewarmer.update_selection(sources, complete)
     pruned = 0
     if complete and cache.should_prune_stale():
         pruned = cache.prune_stale(sources)
@@ -369,13 +556,27 @@ def queue_selected(db, executor) -> dict[str, int]:
         logger.debug(
             "skipping artwork variant cleanup because selection data is incomplete"
         )
-    prewarmer = prewarmer_for(db_file)
     prewarmer.enqueue(sources, executor)
     diagnostics = cache.diagnostics()
     diagnostics.update(prewarmer.diagnostics())
     diagnostics["sources"] = len(sources)
     diagnostics["pruned"] = pruned
+    prewarmer.complete_sweep()
     return diagnostics
+
+
+def record_sweep_error(db, error: BaseException | str) -> None:
+    db_file = getattr(db, "db_file", None)
+    if not isinstance(db_file, (str, Path)):
+        db_file = None
+    prewarmer_for(db_file).record_sweep_error(error)
+
+
+def artwork_variant_status(db) -> dict[str, int | str | None]:
+    db_file = getattr(db, "db_file", None)
+    if not isinstance(db_file, (str, Path)):
+        db_file = None
+    return prewarmer_for(db_file).status()
 
 
 def stop_all() -> None:

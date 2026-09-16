@@ -19,7 +19,7 @@ from api.zenstream.documentation_routes import router as documentation_router
 from api.zenstream.library_routes import router as library_router
 from api.zenstream.notification_routes import router as notification_router
 from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_openapi
-from app.artwork_variants import queue_selected
+from app.artwork_variants import queue_selected, record_sweep_error
 from app.artwork_variants import stop_all as stop_artwork_variants
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import browser_origins
@@ -98,9 +98,10 @@ async def lifespan(_app: FastAPI):
                     diagnostics.get("bytes", 0),
                     diagnostics.get("pruned", 0),
                 )
-            except Exception:
+            except Exception as error:
                 # Prewarming is best-effort. A scan or transient database
                 # failure must not affect catalog availability or cleanup.
+                record_sweep_error(Config().database, error)
                 request_logger.warning(
                     "periodic artwork variant prewarm failed", exc_info=True
                 )

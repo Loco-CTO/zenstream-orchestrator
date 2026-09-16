@@ -80,6 +80,23 @@ export type Job = {
 	historyOnly: boolean;
 };
 
+export type ArtworkVariantStatus = {
+	state: "starting" | "warming" | "ready" | "degraded" | "unavailable";
+	sourceCount: number;
+	expectedVariants: number;
+	readyVariants: number;
+	remainingVariants: number;
+	queuedConversions: number;
+	activeConversions: number;
+	pendingConversions: number;
+	cacheFileCount: number;
+	cacheBytes: number;
+	failedConversions: number;
+	lastSweepAt?: string | null;
+	lastSuccessfulSweepAt?: string | null;
+	lastError?: string | null;
+};
+
 export const activeStates = new Set(["queued", "running", "terminating"]);
 
 export function stateLabel(state?: string | null) {

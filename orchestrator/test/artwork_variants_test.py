@@ -5,6 +5,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from api.zenstream import library_routes
 from app.artwork_variants import (
     ArtworkVariantCache,
     ArtworkVariantPrewarmer,
@@ -12,7 +13,6 @@ from app.artwork_variants import (
     artwork_variant_status,
     selected_sources,
 )
-from api.zenstream import library_routes
 from app.database import DatabaseHandler
 
 

@@ -222,9 +222,9 @@ class OpenApiContractTest(unittest.TestCase):
             "get"
         ]["responses"]
         self.assertIn("Retry-After", trickplay["202"]["headers"])
-        artwork_status = self.schema["paths"][
-            "/api/admin/artwork-variants/status"
-        ]["get"]
+        artwork_status = self.schema["paths"]["/api/admin/artwork-variants/status"][
+            "get"
+        ]
         self.assertIn(
             "AdminSessionCookie",
             artwork_status["security"][0],

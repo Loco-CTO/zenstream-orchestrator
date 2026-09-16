@@ -409,7 +409,9 @@ class ArtworkVariantPrewarmer:
             self._has_sweep = True
             self._last_sweep_at = _timestamp()
             self._last_error = _safe_error(error)
-            self._state = "degraded" if self._last_successful_sweep_at else "unavailable"
+            self._state = (
+                "degraded" if self._last_successful_sweep_at else "unavailable"
+            )
 
     def status(self) -> dict[str, int | str | None]:
         with self._lock:

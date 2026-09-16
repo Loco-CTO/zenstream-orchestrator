@@ -702,6 +702,54 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("immutable", response.headers["cache-control"])
 
+    def test_variant_image_serves_the_persistent_variant_without_encoding(self):
+        request = _json_request(
+            {},
+            method="GET",
+            path="/api/catalog/items/item/images/Primary",
+        )
+        request.scope["query_string"] = b"language=en&v=stored-version&w=320"
+        database = MagicMock()
+        image_path = None
+
+        def execute(query, _params=None):
+            if "SELECT directory FROM libraries" in query:
+                return [(None,)]
+            if "FROM catalog_artwork_selection" in query:
+                return [(str(image_path), "stored-version")]
+            raise AssertionError(query)
+
+        database.execute.side_effect = execute
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.webp"
+            variant_path = Path(directory) / "image-320.webp"
+            image_path.write_bytes(b"original")
+            variant_path.write_bytes(b"variant")
+            cache = MagicMock()
+            cache.get.return_value = variant_path
+            with (
+                patch.object(
+                    client_routes,
+                    "account_from_access",
+                    return_value={"id": "user-1"},
+                ),
+                patch.object(
+                    client_routes.catalog,
+                    "require_entity",
+                    return_value=("item", "library", None, "movie"),
+                ),
+                patch.object(client_routes.catalog, "_has_table", return_value=True),
+                patch.object(client_routes.catalog, "db", database),
+                patch.object(client_routes, "cache_for", return_value=cache),
+            ):
+                response = asyncio.run(
+                    client_routes.item_image("item", "Primary", request, "en")
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-zenstream-image-variant"], "320")
+        cache.submit.assert_not_called()
+
 
 class ClientPreferenceRouteTest(unittest.TestCase):
     def test_subtitle_style_routes_are_not_registered(self):

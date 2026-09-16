@@ -337,6 +337,25 @@ class MetadataAssetExecutor:
                 return current
             return self._submit_future_locked(key, work)
 
+    def try_submit_future(self, key: tuple, work) -> Future | None:
+        """Submit work without waiting for the bounded asset queue."""
+        with self._lock:
+            self._prune_states_locked()
+            current = self._pending.get(key)
+            if current is not None and not current.done():
+                self._coalesced_count += 1
+                return current
+        if not self._pending_capacity.acquire(blocking=False):
+            return None
+        with self._lock:
+            self._prune_states_locked()
+            current = self._pending.get(key)
+            if current is not None and not current.done():
+                self._coalesced_count += 1
+                self._pending_capacity.release()
+                return current
+            return self._submit_future_locked(key, work)
+
     def submit(self, key: tuple, work) -> str:
         self.submit_future(key, work)
         return "pending"

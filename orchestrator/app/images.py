@@ -182,6 +182,65 @@ def encode_webp(source: Path, target: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def encode_webp_variant(source: Path, target: Path, width: int) -> None:
+    """Encode a bounded, aspect-preserving WebP variant without upscaling."""
+    if width <= 0:
+        raise ValueError("Artwork variant width must be positive.")
+    from app.playback import ffmpeg_path
+
+    executable = ffmpeg_path()
+    if not executable:
+        raise RuntimeError("FFmpeg is not available for artwork variants.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.stem}.{uuid.uuid4().hex}.webp")
+    try:
+        completed = subprocess.run(
+            [
+                executable,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(source),
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale=w='min(iw,{width})':h=-2:flags=lanczos",
+                "-c:v",
+                "libwebp",
+                "-quality",
+                str(WEBP_QUALITY),
+                "-compression_level",
+                str(WEBP_COMPRESSION_LEVEL),
+                str(temporary),
+            ],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if (
+            completed.returncode != 0
+            or not temporary.is_file()
+            or not temporary.stat().st_size
+        ):
+            detail = (
+                completed.stderr or "FFmpeg did not produce an artwork variant."
+            ).strip()
+            raise RuntimeError(detail[-1000:])
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _svg_dimension(value: str | None) -> float | None:
     if not value:
         return None

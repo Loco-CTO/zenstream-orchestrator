@@ -210,6 +210,14 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertIn("202", image)
         self.assertIn("Retry-After", image["202"]["headers"])
         self.assertIn("X-ZenStream-Image-State", image["202"]["headers"])
+        image_parameters = {
+            parameter["name"]: parameter
+            for parameter in self.schema["paths"][
+                "/api/catalog/items/{entity_id}/images/{image_type}"
+            ]["get"]["parameters"]
+        }
+        self.assertEqual(image_parameters["w"]["schema"]["enum"], [160, 320])
+        self.assertNotIn("av", image_parameters)
         trickplay = self.schema["paths"]["/api/playback/items/{entity_id}/trickplay"][
             "get"
         ]["responses"]

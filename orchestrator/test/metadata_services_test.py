@@ -492,6 +492,32 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(diagnostics["coalesced"], 1)
         self.assertEqual(diagnostics["pending"], 0)
 
+    def test_asset_executor_try_submit_does_not_wait_when_capacity_is_full(self):
+        executor = MetadataAssetExecutor(max_workers=1)
+        started = threading.Event()
+        release = threading.Event()
+
+        def first_work():
+            started.set()
+            release.wait(5)
+
+        try:
+            executor.submit(("artwork-variant", "first"), first_work)
+            self.assertTrue(started.wait(5))
+            with patch.object(
+                executor._pending_capacity, "acquire", return_value=False
+            ):
+                self.assertIsNone(
+                    executor.try_submit_future(
+                        ("artwork-variant", "second"), lambda: None
+                    )
+                )
+            release.set()
+            executor.drain(5)
+        finally:
+            release.set()
+            executor.shutdown()
+
     def test_asset_executor_submit_once_deduplicates_completed_work(self):
         executor = MetadataAssetExecutor(max_workers=1)
         calls = []

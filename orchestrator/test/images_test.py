@@ -14,6 +14,7 @@ from app.images import (
     encode_blurhash,
     encode_webp,
     encode_webp_bytes,
+    encode_webp_variant,
 )
 
 
@@ -102,6 +103,35 @@ class LocalArtworkCacheTest(unittest.TestCase):
             args, kwargs = calls[0]
             self.assertIn("-nostdin", args)
             self.assertIs(kwargs["stdin"], __import__("subprocess").DEVNULL)
+
+    def test_variant_command_scales_without_upscaling_and_keeps_webp_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "poster.jpg"
+            target = root / "poster-320.webp"
+            source.write_bytes(b"source")
+            calls = []
+
+            def fake_run(args, **kwargs):
+                calls.append((args, kwargs))
+                Path(args[-1]).write_bytes(b"webp")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with (
+                patch("app.playback.ffmpeg_path", return_value="ffmpeg"),
+                patch("app.images.subprocess.run", side_effect=fake_run),
+            ):
+                encode_webp_variant(source, target, 320)
+
+            args, kwargs = calls[0]
+            self.assertIn("-nostdin", args)
+            self.assertEqual(
+                args[args.index("-vf") + 1],
+                "scale=w='min(iw,320)':h=-2:flags=lanczos",
+            )
+            self.assertEqual(args[args.index("-compression_level") + 1], "5")
+            self.assertIs(kwargs["stdin"], __import__("subprocess").DEVNULL)
+            self.assertTrue(target.is_file())
 
     def test_svg_is_rasterized_before_webp_encoding(self):
         with tempfile.TemporaryDirectory() as directory:

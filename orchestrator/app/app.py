@@ -20,6 +20,7 @@ from api.zenstream.library_routes import router as library_router
 from api.zenstream.notification_routes import router as notification_router
 from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_openapi
 from app.catalog_read_model import CatalogReadModel
+from app.artwork_variants import queue_selected, stop_all as stop_artwork_variants
 from app.client_auth import browser_origins
 from app.config import Config, load_config
 from app.foreground import (
@@ -81,6 +82,29 @@ async def lifespan(_app: FastAPI):
                     "periodic resource maintenance failed", exc_info=True
                 )
 
+    async def prewarm_artwork():
+        while True:
+            try:
+                diagnostics = await run_control(
+                    queue_selected, Config().database, asset_executor
+                )
+                request_logger.debug(
+                    "artwork variant prewarm sources=%s queued=%s active=%s files=%s bytes=%s pruned=%s",
+                    diagnostics.get("sources", 0),
+                    diagnostics.get("queued", 0),
+                    diagnostics.get("active", 0),
+                    diagnostics.get("files", 0),
+                    diagnostics.get("bytes", 0),
+                    diagnostics.get("pruned", 0),
+                )
+            except Exception:
+                # Prewarming is best-effort. A scan or transient database
+                # failure must not affect catalog availability or cleanup.
+                request_logger.warning(
+                    "periodic artwork variant prewarm failed", exc_info=True
+                )
+            await asyncio.sleep(300)
+
     async def monitor_event_loop():
         """Report event-loop stalls without adding work to request handlers."""
         loop = asyncio.get_running_loop()
@@ -105,13 +129,14 @@ async def lifespan(_app: FastAPI):
             expected = current + interval
 
     maintenance_task = asyncio.create_task(maintain_sessions())
+    artwork_prewarm_task = asyncio.create_task(prewarm_artwork())
     event_loop_task = asyncio.create_task(monitor_event_loop())
     try:
         yield
     finally:
-        for task in (maintenance_task, event_loop_task):
+        for task in (maintenance_task, artwork_prewarm_task, event_loop_task):
             task.cancel()
-        for task in (maintenance_task, event_loop_task):
+        for task in (maintenance_task, artwork_prewarm_task, event_loop_task):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         try:
@@ -123,6 +148,7 @@ async def lifespan(_app: FastAPI):
         PlaybackManager.stop_all()
         job_scheduler.stop()
         library_runtime.stop()
+        stop_artwork_variants()
         asset_executor.shutdown()
         await wait_for_shutdown(5)
         shutdown_foreground()

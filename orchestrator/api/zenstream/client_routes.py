@@ -9,6 +9,12 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 
+from app.artwork_variants import (
+    ArtworkVariantSource,
+    cache_for,
+    normalize_variant_width,
+    source_version,
+)
 from app.avatar import (
     AVATAR_MAX_BYTES,
     AvatarCrop,
@@ -38,6 +44,7 @@ from app.language_registry import language_options
 from app.local_metadata import local_artwork_type
 from app.logging_config import get_logger
 from app.lyrics import lyrics_to_vtt
+from app.metadata_services import asset_executor
 from app.models.account import Account
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
@@ -111,6 +118,82 @@ async def _require_image_access(request: Request):
         if error.status_code != 401:
             raise
         return await _require_access(request, "artwork")
+
+
+def _requested_variant_width(request: Request) -> int | None:
+    try:
+        width = normalize_variant_width(request.query_params.get("w"))
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return width
+
+
+async def _artwork_file_response(
+    source: ArtworkVariantSource,
+    requested_width: int | None,
+    requested_version: str | None,
+):
+    versioned = bool(requested_version)
+    if requested_width is None:
+        return FileResponse(
+            source.path,
+            media_type="image/webp",
+            headers={
+                "Cache-Control": (
+                    "private, max-age=31536000, immutable"
+                    if versioned
+                    else "private, max-age=300"
+                )
+            },
+        )
+
+    db_file = getattr(catalog.db, "db_file", None)
+    if not isinstance(db_file, (str, os.PathLike)):
+        db_file = None
+    cache = cache_for(db_file)
+    variant = cache.get(source, requested_width)
+    if variant is None:
+        future = cache.submit(source, requested_width, asset_executor)
+        if future is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(asyncio.wrap_future(future)), timeout=0.25
+                )
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                logger.debug(
+                    "artwork variant generation failed path=%s width=%s",
+                    source.path,
+                    requested_width,
+                    exc_info=True,
+                )
+        variant = cache.get(source, requested_width)
+    if variant is not None:
+        return FileResponse(
+            variant,
+            media_type="image/webp",
+            headers={
+                "Cache-Control": (
+                    "private, max-age=31536000, immutable"
+                    if versioned
+                    else "private, max-age=300"
+                ),
+                "X-ZenStream-Image-Variant": str(requested_width),
+            },
+        )
+
+    # The original is a safe cold-start fallback. Do not cache it under the
+    # variant URL, otherwise a browser could keep the oversized response after
+    # the background conversion completes.
+    return FileResponse(
+        source.path,
+        media_type="image/webp",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-ZenStream-Image-Variant": "original-fallback",
+        },
+    )
 
 
 def _save_avatar(
@@ -1174,9 +1257,10 @@ async def item_image(
     entity_id: str, image_type: str, request: Request, language: str = Query(...)
 ):
     requested_version = request.query_params.get("v")
+    requested_width = _requested_variant_width(request)
     account = await _require_image_access(request)
 
-    def resolve_cached_image() -> Path | None:
+    def resolve_cached_image() -> ArtworkVariantSource | None:
         row = catalog.require_entity(account["id"], entity_id)
         library_rows = catalog.db.execute(
             "SELECT directory FROM libraries WHERE id=?", (row[1],)
@@ -1193,7 +1277,14 @@ async def item_image(
                 if local_artwork_type(candidate) == image_type and candidate.is_file():
                     cached = LocalArtworkCache(catalog.db).path(content_hash)
                     if cached and cached.is_file():
-                        return cached
+                        version = str(content_hash or "").strip()[:12]
+                        if requested_version and requested_version != version:
+                            raise HTTPException(
+                                404, "Image version is no longer available."
+                            )
+                        return ArtworkVariantSource(
+                            cached, version or source_version(cached)
+                        )
                     raise HTTPException(404, "Image not found.")
         # The catalog selection is canonical. Request-time provider reselection
         # can disagree with the projection while a secondary provider refreshes
@@ -1210,7 +1301,9 @@ async def item_image(
                     # different fallback file under a stale client URL.
                     raise HTTPException(404, "Image version is no longer available.")
                 if selected_path and Path(selected_path).is_file():
-                    return Path(selected_path)
+                    path = Path(selected_path)
+                    version = source_version(path, selected_version)
+                    return ArtworkVariantSource(path, version)
                 if requested_version:
                     raise HTTPException(404, "Image version is no longer available.")
                 return None
@@ -1234,24 +1327,16 @@ async def item_image(
             if rows and rows[0][0] and Path(rows[0][0]).is_file():
                 if requested_version:
                     raise HTTPException(404, "Image version is no longer available.")
-                return Path(rows[0][0])
+                path = Path(rows[0][0])
+                return ArtworkVariantSource(path, source_version(path))
         if requested_version:
             raise HTTPException(404, "Image version is no longer available.")
         return None
 
     cached_image = await run_control(resolve_cached_image)
     if cached_image:
-        versioned = bool(request.query_params.get("v"))
-        return FileResponse(
-            cached_image,
-            media_type="image/webp",
-            headers={
-                "Cache-Control": (
-                    "private, max-age=31536000, immutable"
-                    if versioned
-                    else "private, max-age=300"
-                )
-            },
+        return await _artwork_file_response(
+            cached_image, requested_width, requested_version
         )
     return Response(
         status_code=202,
@@ -1261,14 +1346,19 @@ async def item_image(
 
 @router.get("/api/catalog/items/{entity_id}/people/{person_id}/image")
 async def person_image(entity_id: str, person_id: str, request: Request):
+    requested_version = request.query_params.get("v")
+    requested_width = _requested_variant_width(request)
     account = await _require_image_access(request)
-    image = await run_control(catalog.person_image, account["id"], entity_id, person_id)
+    image = await run_control(
+        catalog.person_image_source, account["id"], entity_id, person_id
+    )
     if image is None:
         raise HTTPException(404, "Person image not found.")
-    return FileResponse(
-        image,
-        media_type="image/webp",
-        headers={"Cache-Control": "private, max-age=31536000, immutable"},
+    path, version = image
+    if requested_version and requested_version != version:
+        raise HTTPException(404, "Image version is no longer available.")
+    return await _artwork_file_response(
+        ArtworkVariantSource(path, version), requested_width, requested_version
     )
 
 

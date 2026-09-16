@@ -1315,6 +1315,7 @@ _PARAMETER_DESCRIPTIONS = {
     "url": "Legacy invitation header accepted by the registration flow.",
     "disabled": "Administrator disabled-state value.",
     "v": "Artwork/avatar version used for immutable cache validation.",
+    "w": "Optional persistent artwork variant width; supported values are 160 and 320 pixels.",
     "access": "Optional short-lived resource or artwork ticket for headerless media requests.",
     "ticket": "Short-lived WebSocket ticket.",
     "participantId": "Client participant identity for a SyncPlay WebSocket.",
@@ -2237,6 +2238,17 @@ def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
             "query",
             description=_PARAMETER_DESCRIPTIONS["access"],
             example="ticket-example",
+        )
+    if path.startswith("/api/catalog/items/") and (
+        "/images/" in path or "/people/" in path
+    ):
+        _ensure_parameter(
+            operation,
+            "w",
+            "query",
+            schema={"type": "integer", "enum": [160, 320]},
+            description=_PARAMETER_DESCRIPTIONS["w"],
+            example=320,
         )
 
 

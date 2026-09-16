@@ -2102,7 +2102,7 @@ class CatalogTest(unittest.TestCase):
 
         self.assertEqual(
             metadata["images"]["Primary"]["url"],
-            "/api/catalog/items/album/images/Primary?language=en",
+            "/api/catalog/items/album/images/Primary?language=en&v=cached-cover",
         )
         self.assertEqual(metadata["images"]["Primary"]["blurHash"], "L5D@blur")
         resolve_public.assert_called_once()

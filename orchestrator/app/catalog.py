@@ -894,11 +894,13 @@ class Catalog:
             result[credit_type].append(value)
         return result
 
-    def person_image(self, user_id: str, entity_id: str, person_id: str) -> Path | None:
+    def person_image_source(
+        self, user_id: str, entity_id: str, person_id: str
+    ) -> tuple[Path, str] | None:
         if not self._has_table("entity_person_credits"):
             return None
         rows = self.db.execute(
-            "SELECT p.local_path FROM entity_person_credits c "
+            "SELECT p.local_path,p.updated_at FROM entity_person_credits c "
             "JOIN people p ON p.id=c.person_id "
             "JOIN library_entities e ON e.id=c.entity_id "
             "JOIN user_library_access a ON a.library_id=e.library_id AND a.user_id=? "
@@ -908,7 +910,14 @@ class Catalog:
         if not rows or not rows[0][0]:
             return None
         path = Path(rows[0][0])
-        return path if path.is_file() else None
+        if not path.is_file():
+            return None
+        version = hashlib.sha256(f"{path}:{rows[0][1] or ''}".encode()).hexdigest()[:12]
+        return path, version
+
+    def person_image(self, user_id: str, entity_id: str, person_id: str) -> Path | None:
+        source = self.person_image_source(user_id, entity_id, person_id)
+        return source[0] if source else None
 
     def local_artwork(
         self, entity_id: str, image_type: str
@@ -970,16 +979,11 @@ class Catalog:
             local = self.local_artwork(entity_id, image_type)
             if local is None:
                 continue
-            image = images.get(image_type)
-            if not isinstance(image, dict) or not image.get("url"):
-                image = {
-                    "url": (
-                        f"/api/catalog/items/{entity_id}/images/"
-                        f"{image_type}?language={language}"
-                    )
-                }
-            else:
-                image = dict(image)
+            image = dict(images.get(image_type) or {})
+            image["url"] = (
+                f"/api/catalog/items/{entity_id}/images/{image_type}"
+                f"?language={language}&v={local[0].stem[:12]}"
+            )
             if image_type == "Logo":
                 image.pop("blurHash", None)
             else:

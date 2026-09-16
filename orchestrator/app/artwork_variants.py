@@ -102,7 +102,9 @@ class ArtworkVariantCache:
             raise RuntimeError("Artwork variant output is empty.")
         return target
 
-    def submit(self, source: ArtworkVariantSource, width: int, executor) -> Future | None:
+    def submit(
+        self, source: ArtworkVariantSource, width: int, executor
+    ) -> Future | None:
         target = self.path_for(source, width)
         if target is None:
             return None
@@ -139,9 +141,7 @@ class ArtworkVariantCache:
 
     def active_keys(self, sources: list[ArtworkVariantSource]) -> set[str]:
         return {
-            self._key(source, width)
-            for source in sources
-            for width in VARIANT_WIDTHS
+            self._key(source, width) for source in sources for width in VARIANT_WIDTHS
         }
 
     def prune_stale(self, sources: list[ArtworkVariantSource]) -> int:
@@ -316,9 +316,7 @@ def selected_sources(db) -> tuple[list[ArtworkVariantSource], bool]:
     if "media_files" in tables:
         db_file = getattr(db, "db_file", None)
         local_cache = (
-            LocalArtworkCache(db)
-            if isinstance(db_file, (str, Path))
-            else None
+            LocalArtworkCache(db) if isinstance(db_file, (str, Path)) else None
         )
         try:
             local_rows = db.read_execute(
@@ -349,9 +347,9 @@ def selected_sources(db) -> tuple[list[ArtworkVariantSource], bool]:
         except Exception:
             return list(sources.values()), False
         for path, updated_at in people_rows:
-            version = hashlib.sha256(
-                f"{path}:{updated_at or ''}".encode("utf-8")
-            ).hexdigest()[:12]
+            version = hashlib.sha256(f"{path}:{updated_at or ''}".encode()).hexdigest()[
+                :12
+            ]
             source = ArtworkVariantSource(Path(path), version)
             if source.path.is_file():
                 sources[(str(source.path), source.version)] = source
@@ -368,7 +366,9 @@ def queue_selected(db, executor) -> dict[str, int]:
     if complete and cache.should_prune_stale():
         pruned = cache.prune_stale(sources)
     elif not complete:
-        logger.debug("skipping artwork variant cleanup because selection data is incomplete")
+        logger.debug(
+            "skipping artwork variant cleanup because selection data is incomplete"
+        )
     prewarmer = prewarmer_for(db_file)
     prewarmer.enqueue(sources, executor)
     diagnostics = cache.diagnostics()

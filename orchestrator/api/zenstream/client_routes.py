@@ -9,6 +9,12 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 
+from app.artwork_variants import (
+    ArtworkVariantSource,
+    cache_for,
+    normalize_variant_width,
+    source_version,
+)
 from app.avatar import (
     AVATAR_MAX_BYTES,
     AvatarCrop,
@@ -16,12 +22,6 @@ from app.avatar import (
     AvatarTooLargeError,
     AvatarUnsupportedError,
     UserAvatarStore,
-)
-from app.artwork_variants import (
-    ArtworkVariantSource,
-    cache_for,
-    normalize_variant_width,
-    source_version,
 )
 from app.catalog import Catalog
 from app.catalog_read_model import CatalogReadModel

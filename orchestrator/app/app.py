@@ -19,8 +19,9 @@ from api.zenstream.documentation_routes import router as documentation_router
 from api.zenstream.library_routes import router as library_router
 from api.zenstream.notification_routes import router as notification_router
 from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_openapi
+from app.artwork_variants import queue_selected
+from app.artwork_variants import stop_all as stop_artwork_variants
 from app.catalog_read_model import CatalogReadModel
-from app.artwork_variants import queue_selected, stop_all as stop_artwork_variants
 from app.client_auth import browser_origins
 from app.config import Config, load_config
 from app.foreground import (

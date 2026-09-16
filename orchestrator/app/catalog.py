@@ -912,9 +912,7 @@ class Catalog:
         path = Path(rows[0][0])
         if not path.is_file():
             return None
-        version = hashlib.sha256(
-            f"{path}:{rows[0][1] or ''}".encode()
-        ).hexdigest()[:12]
+        version = hashlib.sha256(f"{path}:{rows[0][1] or ''}".encode()).hexdigest()[:12]
         return path, version
 
     def person_image(self, user_id: str, entity_id: str, person_id: str) -> Path | None:

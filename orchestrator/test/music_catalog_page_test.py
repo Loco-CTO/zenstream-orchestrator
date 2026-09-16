@@ -191,6 +191,39 @@ class MusicCatalogPageTest(unittest.TestCase):
             ["release-c", "release-b"],
         )
 
+    def test_incomplete_page_status_keeps_requests_page_bounded(self):
+        self.db.execute(
+            "UPDATE catalog_music_album_page_status SET state='queued' WHERE library_id='music'"
+        )
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        catalog.require_library = Mock(return_value={"type": "music"})
+        catalog._music_release_rows = Mock(
+            side_effect=AssertionError("request-time full-library fallback")
+        )
+        catalog._seed_hydration_rows = Mock()
+        catalog._music_album_value = Mock(
+            side_effect=lambda _user, row, _language, _dates, children: {
+                "id": row[0],
+                "name": row[4],
+                "childIds": children,
+            }
+        )
+
+        result = catalog.music_albums(
+            "user",
+            "en",
+            "music",
+            page=2,
+            page_size=1,
+            sort_by="title",
+            sort_order="ascending",
+        )
+
+        self.assertEqual([item["id"] for item in result["items"]], ["release-b"])
+        catalog._music_release_rows.assert_not_called()
+        catalog._music_album_value.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

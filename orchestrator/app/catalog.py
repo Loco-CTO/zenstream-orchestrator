@@ -2557,6 +2557,23 @@ class Catalog:
             [language, *sorted(library_ids)],
         )
         total = int(count_rows[0][0] or 0) if count_rows else 0
+        page_language = language
+        if total == 0:
+            # A locale can be queued for projection while another committed
+            # locale still has a complete page. Keep the request bounded and
+            # use that committed ordering while the requested locale catches
+            # up; hydration below still uses the requested language.
+            locale_rows = self.db.execute(
+                "SELECT locale,COUNT(*) AS item_count "
+                "FROM catalog_music_album_page "
+                f"WHERE library_id IN ({placeholders}) "
+                "GROUP BY locale ORDER BY CASE WHEN locale=? THEN 0 "
+                "WHEN locale='en' THEN 1 ELSE 2 END,locale",
+                [*sorted(library_ids), language],
+            )
+            if locale_rows:
+                page_language = str(locale_rows[0][0])
+                total = int(locale_rows[0][1] or 0)
         direction = "DESC" if sort_order.casefold() == "descending" else "ASC"
         sort_key = str(sort_by or "title").casefold()
         order_column = (
@@ -2574,7 +2591,7 @@ class Catalog:
             f"WHERE p.locale=? AND p.library_id IN ({placeholders}) "
             f"ORDER BY p.{order_column} {direction},p.title_sort {direction},p.release_id {direction} "
             "LIMIT ? OFFSET ?",
-            [language, *sorted(library_ids), page_size, offset],
+            [page_language, *sorted(library_ids), page_size, offset],
         )
         if not rows:
             return {"items": [], "page": page, "pageSize": page_size, "total": total}
@@ -2680,6 +2697,24 @@ class Catalog:
                 for library in self.libraries(user_id)
                 if library["type"] == "music"
             }
+        if not allowed:
+            return {"items": [], "page": page, "pageSize": page_size, "total": 0}
+        # Once the bounded album page index exists, never hydrate the entire
+        # release/track tree in a request just because a rebuild is in flight.
+        # The page contains the last committed complete view and is repaired by
+        # the catalog read-model worker.
+        if self._has_table("catalog_music_album_page") and self._has_table(
+            "catalog_music_album_page_status"
+        ):
+            return self._music_album_page(
+                user_id,
+                language,
+                allowed,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
         if self._music_album_page_ready(allowed, language):
             return self._music_album_page(
                 user_id,
@@ -3427,37 +3462,29 @@ class Catalog:
                 *allowed,
                 *locale_order,
             ]
-            facet_rows = self.db.execute(
-                match_cte + "SELECT e.entity_type,COUNT(*) FROM matches "
-                "JOIN library_entities e ON e.id=matches.entity_id "
-                "GROUP BY e.entity_type",
-                match_params,
-            )
-            facets = _search_facets(
-                {str(row[0]): int(row[1] or 0) for row in facet_rows}
-            )
-            type_clause = ""
-            type_params: list[str] = []
-            if entity_type is not None:
-                type_clause = " WHERE e.entity_type=?"
-                type_params = [entity_type]
-            page_source = (
+            # Materialize the scored entity rows once. The previous path ran
+            # the entire trigram CTE once for facets and again for the page;
+            # only the selected page is hydrated after this bounded metadata
+            # rowset is sliced in memory.
+            all_source = (
                 match_cte
                 + "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
                 "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-                "FROM matches JOIN library_entities e ON e.id=matches.entity_id"
-                + type_clause
-                + " ORDER BY matches.score DESC,matches.locale_rank,matches.title_sort,matches.entity_id LIMIT ? OFFSET ?"
+                "FROM matches JOIN library_entities e ON e.id=matches.entity_id "
+                "ORDER BY matches.score DESC,matches.locale_rank,matches.title_sort,matches.entity_id"
             )
-            page_rows = self.db.execute(
-                page_source,
-                [
-                    *match_params,
-                    *type_params,
-                    page_size,
-                    max(0, page - 1) * page_size,
-                ],
+            all_rows = self.db.execute(all_source, match_params)
+            facet_counts: dict[str, int] = {}
+            for row in all_rows:
+                facet_counts[str(row[3])] = facet_counts.get(str(row[3]), 0) + 1
+            facets = _search_facets(facet_counts)
+            filtered_rows = (
+                [row for row in all_rows if row[3] == entity_type]
+                if entity_type is not None
+                else all_rows
             )
+            start = max(0, page - 1) * page_size
+            page_rows = filtered_rows[start : start + page_size]
             total = facets[entity_type] if entity_type else facets["all"]
             values = self._hydrate_rows(
                 user_id, [row[:10] for row in page_rows], language

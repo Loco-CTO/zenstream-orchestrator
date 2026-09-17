@@ -173,6 +173,32 @@ def _filesystem_path_key(value: str | os.PathLike[str]) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(os.fspath(value))))
 
 
+def _relative_watcher_path(
+    root: str | os.PathLike[str], value: str | os.PathLike[str]
+) -> Path | None:
+    """Return an event path relative to ``root`` only when it stays inside."""
+    try:
+        root_key = _filesystem_path_key(root)
+        value_key = _filesystem_path_key(value)
+        if (
+            root_key != value_key
+            and os.path.commonpath((root_key, value_key)) != root_key
+        ):
+            return None
+        # Use normalized keys for containment, but retain the event's spelling
+        # for the durable target and its latest-spelling diagnostics.
+        relative_value = os.path.normpath(
+            os.path.relpath(os.fspath(value), os.fspath(root))
+        )
+    except (OSError, ValueError):
+        return None
+    if relative_value in ("", os.curdir):
+        return Path()
+    if relative_value == os.pardir or relative_value.startswith(os.pardir + os.sep):
+        return None
+    return Path(relative_value)
+
+
 def _top_level_key(value: str | os.PathLike[str]) -> str:
     return _path_key(value).split("/", 1)[0]
 
@@ -2226,6 +2252,10 @@ class LibraryScanner:
         )
         missing = []
         normalized_targets = {_top_level_key(target) for target in (targets or set())}
+        if targets is not None and not normalized_targets:
+            # An empty targeted traversal is stale or invalid; it must never
+            # fall through to the full-library missing-row cleanup below.
+            return set()
         for entity_id, relative_path in rows:
             if entity_id in self._scan_seen_ids:
                 continue
@@ -5743,13 +5773,47 @@ class LibraryScanner:
         yield from walk(directory)
 
     @staticmethod
+    def _is_directory_or_inaccessible(path: Path) -> bool:
+        try:
+            if path.is_dir():
+                return True
+        except OSError:
+            return True
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return False
+
+    @staticmethod
     def _target_entries(root: Path, targets: set[str] | None) -> list[Path]:
         if targets is None:
             return list(root.iterdir())
         entries = []
         for target in sorted(targets):
-            candidate = root / target
-            if candidate.exists() or candidate.is_symlink():
+            target_path = Path(os.fspath(target).replace("\\", "/"))
+            if (
+                target_path.is_absolute()
+                or target_path.drive
+                or target_path.root
+                or len(target_path.parts) != 1
+                or target_path.parts[0] in {".", ".."}
+            ):
+                continue
+            candidate = root / target_path
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                # A deleted target must remain absent so scoped cleanup can
+                # remove its stale catalog rows.
+                continue
+            except OSError:
+                # Keep an inaccessible target in the scan so the caller can
+                # defer it instead of treating it as a completed deletion.
+                entries.append(candidate)
+            else:
                 entries.append(candidate)
         return entries
 
@@ -5932,7 +5996,8 @@ class LibraryScanner:
             (
                 path
                 for path in self._target_entries(root, targets)
-                if path.is_dir() or path.suffix.lower() in VIDEO_EXTENSIONS
+                if self._is_directory_or_inaccessible(path)
+                or path.suffix.lower() in VIDEO_EXTENSIONS
             ),
             key=lambda path: _path_key(relative(str(root), str(path))),
         )
@@ -6065,7 +6130,11 @@ class LibraryScanner:
         )
         enumeration_started = time.monotonic()
         series_dirs = sorted(
-            (path for path in self._target_entries(root, targets) if path.is_dir()),
+            (
+                path
+                for path in self._target_entries(root, targets)
+                if self._is_directory_or_inaccessible(path)
+            ),
             key=lambda path: path.name.casefold(),
         )
         logger.info(
@@ -11501,6 +11570,28 @@ class LibraryRuntime:
         )
         return bool(rows)
 
+    def _has_pending_full_inventory_job(self, library_id: str) -> bool:
+        rows = self.store.db.execute(
+            "SELECT 1 FROM library_jobs "
+            "WHERE library_id=? AND kind IN ('scan','collection_rebuild') "
+            "AND state IN ('queued','running','terminating') LIMIT 1",
+            (library_id,),
+        )
+        return bool(rows)
+
+    def _next_queued_job(self):
+        rows = self.store.db.execute(
+            "SELECT id,library_id,kind FROM library_jobs "
+            "WHERE state='queued' ORDER BY created_at"
+        )
+        for row in rows:
+            if row[2] == "reconcile" and self._has_pending_full_inventory_job(row[1]):
+                # Keep the watcher job durable, but do not start a worker that
+                # can only block on the same library's full inventory lock.
+                continue
+            return row
+        return None
+
     def _recover_active_jobs(self) -> None:
         """Re-queue interrupted inventory jobs after an Orchestrator restart."""
         rows = self.store.db.execute(
@@ -11557,9 +11648,8 @@ class LibraryRuntime:
         for value in paths:
             if not value:
                 continue
-            try:
-                relative_path = Path(value).relative_to(root)
-            except ValueError:
+            relative_path = _relative_watcher_path(root, value)
+            if relative_path is None:
                 continue
             if relative_path.parts:
                 if library.get("type") == "music" and len(relative_path.parts) == 1:
@@ -12107,14 +12197,12 @@ class LibraryRuntime:
                         self._reconcile_targets.get(library_id, set()).copy(),
                     )
                     self._reconcile_due.pop(library_id, None)
-            rows = self.store.db.execute(
-                "SELECT id,library_id,kind FROM library_jobs WHERE state='queued' ORDER BY created_at LIMIT 1"
-            )
-            if not rows:
+            row = self._next_queued_job()
+            if row is None:
                 with self.condition:
                     self.condition.wait(timeout=1)
                 continue
-            job_id, library_id, kind = rows[0]
+            job_id, library_id, kind = row
             with self._active_lock:
                 if job_id in self._active_jobs:
                     with self.condition:

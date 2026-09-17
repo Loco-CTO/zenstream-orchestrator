@@ -1067,6 +1067,35 @@ class LibraryMetadataTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_empty_targeted_reconcile_never_prunes_full_library(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for name in ("One", "Two"):
+                    movie = root / name
+                    movie.mkdir()
+                    (movie / f"{name}.mkv").touch()
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies("library-1", root, "job-1", lambda: False)
+                self._finish_incremental_scan(scanner, "library-1", root)
+
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_movies(
+                    "library-1", root, "job-1", lambda: False, targets=set()
+                )
+                self._finish_targeted_scan(scanner, "library-1", root, set())
+
+                self.assertEqual(
+                    db.execute(
+                        "SELECT relative_path FROM library_entities ORDER BY relative_path"
+                    ),
+                    [("One",), ("Two",)],
+                )
+        finally:
+            db.close()
+
     def test_targeted_series_reconcile_admits_adds_and_removes_roots(self):
         db, scanner = self._scanner_db()
         try:
@@ -1187,6 +1216,54 @@ class LibraryMetadataTest(unittest.TestCase):
                     scanner._prune_missing_entities(
                         "library-1", root, targets={"Example"}
                     )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT entity_type,relative_path FROM library_entities ORDER BY relative_path"
+                    ),
+                    before,
+                )
+                self.assertIn(_top_level_key("Example"), scanner._scan_deferred_roots)
+        finally:
+            db.close()
+
+    def test_inaccessible_targeted_root_is_not_treated_as_deleted(self):
+        db, scanner = self._scanner_db()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                series = root / "Example"
+                season = series / "Season 1"
+                season.mkdir(parents=True)
+                (season / "Example - S01E01.mkv").touch()
+                self._prepare_incremental_scan(scanner)
+                scanner._scan_series("library-1", root, "job-1", lambda: False)
+                self._finish_incremental_scan(scanner, "library-1", root)
+                before = db.execute(
+                    "SELECT entity_type,relative_path FROM library_entities ORDER BY relative_path"
+                )
+                original_stat = Path.stat
+                original_iterdir = Path.iterdir
+
+                def inaccessible_stat(path, *args, **kwargs):
+                    if path == series:
+                        raise OSError("temporarily unavailable")
+                    return original_stat(path, *args, **kwargs)
+
+                def inaccessible_iterdir(path, *args, **kwargs):
+                    if path == series:
+                        raise OSError("temporarily unavailable")
+                    return original_iterdir(path, *args, **kwargs)
+
+                with (
+                    patch.object(Path, "stat", inaccessible_stat),
+                    patch.object(Path, "iterdir", inaccessible_iterdir),
+                ):
+                    self._prepare_incremental_scan(scanner)
+                    scanner._scan_series(
+                        "library-1", root, "job-1", lambda: False, targets={"Example"}
+                    )
+                    self._finish_targeted_scan(scanner, "library-1", root, {"Example"})
+
                 self.assertEqual(
                     db.execute(
                         "SELECT entity_type,relative_path FROM library_entities ORDER BY relative_path"
@@ -5095,6 +5172,31 @@ class LibraryJobControlTest(unittest.TestCase):
         self.assertNotEqual(scan["id"], reconcile["id"])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM library_jobs")[0][0], 2)
 
+    def test_reconcile_waits_behind_full_inventory_without_starting_a_worker(self):
+        scan = self.runtime.enqueue("library-1", "scan")
+        reconcile = self.runtime.enqueue("library-1", "reconcile")
+        self.db.execute(
+            "UPDATE library_jobs SET created_at='before' WHERE id=?", (scan["id"],)
+        )
+
+        self.assertEqual(
+            self.runtime._next_queued_job(),
+            (scan["id"], "library-1", "scan"),
+        )
+
+        self.db.execute(
+            "UPDATE library_jobs SET state='running' WHERE id=?", (scan["id"],)
+        )
+        self.assertIsNone(self.runtime._next_queued_job())
+
+        self.db.execute(
+            "UPDATE library_jobs SET state='completed' WHERE id=?", (scan["id"],)
+        )
+        self.assertEqual(
+            self.runtime._next_queued_job(),
+            (reconcile["id"], "library-1", "reconcile"),
+        )
+
     def test_queued_library_task_can_be_terminated(self):
         job = self.runtime.enqueue("library-1", "scan")
 
@@ -5262,6 +5364,20 @@ class LibraryJobControlTest(unittest.TestCase):
             )
             self.assertIn("library-1", self.runtime._reconcile_due)
 
+    def test_watcher_reconcile_ignores_paths_outside_library_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.db.execute(
+                "UPDATE libraries SET directory=? WHERE id='library-1'", (str(root),)
+            )
+
+            self.runtime.request_reconcile(
+                "library-1", str(root / ".." / "outside" / "Episode.mkv")
+            )
+
+            self.assertNotIn("library-1", self.runtime._reconcile_targets)
+            self.assertNotIn("library-1", self.runtime._reconcile_due)
+
     def test_durable_reconcile_with_no_due_targets_is_a_noop(self):
         self.db.execute(
             "CREATE TABLE library_reconcile_targets (library_id TEXT NOT NULL, top_level_root TEXT NOT NULL, debounce_until REAL NOT NULL, event_count INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, PRIMARY KEY (library_id,top_level_root))"
@@ -5285,6 +5401,39 @@ class LibraryJobControlTest(unittest.TestCase):
             self.db.execute("SELECT top_level_root FROM library_reconcile_targets"),
             [("Show",)],
         )
+
+    def test_restart_reloads_durable_watcher_targets(self):
+        self.db.execute(
+            "CREATE TABLE library_reconcile_targets (library_id TEXT NOT NULL, top_level_root TEXT NOT NULL, debounce_until REAL NOT NULL, event_count INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 1, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, PRIMARY KEY (library_id,top_level_root))"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.db.execute(
+                "UPDATE libraries SET directory=? WHERE id='library-1'", (str(root),)
+            )
+            self.runtime.request_reconcile(
+                "library-1", str(root / "Show" / "Episode.mkv")
+            )
+            self.db.execute(
+                "UPDATE library_reconcile_targets SET debounce_until=?",
+                (time.time() - 1,),
+            )
+            self.runtime._reconcile_target_cache.clear()
+            self.runtime._reconcile_cache_loaded.clear()
+            self.runtime._reconcile_pending.clear()
+            self.runtime._reconcile_table_available = None
+            job = self.runtime.enqueue("library-1", "reconcile")
+            self.runtime._recover_active_jobs()
+            self.runtime._cancel_events[job["id"]] = threading.Event()
+
+            with patch("app.library.LibraryScanner.scan") as scan:
+                self.runtime._execute_job(job["id"], "library-1", "reconcile")
+
+            self.assertEqual(scan.call_args.kwargs["targets"], {"Show"})
+            self.assertEqual(
+                self.db.execute("SELECT COUNT(*) FROM library_reconcile_targets")[0][0],
+                0,
+            )
 
     def test_durable_reconcile_keeps_newer_revision_after_scan(self):
         self.db.execute(

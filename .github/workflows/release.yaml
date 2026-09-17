@@ -12,6 +12,10 @@ on:
           - fix
           - minor
           - major
+      retry_version:
+        description: Existing release version to retry without bumping
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -43,9 +47,39 @@ jobs:
         id: version
         env:
           BUMP: ${{ inputs.bump }}
+          RETRY_VERSION: ${{ inputs.retry_version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           version=$(sed -nE 's/^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' orchestrator/version.py)
           [ -n "$version" ] || { echo 'Could not read orchestrator version.' >&2; exit 1; }
+
+          if [ -n "$RETRY_VERSION" ]; then
+            retry_version="${RETRY_VERSION#v}"
+            [[ "$retry_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "Retry version must be a semantic version such as 1.5.7." >&2
+              exit 1
+            }
+            [ "$retry_version" = "$version" ] || {
+              echo "Retry version $retry_version must match orchestrator/version.py ($version)." >&2
+              exit 1
+            }
+            tag="v$retry_version"
+            git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 || {
+              echo "Release tag $tag does not exist; retry_version is only for an existing release." >&2
+              exit 1
+            }
+            gh release view "$tag" --json tagName >/dev/null || {
+              echo "GitHub release $tag does not exist; retry_version is only for an existing release." >&2
+              exit 1
+            }
+            echo "Retrying existing release $tag without changing the version."
+            echo "version=$retry_version" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "reuse_existing=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           IFS=. read -r major minor fix <<< "$version"
           case "$BUMP" in
             major) major=$((major + 1)); minor=0; fix=0 ;;
@@ -64,12 +98,20 @@ jobs:
           printf '{\n  "main": 0\n}\n' > .main-version.json
           echo "version=$new_version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "reuse_existing=false" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push main
         id: commit
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          REUSE_EXISTING: ${{ steps.version.outputs.reuse_existing }}
         run: |
+          set -euo pipefail
+          if [ "$REUSE_EXISTING" = "true" ]; then
+            echo "Reusing existing release version v$VERSION; no version commit needed."
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add orchestrator/version.py launcher/package.json launcher/package-lock.json .main-version.json
@@ -110,12 +152,31 @@ jobs:
         run: ./scripts/build-windows.ps1 -PythonExecutable python
       - name: Smoke-test packaged backend lifecycle
         run: node scripts/smoke-windows-backend.mjs
-      - name: Create GitHub release and attach Windows artifacts
+      - name: Ensure GitHub release exists
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
           SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          & gh release view $env:TAG --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "GitHub release $env:TAG already exists; reusing it."
+            exit 0
+          }
+
+          Write-Host "Creating GitHub release $env:TAG."
+          & gh release create $env:TAG --target $env:SHA --title $env:TAG --generate-notes
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to create GitHub release $env:TAG."
+          }
+          Write-Host "Created GitHub release $env:TAG."
+
+      - name: Upload Windows release artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           $releaseFiles = @(
             Get-ChildItem -LiteralPath launcher/release -File -Filter '*.exe' |
@@ -126,4 +187,99 @@ jobs:
           if ($releaseFiles.Count -lt 3) {
             throw 'Expected both Windows executables and SHA256SUMS.txt in launcher/release.'
           }
-          & gh release create $env:TAG @releaseFiles --target $env:SHA --title $env:TAG --generate-notes
+
+          foreach ($releaseFile in $releaseFiles) {
+            if (-not (Test-Path -LiteralPath $releaseFile -PathType Leaf)) {
+              throw "Release artifact is missing: $releaseFile"
+            }
+            $file = Get-Item -LiteralPath $releaseFile
+            Write-Host "Artifact path: $($file.FullName)"
+            Write-Host ("Artifact file size: {0:N0} bytes" -f $file.Length)
+          }
+
+          $assetNames = @(& gh release view $env:TAG --json assets --jq '.assets[].name' 2>$null)
+          if ($LASTEXITCODE -eq 0) {
+            foreach ($releaseFile in $releaseFiles) {
+              $assetName = [System.IO.Path]::GetFileName($releaseFile)
+              if ($assetNames -contains $assetName) {
+                Write-Host "Existing release asset $assetName found; it will be replaced with --clobber."
+              }
+              else {
+                Write-Host "No existing release asset named $assetName; uploading it as new."
+              }
+            }
+          }
+          else {
+            Write-Host 'Could not inspect existing release assets; --clobber will replace matching assets if present.'
+          }
+
+          function Invoke-GhReleaseUpload {
+            param(
+              [Parameter(Mandatory = $true)][string]$Tag,
+              [Parameter(Mandatory = $true)][string[]]$Files,
+              [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+            )
+
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = 'gh'
+            $startInfo.UseShellExecute = $false
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            foreach ($argument in @('release', 'upload', $Tag) + $Files + @('--clobber')) {
+              [void]$startInfo.ArgumentList.Add($argument)
+            }
+
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            try {
+              if (-not $process.Start()) {
+                throw 'Could not start GitHub CLI upload process.'
+              }
+              $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+              $stderrTask = $process.StandardError.ReadToEndAsync()
+              if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                Write-Warning "GitHub CLI upload exceeded the ${TimeoutSeconds}s timeout."
+                try { $process.Kill($true) } catch { Write-Warning "Could not terminate timed-out GitHub CLI process: $($_.Exception.Message)" }
+                $process.WaitForExit()
+                $stdout = $stdoutTask.GetAwaiter().GetResult()
+                $stderr = $stderrTask.GetAwaiter().GetResult()
+                if ($stdout) { Write-Host $stdout.TrimEnd() }
+                if ($stderr) { Write-Host $stderr.TrimEnd() }
+                return 124
+              }
+
+              $stdout = $stdoutTask.GetAwaiter().GetResult()
+              $stderr = $stderrTask.GetAwaiter().GetResult()
+              if ($stdout) { Write-Host $stdout.TrimEnd() }
+              if ($stderr) { Write-Host $stderr.TrimEnd() }
+              return $process.ExitCode
+            }
+            finally {
+              $process.Dispose()
+            }
+          }
+
+          $uploadTimeoutSeconds = 600
+          Write-Host "Upload timeout per attempt: ${uploadTimeoutSeconds}s"
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "Uploading Windows release artifacts to $env:TAG (attempt $attempt/3)..."
+            $uploadExitCode = Invoke-GhReleaseUpload -Tag $env:TAG -Files $releaseFiles -TimeoutSeconds $uploadTimeoutSeconds
+            if ($uploadExitCode -eq 0) {
+              Write-Host "Successfully uploaded Windows release artifacts to $env:TAG."
+              exit 0
+            }
+
+            if ($uploadExitCode -eq 124) {
+              Write-Warning "Upload attempt $attempt timed out after ${uploadTimeoutSeconds}s."
+            }
+            else {
+              Write-Warning "Upload attempt $attempt failed with exit code $uploadExitCode."
+            }
+            if ($attempt -lt 3) {
+              $delay = $attempt * 10
+              Write-Host "Retrying in ${delay}s."
+              Start-Sleep -Seconds $delay
+            }
+          }
+
+          throw 'Windows release asset upload failed after 3 attempts.'

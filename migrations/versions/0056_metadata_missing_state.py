@@ -1,7 +1,6 @@
 import sqlalchemy as sa
 from alembic import op
 
-
 revision = "0056_metadata_missing_state"
 down_revision = "0055_metadata_cleanup_path_indexes"
 branch_labels = None
@@ -22,9 +21,7 @@ def upgrade() -> None:
         sa.Column("error", sa.Text(), nullable=True),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.Text(), nullable=False),
-        sa.PrimaryKeyConstraint(
-            "provider", "entity_type", "provider_id", "locale"
-        ),
+        sa.PrimaryKeyConstraint("provider", "entity_type", "provider_id", "locale"),
     )
     op.create_index(
         "idx_metadata_missing_state_due",

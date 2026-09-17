@@ -16,6 +16,7 @@ from app.jobs import (
     _repair_missing_tv_child_identities,
 )
 from app.progress import PROGRESS_TOTAL, WholeJobProgress
+from app.providers import ProviderError, ProviderNotFoundError
 
 
 class DatabaseRollbackTest(unittest.TestCase):
@@ -165,6 +166,20 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT,PRIMARY KEY(entity_id,locale))"
         )
         self.db.execute(
+            "CREATE TABLE metadata_missing_state("
+            "provider TEXT NOT NULL,entity_type TEXT NOT NULL,provider_id TEXT NOT NULL,"
+            "locale TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL,"
+            "next_attempt_at TEXT,source_job_id TEXT,error TEXT,created_at TEXT NOT NULL,"
+            "updated_at TEXT NOT NULL,PRIMARY KEY(provider,entity_type,provider_id,locale))"
+        )
+        self.db.execute(
+            "CREATE TABLE enrichment_queue("
+            "id TEXT PRIMARY KEY,entity_id TEXT,library_id TEXT,kind TEXT,locale TEXT,"
+            "priority INTEGER,state TEXT,attempts INTEGER,next_attempt_at TEXT,"
+            "lease_owner TEXT,lease_expires_at TEXT,source_job_id TEXT,error TEXT,"
+            "created_at TEXT,updated_at TEXT,UNIQUE(entity_id,kind,locale))"
+        )
+        self.db.execute(
             "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT)"
         )
         self.db.execute(
@@ -226,6 +241,50 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertIn("artwork:Backdrop", gaps)
         self.assertIn("projection-artwork:Backdrop", gaps)
         self.assertNotIn("artwork:Primary", gaps)
+
+    def test_accepts_selected_projection_identity_and_merged_trailer(self):
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie-1",
+                "en",
+                json.dumps(
+                    {
+                        "title": "Example",
+                        "provider": "local",
+                        "providerId": "local-movie-1",
+                        "ids": [{"provider": "local", "id": "movie-1"}],
+                        "trailers": [{"url": "https://youtube.com/watch?v=other"}],
+                        "images": {},
+                    }
+                ),
+            ),
+        )
+        gaps, _linked = _metadata_document_gaps(
+            self.db,
+            "tmdb",
+            "movie",
+            "42",
+            "en",
+            {
+                "title": "Example",
+                "provider": "tmdb",
+                "providerId": "42",
+                "ids": [{"provider": "tmdb", "id": "42"}],
+                "trailers": [{"url": "https://youtube.com/watch?v=source"}],
+                "images": [],
+            },
+        )
+
+        self.assertFalse(
+            {
+                "metadata:provider",
+                "metadata:providerId",
+                "metadata:ids",
+                "metadata:trailers",
+            }
+            & gaps
+        )
 
     def test_detects_missing_provider_title_for_a_season(self):
         self.db.execute(
@@ -424,13 +483,16 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 1", store.updates[-1]["message"])
 
-    def test_providerless_entities_queue_a_forced_library_recovery_scan(self):
+    def test_providerless_entities_queue_a_forced_targeted_recovery_reconcile(self):
         self.db.execute(
             "CREATE TABLE libraries(id TEXT PRIMARY KEY,name TEXT,type TEXT)"
         )
         self.db.execute("INSERT INTO libraries VALUES('library-1','Music','music')")
         self.db.execute(
-            "INSERT INTO library_entities VALUES('release-1','library-1','release')"
+            "ALTER TABLE library_entities ADD COLUMN relative_path TEXT"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('release-1','library-1','release','Artist/Album')"
         )
         self.db.execute(
             "INSERT INTO entity_provider_ids VALUES('release-1','lastfm','release','artist-album',0)"
@@ -460,7 +522,10 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         self.assertEqual(incomplete[0]["libraryId"], "library-1")
         runtime.start.assert_called_once_with()
         runtime.enqueue.assert_called_once_with(
-            "library-1", "scan", force_metadata=True
+            "library-1",
+            "reconcile",
+            targets={"Artist"},
+            force_metadata=True,
         )
         runtime.wait_for_job.assert_called_once_with(
             "scan-1", should_terminate=unittest.mock.ANY
@@ -494,6 +559,189 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         ingest.ingest_document.assert_not_called()
         self.assertEqual(store.updates[-1]["state"], "completed")
         self.assertIn("repaired 0", store.updates[-1]["message"])
+
+    def test_successful_document_is_not_reprocessed_on_the_next_run(self):
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("movie-1", "en", json.dumps({"title": "Example", "images": {}})),
+        )
+
+        class Cache:
+            @staticmethod
+            def get(*_args):
+                return {"title": "Example", "images": []}
+
+        class Ingest:
+            metadata_service = type(
+                "MetadataService", (), {"cache": Cache(), "credentials": {}}
+            )()
+
+            @staticmethod
+            def locales():
+                return ["en"]
+
+            @staticmethod
+            def ingest_document(*_args, **_kwargs):
+                raise AssertionError("a completed document was reprocessed")
+
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=Ingest()):
+            job = MetadataMissingJob(store)
+            job.run("run-1", {"config": {"batchSize": 1}})
+            job.run("run-2", {"config": {"batchSize": 1}})
+
+        self.assertEqual(
+            self.db.execute(
+                "SELECT state,attempts FROM metadata_missing_state "
+                "WHERE provider='tmdb' AND entity_type='movie' AND provider_id='42' "
+                "AND locale='en'"
+            ),
+            [("completed", 0)],
+        )
+        self.assertIn("Checked 0 metadata documents", store.updates[-1]["message"])
+
+    def test_permanent_provider_failure_is_not_retried(self):
+        class Cache:
+            @staticmethod
+            def get(*_args):
+                return None
+
+        class Ingest:
+            metadata_service = type(
+                "MetadataService", (), {"cache": Cache(), "credentials": {}}
+            )()
+
+            def __init__(self):
+                self.calls = 0
+
+            @staticmethod
+            def locales():
+                return ["en"]
+
+            def ingest_locales(self, *_args, **_kwargs):
+                self.calls += 1
+                raise ProviderNotFoundError("identity is gone")
+
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=ingest):
+            job = MetadataMissingJob(store)
+            job.run("run-1", {"config": {"batchSize": 1}})
+            job.run("run-2", {"config": {"batchSize": 1}})
+
+        self.assertEqual(ingest.calls, 1)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT state,attempts,next_attempt_at FROM metadata_missing_state "
+                "WHERE provider='tmdb' AND entity_type='movie' AND provider_id='42' "
+                "AND locale='en'"
+            ),
+            [("failed", 1, None)],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT state,attempts,next_attempt_at FROM enrichment_queue"
+            ),
+            [("failed", 1, None)],
+        )
+
+    def test_transient_failure_resumes_after_due_time_from_a_new_job(self):
+        document = {"title": "Recovered", "images": []}
+
+        class Cache:
+            @staticmethod
+            def get(*_args):
+                return None
+
+        class Ingest:
+            metadata_service = type(
+                "MetadataService", (), {"cache": Cache(), "credentials": {}}
+            )()
+
+            def __init__(self):
+                self.calls = 0
+
+            @staticmethod
+            def locales():
+                return ["en"]
+
+            def ingest_locales(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ProviderError("temporary outage")
+                self_db.execute(
+                    "UPDATE catalog_item_projection SET payload=? "
+                    "WHERE entity_id='movie-1' AND locale='en'",
+                    (json.dumps(document),),
+                )
+                return {"en": document}
+
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("movie-1", "en", json.dumps({"images": {}})),
+        )
+        self_db = self.db
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=ingest):
+            job = MetadataMissingJob(store)
+            job.run("run-1", {"config": {"batchSize": 1}})
+            job.run("run-2", {"config": {"batchSize": 1}})
+            self.assertEqual(ingest.calls, 1)
+            self.db.execute(
+                "UPDATE metadata_missing_state SET next_attempt_at='1970-01-01T00:00:00+00:00'"
+            )
+            self.db.execute(
+                "UPDATE enrichment_queue SET next_attempt_at='1970-01-01T00:00:00+00:00'"
+            )
+            MetadataMissingJob(store).run("run-3", {"config": {"batchSize": 1}})
+
+        self.assertEqual(ingest.calls, 2)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT state,attempts,next_attempt_at FROM metadata_missing_state"
+            ),
+            [("completed", 1, None)],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT state,attempts,next_attempt_at FROM enrichment_queue"
+            ),
+            [("completed", 1, None)],
+        )
 
     def test_musicbrainz_repair_uses_one_neutral_provider_locale(self):
         self.db.execute("DELETE FROM entity_provider_ids WHERE entity_id='movie-1'")
@@ -857,6 +1105,13 @@ class MissingTvChildIdentityRepairTest(unittest.TestCase):
             "is_primary INTEGER,PRIMARY KEY(entity_id,provider,identifier_type))"
         )
         self.db.execute(
+            "CREATE TABLE metadata_missing_state("
+            "provider TEXT NOT NULL,entity_type TEXT NOT NULL,provider_id TEXT NOT NULL,"
+            "locale TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL,"
+            "next_attempt_at TEXT,source_job_id TEXT,error TEXT,created_at TEXT NOT NULL,"
+            "updated_at TEXT NOT NULL,PRIMARY KEY(provider,entity_type,provider_id,locale))"
+        )
+        self.db.execute(
             "INSERT INTO library_entities VALUES"
             "('series-1','library-1',NULL,'series',NULL,NULL,'matched',1.0,'scan', 'now'),"
             "('season-1','library-1','series-1','season',1,NULL,'unresolved',NULL,NULL,'now'),"
@@ -922,6 +1177,37 @@ class MissingTvChildIdentityRepairTest(unittest.TestCase):
                 ("episode-2", "matched", "parent_resolution"),
                 ("season-1", "matched", "parent_resolution"),
             ],
+        )
+
+    def test_permanently_missing_tvdb_hierarchy_is_attempted_once(self):
+        class Service:
+            def __init__(self):
+                self.calls = 0
+
+            def series_child_ids(self, provider, provider_id):
+                self.calls += 1
+                raise ProviderNotFoundError("series is gone")
+
+        service = Service()
+
+        self.assertEqual(
+            _repair_missing_tv_child_identities(
+                self.db, service, run_id="run-1"
+            ),
+            0,
+        )
+        self.assertEqual(
+            _repair_missing_tv_child_identities(
+                self.db, service, run_id="run-2"
+            ),
+            0,
+        )
+        self.assertEqual(service.calls, 1)
+        self.assertEqual(
+            self.db.execute(
+                "SELECT state,attempts,next_attempt_at FROM metadata_missing_state"
+            ),
+            [("failed", 1, None)],
         )
 
 

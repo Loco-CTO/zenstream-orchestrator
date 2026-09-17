@@ -11289,8 +11289,9 @@ class LibraryRuntime:
             # Legacy callers may still pass an explicit target set.  Durable
             # watcher events use the table directly; this path keeps the
             # public enqueue API compatible for manual targeted scans/tests.
-            self._job_targets[job_id] = set(targets)
-        if force_metadata and kind == "scan":
+            existing_targets = getattr(self, "_job_targets", {}).get(job_id, set())
+            self._job_targets[job_id] = set(existing_targets) | set(targets)
+        if force_metadata and kind in {"scan", "reconcile"}:
             if not hasattr(self, "_job_force_metadata"):
                 self._job_force_metadata = {}
             self._job_force_metadata[job_id] = True

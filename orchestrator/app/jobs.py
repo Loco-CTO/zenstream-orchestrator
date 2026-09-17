@@ -36,13 +36,17 @@ from app.progress import (
     format_progress_message,
     resolve_progress_item,
 )
-from app.providers import ProviderError
+from app.providers import ProviderError, ProviderNotFoundError
 from app.trickplay import TrickplayExtractor
 
 logger = get_logger("jobs")
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
 ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
 ANALYSIS_KINDS = {"trickplay_extract", "intro_outro_detect"}
+METADATA_MISSING_MAX_ATTEMPTS = 5
+METADATA_MISSING_RETRY_BASE_SECONDS = 60 * 60
+METADATA_MISSING_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
+METADATA_IDENTITY_PROVIDER = "__identity__"
 
 
 class AnalysisMaintenanceTimeout(TimeoutError):
@@ -90,6 +94,159 @@ def _local_next(time_text: str, weekday: int | None = None) -> str:
 
 def _usable_metadata_value(value) -> bool:
     return value is not None and value != "" and value != [] and value != {}
+
+
+def _metadata_retry_at(attempts: int) -> str:
+    delay = min(
+        METADATA_MISSING_RETRY_MAX_SECONDS,
+        METADATA_MISSING_RETRY_BASE_SECONDS
+        * (2 ** max(0, min(attempts - 1, 16))),
+    )
+    return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
+
+
+def _metadata_recovery_state_table(db) -> bool:
+    try:
+        return bool(
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata_missing_state'"
+            )
+        )
+    except Exception:
+        return False
+
+
+def _metadata_recovery_state(
+    db, provider: str, entity_type: str, provider_id: str, locale: str = ""
+):
+    if not _metadata_recovery_state_table(db):
+        return None
+    rows = db.execute(
+        "SELECT state,attempts,next_attempt_at FROM metadata_missing_state "
+        "WHERE provider=? AND entity_type=? AND provider_id=? AND locale=?",
+        (provider, entity_type, provider_id, locale),
+    )
+    return rows[0] if rows else None
+
+
+def _metadata_recovery_due(state, current: str | None = None) -> bool:
+    if not state:
+        return True
+    status, attempts, next_attempt_at = state
+    if (
+        status not in {"queued", "retry"}
+        or int(attempts or 0) >= METADATA_MISSING_MAX_ATTEMPTS
+    ):
+        return False
+    return next_attempt_at is None or str(next_attempt_at) <= (current or now())
+
+
+def _record_metadata_recovery_state(
+    db,
+    provider: str,
+    entity_type: str,
+    provider_id: str,
+    *,
+    locale: str = "",
+    error: str | None,
+    source_job_id: str | None,
+    permanent: bool = False,
+) -> None:
+    if not _metadata_recovery_state_table(db):
+        return
+    previous = _metadata_recovery_state(
+        db, provider, entity_type, provider_id, locale
+    )
+    attempts = int(previous[1] or 0) + 1 if previous else 1
+    terminal = permanent or attempts >= METADATA_MISSING_MAX_ATTEMPTS
+    status = "failed" if terminal else "retry"
+    next_attempt_at = None if terminal else _metadata_retry_at(attempts)
+    timestamp = now()
+    with db.transaction() as cursor:
+        cursor.execute(
+            "INSERT INTO metadata_missing_state(provider,entity_type,provider_id,locale,state,attempts,next_attempt_at,source_job_id,error,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(provider,entity_type,provider_id,locale) DO UPDATE SET "
+            "state=excluded.state,attempts=excluded.attempts,next_attempt_at=excluded.next_attempt_at,source_job_id=excluded.source_job_id,error=excluded.error,updated_at=excluded.updated_at",
+            (
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                status,
+                attempts,
+                next_attempt_at,
+                source_job_id,
+                error,
+                timestamp,
+                timestamp,
+            ),
+        )
+
+
+def _complete_metadata_recovery_state(
+    db,
+    provider: str,
+    entity_type: str,
+    provider_id: str,
+    *,
+    locale: str = "",
+    source_job_id: str | None,
+) -> None:
+    if not _metadata_recovery_state_table(db):
+        return
+    previous = _metadata_recovery_state(
+        db, provider, entity_type, provider_id, locale
+    )
+    attempts = int(previous[1] or 0) if previous else 0
+    timestamp = now()
+    with db.transaction() as cursor:
+        cursor.execute(
+            "INSERT INTO metadata_missing_state(provider,entity_type,provider_id,locale,state,attempts,next_attempt_at,source_job_id,error,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,NULL,?,NULL,?,?) "
+            "ON CONFLICT(provider,entity_type,provider_id,locale) DO UPDATE SET "
+            "state='completed',attempts=excluded.attempts,next_attempt_at=NULL,source_job_id=excluded.source_job_id,error=NULL,updated_at=excluded.updated_at",
+            (
+                provider,
+                entity_type,
+                provider_id,
+                locale,
+                "completed",
+                attempts,
+                source_job_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+
+
+def _clear_metadata_recovery_state(
+    db, provider: str, entity_type: str, provider_id: str, locale: str = ""
+) -> None:
+    if not _metadata_recovery_state_table(db):
+        return
+    db.execute(
+        "DELETE FROM metadata_missing_state WHERE provider=? AND entity_type=? AND provider_id=? AND locale=?",
+        (provider, entity_type, provider_id, locale),
+    )
+
+
+def _metadata_failure_is_retryable(failure: dict) -> bool:
+    if failure.get("retryable") is False or failure.get("permanent"):
+        return False
+    missing = set(failure.get("missing") or ())
+    # TVDB legitimately has season records with no localized title.  The
+    # scanner's synthesized ``Season N`` label is valid local metadata, so a
+    # missing provider title is terminal after the one explicit recovery pass.
+    if (
+        failure.get("kind") == "incomplete"
+        and failure.get("provider") == "tvdb"
+        and failure.get("entityType") == "season"
+        and missing
+        and missing <= {"metadata:title"}
+    ):
+        return False
+    return True
 
 
 def _ready_cache_path(value) -> bool:
@@ -257,7 +414,15 @@ def _metadata_document_gaps(
     if not entity_libraries:
         return {"identity:orphaned"}, []
 
-    projected_fields = TEXT_FIELDS | FACT_FIELDS
+    # Provider identity fields describe the source document, not the selected
+    # catalog projection.  A local document or a higher-priority provider is
+    # allowed to own those fields, so comparing them here creates a permanent
+    # false gap for otherwise valid music and video records.
+    projected_fields = (TEXT_FIELDS | FACT_FIELDS) - {
+        "provider",
+        "providerId",
+        "ids",
+    }
     prefer_no_language_for_backdrop = _prefer_no_language_for_backdrop()
     source_images = set()
     for image_type in ARTWORK_TYPES:
@@ -367,6 +532,14 @@ def _metadata_document_gaps(
                 elif not _usable_metadata_value(projection.get(field)):
                     gaps.add(f"metadata:{field}")
                 continue
+            if field == "trailers":
+                # Trailer projection is deliberately localized and merged
+                # across provider priorities.  A different provider's
+                # trailer is a valid materialization; only an absent
+                # projection is actionable.
+                if not _usable_metadata_value(projection.get(field)):
+                    gaps.add("metadata:trailers")
+                continue
             if projection.get(field) != source_value:
                 gaps.add(f"metadata:{field}")
         projected_images = projection.get("images")
@@ -448,7 +621,14 @@ def _metadata_document_gaps(
     return gaps, entity_libraries
 
 
-def _repair_missing_tv_child_identities(db, metadata_service) -> int:
+def _repair_missing_tv_child_identities(
+    db,
+    metadata_service,
+    *,
+    run_id: str | None = None,
+    should_terminate=None,
+    persist_state: bool = True,
+) -> int:
     """Restore child provider IDs left behind by an interrupted TV scan.
 
     A scan can persist the series identity before the process is restarted,
@@ -497,8 +677,13 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
             "WHERE provider IN ('tmdb','tvdb')"
         )
     )
+    should_terminate = should_terminate or (lambda: False)
+    state_available = persist_state and _metadata_recovery_state_table(db)
+    source_job_id = run_id or "metadata_missing"
     repaired = 0
     for series_id, provider, series_provider_id in series_rows:
+        if should_terminate():
+            raise JobTerminated()
         children = children_by_series.get(series_id, [])
         if not children:
             continue
@@ -508,6 +693,10 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
             if (child[0], provider, child[1]) not in existing
         ]
         if not missing:
+            if provider == "tvdb" and state_available:
+                _clear_metadata_recovery_state(
+                    db, "tvdb", "series_children", str(series_provider_id)
+                )
             continue
 
         provider_ids: dict[tuple[int, int | None], str] = {}
@@ -525,9 +714,39 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
             discover = getattr(metadata_service, "series_child_ids", None)
             if not callable(discover):
                 continue
+            if state_available and not _metadata_recovery_due(
+                _metadata_recovery_state(
+                    db, "tvdb", "series_children", str(series_provider_id)
+                )
+            ):
+                continue
             try:
                 hierarchy = discover("tvdb", str(series_provider_id)) or {}
+            except ProviderNotFoundError as error:
+                _record_metadata_recovery_state(
+                    db,
+                    "tvdb",
+                    "series_children",
+                    str(series_provider_id),
+                    error=f"{type(error).__name__}: {error}",
+                    source_job_id=source_job_id,
+                    permanent=True,
+                )
+                logger.info(
+                    "missing metadata child identity is permanently unresolved series_id=%s provider_id=%s",
+                    series_id,
+                    series_provider_id,
+                )
+                continue
             except Exception as error:
+                _record_metadata_recovery_state(
+                    db,
+                    "tvdb",
+                    "series_children",
+                    str(series_provider_id),
+                    error=f"{type(error).__name__}: {error}",
+                    source_job_id=source_job_id,
+                )
                 logger.warning(
                     "missing metadata child identity discovery failed series_id=%s provider_id=%s: %s",
                     series_id,
@@ -575,6 +794,32 @@ def _repair_missing_tv_child_identities(db, metadata_service) -> int:
                     "match_confidence=1.0,match_method='parent_resolution',updated_at=? "
                     "WHERE id=?",
                     (now(), child_id),
+                )
+        if provider == "tvdb" and state_available:
+            remaining = [
+                child
+                for child in missing
+                if (
+                    child[0],
+                    "tvdb",
+                    child[1],
+                )
+                not in existing
+            ]
+            if remaining:
+                _record_metadata_recovery_state(
+                    db,
+                    "tvdb",
+                    "series_children",
+                    str(series_provider_id),
+                    error=(
+                        "Provider hierarchy did not contain all indexed TV child identities"
+                    ),
+                    source_job_id=source_job_id,
+                )
+            else:
+                _clear_metadata_recovery_state(
+                    db, "tvdb", "series_children", str(series_provider_id)
                 )
     if repaired:
         logger.info("repaired missing TV child provider identities count=%s", repaired)
@@ -1696,8 +1941,8 @@ class MetadataMissingJob:
             else globals().get("library_runtime")
         )
 
-    def _missing_primary_library_rows(self) -> list[tuple[str, str]]:
-        """Find libraries containing entities invisible to provider-ID worklists."""
+    def _missing_primary_entity_rows(self) -> list[tuple]:
+        """Find non-manual entities invisible to provider-ID worklists."""
         entity_types = sorted(PRIMARY_METADATA_IDENTITIES)
         entity_placeholders = ",".join("?" for _ in entity_types)
         identity_clauses = []
@@ -1720,9 +1965,12 @@ class MetadataMissingJob:
             if "match_method" in entity_columns
             else ""
         )
+        relative_path = "e.relative_path" if "relative_path" in entity_columns else "NULL"
+        parent_id = "e.parent_id" if "parent_id" in entity_columns else "NULL"
         try:
             rows = self.db.execute(
-                "SELECT DISTINCT e.library_id,COALESCE(l.name,e.library_id) "
+                "SELECT e.id,e.library_id,COALESCE(l.name,e.library_id),"
+                f"e.entity_type,{relative_path} AS relative_path,{parent_id} AS parent_id "
                 "FROM library_entities e JOIN libraries l ON l.id=e.library_id "
                 f"WHERE l.type<>'collection' {manual_filter} "
                 f"AND e.entity_type IN ({entity_placeholders}) "
@@ -1743,19 +1991,155 @@ class MetadataMissingJob:
                 exc_info=True,
             )
             return []
-        return [(str(library_id), str(name or library_id)) for library_id, name in rows]
+        return [
+            (
+                str(entity_id),
+                str(library_id),
+                str(name or library_id),
+                str(entity_type),
+                relative_path,
+                parent_id,
+            )
+            for entity_id, library_id, name, entity_type, relative_path, parent_id in rows
+        ]
+
+    def _missing_primary_library_rows(self) -> list[tuple[str, str]]:
+        """Find libraries containing entities invisible to provider-ID worklists."""
+        libraries = {
+            (row[1], row[2]) for row in self._missing_primary_entity_rows()
+        }
+        return sorted(libraries)
+
+    @staticmethod
+    def _target_root(relative_path) -> str | None:
+        normalized = str(relative_path or "").replace("\\", "/").strip("/")
+        if not normalized:
+            return None
+        root = normalized.split("/", 1)[0].strip()
+        if not root or root in {".", ".."} or ":" in root:
+            return None
+        return root
+
+    def _entity_target_root(self, row: tuple, entity_columns: set[str]) -> str | None:
+        target = self._target_root(row[4])
+        if target or not {"parent_id", "relative_path"} <= entity_columns:
+            return target
+        current = row[5]
+        seen: set[str] = set()
+        while current and current not in seen:
+            seen.add(str(current))
+            parent_rows = self.db.execute(
+                "SELECT parent_id,relative_path FROM library_entities WHERE id=?",
+                (current,),
+            )
+            if not parent_rows:
+                break
+            parent_id, relative_path = parent_rows[0]
+            target = self._target_root(relative_path)
+            if target:
+                return target
+            current = parent_id
+        return None
+
+    def _select_metadata_items(
+        self,
+        rows: list[tuple],
+        locales: list[str],
+        *,
+        operation: str,
+        force: bool,
+        has_enrichment_queue: bool,
+    ) -> tuple[list[tuple], dict[tuple, list[str]] | None]:
+        """Select only new, due, or explicitly queued repair documents."""
+        if operation != "metadata_missing" or force:
+            return list(rows), None
+        if not _metadata_recovery_state_table(self.db):
+            # Keep first-install and old fixture databases compatible. The
+            # migration enables the durable sparse worklist in production.
+            return list(rows), None
+
+        state_rows = {
+            (str(provider), str(entity_type), str(provider_id), str(locale or "")): (
+                str(state),
+                int(attempts or 0),
+                next_attempt_at,
+            )
+            for provider, entity_type, provider_id, locale, state, attempts, next_attempt_at in self.db.execute(
+                "SELECT provider,entity_type,provider_id,locale,state,attempts,next_attempt_at "
+                "FROM metadata_missing_state"
+            )
+        }
+        queued_keys: set[tuple[str, str, str, str]] = set()
+        if has_enrichment_queue:
+            queue_rows = self.db.execute(
+                "SELECT DISTINCT ep.provider,ep.identifier_type,ep.provider_id,q.locale "
+                "FROM enrichment_queue q JOIN entity_provider_ids ep ON ep.entity_id=q.entity_id "
+                "WHERE q.kind='metadata' AND q.state IN ('queued','retry') "
+                "AND q.attempts < ? AND (q.next_attempt_at IS NULL OR q.next_attempt_at<=?)",
+                (METADATA_MISSING_MAX_ATTEMPTS, now()),
+            )
+            for provider, identifier_type, provider_id, locale in queue_rows:
+                entity_type = _metadata_catalog_entity_type(provider, identifier_type)
+                normalized_locale = str(locale or "")
+                if (
+                    provider == "musicbrainz"
+                    and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+                ):
+                    normalized_locale = ""
+                queued_keys.add(
+                    (str(provider), entity_type, str(provider_id), normalized_locale)
+                )
+
+        selected: list[tuple] = []
+        locales_by_item: dict[tuple, list[str]] = {}
+        for item in rows:
+            provider, identifier_type, provider_id = item
+            entity_type = _metadata_catalog_entity_type(provider, identifier_type)
+            neutral = (
+                provider == "musicbrainz"
+                and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+            )
+            item_locales = [""] if neutral else list(locales)
+            due_locales = []
+            for locale in item_locales:
+                key = (provider, entity_type, str(provider_id), locale)
+                state = state_rows.get(key)
+                queued = key in queued_keys
+                if state is None:
+                    # Existing rows are bootstrapped once. Successful work is
+                    # marked completed below, so later runs stay sparse.
+                    due_locales.append(locale)
+                elif state[0] in {"queued", "retry"} and _metadata_recovery_due(
+                    state
+                ):
+                    due_locales.append(locale)
+                elif state[0] == "completed" and queued:
+                    due_locales.append(locale)
+            if due_locales:
+                selected.append(item)
+                locales_by_item[item] = due_locales
+        return selected, locales_by_item
 
     def _recover_missing_primary_entities(
         self,
         run_id: str,
         should_terminate,
     ) -> tuple[list[dict], list[dict]]:
-        """Run a forced inventory pass for providerless catalog entities."""
-        libraries = self._missing_primary_library_rows()
-        if not libraries:
+        """Recover providerless entities through bounded targeted reconciles."""
+        missing_rows = self._missing_primary_entity_rows()
+        if not missing_rows:
             return [], []
         runtime = self.library_runtime
         if runtime is None:
+            for row in missing_rows:
+                _record_metadata_recovery_state(
+                    self.db,
+                    METADATA_IDENTITY_PROVIDER,
+                    row[3],
+                    row[0],
+                    error="Library runtime is unavailable",
+                    source_job_id=run_id,
+                )
             return (
                 [
                     {
@@ -1765,33 +2149,95 @@ class MetadataMissingJob:
                 ],
                 [],
             )
+        state_available = _metadata_recovery_state_table(self.db)
+        state_rows = {}
+        if state_available:
+            state_rows = {
+                (str(provider), str(entity_type), str(provider_id), str(locale or "")): (
+                    str(state),
+                    int(attempts or 0),
+                    next_attempt_at,
+                )
+                for provider, entity_type, provider_id, locale, state, attempts, next_attempt_at in self.db.execute(
+                    "SELECT provider,entity_type,provider_id,locale,state,attempts,next_attempt_at "
+                    "FROM metadata_missing_state WHERE provider=?",
+                    (METADATA_IDENTITY_PROVIDER,),
+                )
+            }
+            missing_rows = [
+                row
+                for row in missing_rows
+                if _metadata_recovery_due(
+                    state_rows.get(
+                        (
+                            METADATA_IDENTITY_PROVIDER,
+                            row[3],
+                            row[0],
+                            "",
+                        )
+                    )
+                )
+            ]
+        if not missing_rows:
+            return [], []
         thread = getattr(runtime, "thread", None)
         if not thread or not getattr(thread, "is_alive", lambda: False)():
             runtime.start()
         failures: list[dict] = []
         incomplete: list[dict] = []
-        missing_library_ids = {
-            library_id for library_id, _name in self._missing_primary_library_rows()
+        entity_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(library_entities)")
         }
-        for index, (library_id, name) in enumerate(libraries, start=1):
+        rows_by_library: dict[str, list[tuple]] = {}
+        names_by_library: dict[str, str] = {}
+        for row in missing_rows:
+            rows_by_library.setdefault(row[1], []).append(row)
+            names_by_library[row[1]] = row[2]
+        libraries = sorted(rows_by_library)
+        for index, library_id in enumerate(libraries, start=1):
+            name = names_by_library[library_id]
             if should_terminate():
                 raise JobTerminated()
             runtime.suppress_library_notifications(library_id, True)
+            library_rows = rows_by_library[library_id]
+            targets = {
+                target
+                for target in (
+                    self._entity_target_root(row, entity_columns)
+                    for row in library_rows
+                )
+                if target
+            }
+            error_text = None
             try:
+                if not targets:
+                    error_text = "Providerless entities have no targetable library path"
+                    raise RuntimeError(error_text)
                 job = runtime.enqueue(
                     library_id,
-                    "scan",
+                    "reconcile",
+                    targets=targets,
                     force_metadata=True,
                 )
                 if not job:
+                    error_text = "Library reconcile could not be queued"
                     failures.append(
                         {
                             "kind": "identity_recovery",
                             "libraryId": library_id,
                             "name": name,
-                            "error": "Library scan could not be queued",
+                            "error": error_text,
                         }
                     )
+                    for row in library_rows:
+                        _record_metadata_recovery_state(
+                            self.db,
+                            METADATA_IDENTITY_PROVIDER,
+                            row[3],
+                            row[0],
+                            error=error_text,
+                            source_job_id=run_id,
+                        )
                     continue
                 was_active = job.get("state") in {
                     "running",
@@ -1807,6 +2253,14 @@ class MetadataMissingJob:
                     "completed",
                     "completed_with_warnings",
                 }:
+                    error_text = (
+                        (result.get("error") if result else None)
+                        or (
+                            f"Library reconcile ended in {result.get('state')}"
+                            if result
+                            else "Library reconcile result was not found"
+                        )
+                    )
                     failures.append(
                         {
                             "kind": "identity_recovery",
@@ -1814,17 +2268,27 @@ class MetadataMissingJob:
                             "name": name,
                             "jobId": job.get("id"),
                             "state": result.get("state") if result else "missing",
-                            "error": result.get("error") if result else None,
+                            "error": error_text,
                         }
                     )
-                    continue
-                # If the scheduler attached itself to a scan that was already
-                # running, that scan may have taken its force flag before this
-                # request arrived. Give it one explicit recovery pass now.
-                if was_active and library_id in missing_library_ids:
+                remaining_ids = {
+                    row[0]
+                    for row in self._missing_primary_entity_rows()
+                    if row[1] == library_id
+                }
+                # An already-running reconcile may have taken its force flag
+                # before this recovery request arrived. Allow one targeted
+                # follow-up, never another library-wide pass or an unbounded
+                # feedback loop.
+                if (
+                    not error_text
+                    and was_active
+                    and remaining_ids
+                ):
                     retry_job = runtime.enqueue(
                         library_id,
-                        "scan",
+                        "reconcile",
+                        targets=targets,
                         force_metadata=True,
                     )
                     if retry_job:
@@ -1838,6 +2302,14 @@ class MetadataMissingJob:
                             "completed",
                             "completed_with_warnings",
                         }:
+                            error_text = (
+                                (retry_result.get("error") if retry_result else None)
+                                or (
+                                    f"Targeted recovery reconcile ended in {retry_result.get('state')}"
+                                    if retry_result
+                                    else "Targeted recovery reconcile result was not found"
+                                )
+                            )
                             failures.append(
                                 {
                                     "kind": "identity_recovery",
@@ -1850,34 +2322,75 @@ class MetadataMissingJob:
                                         else "missing"
                                     ),
                                     "error": (
-                                        retry_result.get("error")
-                                        if retry_result
-                                        else None
+                                        error_text
                                     ),
                                 }
                             )
-                            continue
-                if any(
-                    current_library_id == library_id
-                    for current_library_id, _current_name in self._missing_primary_library_rows()
-                ):
+                        else:
+                            remaining_ids = {
+                                row[0]
+                                for row in self._missing_primary_entity_rows()
+                                if row[1] == library_id
+                            }
+                if error_text:
+                    for row in library_rows:
+                        _record_metadata_recovery_state(
+                            self.db,
+                            METADATA_IDENTITY_PROVIDER,
+                            row[3],
+                            row[0],
+                            error=error_text,
+                            source_job_id=run_id,
+                        )
+                else:
+                    for row in library_rows:
+                        if row[0] in remaining_ids:
+                            _record_metadata_recovery_state(
+                                self.db,
+                                METADATA_IDENTITY_PROVIDER,
+                                row[3],
+                                row[0],
+                                error=(
+                                    "Required provider identity remains missing "
+                                    "after targeted recovery"
+                                ),
+                                source_job_id=run_id,
+                            )
+                        else:
+                            _clear_metadata_recovery_state(
+                                self.db,
+                                METADATA_IDENTITY_PROVIDER,
+                                row[3],
+                                row[0],
+                            )
+                if remaining_ids:
                     incomplete.append(
                         {
                             "kind": "identity_recovery",
                             "libraryId": library_id,
                             "name": name,
-                            "error": "Required provider identities remain missing after recovery scan",
+                            "error": "Required provider identities remain missing after targeted recovery",
                         }
                     )
             except JobTerminated:
                 raise
             except Exception as error:
+                error_text = f"{type(error).__name__}: {error}"
+                for row in library_rows:
+                    _record_metadata_recovery_state(
+                        self.db,
+                        METADATA_IDENTITY_PROVIDER,
+                        row[3],
+                        row[0],
+                        error=error_text,
+                        source_job_id=run_id,
+                    )
                 failures.append(
                     {
                         "kind": "identity_recovery",
                         "libraryId": library_id,
                         "name": name,
-                        "error": f"{type(error).__name__}: {error}",
+                        "error": error_text,
                     }
                 )
                 logger.exception(
@@ -1892,7 +2405,7 @@ class MetadataMissingJob:
                 progress_label="Recovering missing provider identities",
                 message=(
                     f"Recovered provider identities for {name} · "
-                    f"{index}/{len(libraries)} libraries"
+                    f"{index}/{len(libraries)} libraries · {len(targets)} roots"
                 ),
             )
         return failures, incomplete
@@ -1911,7 +2424,13 @@ class MetadataMissingJob:
         is_upgrade = operation == "metadata_upgrade"
         ingest = MetadataIngestService(background_assets=False)
         locales = ingest.locales()
-        _repair_missing_tv_child_identities(self.db, ingest.metadata_service)
+        _repair_missing_tv_child_identities(
+            self.db,
+            ingest.metadata_service,
+            run_id=run_id,
+            should_terminate=should_terminate,
+            persist_state=operation == "metadata_missing",
+        )
         if operation == "metadata_missing":
             identity_failures, identity_incomplete = (
                 self._recover_missing_primary_entities(run_id, should_terminate)
@@ -2003,16 +2522,21 @@ class MetadataMissingJob:
             # deliberately retaining Last.fm identities, cached documents,
             # artwork, and the projected enrichment already on the catalog.
             items = [item for item in items if item[0] != "lastfm"]
-        total = sum(
-            1
-            if (
-                provider == "musicbrainz"
-                and _metadata_catalog_entity_type(provider, identifier_type)
-                in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
-            )
-            else len(locales)
-            for provider, identifier_type, _provider_id in items
+        items, locales_by_item = self._select_metadata_items(
+            items,
+            locales,
+            operation=operation,
+            force=force,
+            has_enrichment_queue=has_enrichment_queue,
         )
+        total = 0
+        for item in items:
+            provider, identifier_type, _provider_id = item
+            entity_type = _metadata_catalog_entity_type(provider, identifier_type)
+            if provider == "musicbrainz" and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES:
+                total += 1
+            else:
+                total += len((locales_by_item or {}).get(item, locales))
         has_screen_assets = bool(
             self.db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='screen_extractor_assets'"
@@ -2060,14 +2584,8 @@ class MetadataMissingJob:
             provider_id: str,
             item_failures: list[dict],
         ) -> None:
-            if not item_failures or not has_enrichment_queue:
+            if not item_failures:
                 return
-            entity_rows = self.db.execute(
-                "SELECT ep.entity_id,e.library_id FROM entity_provider_ids ep "
-                "JOIN library_entities e ON e.id=ep.entity_id "
-                "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=?",
-                (provider, _metadata_identity_type(provider, entity_type), provider_id),
-            )
             timestamp = now()
             failures_by_locale = {
                 locale: [
@@ -2079,19 +2597,66 @@ class MetadataMissingJob:
                     str(failure.get("locale") or "") for failure in item_failures
                 }
             }
+            for locale, locale_failures in failures_by_locale.items():
+                retryable = any(
+                    _metadata_failure_is_retryable(failure)
+                    for failure in locale_failures
+                )
+                _record_metadata_recovery_state(
+                    self.db,
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale=locale,
+                    error=json.dumps(locale_failures, ensure_ascii=False),
+                    source_job_id=run_id,
+                    permanent=not retryable,
+                )
+            if not has_enrichment_queue:
+                return
+            entity_rows = self.db.execute(
+                "SELECT ep.entity_id,e.library_id FROM entity_provider_ids ep "
+                "JOIN library_entities e ON e.id=ep.entity_id "
+                "WHERE ep.provider=? AND ep.identifier_type=? AND ep.provider_id=?",
+                (provider, _metadata_identity_type(provider, entity_type), provider_id),
+            )
             with self.db.transaction() as cursor:
                 for entity_id, library_id in entity_rows:
                     for locale, locale_failures in failures_by_locale.items():
+                        existing = cursor.execute(
+                            "SELECT attempts FROM enrichment_queue "
+                            "WHERE entity_id=? AND kind='metadata' AND locale=?",
+                            (entity_id, locale),
+                        ).fetchone()
+                        attempts = int(existing[0] or 0) + 1 if existing else 1
+                        retryable = any(
+                            _metadata_failure_is_retryable(failure)
+                            for failure in locale_failures
+                        )
+                        terminal = (
+                            not retryable
+                            or attempts >= METADATA_MISSING_MAX_ATTEMPTS
+                        )
+                        queue_state = "failed" if terminal else "retry"
+                        next_attempt_at = (
+                            None if terminal else _metadata_retry_at(attempts)
+                        )
                         cursor.execute(
                             "INSERT INTO enrichment_queue(id,entity_id,library_id,kind,locale,priority,state,attempts,next_attempt_at,lease_owner,lease_expires_at,source_job_id,error,created_at,updated_at) "
-                            "VALUES(?,?,?,?,?,10,'retry',1,NULL,NULL,NULL,?,?,?,?) "
-                            "ON CONFLICT(entity_id,kind,locale) DO UPDATE SET state='retry',priority=MAX(enrichment_queue.priority,excluded.priority),attempts=enrichment_queue.attempts+1,next_attempt_at=NULL,lease_owner=NULL,lease_expires_at=NULL,source_job_id=excluded.source_job_id,error=excluded.error,updated_at=excluded.updated_at",
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                            "ON CONFLICT(entity_id,kind,locale) DO UPDATE SET state=excluded.state,priority=MAX(enrichment_queue.priority,excluded.priority),attempts=excluded.attempts,next_attempt_at=excluded.next_attempt_at,lease_owner=NULL,lease_expires_at=NULL,source_job_id=excluded.source_job_id,error=excluded.error,updated_at=excluded.updated_at",
                             (
                                 str(uuid.uuid4()),
                                 entity_id,
                                 library_id,
                                 "metadata",
                                 locale,
+                                10,
+                                queue_state,
+                                attempts,
+                                next_attempt_at,
+                                None,
+                                None,
                                 run_id,
                                 json.dumps(locale_failures, ensure_ascii=False),
                                 timestamp,
@@ -2116,6 +2681,11 @@ class MetadataMissingJob:
                 provider == "musicbrainz"
                 and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
             )
+            requested_locales = (
+                locales_by_item.get(item) if locales_by_item is not None else None
+            )
+            provider_locales = [""] if neutral else list(requested_locales or locales)
+            output_locales = locales if neutral else provider_locales
             item_failures = []
             fetch_locales = []
             documents: dict[str, dict] = {}
@@ -2152,7 +2722,7 @@ class MetadataMissingJob:
                         )
                         worked_locales.add(provider_locale)
             else:
-                for locale in locales:
+                for locale in provider_locales:
                     cached = ingest.metadata_service.cache.get(
                         provider, entity_type, provider_id, locale
                     )
@@ -2234,6 +2804,9 @@ class MetadataMissingJob:
                             "entityType": entity_type,
                             "providerId": provider_id,
                             "locale": "" if neutral else locale,
+                            "retryable": not isinstance(
+                                error, ProviderNotFoundError
+                            ),
                             "error": f"{type(error).__name__}: {error}",
                         }
                         for locale in fetch_locales
@@ -2247,7 +2820,7 @@ class MetadataMissingJob:
                     )
             failed_locales = {str(failure.get("locale")) for failure in item_failures}
             publish_ids: set[str] = set()
-            for locale in locales:
+            for locale in output_locales:
                 if ("" if neutral else locale) in failed_locales:
                     continue
                 document = documents.get(locale)
@@ -2258,7 +2831,7 @@ class MetadataMissingJob:
                             "provider": provider,
                             "entityType": entity_type,
                             "providerId": provider_id,
-                            "locale": locale,
+                            "locale": "" if neutral else locale,
                             "error": "Metadata document is still missing after repair",
                         }
                     )
@@ -2291,6 +2864,15 @@ class MetadataMissingJob:
                     )
                 else:
                     complete_repair(linked_ids, "" if neutral else locale)
+                    if operation == "metadata_missing":
+                        _complete_metadata_recovery_state(
+                            self.db,
+                            provider,
+                            entity_type,
+                            provider_id,
+                            locale="" if neutral else locale,
+                            source_job_id=run_id,
+                        )
             queue_failures(provider, entity_type, provider_id, item_failures)
             if worked_locales and publish_ids:
                 from app.catalog_read_model import CatalogReadModel

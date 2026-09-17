@@ -77,6 +77,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "idx_people_local_path",
                         "idx_screen_extractor_assets_local_path",
                         "idx_metadata_refresh_state_attempted",
+                        "idx_metadata_missing_state_due",
                     }
                     <= indexes
                 )
@@ -154,6 +155,7 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "bazarr_episode_mappings",
                         "bazarr_movie_mappings",
                         "metadata_refresh_state",
+                        "metadata_missing_state",
                         "catalog_music_album_page",
                         "catalog_music_album_page_status",
                         "catalog_search_row_lookup",
@@ -183,6 +185,28 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "last_error",
                     }
                     <= refresh_state_columns
+                )
+                missing_state_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(metadata_missing_state)"
+                    )
+                }
+                self.assertTrue(
+                    {
+                        "provider",
+                        "entity_type",
+                        "provider_id",
+                        "locale",
+                        "state",
+                        "attempts",
+                        "next_attempt_at",
+                        "source_job_id",
+                        "error",
+                        "created_at",
+                        "updated_at",
+                    }
+                    <= missing_state_columns
                 )
                 series_mapping_columns = {
                     row[1]

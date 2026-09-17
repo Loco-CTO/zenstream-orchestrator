@@ -5214,6 +5214,35 @@ class LibraryJobControlTest(unittest.TestCase):
             force_metadata=True,
         )
 
+    def test_forced_targeted_reconcile_propagates_to_the_scanner(self):
+        job = self.runtime.enqueue(
+            "library-1",
+            "reconcile",
+            targets={"Show"},
+            force_metadata=True,
+        )
+        self.runtime._cancel_events[job["id"]] = threading.Event()
+
+        with patch("app.library.LibraryScanner.scan") as scan:
+            self.runtime._execute_job(job["id"], "library-1", "reconcile")
+
+        scan.assert_called_once_with(
+            "library-1",
+            job["id"],
+            unittest.mock.ANY,
+            targets={"Show"},
+            force_metadata=True,
+        )
+
+    def test_explicit_reconcile_targets_are_merged_for_an_existing_job(self):
+        first = self.runtime.enqueue("library-1", "reconcile", targets={"Show"})
+        second = self.runtime.enqueue(
+            "library-1", "reconcile", targets={"Other"}, force_metadata=True
+        )
+
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(self.runtime._job_targets[first["id"]], {"Show", "Other"})
+
     def test_watcher_reconcile_scopes_move_to_top_level_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

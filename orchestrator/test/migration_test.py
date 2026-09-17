@@ -29,6 +29,24 @@ class PersistenceMigrationTest(unittest.TestCase):
 
             connection = sqlite3.connect(database_path)
             try:
+                upgrade_state_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(metadata_upgrade_state)"
+                    )
+                }
+                self.assertEqual(
+                    upgrade_state_columns,
+                    {
+                        "provider",
+                        "entity_type",
+                        "provider_id",
+                        "locale",
+                        "upgrade_version",
+                        "document_digest",
+                        "completed_at",
+                    },
+                )
                 columns = {
                     row[1]: row
                     for row in connection.execute("PRAGMA table_info(metadata_images)")

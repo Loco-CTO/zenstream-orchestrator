@@ -551,6 +551,37 @@ class MetadataCache:
                 ),
             )
 
+    def put_many(self, records, days: int = 7) -> None:
+        """Persist a bounded group of normalized documents in one transaction."""
+        records = list(records)
+        if not records:
+            return
+        now = utc_now()
+        fetched_at = now.isoformat()
+        expires_at = (now + timedelta(days=days)).isoformat()
+        values = []
+        for provider, entity_type, provider_id, locale, payload in records:
+            normalized = dict(payload)
+            normalized["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
+            normalized["_metadataLocale"] = locale
+            values.append(
+                (
+                    provider,
+                    entity_type,
+                    provider_id,
+                    locale,
+                    json.dumps(normalized, ensure_ascii=False),
+                    fetched_at,
+                    expires_at,
+                )
+            )
+        with self.db.transaction() as cursor:
+            cursor.executemany(
+                "INSERT INTO metadata_cache(provider, entity_type, provider_id, locale, payload, fetched_at, expires_at) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(provider, entity_type, provider_id, locale) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
+                values,
+            )
+
     def put_image(
         self,
         provider: str,

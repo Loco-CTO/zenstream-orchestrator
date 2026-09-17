@@ -3168,6 +3168,7 @@ class MetadataIngestService:
         complete_batch: bool | None = None,
         target_entity_id: str | None = None,
         project: bool = True,
+        reproject_assets: bool = True,
     ) -> dict:
         """Materialize a normalized document, including documents cached by aggregation."""
         neutral = self.is_locale_neutral(provider, entity_type)
@@ -3206,6 +3207,8 @@ class MetadataIngestService:
                         }
                         if target_entity_id:
                             image_kwargs["target_entity_id"] = target_entity_id
+                        if not reproject_assets:
+                            image_kwargs["project"] = False
                         self.image_ingest.ingest(
                             provider,
                             entity_type,
@@ -3224,7 +3227,8 @@ class MetadataIngestService:
                             force_images=force_assets,
                         )
                 finally:
-                    self._reproject_music_assets(entity_type, target_entity_id)
+                    if reproject_assets:
+                        self._reproject_music_assets(entity_type, target_entity_id)
 
             digest = hashlib.sha256(
                 json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
@@ -3238,6 +3242,7 @@ class MetadataIngestService:
                 digest,
                 int(force_assets),
                 int(bool(complete_batch)),
+                int(bool(reproject_assets)),
             )
             if self.background_assets:
                 asset_executor.submit(key, materialize_assets)
@@ -3586,6 +3591,7 @@ class MetadataImageIngestService:
         force: bool = False,
         complete_batch: bool = False,
         target_entity_id: str | None = None,
+        project: bool = True,
     ) -> dict[str, int]:
         """Materialize one provider winner per locale/category.
 
@@ -3696,36 +3702,38 @@ class MetadataImageIngestService:
                 # A failed preferred candidate may have a ready fallback, but
                 # never fan out through the full provider candidate list.
 
-        projection = MetadataSearchProjection(self.db)
-        projection_tables = {
-            row[0]
-            for row in self.db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
-        if (
-            target_entity_id
-            and {
-                "catalog_item_projection",
-                "catalog_artwork_selection",
-            }
-            <= projection_tables
-        ):
-            # Metadata projection already ran before background artwork work.
-            # Rebuild only artwork selections here so image completion does not
-            # rewrite titles, search grams, genres, or the full payload.
-            projection.reproject_entity_artwork(target_entity_id)
-        else:
-            for locale, document in documents.items():
-                projection.project(
-                    provider,
-                    entity_type,
-                    provider_id,
-                    locale,
-                    document,
-                    preserve_artwork=preserved.get(locale),
-                    target_entity_id=target_entity_id,
+        if project:
+            projection = MetadataSearchProjection(self.db)
+            projection_tables = {
+                row[0]
+                for row in self.db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
                 )
+            }
+            if (
+                target_entity_id
+                and {
+                    "catalog_item_projection",
+                    "catalog_artwork_selection",
+                }
+                <= projection_tables
+            ):
+                # Metadata projection already ran before background artwork
+                # work. Rebuild only artwork selections here so image
+                # completion does not rewrite titles, search grams, genres,
+                # or the full payload.
+                projection.reproject_entity_artwork(target_entity_id)
+            else:
+                for locale, document in documents.items():
+                    projection.project(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        document,
+                        preserve_artwork=preserved.get(locale),
+                        target_entity_id=target_entity_id,
+                    )
         # Pruning is safe only when the caller supplied the complete
         # configured-locale document batch.  A single-locale replay from a
         # multi-locale configuration must remain non-destructive, otherwise
@@ -3748,6 +3756,7 @@ class MetadataImageIngestService:
         force: bool = False,
         complete_batch: bool = False,
         target_entity_id: str | None = None,
+        project: bool = True,
     ) -> dict[str, int]:
         return self.ingest_documents(
             provider,
@@ -3757,6 +3766,7 @@ class MetadataImageIngestService:
             force=force,
             complete_batch=complete_batch,
             target_entity_id=target_entity_id,
+            project=project,
         )
 
 

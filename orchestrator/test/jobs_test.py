@@ -7,12 +7,14 @@ from unittest.mock import MagicMock, patch
 
 from app.database import DatabaseHandler
 from app.jobs import (
+    METADATA_UPGRADE_VERSION,
     AnalysisMaintenanceTimeout,
     JobScheduler,
     JobStore,
     MetadataMissingJob,
     MetadataUpgradeJob,
     _metadata_document_gaps,
+    _metadata_upgrade_digest,
     _repair_missing_tv_child_identities,
 )
 from app.progress import PROGRESS_TOTAL, WholeJobProgress
@@ -834,12 +836,356 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
 
         self.assertEqual(
-            ingest.metadata_service.fetches[0][1], {"force": True, "project": False}
+            ingest.metadata_service.fetches[0][1],
+            {"force": True, "project": False, "batch_cache_writes": True},
         )
-        self.assertEqual(ingest.materialized[0][-1], {"force_assets": False})
+        self.assertEqual(
+            ingest.materialized[0][-1],
+            {"force_assets": False, "reproject_assets": False},
+        )
         self.assertIn("upgraded 1", store.updates[-1]["message"])
         self.assertEqual(json.loads(store.updates[-1]["error_details"])["upgraded"], 1)
         read_model.refresh_roots.assert_called_once_with(["movie-1"])
+
+    def test_upgrade_skips_cached_document_with_completed_digest(self):
+        self.db.execute(
+            "CREATE TABLE metadata_upgrade_state("
+            "provider TEXT NOT NULL,entity_type TEXT NOT NULL,provider_id TEXT NOT NULL,"
+            "locale TEXT NOT NULL,upgrade_version INTEGER NOT NULL,"
+            "document_digest TEXT NOT NULL,completed_at TEXT NOT NULL,"
+            "PRIMARY KEY(provider,entity_type,provider_id,locale))"
+        )
+        document = {"title": "Example", "overview": "Current", "images": []}
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            ("movie-1", "en", json.dumps(document)),
+        )
+        self.db.execute(
+            "INSERT INTO metadata_upgrade_state VALUES(?,?,?,?,?,?,?)",
+            (
+                "tmdb",
+                "movie",
+                "42",
+                "en",
+                METADATA_UPGRADE_VERSION,
+                _metadata_upgrade_digest(document),
+                "completed",
+            ),
+        )
+
+        class Cache:
+            @staticmethod
+            def get(*_args):
+                return dict(document)
+
+        class Service:
+            credentials = {}
+
+            def __init__(self):
+                self.cache = Cache()
+                self.fetches = []
+
+            def fetch_locales(self, *args, **kwargs):
+                self.fetches.append((args, kwargs))
+                raise AssertionError("a completed upgrade must not refetch")
+
+        class Ingest:
+            def __init__(self):
+                self.metadata_service = Service()
+                self.materialized = []
+
+            @staticmethod
+            def locales():
+                return ["en"]
+
+            def ingest_document(self, *args, **kwargs):
+                self.materialized.append((args, kwargs))
+                raise AssertionError("a complete upgrade must not materialize")
+
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+
+        with patch("app.jobs.MetadataIngestService", return_value=ingest):
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        self.assertEqual(ingest.metadata_service.fetches, [])
+        self.assertEqual(ingest.materialized, [])
+        stats = json.loads(store.updates[-1]["scan_stats"])
+        self.assertEqual(stats["totalDocuments"], 1)
+        self.assertEqual(stats["skippedDocuments"], 1)
+        self.assertEqual(stats["providerRequests"], 0)
+        self.assertEqual(stats["projectionCalls"], 0)
+        self.assertEqual(stats["unchangedDocuments"], 1)
+
+    def test_upgrade_batches_root_refreshes_for_changed_documents(self):
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('movie-2','library-1','movie')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('movie-2','tmdb','movie','43',1)"
+        )
+        self.db.execute(
+            "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+            (
+                "movie-2",
+                "en",
+                json.dumps(
+                    {"title": "Second", "overview": "Old overview", "images": {}}
+                ),
+            ),
+        )
+        previous = {
+            "42": {"title": "Example", "overview": "Old overview", "images": []},
+            "43": {"title": "Second", "overview": "Old overview", "images": []},
+        }
+        fresh = {
+            "42": {"title": "Example", "overview": "New overview", "images": []},
+            "43": {"title": "Second", "overview": "New overview", "images": []},
+        }
+
+        class Cache:
+            @staticmethod
+            def get(_provider, _entity_type, provider_id, _locale):
+                return dict(previous[provider_id])
+
+        class Service:
+            credentials = {}
+
+            def __init__(self):
+                self.cache = Cache()
+                self.fetches = []
+
+            def fetch_locales(self, *args, **kwargs):
+                self.fetches.append((args, kwargs))
+                return {args[3][0]: dict(fresh[args[2]])}
+
+        class Ingest:
+            def __init__(self):
+                self.metadata_service = Service()
+                self.materialized = []
+
+            @staticmethod
+            def locales():
+                return ["en"]
+
+            def ingest_document(
+                self, provider, entity_type, provider_id, locale, document, **kwargs
+            ):
+                self.materialized.append(
+                    (provider, entity_type, provider_id, locale, kwargs)
+                )
+                entity_id = {"42": "movie-1", "43": "movie-2"}[provider_id]
+                self_db.execute(
+                    "UPDATE catalog_item_projection SET payload=? WHERE entity_id=? AND locale=?",
+                    (json.dumps(document), entity_id, locale),
+                )
+
+        self_db = self.db
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+        read_model = MagicMock()
+
+        with (
+            patch("app.jobs.MetadataIngestService", return_value=ingest),
+            patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
+        ):
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 2}})
+
+        self.assertEqual(len(ingest.metadata_service.fetches), 2)
+        self.assertEqual(len(ingest.materialized), 2)
+        self.assertTrue(
+            all(
+                values[-1] == {"force_assets": False, "reproject_assets": False}
+                for values in ingest.materialized
+            )
+        )
+        read_model.refresh_roots.assert_called_once_with(["movie-1", "movie-2"])
+        stats = json.loads(store.updates[-1]["scan_stats"])
+        self.assertEqual(stats["changedDocuments"], 2)
+        self.assertEqual(stats["projectionCalls"], 2)
+        self.assertEqual(stats["rootRefreshCalls"], 1)
+        self.assertEqual(stats["rootRefreshRoots"], 2)
+        self.assertGreater(stats["writerOperations"], 0)
+
+    def test_upgrade_keeps_completions_retryable_when_root_refresh_fails(self):
+        self.db.execute(
+            "CREATE TABLE metadata_upgrade_state("
+            "provider TEXT NOT NULL,entity_type TEXT NOT NULL,provider_id TEXT NOT NULL,"
+            "locale TEXT NOT NULL,upgrade_version INTEGER NOT NULL,"
+            "document_digest TEXT NOT NULL,completed_at TEXT NOT NULL,"
+            "PRIMARY KEY(provider,entity_type,provider_id,locale))"
+        )
+        previous = {"title": "Example", "overview": "Old", "images": []}
+        fresh = {"title": "Example", "overview": "New", "images": []}
+
+        class Cache:
+            @staticmethod
+            def get(*_args):
+                return dict(previous)
+
+        class Service:
+            credentials = {}
+
+            def __init__(self):
+                self.cache = Cache()
+
+            @staticmethod
+            def fetch_locales(*_args, **_kwargs):
+                return {"en": dict(fresh)}
+
+        class Ingest:
+            def __init__(self):
+                self.metadata_service = Service()
+
+            @staticmethod
+            def locales():
+                return ["en"]
+
+            ingest_document = MagicMock()
+
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+        read_model = MagicMock()
+        read_model.refresh_roots.side_effect = RuntimeError("projection unavailable")
+
+        with (
+            patch("app.jobs.MetadataIngestService", return_value=ingest),
+            patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
+        ):
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM metadata_upgrade_state")[0][0], 0
+        )
+        stats = json.loads(store.updates[-1]["scan_stats"])
+        self.assertEqual(stats["completionWrites"], 0)
+        self.assertEqual(stats["stateWrites"], 0)
+
+    def test_upgrade_counts_neutral_music_document_once(self):
+        self.db.execute("DELETE FROM entity_provider_ids")
+        self.db.execute("DELETE FROM library_entities")
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('track-1','library-1','track')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('track-1','musicbrainz','recording','recording-1',1)"
+        )
+        for locale in ("en", "ja", "zh-TW"):
+            self.db.execute(
+                "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+                (
+                    "track-1",
+                    locale,
+                    json.dumps(
+                        {
+                            "title": "Old track",
+                            "overview": "Old overview",
+                            "images": {},
+                        }
+                    ),
+                ),
+            )
+        previous = {"title": "Old track", "overview": "Old overview", "images": []}
+        fresh = {"title": "New track", "overview": "New overview", "images": []}
+
+        class Cache:
+            @staticmethod
+            def get(*_args):
+                return dict(previous)
+
+        class Service:
+            credentials = {}
+
+            def __init__(self):
+                self.cache = Cache()
+                self.fetches = []
+
+            def fetch_locales(self, *args, **kwargs):
+                self.fetches.append((args, kwargs))
+                return {"": dict(fresh)}
+
+        class Ingest:
+            def __init__(self):
+                self.metadata_service = Service()
+                self.materialized = []
+
+            @staticmethod
+            def locales():
+                return ["en", "ja", "zh-TW"]
+
+            def ingest_document(
+                self, provider, entity_type, provider_id, locale, document, **kwargs
+            ):
+                self.materialized.append(
+                    (provider, entity_type, provider_id, locale, kwargs)
+                )
+                for display_locale in self.locales():
+                    self_db.execute(
+                        "UPDATE catalog_item_projection SET payload=? WHERE entity_id=? AND locale=?",
+                        (json.dumps(document), "track-1", display_locale),
+                    )
+
+        self_db = self.db
+        ingest = Ingest()
+        store = type(
+            "Store",
+            (),
+            {
+                "db": self.db,
+                "updates": [],
+                "update_run": lambda value, _run_id, **fields: value.updates.append(
+                    fields
+                ),
+            },
+        )()
+        read_model = MagicMock()
+
+        with (
+            patch("app.jobs.MetadataIngestService", return_value=ingest),
+            patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
+        ):
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
+
+        self.assertEqual(len(ingest.metadata_service.fetches), 1)
+        self.assertEqual(ingest.metadata_service.fetches[0][0][3], [""])
+        self.assertEqual(len(ingest.materialized), 1)
+        self.assertEqual(store.updates[0]["progress_total"], 1)
+        stats = json.loads(store.updates[-1]["scan_stats"])
+        self.assertEqual(stats["totalDocuments"], 1)
+        self.assertEqual(stats["changedDocuments"], 1)
+        self.assertEqual(stats["providerRequests"], 1)
+        self.assertEqual(stats["materializedDocuments"], 1)
+        self.assertEqual(stats["projectionCalls"], 3)
 
 
 class MissingTvChildIdentityRepairTest(unittest.TestCase):
@@ -1307,6 +1653,19 @@ class JobLockingTest(unittest.TestCase):
         self.assertTrue(second_created)
         self.assertNotEqual(second_run["id"], first_run["id"])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM job_runs")[0][0], 2)
+
+    def test_metadata_tasks_are_serialized_across_definitions(self):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = self.store
+        scheduler.active_lock = threading.RLock()
+        self.db.execute(
+            "INSERT INTO job_runs(id,definition_id,kind,state,created_at) "
+            "VALUES('metadata-run','task-1','metadata_missing','running','now')"
+        )
+
+        self.assertTrue(scheduler._metadata_work_active())
+        self.db.execute("UPDATE job_runs SET state='completed'")
+        self.assertFalse(scheduler._metadata_work_active())
 
 
 class BazarrTaskQueueTest(unittest.TestCase):

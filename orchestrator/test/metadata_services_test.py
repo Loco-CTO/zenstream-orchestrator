@@ -615,6 +615,38 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(first_key[3], "release-entity-a")
         self.assertEqual(second_key[3], "release-entity-b")
 
+    def test_ingest_document_can_defer_asset_reprojection(self):
+        fetcher = _Fetcher()
+        image_ingest = MagicMock()
+        service = MetadataIngestService(
+            fetcher,
+            _Settings(["en"]),
+            image_ingest=image_ingest,
+            background_assets=False,
+        )
+
+        with patch.object(service, "_reproject_music_assets") as reproject:
+            service.ingest_document(
+                "tmdb",
+                "movie",
+                "movie-1",
+                "en",
+                {"title": "Movie", "images": []},
+                reproject_assets=False,
+            )
+
+        image_ingest.ingest.assert_called_once_with(
+            "tmdb",
+            "movie",
+            "movie-1",
+            "en",
+            {"title": "Movie", "images": []},
+            force=False,
+            complete_batch=True,
+            project=False,
+        )
+        reproject.assert_not_called()
+
     def test_music_read_fallback_uses_requested_neutral_and_english_tiers(self):
         def cache(provider, provider_id, locale, payload):
             self.db.execute(
@@ -1240,6 +1272,41 @@ class MetadataServicesTest(unittest.TestCase):
 
             project.assert_not_called()
             reproject.assert_called_once_with("movie-1")
+
+    def test_upgrade_image_completion_can_skip_projection_until_root_batch(self):
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,payload TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_artwork_selection("
+            "entity_id TEXT,locale TEXT,image_type TEXT,provider TEXT,"
+            "local_path TEXT,blur_hash TEXT,version TEXT)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_ingest = MetadataImageIngestService(
+                SimpleNamespace(db=self.db),
+                directory,
+                downloader=lambda _url: b"image-data",
+                encoder=lambda content, target, suffix: target.write_bytes(b"webp"),
+                hasher=lambda _target: "blur",
+            )
+            with (
+                patch.object(MetadataSearchProjection, "project") as project,
+                patch.object(
+                    MetadataSearchProjection, "reproject_entity_artwork"
+                ) as reproject,
+            ):
+                image_ingest.ingest_documents(
+                    "tmdb",
+                    "movie",
+                    "1",
+                    {"en": {"images": []}},
+                    target_entity_id="movie-1",
+                    project=False,
+                )
+
+            project.assert_not_called()
+            reproject.assert_not_called()
 
     def test_concurrent_projection_preparation_merges_after_writer_recheck(self):
         with tempfile.TemporaryDirectory() as directory:

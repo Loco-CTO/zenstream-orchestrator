@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -43,6 +44,17 @@ logger = get_logger("jobs")
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
 ARTWORK_TYPES = {"Primary", "Backdrop", "Logo", "Banner"}
 ANALYSIS_KINDS = {"trickplay_extract", "intro_outro_detect"}
+METADATA_JOB_KINDS = {"metadata_missing", "metadata_upgrade", "metadata_refresh"}
+METADATA_UPGRADE_VERSION = 1
+METADATA_UPGRADE_STATE_COLUMNS = {
+    "provider",
+    "entity_type",
+    "provider_id",
+    "locale",
+    "upgrade_version",
+    "document_digest",
+    "completed_at",
+}
 
 
 class AnalysisMaintenanceTimeout(TimeoutError):
@@ -100,6 +112,95 @@ def _ready_cache_path(value) -> bool:
         return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def _metadata_upgrade_digest(document: dict | None) -> str | None:
+    """Hash provider data without cache-only bookkeeping fields."""
+    if not isinstance(document, dict):
+        return None
+    comparable = {
+        key: value for key, value in document.items() if not str(key).startswith("_")
+    }
+    return hashlib.sha256(
+        json.dumps(
+            comparable,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _metadata_upgrade_state_columns(db) -> set[str]:
+    try:
+        tables = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='metadata_upgrade_state'"
+        )
+        if not tables:
+            return set()
+        return {
+            row[1] for row in db.execute("PRAGMA table_info(metadata_upgrade_state)")
+        }
+    except Exception:
+        return set()
+
+
+def _load_metadata_upgrade_state(
+    db,
+) -> dict[tuple[str, str, str, str], tuple[int, str]]:
+    if not METADATA_UPGRADE_STATE_COLUMNS <= _metadata_upgrade_state_columns(db):
+        return {}
+    try:
+        rows = db.execute(
+            "SELECT provider,entity_type,provider_id,locale,upgrade_version,document_digest "
+            "FROM metadata_upgrade_state"
+        )
+    except Exception:
+        return {}
+    state = {}
+    for provider, entity_type, provider_id, locale, version, digest in rows:
+        if not digest:
+            continue
+        try:
+            state[(str(provider), str(entity_type), str(provider_id), str(locale))] = (
+                int(version),
+                str(digest),
+            )
+        except (TypeError, ValueError):
+            continue
+    return state
+
+
+def _persist_metadata_upgrade_state(db, updates) -> int:
+    """Persist completed upgrade markers in one bounded transaction."""
+    updates = list(dict.fromkeys(updates))
+    if (
+        not updates
+        or not METADATA_UPGRADE_STATE_COLUMNS <= _metadata_upgrade_state_columns(db)
+    ):
+        return 0
+    completed_at = now()
+    with db.transaction() as cursor:
+        cursor.executemany(
+            "INSERT INTO metadata_upgrade_state(provider,entity_type,provider_id,locale,upgrade_version,document_digest,completed_at) "
+            "VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(provider,entity_type,provider_id,locale) DO UPDATE SET "
+            "upgrade_version=excluded.upgrade_version,document_digest=excluded.document_digest,completed_at=excluded.completed_at",
+            [
+                (
+                    provider,
+                    entity_type,
+                    str(provider_id),
+                    locale,
+                    METADATA_UPGRADE_VERSION,
+                    digest,
+                    completed_at,
+                )
+                for provider, entity_type, provider_id, locale, digest in updates
+            ],
+        )
+    return len(updates)
 
 
 def _metadata_upgrade_needed(
@@ -185,25 +286,35 @@ def _fetch_upgrade_documents(
     fetch_method = getattr(service, "fetch_locales", None)
     provider_locales = [""] if neutral else locales
     if fetch_method is not None:
-        try:
-            values = fetch_method(
-                provider,
-                entity_type,
-                provider_id,
-                provider_locales if neutral else locales,
-                force=True,
-                project=False,
-            )
-        except TypeError as error:
-            if "project" not in str(error):
-                raise
-            values = fetch_method(
-                provider,
-                entity_type,
-                provider_id,
-                provider_locales if neutral else locales,
-                force=True,
-            )
+        fetch_kwargs = {
+            "force": True,
+            "project": False,
+            "batch_cache_writes": True,
+        }
+        while True:
+            try:
+                values = fetch_method(
+                    provider,
+                    entity_type,
+                    provider_id,
+                    provider_locales if neutral else locales,
+                    **fetch_kwargs,
+                )
+                break
+            except TypeError as error:
+                message = str(error)
+                unsupported = next(
+                    (
+                        key
+                        for key in ("batch_cache_writes", "project")
+                        if key in message
+                    ),
+                    None,
+                )
+                if unsupported is None:
+                    raise
+                fetch_kwargs.pop(unsupported)
+
     else:
         values = {
             locale: service.fetch(
@@ -1909,8 +2020,19 @@ class MetadataMissingJob:
         should_terminate = should_terminate or (lambda: False)
         operation = operation or ("metadata_refresh" if force else "metadata_missing")
         is_upgrade = operation == "metadata_upgrade"
+        job_started = time.monotonic()
+        metrics_before = (
+            self.db.metrics() if callable(getattr(self.db, "metrics", None)) else {}
+        )
         ingest = MetadataIngestService(background_assets=False)
         locales = ingest.locales()
+        upgrade_state_columns = (
+            _metadata_upgrade_state_columns(self.db) if is_upgrade else set()
+        )
+        upgrade_state_enabled = METADATA_UPGRADE_STATE_COLUMNS <= upgrade_state_columns
+        upgrade_state = (
+            _load_metadata_upgrade_state(self.db) if upgrade_state_enabled else {}
+        )
         _repair_missing_tv_child_identities(self.db, ingest.metadata_service)
         if operation == "metadata_missing":
             identity_failures, identity_incomplete = (
@@ -1926,13 +2048,19 @@ class MetadataMissingJob:
             )
         )
         # Discover optional TMDB series identities from the authoritative TVDB
-        # documents before taking the work-list snapshot.  This lets one global
-        # refresh ingest the newly discovered TMDB documents in the same run.
-        tv_series_rows = self.db.execute(
-            "SELECT e.id,p.provider_id FROM library_entities e "
-            "JOIN entity_provider_ids p ON p.entity_id=e.id "
-            "WHERE e.entity_type='series' AND p.provider='tvdb' "
-            "AND p.identifier_type='series' ORDER BY e.id"
+        # documents before taking the work-list snapshot.  This lets a missing
+        # or forced refresh ingest newly discovered TMDB documents in the same
+        # run. An upgrade is deliberately limited to existing cached documents
+        # and must not fetch every TVDB series before fetching it again below.
+        tv_series_rows = (
+            []
+            if is_upgrade
+            else self.db.execute(
+                "SELECT e.id,p.provider_id FROM library_entities e "
+                "JOIN entity_provider_ids p ON p.entity_id=e.id "
+                "WHERE e.entity_type='series' AND p.provider='tvdb' "
+                "AND p.identifier_type='series' ORDER BY e.id"
+            )
         )
         for entity_id, tvdb_id in tv_series_rows:
             try:
@@ -2099,8 +2227,15 @@ class MetadataMissingJob:
                             ),
                         )
 
-        def complete_repair(entity_ids: set[str], locale: str) -> None:
+        def complete_repair(
+            entity_ids: set[str],
+            locale: str,
+            pending: set[tuple[str, str]] | None = None,
+        ) -> None:
             if not entity_ids or not has_enrichment_queue:
+                return
+            if is_upgrade and pending is not None:
+                pending.update((entity_id, locale) for entity_id in entity_ids)
                 return
             placeholders = ",".join("?" for _ in entity_ids)
             self.db.execute(
@@ -2109,7 +2244,441 @@ class MetadataMissingJob:
                 (now(), locale, *sorted(entity_ids)),
             )
 
+        def root_ids(entity_ids: set[str]) -> set[str]:
+            roots = set()
+            reader = getattr(self.db, "read_execute", self.db.execute)
+            for entity_id in entity_ids:
+                current = entity_id
+                seen_ancestors = set()
+                while current and current not in seen_ancestors:
+                    seen_ancestors.add(current)
+                    try:
+                        rows = reader(
+                            "SELECT parent_id FROM library_entities WHERE id=?",
+                            (current,),
+                        )
+                    except Exception:
+                        # Older/fixture schemas do not carry hierarchy; publish
+                        # the linked entity itself in that case.
+                        roots.add(current)
+                        break
+                    parent = rows[0][0] if rows else None
+                    if not parent:
+                        roots.add(current)
+                        break
+                    current = parent
+            return roots
+
+        def process_upgrade_item(item):
+            started = time.monotonic()
+            provider, identifier_type, provider_id = item
+            entity_type = _metadata_catalog_entity_type(provider, identifier_type)
+            neutral = (
+                provider == "musicbrainz"
+                and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+            )
+            provider_locales = [""] if neutral else locales
+            cache = ingest.metadata_service.cache
+            item_failures = []
+            documents: dict[str, dict] = {}
+            cached_documents: dict[str, dict] = {}
+            pre_gaps: dict[str, set[str]] = {}
+            pre_linked: dict[str, list[tuple[str, str]]] = {}
+            fetch_locales = []
+            failed_locales: set[str] = set()
+            changed_locales: set[str] = set()
+            repair_locales: set[str] = set()
+            state_skipped_locales: set[str] = set()
+            missing_locales: set[str] = set()
+            state_updates = []
+            pending_completions: set[tuple[str, str]] = set()
+            publish_ids: set[str] = set()
+            upgraded_documents = 0
+            changed_documents = 0
+            materialized_documents = 0
+            skipped_documents = 0
+            missing_documents = 0
+            incomplete_documents = 0
+            failed_documents = 0
+            projection_calls = 0
+            provider_requests = 0
+            provider_elapsed_ms = 0.0
+
+            def clean(document):
+                if not isinstance(document, dict):
+                    return None
+                value = dict(document)
+                value.pop("_stale", None)
+                return value
+
+            def has_current_state(locale: str, document: dict | None) -> bool:
+                digest = _metadata_upgrade_digest(document)
+                return bool(
+                    upgrade_state_enabled
+                    and digest
+                    and upgrade_state.get(
+                        (provider, entity_type, str(provider_id), locale)
+                    )
+                    == (METADATA_UPGRADE_VERSION, digest)
+                )
+
+            for locale in provider_locales:
+                cached = clean(
+                    cache.get(provider, entity_type, str(provider_id), locale)
+                )
+                if cached is None:
+                    missing_locales.add(locale)
+                    missing_documents += 1
+                    item_failures.append(
+                        {
+                            "kind": "incomplete",
+                            "provider": provider,
+                            "entityType": entity_type,
+                            "providerId": provider_id,
+                            "locale": locale,
+                            "error": (
+                                "Metadata cache document is missing; "
+                                "metadata_missing will populate it"
+                            ),
+                        }
+                    )
+                    continue
+                cached_documents[locale] = cached
+                if has_current_state(locale, cached):
+                    if neutral:
+                        documents = {
+                            display_locale: dict(cached) for display_locale in locales
+                        }
+                    else:
+                        documents[locale] = cached
+                    state_skipped_locales.add(locale)
+                    continue
+                if neutral:
+                    documents = {
+                        display_locale: dict(cached) for display_locale in locales
+                    }
+                else:
+                    documents[locale] = cached
+                fetch_locales.append(locale)
+
+            if neutral and missing_documents:
+                # A neutral provider identity is one document even though it
+                # is rendered into every configured catalog locale.
+                missing_documents = 1
+                state_skipped_locales.clear()
+                fetch_locales.clear()
+            elif not neutral:
+                missing_documents = min(missing_documents, len(locales))
+                incomplete_documents = missing_documents
+
+            if fetch_locales:
+                provider_started = time.monotonic()
+                provider_requests = 1
+                try:
+                    fetched = _fetch_upgrade_documents(
+                        ingest,
+                        provider,
+                        entity_type,
+                        provider_id,
+                        fetch_locales,
+                    )
+                    if neutral:
+                        normalized = clean(
+                            fetched.get(locales[0]) if locales else fetched.get("")
+                        )
+                        if normalized is not None:
+                            documents = {
+                                display_locale: dict(normalized)
+                                for display_locale in locales
+                            }
+                    else:
+                        documents.update(
+                            {
+                                locale: clean(document)
+                                for locale, document in fetched.items()
+                            }
+                        )
+                    if neutral:
+                        previous = cached_documents.get("")
+                        if previous is not None and any(
+                            _metadata_upgrade_needed(
+                                previous,
+                                documents.get(locale),
+                                locale,
+                                provider,
+                            )
+                            for locale in locales
+                        ):
+                            changed_documents = 1
+                            changed_locales.update(locales)
+                    else:
+                        for locale in fetch_locales:
+                            fresh = documents.get(locale)
+                            if _metadata_upgrade_needed(
+                                cached_documents.get(locale),
+                                fresh,
+                                locale,
+                                provider,
+                            ):
+                                changed_documents += 1
+                                changed_locales.add(locale)
+                except (ProviderError, ValueError, OSError) as error:
+                    failed_locales.update(fetch_locales)
+                    failed_documents = len(set(fetch_locales))
+                    item_failures.extend(
+                        {
+                            "kind": "error",
+                            "provider": provider,
+                            "entityType": entity_type,
+                            "providerId": provider_id,
+                            "locale": locale,
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                        for locale in fetch_locales
+                    )
+                    logger.exception(
+                        "metadata upgrade failed provider=%s entity_type=%s provider_id=%s locales=%s",
+                        provider,
+                        entity_type,
+                        provider_id,
+                        fetch_locales,
+                    )
+                finally:
+                    provider_elapsed_ms = (
+                        max(0.0, time.monotonic() - provider_started) * 1000.0
+                    )
+
+            if neutral:
+                neutral_locale = ""
+                if neutral_locale in failed_locales:
+                    incomplete_documents = 0
+                elif missing_documents:
+                    incomplete_documents = 1
+                else:
+                    document = documents.get(locales[0]) if locales else None
+                    if isinstance(document, dict):
+                        for locale in locales:
+                            gaps, linked = _metadata_document_gaps(
+                                self.db,
+                                provider,
+                                entity_type,
+                                provider_id,
+                                locale,
+                                document,
+                            )
+                            pre_gaps[locale] = gaps
+                            pre_linked[locale] = linked
+                            if gaps:
+                                repair_locales.add(locale)
+                        needs_materialization = bool(changed_locales or repair_locales)
+                        if needs_materialization:
+                            ingest.ingest_document(
+                                provider,
+                                entity_type,
+                                provider_id,
+                                neutral_locale,
+                                document,
+                                force_assets=False,
+                                reproject_assets=False,
+                            )
+                            materialized_documents = 1
+                            projection_calls = len(locales)
+                        final_gaps = set()
+                        final_linked: list[tuple[str, str]] = []
+                        for locale in locales:
+                            if materialized_documents:
+                                gaps, linked = _metadata_document_gaps(
+                                    self.db,
+                                    provider,
+                                    entity_type,
+                                    provider_id,
+                                    locale,
+                                    document,
+                                )
+                            else:
+                                gaps = pre_gaps.get(locale, set())
+                                linked = pre_linked.get(locale, [])
+                            final_gaps.update(gaps)
+                            final_linked.extend(linked)
+                        linked_ids = {
+                            entity_id for entity_id, _library_id in final_linked
+                        }
+                        if materialized_documents:
+                            pending_completions.update(
+                                (entity_id, "") for entity_id in linked_ids
+                            )
+                            publish_ids.update(linked_ids)
+                        deferred_projection_gaps = {
+                            gap
+                            for gap in final_gaps
+                            if gap == "projection" or gap.startswith("projection-")
+                        }
+                        unresolved_gaps = final_gaps - (
+                            deferred_projection_gaps
+                            if materialized_documents and linked_ids
+                            else set()
+                        )
+                        if unresolved_gaps:
+                            incomplete_documents = 1
+                            item_failures.append(
+                                {
+                                    "kind": "incomplete",
+                                    "provider": provider,
+                                    "entityType": entity_type,
+                                    "providerId": provider_id,
+                                    "locale": neutral_locale,
+                                    "missing": sorted(unresolved_gaps),
+                                    "error": "Metadata materialization remains incomplete",
+                                }
+                            )
+                        else:
+                            if changed_documents and not unresolved_gaps:
+                                upgraded_documents = 1
+                            if upgrade_state_enabled and not (
+                                neutral_locale in state_skipped_locales
+                                and not materialized_documents
+                            ):
+                                state_updates.append(
+                                    (
+                                        provider,
+                                        entity_type,
+                                        provider_id,
+                                        neutral_locale,
+                                        _metadata_upgrade_digest(document),
+                                        bool(materialized_documents),
+                                    )
+                                )
+                            if not materialized_documents:
+                                skipped_documents = len(state_skipped_locales)
+                    else:
+                        incomplete_documents = 1
+                        item_failures.append(
+                            {
+                                "kind": "incomplete",
+                                "provider": provider,
+                                "entityType": entity_type,
+                                "providerId": provider_id,
+                                "locale": neutral_locale,
+                                "error": "Metadata document is still missing after repair",
+                            }
+                        )
+            else:
+                for locale in locales:
+                    if locale in failed_locales or locale in missing_locales:
+                        continue
+                    document = documents.get(locale)
+                    if not isinstance(document, dict):
+                        incomplete_documents += 1
+                        item_failures.append(
+                            {
+                                "kind": "incomplete",
+                                "provider": provider,
+                                "entityType": entity_type,
+                                "providerId": provider_id,
+                                "locale": locale,
+                                "error": "Metadata document is still missing after repair",
+                            }
+                        )
+                        continue
+                    gaps, linked = _metadata_document_gaps(
+                        self.db,
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        document,
+                    )
+                    needs_materialization = locale in changed_locales or bool(gaps)
+                    if needs_materialization:
+                        ingest.ingest_document(
+                            provider,
+                            entity_type,
+                            provider_id,
+                            locale,
+                            document,
+                            force_assets=False,
+                            reproject_assets=False,
+                        )
+                        materialized_documents += 1
+                        projection_calls += 1
+                        gaps, linked = _metadata_document_gaps(
+                            self.db,
+                            provider,
+                            entity_type,
+                            provider_id,
+                            locale,
+                            document,
+                        )
+                    linked_ids = {entity_id for entity_id, _library_id in linked}
+                    if needs_materialization:
+                        pending_completions.update(
+                            (entity_id, locale) for entity_id in linked_ids
+                        )
+                        publish_ids.update(linked_ids)
+                    deferred_projection_gaps = {
+                        gap
+                        for gap in gaps
+                        if gap == "projection" or gap.startswith("projection-")
+                    }
+                    unresolved_gaps = gaps - (
+                        deferred_projection_gaps
+                        if needs_materialization and linked_ids
+                        else set()
+                    )
+                    if unresolved_gaps:
+                        incomplete_documents += 1
+                        item_failures.append(
+                            {
+                                "kind": "incomplete",
+                                "provider": provider,
+                                "entityType": entity_type,
+                                "providerId": provider_id,
+                                "locale": locale,
+                                "missing": sorted(unresolved_gaps),
+                                "error": "Metadata materialization remains incomplete",
+                            }
+                        )
+                        continue
+                    if locale in changed_locales:
+                        upgraded_documents += 1
+                    if upgrade_state_enabled and locale not in state_skipped_locales:
+                        state_updates.append(
+                            (
+                                provider,
+                                entity_type,
+                                provider_id,
+                                locale,
+                                _metadata_upgrade_digest(document),
+                                needs_materialization,
+                            )
+                        )
+                    if locale in state_skipped_locales and not needs_materialization:
+                        skipped_documents += 1
+
+            queue_failures(provider, entity_type, provider_id, item_failures)
+            roots = root_ids(publish_ids) if materialized_documents else set()
+            return {
+                "processed": 1 if neutral else len(locales),
+                "failures": item_failures,
+                "upgraded": upgraded_documents,
+                "changed": changed_documents,
+                "skipped": skipped_documents,
+                "missing": missing_documents,
+                "incomplete": incomplete_documents,
+                "failed": failed_documents,
+                "materialized": materialized_documents,
+                "projection_calls": projection_calls,
+                "provider_requests": provider_requests,
+                "provider_elapsed_ms": provider_elapsed_ms,
+                "worker_elapsed_ms": max(0.0, time.monotonic() - started) * 1000.0,
+                "roots": roots,
+                "state_updates": state_updates,
+                "completions": pending_completions,
+            }
+
         def process_item(item):
+            if is_upgrade:
+                return process_upgrade_item(item)
             provider, identifier_type, provider_id = item
             entity_type = _metadata_catalog_entity_type(provider, identifier_type)
             neutral = (
@@ -2120,7 +2689,6 @@ class MetadataMissingJob:
             fetch_locales = []
             documents: dict[str, dict] = {}
             worked_locales: set[str] = set()
-            upgrade_locales: set[str] = set()
             if neutral:
                 provider_locale = ""
                 cached = ingest.metadata_service.cache.get(
@@ -2191,41 +2759,16 @@ class MetadataMissingJob:
                             worked_locales.add(locale)
             if fetch_locales:
                 try:
-                    if is_upgrade:
-                        fetched = _fetch_upgrade_documents(
-                            ingest,
-                            provider,
-                            entity_type,
-                            provider_id,
-                            fetch_locales,
-                        )
-                        for locale, fresh in fetched.items():
-                            previous = documents.get(locale)
-                            documents[locale] = fresh
-                            if _metadata_upgrade_needed(
-                                previous, fresh, locale, provider
-                            ):
-                                ingest.ingest_document(
-                                    provider,
-                                    entity_type,
-                                    provider_id,
-                                    locale,
-                                    fresh,
-                                    force_assets=False,
-                                )
-                                worked_locales.add(locale)
-                                upgrade_locales.add(locale)
-                    else:
-                        fetched = ingest.ingest_locales(
-                            provider,
-                            entity_type,
-                            provider_id,
-                            fetch_locales,
-                            force=force,
-                            force_assets=force_assets,
-                        )
-                        documents.update(fetched)
-                        worked_locales.update(fetch_locales)
+                    fetched = ingest.ingest_locales(
+                        provider,
+                        entity_type,
+                        provider_id,
+                        fetch_locales,
+                        force=force,
+                        force_assets=force_assets,
+                    )
+                    documents.update(fetched)
+                    worked_locales.update(fetch_locales)
                 except (ProviderError, ValueError, OSError) as error:
                     item_failures.extend(
                         {
@@ -2265,8 +2808,6 @@ class MetadataMissingJob:
                     continue
                 document = dict(document)
                 document.pop("_stale", None)
-                if is_upgrade and locale not in upgrade_locales:
-                    continue
                 gaps, linked = _metadata_document_gaps(
                     self.db,
                     provider,
@@ -2321,29 +2862,124 @@ class MetadataMissingJob:
                             break
                         current = parent
                 CatalogReadModel(self.db).refresh_roots(sorted(roots))
-            if is_upgrade:
-                incomplete_locales = {
-                    str(failure.get("locale"))
-                    for failure in item_failures
-                    if failure.get("kind") == "incomplete"
-                }
-                upgraded_documents = len(upgrade_locales - incomplete_locales)
-            else:
-                upgraded_documents = len(worked_locales)
+            upgraded_documents = len(worked_locales)
             return (1 if neutral else len(locales)), item_failures, upgraded_documents
 
         completed = 0
         repaired = 0
         failures = list(identity_failures)
         incomplete_repairs = list(identity_incomplete)
+        upgrade_stats = {
+            "changed": 0,
+            "skipped": 0,
+            "missing": 0,
+            "incomplete": 0,
+            "failed": 0,
+            "materialized": 0,
+            "projection_calls": 0,
+            "provider_requests": 0,
+            "provider_elapsed_ms": 0.0,
+            "worker_elapsed_ms": 0.0,
+            "root_refresh_calls": 0,
+            "root_refresh_roots": 0,
+            "state_writes": 0,
+            "completion_writes": 0,
+        }
+
+        def upgrade_scan_stats() -> dict:
+            metrics_after = (
+                self.db.metrics() if callable(getattr(self.db, "metrics", None)) else {}
+            )
+
+            def metric_delta(name: str) -> float:
+                try:
+                    return max(
+                        0.0,
+                        float(metrics_after.get(name, 0))
+                        - float(metrics_before.get(name, 0)),
+                    )
+                except (AttributeError, TypeError, ValueError):
+                    return 0.0
+
+            changed = upgrade_stats["changed"]
+            incomplete = upgrade_stats["incomplete"]
+            failed = upgrade_stats["failed"]
+            unchanged = max(0, completed - repaired - incomplete - failed)
+            return {
+                "totalDocuments": total,
+                "checkedDocuments": completed,
+                "changedDocuments": changed,
+                "unchangedDocuments": unchanged,
+                "skippedDocuments": upgrade_stats["skipped"],
+                "missingDocuments": upgrade_stats["missing"],
+                "incompleteDocuments": incomplete,
+                "failedDocuments": failed,
+                "materializedDocuments": upgrade_stats["materialized"],
+                "providerRequests": upgrade_stats["provider_requests"],
+                "providerElapsedMs": round(upgrade_stats["provider_elapsed_ms"], 3),
+                "workerElapsedMs": round(upgrade_stats["worker_elapsed_ms"], 3),
+                "projectionCalls": upgrade_stats["projection_calls"],
+                "rootRefreshCalls": upgrade_stats["root_refresh_calls"],
+                "rootRefreshRoots": upgrade_stats["root_refresh_roots"],
+                "stateWrites": upgrade_stats["state_writes"],
+                "completionWrites": upgrade_stats["completion_writes"],
+                "writerOperations": int(metric_delta("writer_operations")),
+                "commitCount": int(metric_delta("commit_count")),
+                "writerWaitMs": round(metric_delta("writer_wait_seconds") * 1000, 3),
+                "writerHoldMs": round(metric_delta("writer_hold_seconds") * 1000, 3),
+                "wallClockMs": round(
+                    max(0.0, time.monotonic() - job_started) * 1000, 3
+                ),
+            }
+
+        def complete_repairs_batch(pending: set[tuple[str, str]]) -> int:
+            if not pending or not has_enrichment_queue:
+                return 0
+            timestamp = now()
+            with self.db.transaction() as cursor:
+                cursor.executemany(
+                    "UPDATE enrichment_queue SET state='completed',next_attempt_at=NULL,lease_owner=NULL,lease_expires_at=NULL,error=NULL,updated_at=? "
+                    "WHERE kind='metadata' AND locale=? AND entity_id=?",
+                    [
+                        (timestamp, locale, entity_id)
+                        for entity_id, locale in sorted(pending)
+                    ],
+                )
+            return len(pending)
+
         for offset in range(0, len(items), batch_size):
             batch = items[offset : offset + batch_size]
+            batch_roots: set[str] = set()
+            batch_state_updates = []
+            batch_completions: set[tuple[str, str]] = set()
+            last_item_label = None
             for item, result, error in metadata_task_results(
                 batch, process_item, should_terminate
             ):
                 if error is not None:
                     raise error
-                processed, item_failures, repaired_documents = result
+                if is_upgrade:
+                    processed = result["processed"]
+                    item_failures = result["failures"]
+                    repaired_documents = result["upgraded"]
+                    batch_roots.update(result["roots"])
+                    batch_state_updates.extend(result["state_updates"])
+                    batch_completions.update(result["completions"])
+                    for key in (
+                        "changed",
+                        "skipped",
+                        "missing",
+                        "incomplete",
+                        "failed",
+                        "materialized",
+                        "projection_calls",
+                        "provider_requests",
+                    ):
+                        upgrade_stats[key] += result[key]
+                    for key in ("provider_elapsed_ms", "worker_elapsed_ms"):
+                        upgrade_stats[key] += result[key]
+                else:
+                    processed, item_failures, repaired_documents = result
                 failures.extend(
                     failure
                     for failure in item_failures
@@ -2366,6 +3002,9 @@ class MetadataMissingJob:
                     entity_rows[0][0] if entity_rows else None,
                     f"{entity_type} {provider}:{provider_id}",
                 )
+                last_item_label = item_label
+                if is_upgrade:
+                    continue
                 self.store.update_run(
                     run_id,
                     progress_current=completed,
@@ -2390,6 +3029,59 @@ class MetadataMissingJob:
                             unit="documents",
                         )
                     ),
+                )
+            if is_upgrade:
+                projection_error = None
+                if batch_roots:
+                    try:
+                        from app.catalog_read_model import CatalogReadModel
+
+                        CatalogReadModel(self.db).refresh_roots(sorted(batch_roots))
+                        upgrade_stats["root_refresh_calls"] += 1
+                        upgrade_stats["root_refresh_roots"] += len(batch_roots)
+                    except Exception as error:
+                        projection_error = error
+                        failures.append(
+                            {
+                                "kind": "projection",
+                                "error": f"{type(error).__name__}: {error}",
+                                "roots": sorted(batch_roots),
+                            }
+                        )
+                        upgrade_stats["failed"] += 1
+                        logger.exception(
+                            "metadata upgrade catalog refresh failed roots=%s",
+                            sorted(batch_roots),
+                        )
+                if projection_error is None:
+                    upgrade_stats["completion_writes"] += complete_repairs_batch(
+                        batch_completions
+                    )
+                state_rows = [
+                    row[:5]
+                    for row in batch_state_updates
+                    if projection_error is None or not row[5]
+                ]
+                upgrade_stats["state_writes"] += _persist_metadata_upgrade_state(
+                    self.db, state_rows
+                )
+                self.store.update_run(
+                    run_id,
+                    progress_current=completed,
+                    progress_phase="metadata",
+                    progress_label="Upgrading metadata",
+                    progress_stage_current=completed,
+                    progress_stage_total=total + extractor_total,
+                    progress_stage_unit="documents",
+                    progress_current_item=last_item_label,
+                    message=format_progress_message(
+                        "Upgrading metadata",
+                        item=last_item_label,
+                        current=completed,
+                        total=total + extractor_total,
+                        unit="documents",
+                    ),
+                    scan_stats=json.dumps(upgrade_scan_stats(), ensure_ascii=False),
                 )
         # Screen Extractor is a final, language-neutral fallback. Run it only
         # after every real provider identity has been processed so a secondary
@@ -2494,16 +3186,15 @@ class MetadataMissingJob:
             logger.exception("music artist credit repair failed")
         if should_terminate():
             raise JobTerminated()
+        final_scan_stats = upgrade_scan_stats() if is_upgrade else None
         if failures:
             if is_upgrade:
-                unchanged = max(
-                    0,
-                    completed - repaired - len(failures) - len(incomplete_repairs),
-                )
+                unchanged = final_scan_stats["unchangedDocuments"]
                 summary = (
                     f"Checked {completed} metadata documents; upgraded {repaired}; "
-                    f"unchanged {unchanged}; {len(incomplete_repairs)} incomplete; "
-                    f"{len(failures)} failed"
+                    f"unchanged {unchanged}; "
+                    f"{final_scan_stats['incompleteDocuments']} incomplete; "
+                    f"{final_scan_stats['failedDocuments']} failed"
                 )
             else:
                 summary = (
@@ -2512,43 +3203,48 @@ class MetadataMissingJob:
                 )
             if incomplete_repairs and not is_upgrade:
                 summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
+            details = {
+                "operation": operation,
+                "checked": completed,
+                "upgraded": repaired if is_upgrade else 0,
+                "unchanged": final_scan_stats["unchangedDocuments"]
+                if is_upgrade
+                else 0,
+                "incomplete": final_scan_stats["incompleteDocuments"]
+                if is_upgrade
+                else len(incomplete_repairs),
+                "failed": final_scan_stats["failedDocuments"]
+                if is_upgrade
+                else len(failures),
+                "failures": failures,
+                "incompleteRepairs": incomplete_repairs,
+            }
+            terminal_fields = {
+                "state": "failed",
+                "progress_current": completed,
+                "progress_total": total + extractor_total,
+                "finished_at": now(),
+                "message": summary,
+                "error": summary,
+                "error_details": json.dumps(details),
+            }
+            if is_upgrade:
+                details["scanStats"] = final_scan_stats
+                terminal_fields["error_details"] = json.dumps(details)
+                terminal_fields["scan_stats"] = json.dumps(
+                    final_scan_stats, ensure_ascii=False
+                )
             self.store.update_run(
                 run_id,
-                state="failed",
-                progress_current=completed,
-                progress_total=total + extractor_total,
-                finished_at=now(),
-                message=summary,
-                error=summary,
-                error_details=json.dumps(
-                    {
-                        "operation": operation,
-                        "checked": completed,
-                        "upgraded": repaired if is_upgrade else 0,
-                        "unchanged": (
-                            max(
-                                0,
-                                completed
-                                - repaired
-                                - len(failures)
-                                - len(incomplete_repairs),
-                            )
-                            if is_upgrade
-                            else 0
-                        ),
-                        "incomplete": len(incomplete_repairs),
-                        "failed": len(failures),
-                        "failures": failures,
-                        "incompleteRepairs": incomplete_repairs,
-                    }
-                ),
+                **terminal_fields,
             )
         else:
             if is_upgrade:
-                unchanged = max(0, completed - repaired - len(incomplete_repairs))
+                unchanged = final_scan_stats["unchangedDocuments"]
                 summary = (
                     f"Checked {completed} metadata documents; upgraded {repaired}; "
-                    f"unchanged {unchanged}; {len(incomplete_repairs)} incomplete; "
+                    f"unchanged {unchanged}; "
+                    f"{final_scan_stats['incompleteDocuments']} incomplete; "
                     "0 failed"
                 )
             else:
@@ -2559,29 +3255,33 @@ class MetadataMissingJob:
             if incomplete_repairs:
                 if not is_upgrade:
                     summary += f"; {len(incomplete_repairs)} repairs remain incomplete"
+            details = None
+            terminal_fields = {
+                "state": "completed",
+                "progress_current": completed,
+                "progress_total": total + extractor_total,
+                "finished_at": now(),
+                "message": summary,
+            }
+            if is_upgrade:
+                details = {
+                    "operation": operation,
+                    "checked": completed,
+                    "upgraded": repaired,
+                    "unchanged": final_scan_stats["unchangedDocuments"],
+                    "incomplete": final_scan_stats["incompleteDocuments"],
+                    "failed": 0,
+                    "scanStats": final_scan_stats,
+                }
+                terminal_fields["error_details"] = json.dumps(details)
+                terminal_fields["scan_stats"] = json.dumps(
+                    final_scan_stats, ensure_ascii=False
+                )
+            else:
+                terminal_fields["error_details"] = None
             self.store.update_run(
                 run_id,
-                state="completed",
-                progress_current=completed,
-                progress_total=total + extractor_total,
-                finished_at=now(),
-                message=summary,
-                error_details=(
-                    json.dumps(
-                        {
-                            "operation": operation,
-                            "checked": completed,
-                            "upgraded": repaired,
-                            "unchanged": max(
-                                0, completed - repaired - len(incomplete_repairs)
-                            ),
-                            "incomplete": len(incomplete_repairs),
-                            "failed": 0,
-                        }
-                    )
-                    if is_upgrade
-                    else None
-                ),
+                **terminal_fields,
             )
 
 
@@ -2984,6 +3684,24 @@ class JobScheduler:
             )
             return True
 
+    def _metadata_work_active(self) -> bool:
+        """Keep overlapping metadata walks from competing for providers/SQLite."""
+        try:
+            placeholders = ",".join("?" for _ in METADATA_JOB_KINDS)
+            return bool(
+                self.store.db.execute(
+                    "SELECT 1 FROM job_runs WHERE kind IN ("
+                    + placeholders
+                    + ") AND state IN ('running','terminating') LIMIT 1",
+                    tuple(sorted(METADATA_JOB_KINDS)),
+                )
+            )
+        except Exception:
+            with self.active_lock:
+                # A failed queue read is safer when it defers metadata until
+                # the next dispatcher pass than when it starts another walk.
+                return bool(self.active_definitions)
+
     def _analysis_maintenance_active(self, kind: str) -> bool:
         with self.active_lock:
             return kind in getattr(self, "analysis_maintenance", set())
@@ -3282,8 +4000,11 @@ class JobScheduler:
         while not self.stop_event.is_set():
             self._schedule_due()
             queued = self.store.runs(limit=1000)
+            metadata_work_active = self._metadata_work_active()
             for run in queued:
                 if run["state"] != "queued":
+                    continue
+                if run["kind"] in METADATA_JOB_KINDS and metadata_work_active:
                     continue
                 if (
                     run["kind"] in ANALYSIS_KINDS or run["kind"] == "bazarr_sync"
@@ -3311,6 +4032,8 @@ class JobScheduler:
                         self.active_definitions.discard(run["definitionId"])
                         self.cancel_events.pop(run["id"], None)
                         continue
+                    if run["kind"] in METADATA_JOB_KINDS:
+                        metadata_work_active = True
                 thread = threading.Thread(
                     target=self._execute,
                     args=(run["id"],),

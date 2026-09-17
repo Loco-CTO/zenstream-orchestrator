@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, patch
 
 from app.database import DatabaseHandler
 from app.jobs import (
+    METADATA_UPGRADE_VERSION,
     AnalysisMaintenanceTimeout,
     JobScheduler,
     JobStore,
-    METADATA_UPGRADE_VERSION,
     MetadataMissingJob,
     MetadataUpgradeJob,
     _metadata_document_gaps,
@@ -916,9 +916,7 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         )()
 
         with patch("app.jobs.MetadataIngestService", return_value=ingest):
-            MetadataUpgradeJob(store).run(
-                "run-1", {"config": {"batchSize": 1}}
-            )
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
 
         self.assertEqual(ingest.metadata_service.fetches, [])
         self.assertEqual(ingest.materialized, [])
@@ -1011,9 +1009,7 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             patch("app.jobs.MetadataIngestService", return_value=ingest),
             patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
         ):
-            MetadataUpgradeJob(store).run(
-                "run-1", {"config": {"batchSize": 2}}
-            )
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 2}})
 
         self.assertEqual(len(ingest.metadata_service.fetches), 2)
         self.assertEqual(len(ingest.materialized), 2)
@@ -1086,9 +1082,7 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             patch("app.jobs.MetadataIngestService", return_value=ingest),
             patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
         ):
-            MetadataUpgradeJob(store).run(
-                "run-1", {"config": {"batchSize": 1}}
-            )
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
 
         self.assertEqual(
             self.db.execute("SELECT COUNT(*) FROM metadata_upgrade_state")[0][0], 0
@@ -1180,9 +1174,7 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             patch("app.jobs.MetadataIngestService", return_value=ingest),
             patch("app.catalog_read_model.CatalogReadModel", return_value=read_model),
         ):
-            MetadataUpgradeJob(store).run(
-                "run-1", {"config": {"batchSize": 1}}
-            )
+            MetadataUpgradeJob(store).run("run-1", {"config": {"batchSize": 1}})
 
         self.assertEqual(len(ingest.metadata_service.fetches), 1)
         self.assertEqual(ingest.metadata_service.fetches[0][0][3], [""])

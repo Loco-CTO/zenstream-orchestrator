@@ -139,12 +139,16 @@ def _metadata_upgrade_state_columns(db) -> set[str]:
         )
         if not tables:
             return set()
-        return {row[1] for row in db.execute("PRAGMA table_info(metadata_upgrade_state)")}
+        return {
+            row[1] for row in db.execute("PRAGMA table_info(metadata_upgrade_state)")
+        }
     except Exception:
         return set()
 
 
-def _load_metadata_upgrade_state(db) -> dict[tuple[str, str, str, str], tuple[int, str]]:
+def _load_metadata_upgrade_state(
+    db,
+) -> dict[tuple[str, str, str, str], tuple[int, str]]:
     if not METADATA_UPGRADE_STATE_COLUMNS <= _metadata_upgrade_state_columns(db):
         return {}
     try:
@@ -171,7 +175,10 @@ def _load_metadata_upgrade_state(db) -> dict[tuple[str, str, str, str], tuple[in
 def _persist_metadata_upgrade_state(db, updates) -> int:
     """Persist completed upgrade markers in one bounded transaction."""
     updates = list(dict.fromkeys(updates))
-    if not updates or not METADATA_UPGRADE_STATE_COLUMNS <= _metadata_upgrade_state_columns(db):
+    if (
+        not updates
+        or not METADATA_UPGRADE_STATE_COLUMNS <= _metadata_upgrade_state_columns(db)
+    ):
         return 0
     completed_at = now()
     with db.transaction() as cursor:
@@ -2014,15 +2021,15 @@ class MetadataMissingJob:
         operation = operation or ("metadata_refresh" if force else "metadata_missing")
         is_upgrade = operation == "metadata_upgrade"
         job_started = time.monotonic()
-        metrics_before = self.db.metrics() if callable(getattr(self.db, "metrics", None)) else {}
+        metrics_before = (
+            self.db.metrics() if callable(getattr(self.db, "metrics", None)) else {}
+        )
         ingest = MetadataIngestService(background_assets=False)
         locales = ingest.locales()
         upgrade_state_columns = (
             _metadata_upgrade_state_columns(self.db) if is_upgrade else set()
         )
-        upgrade_state_enabled = (
-            METADATA_UPGRADE_STATE_COLUMNS <= upgrade_state_columns
-        )
+        upgrade_state_enabled = METADATA_UPGRADE_STATE_COLUMNS <= upgrade_state_columns
         upgrade_state = (
             _load_metadata_upgrade_state(self.db) if upgrade_state_enabled else {}
         )
@@ -2045,11 +2052,15 @@ class MetadataMissingJob:
         # or forced refresh ingest newly discovered TMDB documents in the same
         # run. An upgrade is deliberately limited to existing cached documents
         # and must not fetch every TVDB series before fetching it again below.
-        tv_series_rows = [] if is_upgrade else self.db.execute(
-            "SELECT e.id,p.provider_id FROM library_entities e "
-            "JOIN entity_provider_ids p ON p.entity_id=e.id "
-            "WHERE e.entity_type='series' AND p.provider='tvdb' "
-            "AND p.identifier_type='series' ORDER BY e.id"
+        tv_series_rows = (
+            []
+            if is_upgrade
+            else self.db.execute(
+                "SELECT e.id,p.provider_id FROM library_entities e "
+                "JOIN entity_provider_ids p ON p.entity_id=e.id "
+                "WHERE e.entity_type='series' AND p.provider='tvdb' "
+                "AND p.identifier_type='series' ORDER BY e.id"
+            )
         )
         for entity_id, tvdb_id in tv_series_rows:
             try:
@@ -2217,7 +2228,9 @@ class MetadataMissingJob:
                         )
 
         def complete_repair(
-            entity_ids: set[str], locale: str, pending: set[tuple[str, str]] | None = None
+            entity_ids: set[str],
+            locale: str,
+            pending: set[tuple[str, str]] | None = None,
         ) -> None:
             if not entity_ids or not has_enrichment_queue:
                 return
@@ -2371,9 +2384,7 @@ class MetadataMissingJob:
                     )
                     if neutral:
                         normalized = clean(
-                            fetched.get(locales[0])
-                            if locales
-                            else fetched.get("")
+                            fetched.get(locales[0]) if locales else fetched.get("")
                         )
                         if normalized is not None:
                             documents = {
@@ -2433,9 +2444,9 @@ class MetadataMissingJob:
                         fetch_locales,
                     )
                 finally:
-                    provider_elapsed_ms = max(
-                        0.0, time.monotonic() - provider_started
-                    ) * 1000.0
+                    provider_elapsed_ms = (
+                        max(0.0, time.monotonic() - provider_started) * 1000.0
+                    )
 
             if neutral:
                 neutral_locale = ""
@@ -2459,9 +2470,7 @@ class MetadataMissingJob:
                             pre_linked[locale] = linked
                             if gaps:
                                 repair_locales.add(locale)
-                        needs_materialization = bool(
-                            changed_locales or repair_locales
-                        )
+                        needs_materialization = bool(changed_locales or repair_locales)
                         if needs_materialization:
                             ingest.ingest_document(
                                 provider,
@@ -2879,9 +2888,7 @@ class MetadataMissingJob:
 
         def upgrade_scan_stats() -> dict:
             metrics_after = (
-                self.db.metrics()
-                if callable(getattr(self.db, "metrics", None))
-                else {}
+                self.db.metrics() if callable(getattr(self.db, "metrics", None)) else {}
             )
 
             def metric_delta(name: str) -> float:
@@ -2920,7 +2927,9 @@ class MetadataMissingJob:
                 "commitCount": int(metric_delta("commit_count")),
                 "writerWaitMs": round(metric_delta("writer_wait_seconds") * 1000, 3),
                 "writerHoldMs": round(metric_delta("writer_hold_seconds") * 1000, 3),
-                "wallClockMs": round(max(0.0, time.monotonic() - job_started) * 1000, 3),
+                "wallClockMs": round(
+                    max(0.0, time.monotonic() - job_started) * 1000, 3
+                ),
             }
 
         def complete_repairs_batch(pending: set[tuple[str, str]]) -> int:

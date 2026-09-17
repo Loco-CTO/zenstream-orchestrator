@@ -3138,7 +3138,9 @@ class MetadataService:
                         )
             for locale, normalized in normalized_values:
                 if not batch_cache_writes:
-                    cache_store.put(provider, entity_type, provider_id, locale, normalized)
+                    cache_store.put(
+                        provider, entity_type, provider_id, locale, normalized
+                    )
                 self._scan_cache_put(
                     ("document", provider, entity_type, provider_id, locale),
                     ("ok", copy.deepcopy(normalized)),

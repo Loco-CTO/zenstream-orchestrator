@@ -17,9 +17,7 @@ def upgrade() -> None:
         sa.Column("upgrade_version", sa.Integer(), nullable=False),
         sa.Column("document_digest", sa.Text(), nullable=False),
         sa.Column("completed_at", sa.Text(), nullable=False),
-        sa.PrimaryKeyConstraint(
-            "provider", "entity_type", "provider_id", "locale"
-        ),
+        sa.PrimaryKeyConstraint("provider", "entity_type", "provider_id", "locale"),
     )
 
 

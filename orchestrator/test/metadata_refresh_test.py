@@ -341,6 +341,30 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
             {"movie-1", "movie-2"},
         )
 
+    def test_selection_stats_capture_work_shape_without_changing_selection(self):
+        settings = self.settings()
+        self.add_entity("movie-1", "movie", overview=None, provider_id="42")
+        candidates, skipped = self.job._select(settings, ["en", "ja", "zh-TW"])
+        groups = self.job._groups(candidates)
+
+        stats = MetadataRefreshJob._selection_stats(
+            self.job._entities(),
+            candidates,
+            groups,
+            skipped,
+            ["en", "ja", "zh-TW"],
+            SimpleNamespace(image_ingest=object()),
+        )
+
+        self.assertEqual(stats["checked"], 1)
+        self.assertEqual(stats["candidates"], 1)
+        self.assertEqual(stats["providerIdentities"], 1)
+        self.assertEqual(stats["candidateTypes"], {"movie": 1})
+        self.assertEqual(stats["providerGroups"], {"tmdb:movie": 1})
+        self.assertEqual(stats["providerRequestEstimate"], {"tmdb": 1})
+        self.assertEqual(stats["projectionPassesEstimated"], 2)
+        self.assertEqual(stats["projectionInvocationsEstimated"], 6)
+
     def test_attempt_state_is_recorded_for_success_and_failure(self):
         self.add_entity("movie-1", "movie", overview=None, provider_id="42")
         settings = self.settings()

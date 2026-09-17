@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.library import JobTerminated
 from app.logging_config import get_logger
-from app.metadata_services import MetadataIngestService, metadata_task_results
+from app.metadata_services import (
+    MetadataIngestService,
+    asset_executor,
+    metadata_task_results,
+)
 from app.models.metadata import MetadataLanguageSettings, MetadataRefreshSettings
 from app.providers import ProviderError
 
@@ -645,6 +652,210 @@ class MetadataRefreshJob:
                 )
         return [groups[key] for key in sorted(groups)]
 
+    @staticmethod
+    def _database_metrics(db) -> dict[str, float | int]:
+        metrics = getattr(db, "metrics", None)
+        if not callable(metrics):
+            return {}
+        try:
+            values = metrics()
+        except Exception:
+            return {}
+        return values if isinstance(values, dict) else {}
+
+    @staticmethod
+    def _asset_metrics() -> dict[str, int]:
+        try:
+            values = asset_executor.diagnostics()
+        except Exception:
+            return {}
+        return {
+            str(key): int(value)
+            for key, value in values.items()
+            if isinstance(value, (int, float))
+        }
+
+    @staticmethod
+    def _provider_metrics(ingest: MetadataIngestService) -> dict:
+        service = getattr(ingest, "metadata_service", None)
+        clients = getattr(service, "_clients", None)
+        if not isinstance(clients, dict):
+            return {"requests": 0, "elapsedMs": 0, "byProvider": {}}
+        clients_lock = getattr(service, "_clients_lock", None)
+        if clients_lock is None:
+            client_values = list(clients.items())
+        else:
+            with clients_lock:
+                client_values = list(clients.items())
+        by_provider = {}
+        for provider, client in client_values:
+            diagnostics = getattr(client, "diagnostics", None)
+            if not callable(diagnostics):
+                continue
+            try:
+                values = diagnostics()
+            except Exception:
+                continue
+            if not isinstance(values, dict):
+                continue
+            by_provider[str(provider)] = {
+                "requests": int(values.get("requests", 0) or 0),
+                "elapsedMs": int(
+                    round(float(values.get("elapsed_seconds", 0.0) or 0.0) * 1000)
+                ),
+            }
+        return {
+            "requests": sum(value["requests"] for value in by_provider.values()),
+            "elapsedMs": sum(value["elapsedMs"] for value in by_provider.values()),
+            "byProvider": by_provider,
+        }
+
+    @staticmethod
+    def _selection_stats(
+        entities: list[dict],
+        candidates: list[dict],
+        groups: list[dict],
+        skipped: dict[str, int],
+        locales: list[str],
+        ingest: MetadataIngestService,
+    ) -> dict:
+        candidate_types = Counter(
+            candidate["entity"]["type"] for candidate in candidates
+        )
+        candidate_reasons = Counter(
+            reason for candidate in candidates for reason in candidate["reasons"]
+        )
+        provider_groups = Counter(
+            f"{group['provider']}:{group['entityType']}" for group in groups
+        )
+        provider_request_estimate = Counter()
+        for group in groups:
+            provider = group["provider"]
+            provider_request_estimate[provider] += (
+                1 + len(locales) if provider == "tvdb" else 1
+            )
+        projection_passes = 2 if getattr(ingest, "image_ingest", None) else 1
+        return {
+            "mode": "sparse",
+            "checked": len(entities),
+            "candidates": len(candidates),
+            "providerIdentities": len(groups),
+            "locales": list(locales),
+            "skipped": dict(skipped),
+            "candidateTypes": dict(sorted(candidate_types.items())),
+            "candidateReasons": dict(sorted(candidate_reasons.items())),
+            "providerGroups": dict(sorted(provider_groups.items())),
+            "providerRequestEstimate": dict(
+                sorted(provider_request_estimate.items())
+            ),
+            "replaceMetadataGroups": sum(
+                bool(group["replaceMetadata"]) for group in groups
+            ),
+            "forceAssetGroups": sum(bool(group["forceAssets"]) for group in groups),
+            "projectionPassesEstimated": projection_passes,
+            "projectionInvocationsEstimated": len(groups)
+            * len(locales)
+            * projection_passes,
+        }
+
+    @staticmethod
+    def _delta_count(after: dict, before: dict, key: str) -> int:
+        return max(0, int(after.get(key, 0) or 0) - int(before.get(key, 0) or 0))
+
+    @staticmethod
+    def _delta_milliseconds(after: dict, before: dict, key: str) -> int:
+        return max(
+            0,
+            int(
+                round(
+                    (
+                        float(after.get(key, 0.0) or 0.0)
+                        - float(before.get(key, 0.0) or 0.0)
+                    )
+                    * 1000
+                )
+            ),
+        )
+
+    def _runtime_stats(
+        self,
+        base: dict,
+        ingest: MetadataIngestService,
+        *,
+        started: float,
+        worker_started: float,
+        worker_elapsed_ms: float,
+        completed_groups: int,
+        refreshed_groups: int,
+        refreshed_items: int,
+        failed_groups: int,
+        database_before: dict,
+        assets_before: dict,
+        providers_before: dict,
+    ) -> dict:
+        database_after = self._database_metrics(self.db)
+        assets_after = self._asset_metrics()
+        providers_after = self._provider_metrics(ingest)
+        stats = dict(base)
+        stats.update(
+            {
+                "elapsedMs": int(round((time.monotonic() - started) * 1000)),
+                "workerWallMs": int(
+                    round((time.monotonic() - worker_started) * 1000)
+                ),
+                "workerElapsedMs": int(round(worker_elapsed_ms)),
+                "completedGroups": completed_groups,
+                "refreshedGroups": refreshed_groups,
+                "refreshedItems": refreshed_items,
+                "failedGroups": failed_groups,
+                "providerRequests": self._delta_count(
+                    providers_after, providers_before, "requests"
+                ),
+                "providerElapsedMs": self._delta_count(
+                    providers_after, providers_before, "elapsedMs"
+                ),
+                "providerDiagnostics": providers_after.get("byProvider", {}),
+                "assetSubmissions": self._delta_count(
+                    assets_after, assets_before, "submitted"
+                ),
+                "assetCoalesced": self._delta_count(
+                    assets_after, assets_before, "coalesced"
+                ),
+                "assetCompleted": self._delta_count(
+                    assets_after, assets_before, "completed"
+                ),
+                "assetPending": int(assets_after.get("pending", 0) or 0),
+                "projectionElapsedMs": int(
+                    round(float(getattr(ingest, "_projection_elapsed_ms", 0.0)))
+                ),
+                "writerOperations": self._delta_count(
+                    database_after, database_before, "writer_operations"
+                ),
+                "commitCount": self._delta_count(
+                    database_after, database_before, "commit_count"
+                ),
+                "writerWaitMs": self._delta_milliseconds(
+                    database_after, database_before, "writer_wait_seconds"
+                ),
+                "writerHoldMs": self._delta_milliseconds(
+                    database_after, database_before, "writer_hold_seconds"
+                ),
+                "readerOperations": self._delta_count(
+                    database_after, database_before, "reader_operations"
+                ),
+                "readerWaitMs": self._delta_milliseconds(
+                    database_after, database_before, "reader_wait_seconds"
+                ),
+                "measurementScope": {
+                    "provider": "refresh ingest clients",
+                    "asset": "process delta",
+                    "database": "process delta",
+                    "projection": "tracked ingest projections",
+                },
+            }
+        )
+        return stats
+
     def _publish(self, root_ids: set[str]) -> None:
         if not root_ids:
             return
@@ -666,11 +877,16 @@ class MetadataRefreshJob:
         preserve_cached_assets: bool = False,
     ) -> None:
         should_terminate = should_terminate or (lambda: False)
+        run_started = time.monotonic()
+        database_before = self._database_metrics(self.db)
+        assets_before = self._asset_metrics()
         settings = MetadataRefreshSettings(self.db).get()
         ingest = MetadataIngestService(background_assets=False)
+        providers_before = self._provider_metrics(ingest)
         locales = ingest.locales()
         if not locales:
             locales = MetadataLanguageSettings().get()
+        selection_started = time.monotonic()
         try:
             from app.jobs import _repair_missing_tv_child_identities
 
@@ -681,6 +897,12 @@ class MetadataRefreshJob:
             )
         candidates, skipped = self._select(settings, locales)
         groups = self._groups(candidates)
+        selection_stats = self._selection_stats(
+            self._entities(), candidates, groups, skipped, locales, ingest
+        )
+        selection_stats["selectionElapsedMs"] = int(
+            round((time.monotonic() - selection_started) * 1000)
+        )
         total = max(1, len(groups))
         self.store.update_run(
             run_id,
@@ -693,6 +915,7 @@ class MetadataRefreshJob:
             progress_stage_current=0,
             progress_stage_total=total,
             progress_stage_unit="provider identities",
+            scan_stats=json.dumps(selection_stats, ensure_ascii=False),
         )
         logger.info(
             "sparse metadata refresh start run_id=%s candidates=%d groups=%d locales=%s",
@@ -702,6 +925,20 @@ class MetadataRefreshJob:
             locales,
         )
         if settings["pretend"]:
+            pretend_stats = self._runtime_stats(
+                selection_stats,
+                ingest,
+                started=run_started,
+                worker_started=time.monotonic(),
+                worker_elapsed_ms=0.0,
+                completed_groups=0,
+                refreshed_groups=0,
+                refreshed_items=0,
+                failed_groups=0,
+                database_before=database_before,
+                assets_before=assets_before,
+                providers_before=providers_before,
+            )
             summary = (
                 f"Pretend mode: checked {len(self._entities())} items; "
                 f"would refresh {len(candidates)} items across {len(groups)} provider identities"
@@ -713,6 +950,7 @@ class MetadataRefreshJob:
                 progress_total=total,
                 finished_at=self._timestamp(),
                 message=summary,
+                scan_stats=json.dumps(pretend_stats, ensure_ascii=False),
                 error_details=json.dumps(
                     {
                         "mode": "sparse",
@@ -728,91 +966,121 @@ class MetadataRefreshJob:
         refreshed_items: set[str] = set()
         completed_groups = 0
         refreshed_groups = 0
-        for group, result, error in metadata_task_results(
-            groups,
-            lambda value: self._process_group(
-                value,
-                run_id,
-                ingest,
-                locales,
-                should_terminate,
-                preserve_cached_assets,
-            ),
-            should_terminate,
-        ):
+        worker_elapsed_ms = 0.0
+        worker_started = time.monotonic()
+        worker_metrics_lock = threading.Lock()
+
+        def process_group(value):
+            nonlocal worker_elapsed_ms
+            started = time.monotonic()
+            try:
+                return self._process_group(
+                    value,
+                    run_id,
+                    ingest,
+                    locales,
+                    should_terminate,
+                    preserve_cached_assets,
+                )
+            finally:
+                with worker_metrics_lock:
+                    worker_elapsed_ms += max(0.0, time.monotonic() - started) * 1000
+
+        try:
+            for group, result, error in metadata_task_results(
+                groups, process_group, should_terminate
+            ):
+                if should_terminate():
+                    raise JobTerminated()
+                completed_groups += 1
+                if error is not None:
+                    failures.append(
+                        {
+                            "provider": group["provider"],
+                            "entityType": group["entityType"],
+                            "providerId": group["providerId"],
+                            "error": f"{type(error).__name__}: {error}",
+                        }
+                    )
+                else:
+                    refreshed_groups += 1
+                    refreshed_items.update(result["entityIds"])
+                    self._publish(set(result["rootIds"]))
+                    logger.info(
+                        "sparse metadata refresh identity complete run_id=%s provider=%s entity_type=%s provider_id=%s",
+                        run_id,
+                        group["provider"],
+                        group["entityType"],
+                        group["providerId"],
+                    )
+                self.store.update_run(
+                    run_id,
+                    progress_current=completed_groups,
+                    progress_total=total,
+                    progress_phase="metadata",
+                    progress_label="Refreshing sparse metadata",
+                    progress_stage_current=completed_groups,
+                    progress_stage_total=total,
+                    progress_stage_unit="provider identities",
+                    message=f"Refreshing sparse metadata · {completed_groups}/{total} provider identities",
+                )
             if should_terminate():
                 raise JobTerminated()
-            completed_groups += 1
-            if error is not None:
-                failures.append(
-                    {
-                        "provider": group["provider"],
-                        "entityType": group["entityType"],
-                        "providerId": group["providerId"],
-                        "error": f"{type(error).__name__}: {error}",
-                    }
-                )
+            summary = (
+                f"Checked {len(self._entities())} items; refreshed {len(refreshed_items)} "
+                f"items across {refreshed_groups} provider identities; "
+                f"skipped {len(self._entities()) - len(candidates)}"
+            )
+            if failures:
+                summary += f"; {len(failures)} failed"
+                state = "failed"
             else:
-                refreshed_groups += 1
-                refreshed_items.update(result["entityIds"])
-                self._publish(set(result["rootIds"]))
-                logger.info(
-                    "sparse metadata refresh identity complete run_id=%s provider=%s entity_type=%s provider_id=%s",
-                    run_id,
-                    group["provider"],
-                    group["entityType"],
-                    group["providerId"],
-                )
+                state = "completed"
             self.store.update_run(
                 run_id,
+                state=state,
                 progress_current=completed_groups,
                 progress_total=total,
-                progress_phase="metadata",
-                progress_label="Refreshing sparse metadata",
-                progress_stage_current=completed_groups,
-                progress_stage_total=total,
-                progress_stage_unit="provider identities",
-                message=f"Refreshing sparse metadata · {completed_groups}/{total} provider identities",
+                finished_at=self._timestamp(),
+                message=summary,
+                error=summary if failures else None,
+                error_details=json.dumps(
+                    {
+                        "mode": "sparse",
+                        "checked": len(self._entities()),
+                        "candidates": len(candidates),
+                        "refreshed": len(refreshed_items),
+                        "providerIdentities": refreshed_groups,
+                        "skipped": skipped,
+                        "failed": failures,
+                    }
+                ),
             )
-        if should_terminate():
-            raise JobTerminated()
-        summary = (
-            f"Checked {len(self._entities())} items; refreshed {len(refreshed_items)} "
-            f"items across {refreshed_groups} provider identities; "
-            f"skipped {len(self._entities()) - len(candidates)}"
-        )
-        if failures:
-            summary += f"; {len(failures)} failed"
-            state = "failed"
-        else:
-            state = "completed"
-        self.store.update_run(
-            run_id,
-            state=state,
-            progress_current=completed_groups,
-            progress_total=total,
-            finished_at=self._timestamp(),
-            message=summary,
-            error=summary if failures else None,
-            error_details=json.dumps(
-                {
-                    "mode": "sparse",
-                    "checked": len(self._entities()),
-                    "candidates": len(candidates),
-                    "refreshed": len(refreshed_items),
-                    "providerIdentities": refreshed_groups,
-                    "skipped": skipped,
-                    "failed": failures,
-                }
-            ),
-        )
-        logger.info(
-            "sparse metadata refresh complete run_id=%s checked=%d refreshed=%d failures=%d",
-            run_id,
-            len(self._entities()),
-            len(refreshed_items),
-            len(failures),
-        )
+            logger.info(
+                "sparse metadata refresh complete run_id=%s checked=%d refreshed=%d failures=%d",
+                run_id,
+                len(self._entities()),
+                len(refreshed_items),
+                len(failures),
+            )
+        finally:
+            runtime_stats = self._runtime_stats(
+                selection_stats,
+                ingest,
+                started=run_started,
+                worker_started=worker_started,
+                worker_elapsed_ms=worker_elapsed_ms,
+                completed_groups=completed_groups,
+                refreshed_groups=refreshed_groups,
+                refreshed_items=len(refreshed_items),
+                failed_groups=len(failures),
+                database_before=database_before,
+                assets_before=assets_before,
+                providers_before=providers_before,
+            )
+            self.store.update_run(
+                run_id, scan_stats=json.dumps(runtime_stats, ensure_ascii=False)
+            )
 
     @staticmethod
     def _timestamp() -> str:

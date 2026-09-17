@@ -1,8 +1,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0055_metadata_upgrade_state"
-down_revision = "0054_catalog_search_write_indexes"
+revision = "0057_metadata_upgrade_state"
+down_revision = "0056_metadata_missing_state"
 branch_labels = None
 depends_on = None
 

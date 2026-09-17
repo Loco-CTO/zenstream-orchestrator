@@ -40,9 +40,7 @@ class LibraryCleanupTest(unittest.TestCase):
             db = self._database(root)
             try:
                 db.execute("CREATE TABLE metadata_images(local_path TEXT)")
-                db.execute(
-                    "CREATE TABLE catalog_artwork_selection(local_path TEXT)"
-                )
+                db.execute("CREATE TABLE catalog_artwork_selection(local_path TEXT)")
                 image_root = root / "metadata-cache" / "images"
                 image_root.mkdir(parents=True)
                 metadata_path = image_root / "metadata.webp"
@@ -51,23 +49,24 @@ class LibraryCleanupTest(unittest.TestCase):
                 metadata_path.touch()
                 selected_path.touch()
                 orphan_path.touch()
-                db.execute("INSERT INTO metadata_images VALUES(?)", (str(metadata_path),))
+                db.execute(
+                    "INSERT INTO metadata_images VALUES(?)", (str(metadata_path),)
+                )
                 db.execute("INSERT INTO metadata_images VALUES(?)", (str(orphan_path),))
                 db.execute(
                     "INSERT INTO catalog_artwork_selection VALUES(?)",
                     (str(selected_path),),
                 )
                 db.execute(
-                    "DELETE FROM metadata_images WHERE local_path=?", (str(orphan_path),)
+                    "DELETE FROM metadata_images WHERE local_path=?",
+                    (str(orphan_path),),
                 )
 
                 paths = {
                     str(image_root / f"candidate-{index}.webp")
                     for index in range(_CLEANUP_BATCH_SIZE * 3 + 1)
                 }
-                paths.update(
-                    {str(metadata_path), str(selected_path), str(orphan_path)}
-                )
+                paths.update({str(metadata_path), str(selected_path), str(orphan_path)})
                 queries = self._reference_query_counter(db)
 
                 self.assertTrue(
@@ -94,9 +93,7 @@ class LibraryCleanupTest(unittest.TestCase):
             db = self._database(root)
             try:
                 db.execute("CREATE TABLE metadata_images(local_path TEXT)")
-                db.execute(
-                    "CREATE TABLE catalog_artwork_selection(local_path TEXT)"
-                )
+                db.execute("CREATE TABLE catalog_artwork_selection(local_path TEXT)")
                 image_root = root / "metadata-cache" / "images"
                 image_root.mkdir(parents=True)
                 old = time.time() - 3600
@@ -108,7 +105,9 @@ class LibraryCleanupTest(unittest.TestCase):
                     paths.append(path)
                 metadata_path = paths[0]
                 selected_path = paths[1]
-                db.execute("INSERT INTO metadata_images VALUES(?)", (str(metadata_path),))
+                db.execute(
+                    "INSERT INTO metadata_images VALUES(?)", (str(metadata_path),)
+                )
                 db.execute(
                     "INSERT INTO catalog_artwork_selection VALUES(?)",
                     (str(selected_path),),

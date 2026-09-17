@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from contextlib import nullcontext
-import time
 from pathlib import Path
-
 
 _CLEANUP_BATCH_SIZE = 300
 
@@ -58,9 +57,7 @@ def _referenced_paths(
             )
             params = [value for _table in sources for value in batch]
             referenced.update(
-                str(row[0])
-                for row in db.execute(query, params)
-                if row[0]
+                str(row[0]) for row in db.execute(query, params) if row[0]
             )
     return referenced, True
 
@@ -471,9 +468,7 @@ def _remove_screen_extractor_files(
     )
     if not complete:
         return False
-    return _remove_unreferenced_candidates(
-        candidates, referenced, should_terminate
-    )
+    return _remove_unreferenced_candidates(candidates, referenced, should_terminate)
 
 
 def _sweep_screen_extractor_cache(
@@ -510,9 +505,7 @@ def _sweep_screen_extractor_cache(
     )
     if not complete:
         return False
-    return _remove_unreferenced_candidates(
-        candidates, referenced, should_terminate
-    )
+    return _remove_unreferenced_candidates(candidates, referenced, should_terminate)
 
 
 def _cleanup(
@@ -585,9 +578,7 @@ def _cleanup(
         return False
     if progress:
         progress("trickplay", "Cleaning trickplay cache")
-    if not _remove_screen_extractor_files(
-        db, tables, screen_paths, should_terminate
-    ):
+    if not _remove_screen_extractor_files(db, tables, screen_paths, should_terminate):
         return False
     if progress:
         progress("screen_extractor", "Cleaning screen-extractor cache")

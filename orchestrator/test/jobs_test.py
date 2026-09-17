@@ -76,9 +76,7 @@ class MetadataCleanupJobTest(unittest.TestCase):
                 )
 
         cleanup.assert_called_once()
-        self.assertIs(
-            cleanup.call_args.kwargs["should_terminate"], should_terminate
-        )
+        self.assertIs(cleanup.call_args.kwargs["should_terminate"], should_terminate)
         self.assertNotIn(
             "completed",
             [call.kwargs.get("state") for call in store.update_run.call_args_list],

@@ -1,6 +1,5 @@
 from alembic import op
 
-
 revision = "0055_metadata_cleanup_path_indexes"
 down_revision = "0054_catalog_search_write_indexes"
 branch_labels = None

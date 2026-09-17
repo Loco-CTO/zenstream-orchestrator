@@ -2777,7 +2777,12 @@ class MetadataCleanupJob:
                 message=f"{label} · {completed}/7 stages",
             )
 
-        cleanup_orphans(self.db, progress=progress)
+        if not cleanup_orphans(
+            self.db,
+            progress=progress,
+            should_terminate=should_terminate,
+        ):
+            raise JobTerminated()
         self.store.update_run(
             run_id,
             state="completed",

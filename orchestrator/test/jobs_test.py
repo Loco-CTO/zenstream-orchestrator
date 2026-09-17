@@ -10,6 +10,8 @@ from app.jobs import (
     AnalysisMaintenanceTimeout,
     JobScheduler,
     JobStore,
+    JobTerminated,
+    MetadataCleanupJob,
     MetadataMissingJob,
     MetadataUpgradeJob,
     _metadata_document_gaps,
@@ -60,6 +62,27 @@ class DatabaseRollbackTest(unittest.TestCase):
                 self.assertEqual(errors, [])
             finally:
                 db.close()
+
+
+class MetadataCleanupJobTest(unittest.TestCase):
+    def test_cleanup_termination_does_not_mark_the_run_completed(self):
+        store = MagicMock()
+        should_terminate = MagicMock(return_value=False)
+
+        with patch("app.jobs.cleanup_orphans", return_value=False) as cleanup:
+            with self.assertRaises(JobTerminated):
+                MetadataCleanupJob(store).run(
+                    "run-1", {"kind": "metadata_cleanup"}, should_terminate
+                )
+
+        cleanup.assert_called_once()
+        self.assertIs(
+            cleanup.call_args.kwargs["should_terminate"], should_terminate
+        )
+        self.assertNotIn(
+            "completed",
+            [call.kwargs.get("state") for call in store.update_run.call_args_list],
+        )
 
 
 class WholeJobProgressTest(unittest.TestCase):

@@ -222,6 +222,26 @@ class OpenApiContractTest(unittest.TestCase):
             "get"
         ]["responses"]
         self.assertIn("Retry-After", trickplay["202"]["headers"])
+        artwork_status = self.schema["paths"]["/api/admin/artwork-variants/status"][
+            "get"
+        ]
+        self.assertIn(
+            "AdminSessionCookie",
+            artwork_status["security"][0],
+        )
+        status_schema = artwork_status["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        self.assertEqual(
+            status_schema["$ref"],
+            "#/components/schemas/ArtworkVariantStatus",
+        )
+        self.assertEqual(
+            self.schema["components"]["schemas"]["ArtworkVariantStatus"]["properties"][
+                "state"
+            ]["enum"],
+            ["starting", "warming", "ready", "degraded", "unavailable"],
+        )
 
     def test_documented_success_statuses_match_known_mutations(self):
         no_content = (

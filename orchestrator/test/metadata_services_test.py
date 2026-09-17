@@ -531,6 +531,82 @@ class MetadataServicesTest(unittest.TestCase):
             executor.shutdown()
         self.assertEqual(calls, [1])
 
+    def test_music_cached_artwork_does_not_requeue_current_assets(self):
+        fetcher = _Fetcher()
+        image_ingest = MagicMock()
+        image_ingest.documents_are_current.return_value = True
+        asset_queue = MagicMock()
+        document = {
+            "title": "Album",
+            "images": [
+                {
+                    "type": "Primary",
+                    "url": "https://images.example/album.jpg",
+                }
+            ],
+        }
+
+        with patch("app.metadata_services.asset_executor", asset_queue):
+            ingest = MetadataIngestService(
+                fetcher,
+                _Settings(["en"]),
+                image_ingest=image_ingest,
+                background_assets=True,
+            )
+            ingest.ingest_document(
+                "musicbrainz",
+                "release",
+                "release-1",
+                "en",
+                document,
+                target_entity_id="release-entity",
+            )
+
+        asset_queue.submit.assert_not_called()
+        image_ingest.documents_are_current.assert_called_once()
+
+    def test_music_changed_artwork_document_still_queues_assets(self):
+        fetcher = _Fetcher()
+        image_ingest = MagicMock()
+        image_ingest.documents_are_current.side_effect = [True, False]
+        asset_queue = MagicMock()
+        first = {"title": "Album", "images": []}
+        changed = {
+            "title": "Album",
+            "images": [
+                {
+                    "type": "Primary",
+                    "url": "https://images.example/new-album.jpg",
+                }
+            ],
+        }
+
+        with patch("app.metadata_services.asset_executor", asset_queue):
+            ingest = MetadataIngestService(
+                fetcher,
+                _Settings(["en"]),
+                image_ingest=image_ingest,
+                background_assets=True,
+            )
+            ingest.ingest_document(
+                "musicbrainz",
+                "release",
+                "release-1",
+                "en",
+                first,
+                target_entity_id="release-entity",
+            )
+            ingest.ingest_document(
+                "musicbrainz",
+                "release",
+                "release-1",
+                "en",
+                changed,
+                target_entity_id="release-entity",
+            )
+
+        asset_queue.submit.assert_called_once()
+
     def test_music_scan_asset_mode_queues_assets_while_video_mode_waits(self):
         fetcher = _Fetcher()
         image_ingest = MagicMock()
@@ -1668,6 +1744,115 @@ class MetadataServicesTest(unittest.TestCase):
             self.assertTrue(
                 all(str(value[-1]).endswith(".webp") for value in cache.rows)
             )
+
+    def test_music_artwork_readiness_checks_files_rows_and_selection(self):
+        self.db.execute(
+            "CREATE TABLE metadata_images("
+            "provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,"
+            "image_type TEXT,image_url TEXT,blur_hash TEXT,local_path TEXT,"
+            "fetched_at TEXT,expires_at TEXT,"
+            "PRIMARY KEY(provider,entity_type,provider_id,locale,image_type,image_url))"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_artwork_selection("
+            "entity_id TEXT,locale TEXT,image_type TEXT,provider TEXT,"
+            "local_path TEXT,blur_hash TEXT,version TEXT,updated_at TEXT,"
+            "PRIMARY KEY(entity_id,locale,image_type))"
+        )
+        url = "https://images.example/album.jpg"
+        document = {"images": [{"type": "Primary", "url": url}]}
+        with tempfile.TemporaryDirectory() as directory:
+            cache = SimpleNamespace(db=self.db)
+            image_ingest = MetadataImageIngestService(cache, directory)
+            target = image_ingest._target(url)
+            target.write_bytes(b"webp")
+            self.db.execute(
+                "INSERT INTO metadata_images VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "musicbrainz",
+                    "release",
+                    "release-1",
+                    "",
+                    "Primary",
+                    url,
+                    "blur",
+                    str(target),
+                    "now",
+                    "later",
+                ),
+            )
+            self.db.execute(
+                "INSERT INTO catalog_artwork_selection VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "release-entity",
+                    "en",
+                    "Primary",
+                    "musicbrainz",
+                    str(target),
+                    "blur",
+                    "version",
+                    "now",
+                ),
+            )
+
+            with patch(
+                "app.metadata_services.MetadataLanguageSettings",
+                return_value=_Settings(["en"]),
+            ):
+                self.assertTrue(
+                    image_ingest.documents_are_current(
+                        "musicbrainz",
+                        "release",
+                        "release-1",
+                        {"": document},
+                        complete_batch=True,
+                        catalog_locales=["en"],
+                        target_entity_id="release-entity",
+                    )
+                )
+                self.assertFalse(
+                    image_ingest.documents_are_current(
+                        "musicbrainz",
+                        "release",
+                        "release-1",
+                        {"": {"images": []}},
+                        complete_batch=True,
+                        catalog_locales=["en"],
+                        target_entity_id="release-entity",
+                    )
+                )
+                self.assertFalse(
+                    image_ingest.documents_are_current(
+                        "musicbrainz",
+                        "release",
+                        "release-1",
+                        {
+                            "": {
+                                "images": [
+                                    {
+                                        "type": "Primary",
+                                        "url": "https://images.example/new.jpg",
+                                    }
+                                ]
+                            }
+                        },
+                        complete_batch=True,
+                        catalog_locales=["en"],
+                        target_entity_id="release-entity",
+                    )
+                )
+                target.unlink()
+                self.assertFalse(
+                    image_ingest.documents_are_current(
+                        "musicbrainz",
+                        "release",
+                        "release-1",
+                        {"": document},
+                        complete_batch=True,
+                        catalog_locales=["en"],
+                        target_entity_id="release-entity",
+                    )
+                )
 
     def test_single_locale_refresh_removes_replaced_cached_artwork(self):
         with tempfile.TemporaryDirectory() as directory:

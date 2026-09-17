@@ -603,6 +603,17 @@ class LibraryMetadataTest(unittest.TestCase):
         )
 
     @staticmethod
+    def _enable_music_identity_keys(db):
+        db.execute(
+            "CREATE TABLE music_identity_keys ("
+            "entity_id TEXT NOT NULL,library_id TEXT NOT NULL,"
+            "entity_type TEXT NOT NULL,identity_key TEXT NOT NULL,"
+            "identity_source TEXT NOT NULL,identity_version INTEGER NOT NULL DEFAULT 1,"
+            "updated_at TEXT NOT NULL,"
+            "PRIMARY KEY(entity_id,entity_type,identity_key))"
+        )
+
+    @staticmethod
     def _finish_incremental_scan(scanner, library_id, root):
         scanner._reconcile_moved_entities(library_id, root)
         scanner._prune_rejected_entities()
@@ -2387,6 +2398,8 @@ class LibraryMetadataTest(unittest.TestCase):
         db, scanner = self._scanner_db()
         try:
             self._enable_music_inventory(db)
+            self._enable_music_identity_keys(db)
+            scanner.store.update_job = MagicMock()
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 album = root / "Artist" / "Album"
@@ -2420,6 +2433,12 @@ class LibraryMetadataTest(unittest.TestCase):
                         ],
                         {"Artist/Album/01. Track.flac": probe},
                     )
+                    identity_before = db.execute(
+                        "SELECT entity_id,entity_type,identity_key,identity_source,"
+                        "identity_version,updated_at FROM music_identity_keys "
+                        "ORDER BY entity_type,identity_key"
+                    )
+                    writer_before_unchanged = db.metrics()["writer_operations"]
 
                     parse.reset_mock()
                     playback.return_value.probe_entity.reset_mock()
@@ -2458,6 +2477,175 @@ class LibraryMetadataTest(unittest.TestCase):
                         db.execute("SELECT COUNT(*) FROM music_file_inventory")[0][0],
                         1,
                     )
+                    identity_unchanged = db.execute(
+                        "SELECT entity_id,entity_type,identity_key,identity_source,"
+                        "identity_version,updated_at FROM music_identity_keys "
+                        "ORDER BY entity_type,identity_key"
+                    )
+                    self.assertEqual(identity_before, identity_unchanged)
+                    self.assertEqual(
+                        db.metrics()["writer_operations"], writer_before_unchanged
+                    )
+                    cover = album / "cover.jpg"
+                    cover.write_bytes(b"cover")
+                    resolve.reset_mock()
+                    self._prepare_incremental_scan(scanner)
+                    with (
+                        patch("app.library.parse_audio_tags") as cover_parse,
+                        patch.object(scanner, "_publish_root") as cover_publish,
+                    ):
+                        scanner._scan_music(
+                            "library-1", root, "job-cover", lambda: False
+                        )
+
+                    cover_parse.assert_not_called()
+                    resolve.assert_called_once()
+                    release_id = db.execute(
+                        "SELECT id FROM library_entities WHERE entity_type='release'"
+                    )[0][0]
+                    self.assertIn(release_id, scanner._scan_delta["artwork_changed"])
+                    cover_publish.assert_called_once()
+                    parse.reset_mock()
+                    resolve.reset_mock()
+                    changed_tags = AudioTags(
+                        {**tags, "TITLE": "Changed"},
+                        probe,
+                    )
+                    track.write_bytes(b"changed")
+                    self._prepare_incremental_scan(scanner)
+                    with (
+                        patch(
+                            "app.library.parse_audio_tags",
+                            return_value=changed_tags,
+                        ) as changed_parse,
+                        patch("app.playback.PlaybackManager"),
+                        patch.object(
+                            scanner, "_resolve_music_group"
+                        ) as changed_resolve,
+                    ):
+                        scanner._scan_music("library-1", root, "job-3", lambda: False)
+
+                    changed_parse.assert_called_once_with(track)
+                    changed_resolve.assert_called_once()
+                    self.assertEqual(scanner._music_scan_stats["tagParses"], 1)
+
+                    new_track = album / "02. New.flac"
+                    new_track.write_bytes(b"new")
+                    self._prepare_incremental_scan(scanner)
+                    with (
+                        patch(
+                            "app.library.parse_audio_tags",
+                            return_value=AudioTags(
+                                {
+                                    **tags,
+                                    "TITLE": "New",
+                                    "TRACKNUMBER": "2",
+                                    "MUSICBRAINZ_TRACKID": "recording-2",
+                                },
+                                probe,
+                            ),
+                        ) as new_parse,
+                        patch("app.playback.PlaybackManager"),
+                        patch.object(scanner, "_resolve_music_group") as new_resolve,
+                    ):
+                        scanner._scan_music("library-1", root, "job-4", lambda: False)
+
+                    new_parse.assert_called_once_with(new_track)
+                    new_resolve.assert_called_once()
+                    self.assertEqual(
+                        db.execute("SELECT COUNT(*) FROM music_file_inventory")[0][0],
+                        2,
+                    )
+
+        finally:
+            db.close()
+
+    def test_music_credit_materialization_deduplicates_and_is_idempotent(self):
+        db, scanner = self._scanner_db()
+        try:
+            db.execute(
+                "CREATE TABLE music_artist_credits("
+                "track_id TEXT NOT NULL,artist_id TEXT NOT NULL,"
+                "credit_order INTEGER NOT NULL,credited_name TEXT NOT NULL,"
+                "PRIMARY KEY(track_id,artist_id))"
+            )
+            for entity_id, entity_type, relative_path, parent_id in (
+                ("artist-1", "artist", "Artist", None),
+                ("release-1", "release", "Artist/Album", "artist-1"),
+                ("track-1", "track", "Artist/Album/01. Track.flac", "release-1"),
+            ):
+                db.execute(
+                    "INSERT INTO library_entities(id,library_id,parent_id,entity_type,"
+                    "relative_path,created_at,updated_at,match_status) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        entity_id,
+                        "library-1",
+                        parent_id,
+                        entity_type,
+                        relative_path,
+                        "now",
+                        "now",
+                        "matched",
+                    ),
+                )
+
+            scanner._music_local_metadata = {
+                "release-1": {
+                    "albumArtist": "Artist",
+                    "artists": [{"name": "Artist"}, {"name": "Alias"}],
+                    "contributingArtists": [
+                        {"name": "Artist"},
+                        {"name": "Alias"},
+                    ],
+                },
+                "artist-1": {"title": "Artist"},
+                "track-1": {},
+            }
+            scanner._music_artist_entities = {"alias": "artist-1"}
+            scanner._scan_seen_ids = set()
+            scanner._scan_refresh_root_ids = set()
+            ingest = SimpleNamespace(locales=lambda: ["en"])
+            tracks = [{"entity_id": "track-1", "local": {}}]
+
+            with (
+                patch.object(scanner, "_publish_root") as publish,
+                patch.object(scanner, "_flush_publications"),
+            ):
+                scanner._materialize_music_artist_credits(
+                    "library-1",
+                    "artist-1",
+                    "release-1",
+                    tracks,
+                    None,
+                    ingest,
+                    "job-1",
+                    lambda: False,
+                    resolve_provider_metadata=False,
+                )
+                first_writer_operations = db.metrics()["writer_operations"]
+                scanner._music_local_artists_persisted = set()
+                scanner._materialize_music_artist_credits(
+                    "library-1",
+                    "artist-1",
+                    "release-1",
+                    tracks,
+                    None,
+                    ingest,
+                    "job-1",
+                    lambda: False,
+                    resolve_provider_metadata=False,
+                )
+
+            self.assertEqual(
+                db.execute(
+                    "SELECT artist_id,credit_order,credited_name "
+                    "FROM music_artist_credits ORDER BY credit_order"
+                ),
+                [("artist-1", 0, "Artist")],
+            )
+            self.assertEqual(db.metrics()["writer_operations"], first_writer_operations)
+            publish.assert_called_once_with("artist-1")
         finally:
             db.close()
 

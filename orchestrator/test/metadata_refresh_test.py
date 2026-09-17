@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from app.database import DatabaseHandler
-from app.metadata_refresh import MetadataRefreshJob, _patterns
+from app.metadata_refresh import MetadataRefreshJob, _patterns, _utc
 from app.models.metadata import (
     DEFAULT_METADATA_REFRESH_SETTINGS,
 )
@@ -17,6 +17,9 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")
         self.db.execute(
             "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT,created_at TEXT,relative_path TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE media_files(id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,role TEXT,modified_ns INTEGER)"
         )
         self.db.execute(
             "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,is_primary INTEGER)"
@@ -48,10 +51,13 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
         entity_type,
         *,
         created_at=None,
+        modified_at=None,
+        media_file=True,
         title="Example",
         overview=None,
         provider_id=None,
     ):
+        created_value = created_at or datetime.now(timezone.utc).isoformat()
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?)",
             (
@@ -59,10 +65,22 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
                 "library-1",
                 None,
                 entity_type,
-                created_at or datetime.now(timezone.utc).isoformat(),
+                created_value,
                 f"{entity_id}.mkv",
             ),
         )
+        if media_file:
+            modified_value = _utc(modified_at or created_value)
+            self.db.execute(
+                "INSERT INTO media_files VALUES(?,?,?,?,?)",
+                (
+                    f"{entity_id}-media",
+                    entity_id,
+                    f"{entity_id}.mkv",
+                    "media",
+                    int(modified_value.timestamp() * 1_000_000_000),
+                ),
+            )
         self.db.execute(
             "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
             (entity_id, "tmdb", entity_type, provider_id or entity_id, 1),
@@ -163,7 +181,7 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
         self.assertEqual(skipped["cutoff"], 1)
         self.assertEqual(skipped["cooldown"], 1)
 
-    def test_episode_cutoff_uses_provider_air_date(self):
+    def test_episode_cutoff_uses_media_file_last_modified(self):
         settings = self.settings()
         settings["itemTypes"]["episode"]["cutoffDays"] = 90
         settings["itemTypes"]["episode"]["artwork"] = {
@@ -172,9 +190,10 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
         }
         now = datetime.now(timezone.utc)
         self.add_entity(
-            "episode-recent-air-date",
+            "episode-recent-modified",
             "episode",
             created_at=(now - timedelta(days=365)).isoformat(),
+            modified_at=(now - timedelta(days=30)).isoformat(),
             overview="Recent episode",
         )
         self.db.execute(
@@ -184,16 +203,17 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
                     {
                         "title": "Recent episode",
                         "overview": "Recent episode",
-                        "date": (now - timedelta(days=30)).date().isoformat(),
+                        "date": (now - timedelta(days=365)).date().isoformat(),
                     }
                 ),
-                "episode-recent-air-date",
+                "episode-recent-modified",
             ),
         )
         self.add_entity(
-            "episode-old-air-date",
+            "episode-old-modified",
             "episode",
             created_at=(now - timedelta(days=1)).isoformat(),
+            modified_at=(now - timedelta(days=365)).isoformat(),
             overview="Old episode",
         )
         self.db.execute(
@@ -203,16 +223,17 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
                     {
                         "title": "Old episode",
                         "overview": "Old episode",
-                        "date": (now - timedelta(days=365)).date().isoformat(),
+                        "date": (now - timedelta(days=30)).date().isoformat(),
                     }
                 ),
-                "episode-old-air-date",
+                "episode-old-modified",
             ),
         )
         self.add_entity(
-            "episode-no-air-date",
+            "episode-no-media-file",
             "episode",
             created_at=now.isoformat(),
+            media_file=False,
             overview="Unknown air date",
         )
 
@@ -220,7 +241,7 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
 
         self.assertEqual(
             [candidate["entity"]["id"] for candidate in candidates],
-            ["episode-recent-air-date"],
+            ["episode-recent-modified"],
         )
         self.assertEqual(skipped["cutoff"], 2)
 

@@ -41,6 +41,20 @@ def _utc(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _modified_at(value) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        modified_ns = int(value)
+        if modified_ns <= 0:
+            return None
+        return datetime.fromtimestamp(
+            modified_ns / 1_000_000_000, timezone.utc
+        )
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+
+
 def _age_exceeded(value: str | None, days: int, current: datetime) -> bool:
     if days == -1:
         return False
@@ -109,9 +123,24 @@ class MetadataRefreshJob:
             name if name in columns else f"NULL AS {name}"
             for name in ("parent_id", "created_at", "relative_path")
         )
+        media_columns = (
+            self._table_columns("media_files")
+            if "media_files" in self._table_names()
+            else set()
+        )
+        if {"entity_id", "role", "modified_ns"}.issubset(media_columns):
+            last_modified = (
+                "(SELECT MAX(modified_ns) FROM media_files "
+                "WHERE media_files.entity_id=library_entities.id "
+                "AND media_files.role='media') AS last_modified_ns"
+            )
+        else:
+            last_modified = "NULL AS last_modified_ns"
         rows = self.db.execute(
             "SELECT "
             + ",".join(selected)
+            + ","
+            + last_modified
             + " FROM library_entities WHERE entity_type IN ('movie','series','season','episode')"
             " ORDER BY entity_type,id"
         )
@@ -122,6 +151,7 @@ class MetadataRefreshJob:
                 "parentId": row[2],
                 "createdAt": row[3],
                 "path": str(row[4] or ""),
+                "lastModifiedNs": row[5],
             }
             for row in rows
         ]
@@ -260,26 +290,6 @@ class MetadataRefreshJob:
                 and _usable(image.get("url"))
             )
         return image_types
-
-    def _episode_air_date(
-        self,
-        values: list[dict],
-        entity_type: str,
-        identities: list[dict],
-        locales: list[str],
-    ) -> datetime | None:
-        if entity_type != "episode":
-            return None
-        documents = [*values]
-        cached_values = self._cached_values(entity_type, identities, locales)
-        if cached_values:
-            documents.extend(cached_values)
-        for document in documents:
-            for key in ("date", "firstAired"):
-                parsed = _utc(document.get(key))
-                if parsed is not None:
-                    return parsed
-        return None
 
     def _metadata_bucket_due(
         self, entity_type: str, identities: list[dict], locales: list[str], days: int
@@ -456,19 +466,16 @@ class MetadataRefreshJob:
             entity, identities, locales
         )
         if config["cutoffDays"] != -1:
-            # Episode created_at is catalog admission time, not the provider's
-            # air date. Unknown air dates are not provably inside the window.
-            episode_air_date = self._episode_air_date(
-                values, entity["type"], identities, locales
-            )
+            # Episode media mtime is the local change/admission signal. It is
+            # independent of the provider air date and catalog row timestamp.
             cutoff_date = (
-                episode_air_date
+                _modified_at(entity.get("lastModifiedNs"))
                 if entity["type"] == "episode"
                 else _utc(entity.get("createdAt"))
             )
             if (
                 entity["type"] == "episode"
-                and episode_air_date is None
+                and cutoff_date is None
             ) or (
                 cutoff_date is not None
                 and current - cutoff_date > timedelta(days=config["cutoffDays"])

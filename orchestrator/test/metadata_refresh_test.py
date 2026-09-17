@@ -303,7 +303,9 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
                     {
                         "title": "Example",
                         "overview": "Complete overview",
-                        "images": [{"type": "Primary", "url": "https://example.test/1"}],
+                        "images": [
+                            {"type": "Primary", "url": "https://example.test/1"}
+                        ],
                     }
                 ),
                 fresh,
@@ -334,7 +336,9 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
                     {
                         "title": "Example",
                         "overview": "Complete overview",
-                        "images": [{"type": "Primary", "url": "https://example.test/1"}],
+                        "images": [
+                            {"type": "Primary", "url": "https://example.test/1"}
+                        ],
                     }
                 ),
                 (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(),

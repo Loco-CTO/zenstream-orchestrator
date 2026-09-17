@@ -48,9 +48,7 @@ def _modified_at(value) -> datetime | None:
         modified_ns = int(value)
         if modified_ns <= 0:
             return None
-        return datetime.fromtimestamp(
-            modified_ns / 1_000_000_000, timezone.utc
-        )
+        return datetime.fromtimestamp(modified_ns / 1_000_000_000, timezone.utc)
     except (OSError, OverflowError, TypeError, ValueError):
         return None
 
@@ -473,10 +471,7 @@ class MetadataRefreshJob:
                 if entity["type"] == "episode"
                 else _utc(entity.get("createdAt"))
             )
-            if (
-                entity["type"] == "episode"
-                and cutoff_date is None
-            ) or (
+            if (entity["type"] == "episode" and cutoff_date is None) or (
                 cutoff_date is not None
                 and current - cutoff_date > timedelta(days=config["cutoffDays"])
             ):
@@ -752,9 +747,7 @@ class MetadataRefreshJob:
             "candidateTypes": dict(sorted(candidate_types.items())),
             "candidateReasons": dict(sorted(candidate_reasons.items())),
             "providerGroups": dict(sorted(provider_groups.items())),
-            "providerRequestEstimate": dict(
-                sorted(provider_request_estimate.items())
-            ),
+            "providerRequestEstimate": dict(sorted(provider_request_estimate.items())),
             "replaceMetadataGroups": sum(
                 bool(group["replaceMetadata"]) for group in groups
             ),
@@ -807,9 +800,7 @@ class MetadataRefreshJob:
         stats.update(
             {
                 "elapsedMs": int(round((time.monotonic() - started) * 1000)),
-                "workerWallMs": int(
-                    round((time.monotonic() - worker_started) * 1000)
-                ),
+                "workerWallMs": int(round((time.monotonic() - worker_started) * 1000)),
                 "workerElapsedMs": int(round(worker_elapsed_ms)),
                 "completedGroups": completed_groups,
                 "refreshedGroups": refreshed_groups,

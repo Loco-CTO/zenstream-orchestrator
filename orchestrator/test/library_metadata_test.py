@@ -1251,9 +1251,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     scanner._scan_series(
                         "library-1", root, "job-1", lambda: False, targets={"Example"}
                     )
-                    self._finish_targeted_scan(
-                        scanner, "library-1", root, {"Example"}
-                    )
+                    self._finish_targeted_scan(scanner, "library-1", root, {"Example"})
 
                 self.assertEqual(
                     db.execute(

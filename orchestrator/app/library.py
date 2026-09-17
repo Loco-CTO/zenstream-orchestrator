@@ -194,9 +194,7 @@ def _relative_watcher_path(
         return None
     if relative_value in ("", os.curdir):
         return Path()
-    if relative_value == os.pardir or relative_value.startswith(
-        os.pardir + os.sep
-    ):
+    if relative_value == os.pardir or relative_value.startswith(os.pardir + os.sep):
         return None
     return Path(relative_value)
 
@@ -11483,9 +11481,7 @@ class LibraryRuntime:
             "WHERE state='queued' ORDER BY created_at"
         )
         for row in rows:
-            if row[2] == "reconcile" and self._has_pending_full_inventory_job(
-                row[1]
-            ):
+            if row[2] == "reconcile" and self._has_pending_full_inventory_job(row[1]):
                 # Keep the watcher job durable, but do not start a worker that
                 # can only block on the same library's full inventory lock.
                 continue

@@ -488,9 +488,7 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             "CREATE TABLE libraries(id TEXT PRIMARY KEY,name TEXT,type TEXT)"
         )
         self.db.execute("INSERT INTO libraries VALUES('library-1','Music','music')")
-        self.db.execute(
-            "ALTER TABLE library_entities ADD COLUMN relative_path TEXT"
-        )
+        self.db.execute("ALTER TABLE library_entities ADD COLUMN relative_path TEXT")
         self.db.execute(
             "INSERT INTO library_entities VALUES('release-1','library-1','release','Artist/Album')"
         )
@@ -1191,15 +1189,11 @@ class MissingTvChildIdentityRepairTest(unittest.TestCase):
         service = Service()
 
         self.assertEqual(
-            _repair_missing_tv_child_identities(
-                self.db, service, run_id="run-1"
-            ),
+            _repair_missing_tv_child_identities(self.db, service, run_id="run-1"),
             0,
         )
         self.assertEqual(
-            _repair_missing_tv_child_identities(
-                self.db, service, run_id="run-2"
-            ),
+            _repair_missing_tv_child_identities(self.db, service, run_id="run-2"),
             0,
         )
         self.assertEqual(service.calls, 1)

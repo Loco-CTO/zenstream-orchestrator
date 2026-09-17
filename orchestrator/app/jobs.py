@@ -99,8 +99,7 @@ def _usable_metadata_value(value) -> bool:
 def _metadata_retry_at(attempts: int) -> str:
     delay = min(
         METADATA_MISSING_RETRY_MAX_SECONDS,
-        METADATA_MISSING_RETRY_BASE_SECONDS
-        * (2 ** max(0, min(attempts - 1, 16))),
+        METADATA_MISSING_RETRY_BASE_SECONDS * (2 ** max(0, min(attempts - 1, 16))),
     )
     return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
 
@@ -154,9 +153,7 @@ def _record_metadata_recovery_state(
 ) -> None:
     if not _metadata_recovery_state_table(db):
         return
-    previous = _metadata_recovery_state(
-        db, provider, entity_type, provider_id, locale
-    )
+    previous = _metadata_recovery_state(db, provider, entity_type, provider_id, locale)
     attempts = int(previous[1] or 0) + 1 if previous else 1
     terminal = permanent or attempts >= METADATA_MISSING_MAX_ATTEMPTS
     status = "failed" if terminal else "retry"
@@ -195,9 +192,7 @@ def _complete_metadata_recovery_state(
 ) -> None:
     if not _metadata_recovery_state_table(db):
         return
-    previous = _metadata_recovery_state(
-        db, provider, entity_type, provider_id, locale
-    )
+    previous = _metadata_recovery_state(db, provider, entity_type, provider_id, locale)
     attempts = int(previous[1] or 0) if previous else 0
     timestamp = now()
     with db.transaction() as cursor:
@@ -1965,7 +1960,9 @@ class MetadataMissingJob:
             if "match_method" in entity_columns
             else ""
         )
-        relative_path = "e.relative_path" if "relative_path" in entity_columns else "NULL"
+        relative_path = (
+            "e.relative_path" if "relative_path" in entity_columns else "NULL"
+        )
         parent_id = "e.parent_id" if "parent_id" in entity_columns else "NULL"
         try:
             rows = self.db.execute(
@@ -2005,9 +2002,7 @@ class MetadataMissingJob:
 
     def _missing_primary_library_rows(self) -> list[tuple[str, str]]:
         """Find libraries containing entities invisible to provider-ID worklists."""
-        libraries = {
-            (row[1], row[2]) for row in self._missing_primary_entity_rows()
-        }
+        libraries = {(row[1], row[2]) for row in self._missing_primary_entity_rows()}
         return sorted(libraries)
 
     @staticmethod
@@ -2109,11 +2104,12 @@ class MetadataMissingJob:
                     # Existing rows are bootstrapped once. Successful work is
                     # marked completed below, so later runs stay sparse.
                     due_locales.append(locale)
-                elif state[0] in {"queued", "retry"} and _metadata_recovery_due(
-                    state
+                elif (
+                    state[0] in {"queued", "retry"}
+                    and _metadata_recovery_due(state)
+                    or state[0] == "completed"
+                    and queued
                 ):
-                    due_locales.append(locale)
-                elif state[0] == "completed" and queued:
                     due_locales.append(locale)
             if due_locales:
                 selected.append(item)
@@ -2153,7 +2149,12 @@ class MetadataMissingJob:
         state_rows = {}
         if state_available:
             state_rows = {
-                (str(provider), str(entity_type), str(provider_id), str(locale or "")): (
+                (
+                    str(provider),
+                    str(entity_type),
+                    str(provider_id),
+                    str(locale or ""),
+                ): (
                     str(state),
                     int(attempts or 0),
                     next_attempt_at,
@@ -2253,13 +2254,10 @@ class MetadataMissingJob:
                     "completed",
                     "completed_with_warnings",
                 }:
-                    error_text = (
-                        (result.get("error") if result else None)
-                        or (
-                            f"Library reconcile ended in {result.get('state')}"
-                            if result
-                            else "Library reconcile result was not found"
-                        )
+                    error_text = (result.get("error") if result else None) or (
+                        f"Library reconcile ended in {result.get('state')}"
+                        if result
+                        else "Library reconcile result was not found"
                     )
                     failures.append(
                         {
@@ -2280,11 +2278,7 @@ class MetadataMissingJob:
                 # before this recovery request arrived. Allow one targeted
                 # follow-up, never another library-wide pass or an unbounded
                 # feedback loop.
-                if (
-                    not error_text
-                    and was_active
-                    and remaining_ids
-                ):
+                if not error_text and was_active and remaining_ids:
                     retry_job = runtime.enqueue(
                         library_id,
                         "reconcile",
@@ -2303,12 +2297,11 @@ class MetadataMissingJob:
                             "completed_with_warnings",
                         }:
                             error_text = (
-                                (retry_result.get("error") if retry_result else None)
-                                or (
-                                    f"Targeted recovery reconcile ended in {retry_result.get('state')}"
-                                    if retry_result
-                                    else "Targeted recovery reconcile result was not found"
-                                )
+                                retry_result.get("error") if retry_result else None
+                            ) or (
+                                f"Targeted recovery reconcile ended in {retry_result.get('state')}"
+                                if retry_result
+                                else "Targeted recovery reconcile result was not found"
                             )
                             failures.append(
                                 {
@@ -2321,9 +2314,7 @@ class MetadataMissingJob:
                                         if retry_result
                                         else "missing"
                                     ),
-                                    "error": (
-                                        error_text
-                                    ),
+                                    "error": (error_text),
                                 }
                             )
                         else:
@@ -2533,7 +2524,10 @@ class MetadataMissingJob:
         for item in items:
             provider, identifier_type, _provider_id = item
             entity_type = _metadata_catalog_entity_type(provider, identifier_type)
-            if provider == "musicbrainz" and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES:
+            if (
+                provider == "musicbrainz"
+                and entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES
+            ):
                 total += 1
             else:
                 total += len((locales_by_item or {}).get(item, locales))
@@ -2634,8 +2628,7 @@ class MetadataMissingJob:
                             for failure in locale_failures
                         )
                         terminal = (
-                            not retryable
-                            or attempts >= METADATA_MISSING_MAX_ATTEMPTS
+                            not retryable or attempts >= METADATA_MISSING_MAX_ATTEMPTS
                         )
                         queue_state = "failed" if terminal else "retry"
                         next_attempt_at = (
@@ -2804,9 +2797,7 @@ class MetadataMissingJob:
                             "entityType": entity_type,
                             "providerId": provider_id,
                             "locale": "" if neutral else locale,
-                            "retryable": not isinstance(
-                                error, ProviderNotFoundError
-                            ),
+                            "retryable": not isinstance(error, ProviderNotFoundError),
                             "error": f"{type(error).__name__}: {error}",
                         }
                         for locale in fetch_locales

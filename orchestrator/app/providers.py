@@ -3005,6 +3005,7 @@ class MetadataService:
         project: bool = True,
         cache=None,
         target_entity_id: str | None = None,
+        batch_cache_writes: bool = False,
     ) -> dict[str, dict]:
         cache_store = cache or self.cache
         locales = list(dict.fromkeys(locales))
@@ -3104,6 +3105,7 @@ class MetadataService:
                 raise ProviderError(
                     f"{provider} {entity_type} {provider_id} details normalization failed: {type(error).__name__}: {error}"
                 ) from error
+            normalized_values = []
             for locale in missing:
                 try:
                     normalized = client.normalize(
@@ -3113,7 +3115,32 @@ class MetadataService:
                     raise ProviderError(
                         f"{provider} {entity_type} {provider_id} {locale} normalization failed: {type(error).__name__}: {error}"
                     ) from error
-                cache_store.put(provider, entity_type, provider_id, locale, normalized)
+                normalized_values.append((locale, normalized))
+            if batch_cache_writes and normalized_values:
+                put_many = getattr(cache_store, "put_many", None)
+                if callable(put_many):
+                    put_many(
+                        [
+                            (
+                                provider,
+                                entity_type,
+                                provider_id,
+                                locale,
+                                normalized,
+                            )
+                            for locale, normalized in normalized_values
+                        ]
+                    )
+                else:
+                    for locale, normalized in normalized_values:
+                        cache_store.put(
+                            provider, entity_type, provider_id, locale, normalized
+                        )
+            for locale, normalized in normalized_values:
+                if not batch_cache_writes:
+                    cache_store.put(
+                        provider, entity_type, provider_id, locale, normalized
+                    )
                 self._scan_cache_put(
                     ("document", provider, entity_type, provider_id, locale),
                     ("ok", copy.deepcopy(normalized)),

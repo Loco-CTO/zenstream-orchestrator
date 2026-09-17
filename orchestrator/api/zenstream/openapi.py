@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import warnings
 from copy import deepcopy
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
@@ -761,6 +761,27 @@ class JobsResponse(DocsModel):
     jobs: list[Job] = Field(default_factory=list)
 
 
+class ArtworkVariantStatus(DocsModel):
+    state: Literal["starting", "warming", "ready", "degraded", "unavailable"] = (
+        "starting"
+    )
+    sourceCount: int = Field(default=0, examples=[1200])
+    expectedVariants: int = Field(default=0, examples=[2400])
+    readyVariants: int = Field(default=0, examples=[2380])
+    remainingVariants: int = Field(default=0, examples=[20])
+    queuedConversions: int = Field(default=0, examples=[18])
+    activeConversions: int = Field(default=0, examples=[2])
+    pendingConversions: int = Field(default=0, examples=[2])
+    cacheFileCount: int = Field(default=0, examples=[2380])
+    cacheBytes: int = Field(default=0, examples=[524288000])
+    failedConversions: int = Field(default=0, examples=[0])
+    lastSweepAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
+    lastSuccessfulSweepAt: str | None = Field(
+        default=None, examples=["2025-01-15T12:00:00Z"]
+    )
+    lastError: str | None = None
+
+
 class JobRunResponse(DocsModel):
     run: JobRun | None = None
     job: Job | None = None
@@ -1021,6 +1042,7 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     JobTrigger,
     Job,
     JobsResponse,
+    ArtworkVariantStatus,
     JobRunResponse,
     AdminUser,
     AdminUsersResponse,
@@ -1506,6 +1528,7 @@ _SUMMARY_OVERRIDES = {
     ): "Move a library in display order",
     ("GET", "/api/admin/library-jobs/{job_id}"): "Get a library job",
     ("GET", "/api/admin/jobs"): "List scheduled jobs",
+    ("GET", "/api/admin/artwork-variants/status"): "Get artwork variant status",
     ("GET", "/api/admin/jobs/{job_id}"): "Get a scheduled job",
     ("PATCH", "/api/admin/jobs/{job_id}"): "Update a scheduled job",
     ("POST", "/api/admin/jobs/{job_id}/triggers"): "Add a job trigger",
@@ -1941,6 +1964,7 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("POST", "/api/admin/libraries/{library_id}/move"): Library,
     ("GET", "/api/admin/library-jobs/{job_id}"): Job,
     ("GET", "/api/admin/jobs"): JobsResponse,
+    ("GET", "/api/admin/artwork-variants/status"): ArtworkVariantStatus,
     ("GET", "/api/admin/jobs/{job_id}"): Job,
     ("PATCH", "/api/admin/jobs/{job_id}"): Job,
     ("POST", "/api/admin/jobs/{job_id}/triggers"): Job,
@@ -2111,6 +2135,22 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
         "generation": 12,
         "updatedAt": "2025-01-15T12:00:00Z",
         "libraries": [],
+    },
+    ArtworkVariantStatus: {
+        "state": "warming",
+        "sourceCount": 1200,
+        "expectedVariants": 2400,
+        "readyVariants": 2380,
+        "remainingVariants": 20,
+        "queuedConversions": 18,
+        "activeConversions": 2,
+        "pendingConversions": 2,
+        "cacheFileCount": 2380,
+        "cacheBytes": 524288000,
+        "failedConversions": 0,
+        "lastSweepAt": "2025-01-15T12:00:00Z",
+        "lastSuccessfulSweepAt": "2025-01-15T12:00:00Z",
+        "lastError": None,
     },
     CatalogPage: {"items": [], "page": 1, "pageSize": 40, "total": 0, "hasNext": False},
     MusicAlbumPage: {

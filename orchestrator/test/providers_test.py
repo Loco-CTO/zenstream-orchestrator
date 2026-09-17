@@ -355,6 +355,59 @@ class MusicBrainzLookupTest(unittest.TestCase):
 
 
 class MetadataScanCacheTest(unittest.TestCase):
+    def test_forced_locale_fetch_batches_cache_writes(self):
+        class Cache:
+            db = object()
+
+            def __init__(self):
+                self.batch_records = []
+                self.single_writes = []
+
+            def get(self, *_args):
+                return None
+
+            def put(self, *args):
+                self.single_writes.append(args)
+
+            def put_many(self, records):
+                self.batch_records.append(list(records))
+
+        class Client:
+            def __init__(self):
+                self.details_calls = []
+
+            def details_all_locales(self, entity_type, provider_id, locales):
+                self.details_calls.append((entity_type, provider_id, locales))
+                return {locale: {"title": locale} for locale in locales}
+
+            @staticmethod
+            def normalize(_entity_type, _provider_id, payload):
+                return payload
+
+        service = MetadataService.__new__(MetadataService)
+        service.cache = Cache()
+        service._scan_cache = None
+        service._scan_cache_lock = None
+        service._scan_cache_inflight = None
+        client = Client()
+        service.client = lambda _provider: client
+
+        values = service.fetch_locales(
+            "tmdb",
+            "movie",
+            "42",
+            ["en", "ja", "zh-TW"],
+            force=True,
+            project=False,
+            batch_cache_writes=True,
+        )
+
+        self.assertEqual(set(values), {"en", "ja", "zh-TW"})
+        self.assertEqual(len(client.details_calls), 1)
+        self.assertEqual(len(service.cache.batch_records), 1)
+        self.assertEqual(len(service.cache.batch_records[0]), 3)
+        self.assertEqual(service.cache.single_writes, [])
+
     def test_scan_cache_single_flights_duplicate_provider_payloads(self):
         service = MetadataService.__new__(MetadataService)
         service._scan_cache = {}

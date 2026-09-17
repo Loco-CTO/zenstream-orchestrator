@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.artwork_variants import artwork_variant_status
 from app.client_auth import administrator_origin_allowed
 from app.foreground import run_auth, run_control, run_foreground
 from app.images import LocalArtworkCache
@@ -1001,6 +1002,14 @@ async def list_jobs(
 ):
     require_admin(Username, TOKEN)
     return await run_control(_list_jobs_sync)
+
+
+@router.get("/artwork-variants/status")
+async def get_artwork_variant_status(
+    Username: str | None = Header(None), TOKEN: str | None = Header(None)
+):
+    require_admin(Username, TOKEN)
+    return await run_control(artwork_variant_status, scheduler.store.db)
 
 
 @router.get("/jobs/{job_id}")

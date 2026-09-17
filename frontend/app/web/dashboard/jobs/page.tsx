@@ -10,7 +10,13 @@ import {
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import { DashboardModal } from "../components/dashboard-surface";
-import { Job, activeStates, progressDetailText } from "./job-types";
+import {
+	ArtworkVariantStatus,
+	Job,
+	activeStates,
+	progressDetailText,
+	stateLabel,
+} from "./job-types";
 
 type TaskGroup = { group: string; tasks: Job[] };
 
@@ -47,6 +53,203 @@ function progressFor(job: Job) {
 	return Math.max(
 		0,
 		Math.min(100, (run.progressCurrent / run.progressTotal) * 100),
+	);
+}
+
+function formatBytes(value: number) {
+	if (!Number.isFinite(value) || value <= 0) return "0 B";
+	const units = ["B", "KB", "MB", "GB", "TB"];
+	let amount = value;
+	let unit = 0;
+	while (amount >= 1024 && unit < units.length - 1) {
+		amount /= 1024;
+		unit += 1;
+	}
+	const formatted =
+		amount >= 10 || unit === 0 ? String(Math.round(amount)) : amount.toFixed(1);
+	return formatted + " " + units[unit];
+}
+
+function ArtworkVariantStatusCard({
+	status,
+	error,
+}: {
+	status: ArtworkVariantStatus | null;
+	error: string;
+}) {
+	const progress =
+		status && status.expectedVariants > 0
+			? Math.max(
+					0,
+					Math.min(100, (status.readyVariants / status.expectedVariants) * 100),
+				)
+			: status?.state === "ready"
+				? 100
+				: 0;
+	const serverError = status?.lastError || error;
+	const detail = !status
+		? error || "Waiting for the first prewarm status snapshot…"
+		: status.state === "starting"
+			? "The background prewarm process has not completed its first sweep."
+			: status.state === "unavailable"
+				? "The selected artwork data is not currently available for inspection."
+				: status.sourceCount.toLocaleString() + " selected artwork sources";
+
+	return (
+		<section aria-labelledby="artwork-variants-heading">
+			<div
+				style={{
+					fontSize: 13,
+					fontWeight: 600,
+					color: "#fff",
+					marginBottom: 10,
+				}}
+			>
+				Artwork variants
+			</div>
+			<div
+				style={{
+					background: "#080808",
+					borderRadius: 12,
+					padding: "16px 18px",
+					border: serverError ? "1px solid rgba(240,112,112,0.35)" : undefined,
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						alignItems: "center",
+						justifyContent: "space-between",
+						gap: 12,
+					}}
+				>
+					<div>
+						<h2
+							id="artwork-variants-heading"
+							style={{
+								margin: 0,
+								fontSize: 14,
+								fontWeight: 500,
+								color: "#ddd",
+							}}
+						>
+							Background prewarm
+						</h2>
+						<div style={{ marginTop: 3, fontSize: 11, color: "#555" }}>{detail}</div>
+					</div>
+					<div
+						style={{
+							color:
+								status?.state === "degraded"
+									? "#f07070"
+									: status?.state === "ready"
+										? "var(--primary)"
+										: "#60b4e8",
+							fontSize: 11,
+							fontFamily: "var(--font-mono)",
+							textTransform: "uppercase",
+							letterSpacing: ".08em",
+							flexShrink: 0,
+						}}
+					>
+						{status ? stateLabel(status.state) : "loading"}
+					</div>
+				</div>
+				<div style={{ marginTop: 16 }}>
+					<div
+						style={{
+							display: "flex",
+							justifyContent: "space-between",
+							gap: 12,
+							fontSize: 11,
+							color: "#777",
+							fontFamily: "var(--font-mono)",
+						}}
+					>
+						<span>
+							{status
+								? status.readyVariants.toLocaleString() +
+									" / " +
+									status.expectedVariants.toLocaleString() +
+									" ready"
+								: "Loading progress…"}
+						</span>
+						<span>{Math.round(progress)}%</span>
+					</div>
+					<div
+						style={{
+							height: 4,
+							marginTop: 7,
+							background: "#111",
+							borderRadius: 4,
+							overflow: "hidden",
+						}}
+					>
+						<div
+							aria-label="Artwork variant prewarm progress"
+							role="progressbar"
+							aria-valuemin={0}
+							aria-valuemax={100}
+							aria-valuenow={Math.round(progress)}
+							style={{
+								height: "100%",
+								width: progress + "%",
+								background: status?.state === "degraded" ? "#f07070" : "var(--primary)",
+								borderRadius: 4,
+								transition: "width 0.4s ease",
+							}}
+						/>
+					</div>
+				</div>
+				{status && (
+					<div
+						style={{
+							display: "grid",
+							gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+							gap: "10px 18px",
+							marginTop: 16,
+							fontSize: 11,
+							color: "#666",
+						}}
+					>
+						<div>
+							Queued / active / pending{" "}
+							<span style={{ color: "#aaa", fontFamily: "var(--font-mono)" }}>
+								{status.queuedConversions} / {status.activeConversions} /{" "}
+								{status.pendingConversions}
+							</span>
+						</div>
+						<div>
+							Cache{" "}
+							<span style={{ color: "#aaa", fontFamily: "var(--font-mono)" }}>
+								{formatBytes(status.cacheBytes)} ·{" "}
+								{status.cacheFileCount.toLocaleString()} files
+							</span>
+						</div>
+						<div>
+							Remaining{" "}
+							<span style={{ color: "#aaa", fontFamily: "var(--font-mono)" }}>
+								{status.remainingVariants.toLocaleString()}
+							</span>
+						</div>
+						<div>
+							Last sweep{" "}
+							<span style={{ color: "#aaa", fontFamily: "var(--font-mono)" }}>
+								{relativeTime(status.lastSuccessfulSweepAt)}
+							</span>
+						</div>
+					</div>
+				)}
+				{serverError && (
+					<div
+						role="alert"
+						style={{ marginTop: 14, color: "#f07070", fontSize: 11 }}
+					>
+						{serverError}
+					</div>
+				)}
+			</div>
+		</section>
 	);
 }
 
@@ -215,6 +418,9 @@ export default function JobsPage() {
 	const [jobs, setJobs] = useState<Job[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
+	const [artworkStatus, setArtworkStatus] =
+		useState<ArtworkVariantStatus | null>(null);
+	const [artworkStatusError, setArtworkStatusError] = useState("");
 	const [runTask, setRunTask] = useState<Job | null>(null);
 	const [runOptions, setRunOptions] = useState<Record<string, unknown>>({});
 
@@ -229,6 +435,21 @@ export default function JobsPage() {
 			setError("Scheduled tasks could not be loaded.");
 		}
 		setLoading(false);
+	}, []);
+
+	const refreshArtworkStatus = useCallback(async (current: Session | null) => {
+		if (!current) return;
+		try {
+			const response = await adminFetch(
+				"/api/admin/artwork-variants/status",
+				current,
+			);
+			if (!response.ok) throw new Error("status request failed");
+			setArtworkStatus((await response.json()) as ArtworkVariantStatus);
+			setArtworkStatusError("");
+		} catch {
+			setArtworkStatusError("Artwork variant status could not be loaded.");
+		}
 	}, []);
 
 	const refreshTask = useCallback(
@@ -272,7 +493,24 @@ export default function JobsPage() {
 		const current = readSession();
 		setSession(current);
 		void load(current);
-	}, [load, params, router]);
+		void refreshArtworkStatus(current);
+	}, [load, params, refreshArtworkStatus, router]);
+
+	useEffect(() => {
+		if (!session) return;
+		let polling = false;
+		const poll = async () => {
+			if (polling) return;
+			polling = true;
+			try {
+				await refreshArtworkStatus(session);
+			} finally {
+				polling = false;
+			}
+		};
+		const timer = window.setInterval(() => void poll(), 5000);
+		return () => window.clearInterval(timer);
+	}, [refreshArtworkStatus, session]);
 
 	useEffect(() => {
 		if (!session) return;
@@ -448,7 +686,10 @@ export default function JobsPage() {
 				</div>
 				<button
 					type="button"
-					onClick={() => void load(session)}
+					onClick={() => {
+						void load(session);
+						void refreshArtworkStatus(session);
+					}}
 					title="Refresh"
 					aria-label="Refresh tasks"
 					style={{
@@ -476,6 +717,11 @@ export default function JobsPage() {
 					{error}
 				</div>
 			)}
+
+			<ArtworkVariantStatusCard
+				status={artworkStatus}
+				error={artworkStatusError}
+			/>
 
 			{loading ? (
 				<div

@@ -29,6 +29,24 @@ class PersistenceMigrationTest(unittest.TestCase):
 
             connection = sqlite3.connect(database_path)
             try:
+                upgrade_state_columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(metadata_upgrade_state)"
+                    )
+                }
+                self.assertEqual(
+                    upgrade_state_columns,
+                    {
+                        "provider",
+                        "entity_type",
+                        "provider_id",
+                        "locale",
+                        "upgrade_version",
+                        "document_digest",
+                        "completed_at",
+                    },
+                )
                 columns = {
                     row[1]: row
                     for row in connection.execute("PRAGMA table_info(metadata_images)")
@@ -54,11 +72,33 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "idx_user_item_state_continue",
                         "idx_metadata_images_url_path_ready",
                         "idx_metadata_images_type_url_fetched",
+                        "idx_metadata_images_local_path",
+                        "idx_catalog_artwork_selection_local_path",
+                        "idx_people_local_path",
+                        "idx_screen_extractor_assets_local_path",
                         "idx_metadata_refresh_state_attempted",
                         "idx_metadata_missing_state_due",
                     }
                     <= indexes
                 )
+                for table, index in (
+                    ("metadata_images", "idx_metadata_images_local_path"),
+                    (
+                        "catalog_artwork_selection",
+                        "idx_catalog_artwork_selection_local_path",
+                    ),
+                    ("people", "idx_people_local_path"),
+                    (
+                        "screen_extractor_assets",
+                        "idx_screen_extractor_assets_local_path",
+                    ),
+                ):
+                    plan = connection.execute(
+                        f"EXPLAIN QUERY PLAN SELECT 1 FROM {table} "
+                        "WHERE local_path=? LIMIT 1",
+                        ("cache-path",),
+                    ).fetchall()
+                    self.assertTrue(any(index in str(row) for row in plan), plan)
                 playback_columns = {
                     row[1]: row
                     for row in connection.execute(

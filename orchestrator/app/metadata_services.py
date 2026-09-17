@@ -3708,12 +3708,15 @@ class MetadataImageIngestService:
                     "PRAGMA table_info(catalog_artwork_selection)"
                 )
             }
-            if not {
-                "entity_id",
-                "locale",
-                "image_type",
-                "local_path",
-            } <= selection_columns:
+            if (
+                not {
+                    "entity_id",
+                    "locale",
+                    "image_type",
+                    "local_path",
+                }
+                <= selection_columns
+            ):
                 selection_columns = set()
         configured = list(MetadataLanguageSettings().get())
         include_english = any(language_family(value) == "en" for value in configured)
@@ -3828,10 +3831,7 @@ class MetadataImageIngestService:
                                 row
                                 for row in selected
                                 if _ready_file(row[1])
-                                and (
-                                    row[0] != provider
-                                    or str(row[1]) == str(target)
-                                )
+                                and (row[0] != provider or str(row[1]) == str(target))
                             ]
                         else:
                             selected_ready = [

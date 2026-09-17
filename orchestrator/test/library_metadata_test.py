@@ -2494,7 +2494,9 @@ class LibraryMetadataTest(unittest.TestCase):
                         patch("app.library.parse_audio_tags") as cover_parse,
                         patch.object(scanner, "_publish_root") as cover_publish,
                     ):
-                        scanner._scan_music("library-1", root, "job-cover", lambda: False)
+                        scanner._scan_music(
+                            "library-1", root, "job-cover", lambda: False
+                        )
 
                     cover_parse.assert_not_called()
                     resolve.assert_called_once()
@@ -2517,7 +2519,9 @@ class LibraryMetadataTest(unittest.TestCase):
                             return_value=changed_tags,
                         ) as changed_parse,
                         patch("app.playback.PlaybackManager"),
-                        patch.object(scanner, "_resolve_music_group") as changed_resolve,
+                        patch.object(
+                            scanner, "_resolve_music_group"
+                        ) as changed_resolve,
                     ):
                         scanner._scan_music("library-1", root, "job-3", lambda: False)
 
@@ -2549,9 +2553,7 @@ class LibraryMetadataTest(unittest.TestCase):
                     new_parse.assert_called_once_with(new_track)
                     new_resolve.assert_called_once()
                     self.assertEqual(
-                        db.execute(
-                            "SELECT COUNT(*) FROM music_file_inventory"
-                        )[0][0],
+                        db.execute("SELECT COUNT(*) FROM music_file_inventory")[0][0],
                         2,
                     )
 
@@ -2642,9 +2644,7 @@ class LibraryMetadataTest(unittest.TestCase):
                 ),
                 [("artist-1", 0, "Artist")],
             )
-            self.assertEqual(
-                db.metrics()["writer_operations"], first_writer_operations
-            )
+            self.assertEqual(db.metrics()["writer_operations"], first_writer_operations)
             publish.assert_called_once_with("artist-1")
         finally:
             db.close()

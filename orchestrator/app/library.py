@@ -8391,9 +8391,7 @@ class LibraryScanner:
                 if not current_provider_id or str(current_provider_id[0][0]) != str(
                     provider_id
                 ):
-                    self._replace_ids(
-                        entity, [("musicbrainz", "artist", provider_id)]
-                    )
+                    self._replace_ids(entity, [("musicbrainz", "artist", provider_id)])
                 if not resolve_provider_metadata:
                     mark_matched(entity, "musicbrainz_credit")
                 elif provider_id not in attempted_provider_ids:

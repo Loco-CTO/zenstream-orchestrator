@@ -2865,6 +2865,89 @@ class MetadataIngestService:
                 error,
             )
 
+    def _music_assets_are_current(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        documents: dict[str, dict],
+        *,
+        complete_batch: bool,
+        target_entity_id: str | None,
+    ) -> bool:
+        """Avoid replaying a completed music artwork batch.
+
+        Music scans frequently re-ingest the same cached provider document
+        while repairing a changed entity.  The asset executor only coalesces
+        work that is still pending, so a completed batch would otherwise be
+        submitted again on every scan.  The image service verifies the actual
+        target files, metadata rows, and catalog selections before this fast
+        path is allowed to skip the batch.
+        """
+        if (
+            provider not in {"musicbrainz", "lastfm"}
+            or entity_type not in MUSIC_ENTITY_TYPES
+            or not target_entity_id
+            or self.image_ingest is None
+        ):
+            return False
+        checker = getattr(self.image_ingest, "documents_are_current", None)
+        if not callable(checker):
+            return False
+        try:
+            return (
+                checker(
+                    provider,
+                    entity_type,
+                    provider_id,
+                    documents,
+                    complete_batch=complete_batch,
+                    catalog_locales=self.locales(),
+                    target_entity_id=target_entity_id,
+                )
+                is True
+            )
+        except Exception:
+            # Readiness is an optimization only.  If a legacy schema or a
+            # transient read prevents verification, retain the existing asset
+            # submission and repair behavior.
+            logger.debug(
+                "music artwork readiness check deferred provider=%s entity_type=%s provider_id=%s target_entity_id=%s",
+                provider,
+                entity_type,
+                provider_id,
+                target_entity_id,
+                exc_info=True,
+            )
+            return False
+
+    def _submit_asset_work(
+        self,
+        key: tuple,
+        work,
+        *,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        documents: dict[str, dict],
+        force_assets: bool,
+        complete_batch: bool,
+        target_entity_id: str | None,
+    ) -> None:
+        if self.background_assets:
+            if not force_assets and self._music_assets_are_current(
+                provider,
+                entity_type,
+                provider_id,
+                documents,
+                complete_batch=complete_batch,
+                target_entity_id=target_entity_id,
+            ):
+                return
+            asset_executor.submit(key, work)
+        else:
+            asset_executor.submit_wait(key, work)
+
     @staticmethod
     def is_locale_neutral(provider: str, entity_type: str) -> bool:
         return (
@@ -3124,10 +3207,17 @@ class MetadataIngestService:
                 int(force_assets),
                 int(bool(complete_batch)),
             )
-            if self.background_assets:
-                asset_executor.submit(key, materialize_assets)
-            else:
-                asset_executor.submit_wait(key, materialize_assets)
+            self._submit_asset_work(
+                key,
+                materialize_assets,
+                provider=provider,
+                entity_type=entity_type,
+                provider_id=provider_id,
+                documents=asset_documents,
+                force_assets=force_assets,
+                complete_batch=complete_batch,
+                target_entity_id=target_entity_id,
+            )
         return values
 
     def ingest_locale(
@@ -3239,10 +3329,17 @@ class MetadataIngestService:
                 int(force_assets),
                 int(bool(complete_batch)),
             )
-            if self.background_assets:
-                asset_executor.submit(key, materialize_assets)
-            else:
-                asset_executor.submit_wait(key, materialize_assets)
+            self._submit_asset_work(
+                key,
+                materialize_assets,
+                provider=provider,
+                entity_type=entity_type,
+                provider_id=provider_id,
+                documents={asset_locale: normalized},
+                force_assets=force_assets,
+                complete_batch=complete_batch,
+                target_entity_id=target_entity_id,
+            )
         return normalized
 
 
@@ -3575,6 +3672,184 @@ class MetadataImageIngestService:
                         )
                     if not still_referenced:
                         path.unlink(missing_ok=True)
+
+    def documents_are_current(
+        self,
+        provider: str,
+        entity_type: str,
+        provider_id: str,
+        documents: dict[str, dict],
+        *,
+        complete_batch: bool = False,
+        catalog_locales: Iterable[str] = (),
+        target_entity_id: str | None = None,
+    ) -> bool:
+        """Return whether a provider artwork batch needs no repair work."""
+        if self.image_root is None:
+            return False
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if "metadata_images" not in tables:
+            return False
+        image_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(metadata_images)")
+        }
+        if not {"image_url", "local_path"} <= image_columns:
+            return False
+        selection_columns = set()
+        if target_entity_id and "catalog_artwork_selection" in tables:
+            selection_columns = {
+                row[1]
+                for row in self.db.execute(
+                    "PRAGMA table_info(catalog_artwork_selection)"
+                )
+            }
+            if not {
+                "entity_id",
+                "locale",
+                "image_type",
+                "local_path",
+            } <= selection_columns:
+                selection_columns = set()
+        configured = list(MetadataLanguageSettings().get())
+        include_english = any(language_family(value) == "en" for value in configured)
+        prefer_no_language_for_backdrop = (
+            MetadataLanguageSettings().prefer_no_language_for_backdrop()
+        )
+        selection_locales = tuple(dict.fromkeys(catalog_locales)) or tuple(
+            dict.fromkeys(configured)
+        )
+        expected_urls: dict[str, set[str]] = {
+            image_type: set() for image_type in ARTWORK_CATEGORIES
+        }
+        for locale, document in documents.items():
+            images = document.get("images", []) if isinstance(document, dict) else []
+            if not isinstance(images, list):
+                continue
+            for image_type in ARTWORK_CATEGORIES:
+                candidates = rank_artwork_candidates(
+                    images,
+                    locale,
+                    image_type,
+                    document.get("originalLanguage"),
+                    [provider],
+                    include_english=include_english,
+                    prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
+                )
+                usable = [
+                    candidate
+                    for candidate in candidates[:2]
+                    if isinstance(candidate.get("url"), str)
+                    and urlparse(candidate["url"]).scheme in {"http", "https"}
+                    and bool(urlparse(candidate["url"]).netloc)
+                ]
+                if not usable:
+                    continue
+                candidate = usable[0]
+                url = str(candidate["url"])
+                target = self._target(url)
+                if target is None or not _ready_file(target):
+                    return False
+                if "blur_hash" in image_columns:
+                    image_rows = self.db.execute(
+                        "SELECT local_path,blur_hash FROM metadata_images "
+                        "WHERE provider=? AND entity_type=? AND provider_id=? "
+                        "AND image_type=? AND image_url=? LIMIT 8",
+                        (
+                            provider,
+                            entity_type,
+                            provider_id,
+                            image_type,
+                            url,
+                        ),
+                    )
+                else:
+                    image_rows = self.db.execute(
+                        "SELECT local_path FROM metadata_images "
+                        "WHERE provider=? AND entity_type=? AND provider_id=? "
+                        "AND image_type=? AND image_url=? LIMIT 8",
+                        (
+                            provider,
+                            entity_type,
+                            provider_id,
+                            image_type,
+                            url,
+                        ),
+                    )
+                if not image_rows:
+                    return False
+                if "blur_hash" in image_columns and image_type != "Logo":
+                    ready_rows = [
+                        row
+                        for row in image_rows
+                        if str(row[0]) == str(target)
+                        and _ready_file(row[0])
+                        and bool(row[1])
+                    ]
+                else:
+                    ready_rows = [
+                        row
+                        for row in image_rows
+                        if str(row[0]) == str(target) and _ready_file(row[0])
+                    ]
+                if not ready_rows:
+                    return False
+                expected_urls.setdefault(image_type, set()).add(url)
+                if selection_columns:
+                    for catalog_locale in selection_locales:
+                        if "provider" in selection_columns:
+                            selected = self.db.execute(
+                                "SELECT provider,local_path FROM catalog_artwork_selection "
+                                "WHERE entity_id=? AND locale=? AND image_type=? LIMIT 8",
+                                (
+                                    target_entity_id,
+                                    catalog_locale,
+                                    image_type,
+                                ),
+                            )
+                        else:
+                            selected = self.db.execute(
+                                "SELECT local_path FROM catalog_artwork_selection "
+                                "WHERE entity_id=? AND locale=? AND image_type=? LIMIT 8",
+                                (
+                                    target_entity_id,
+                                    catalog_locale,
+                                    image_type,
+                                ),
+                            )
+                        if not selected:
+                            return False
+                        if "provider" in selection_columns:
+                            selected_ready = [
+                                row
+                                for row in selected
+                                if _ready_file(row[1])
+                                and (
+                                    row[0] != provider
+                                    or str(row[1]) == str(target)
+                                )
+                            ]
+                        else:
+                            selected_ready = [
+                                row for row in selected if _ready_file(row[0])
+                            ]
+                        if not selected_ready:
+                            return False
+        if complete_batch:
+            for image_type, urls in expected_urls.items():
+                existing = self.db.execute(
+                    "SELECT DISTINCT image_url FROM metadata_images "
+                    "WHERE provider=? AND entity_type=? AND provider_id=? "
+                    "AND image_type=?",
+                    (provider, entity_type, provider_id, image_type),
+                )
+                if {str(row[0]) for row in existing} != urls:
+                    return False
+        return True
 
     def ingest_documents(
         self,

@@ -1345,6 +1345,7 @@ class LibraryScanner:
         self._scan_refresh_root_ids: set[str] = set()
         self._scan_published_music_roots: set[str] = set()
         self._music_local_metadata: dict[str, dict] = {}
+        self._music_local_artists_persisted: set[str] = set()
         self._local_nfo_sources: dict[str, tuple[str, Path, list]] = {}
         self._music_pending_release_ids: dict[str, set[str]] = {}
         self._music_release_conflicts: set[str] = set()
@@ -3961,9 +3962,29 @@ class LibraryScanner:
     ) -> None:
         if not self._has_table("music_identity_keys"):
             return
+        values = dict(keys)
+        if not values:
+            return
+        placeholders = ",".join("?" for _ in values)
+        existing = {
+            str(row[0]): (str(row[1]), int(row[2] or 1))
+            for row in self.db.execute(
+                "SELECT identity_key,identity_source,identity_version "
+                "FROM music_identity_keys WHERE entity_id=? AND entity_type=? "
+                f"AND identity_key IN ({placeholders})",
+                [entity_id, entity_type, *values],
+            )
+        }
+        pending = [
+            (identity_key, source)
+            for identity_key, source in values.items()
+            if existing.get(identity_key) != (str(source), 1)
+        ]
+        if not pending:
+            return
         timestamp = now()
         with self.db.transaction() as cursor:
-            for identity_key, source in dict(keys).items():
+            for identity_key, source in pending:
                 try:
                     cursor.execute(
                         "INSERT OR IGNORE INTO music_identity_keys "
@@ -6473,55 +6494,102 @@ class LibraryScanner:
         self, artist_id: str, name: str, ingest=None
     ) -> None:
         """Keep providerless artist metadata durable and projection-readable."""
+        persisted = getattr(self, "_music_local_artists_persisted", set())
         existing_nfo = self._local_nfo_document(artist_id)
         if existing_nfo is not None:
             self._music_local_metadata[artist_id] = existing_nfo
+            persisted.add(artist_id)
+            self._music_local_artists_persisted = persisted
             return
         display_name = _music_display_value(name)
         if not display_name:
             return
+        if artist_id in persisted:
+            return
         document = _music_local_artist_document(display_name, artist_id)
         self._music_local_metadata[artist_id] = document
-        self.db.execute(
-            "INSERT OR IGNORE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
-            (artist_id, "local", "artist", artist_id),
+        local_identity_exists = bool(
+            self.db.execute(
+                "SELECT 1 FROM entity_provider_ids WHERE entity_id=? "
+                "AND provider='local' AND identifier_type='artist' "
+                "AND provider_id=? LIMIT 1",
+                (artist_id, artist_id),
+            )
         )
-        if self._has_table("metadata_cache"):
+        has_cache = self._has_table("metadata_cache")
+        if not local_identity_exists:
+            self.db.execute(
+                "INSERT OR IGNORE INTO entity_provider_ids(entity_id,provider,identifier_type,provider_id,is_primary) VALUES(?,?,?,?,0)",
+                (artist_id, "local", "artist", artist_id),
+            )
+        if has_cache:
             from app.metadata_services import MetadataSearchProjection
             from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
 
             payload = dict(document)
             payload["_imageLanguageSchema"] = IMAGE_LANGUAGE_SCHEMA
             payload["_metadataLocale"] = ""
-            fetched_at = datetime.now(timezone.utc)
-            cache_values = (
-                json.dumps(payload, ensure_ascii=False),
-                fetched_at.isoformat(),
-                (fetched_at + timedelta(days=7)).isoformat(),
-            )
+            encoded = json.dumps(payload, ensure_ascii=False)
             cache_key = ("local", "artist", artist_id, "")
-            if self.db.execute(
-                "SELECT 1 FROM metadata_cache WHERE provider=? AND entity_type=? AND provider_id=? AND locale=? LIMIT 1",
+            cache_rows = self.db.execute(
+                "SELECT payload FROM metadata_cache WHERE provider=? "
+                "AND entity_type=? AND provider_id=? AND locale=? "
+                "ORDER BY rowid DESC LIMIT 1",
                 cache_key,
-            ):
-                self.db.execute(
-                    "UPDATE metadata_cache SET payload=?,fetched_at=?,expires_at=? WHERE provider=? AND entity_type=? AND provider_id=? AND locale=?",
-                    (*cache_values, *cache_key),
+            )
+            cache_current = False
+            if cache_rows:
+                try:
+                    cache_current = json.loads(cache_rows[0][0] or "{}") == payload
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            locales = list(getattr(ingest, "locales", lambda: ["en"])()) or ["en"]
+            projection_current = True
+            if self._has_table("catalog_item_projection"):
+                placeholders = ",".join("?" for _ in locales)
+                projection_locales = {
+                    str(row[0])
+                    for row in self.db.execute(
+                        "SELECT locale FROM catalog_item_projection "
+                        f"WHERE entity_id=? AND locale IN ({placeholders})",
+                        [artist_id, *locales],
+                    )
+                }
+                projection_current = set(locales) <= projection_locales
+            if local_identity_exists and cache_current and projection_current:
+                persisted.add(artist_id)
+                self._music_local_artists_persisted = persisted
+                return
+            if not cache_current:
+                fetched_at = datetime.now(timezone.utc)
+                cache_values = (
+                    encoded,
+                    fetched_at.isoformat(),
+                    (fetched_at + timedelta(days=7)).isoformat(),
                 )
-            else:
-                self.db.execute(
-                    "INSERT INTO metadata_cache(provider,entity_type,provider_id,locale,payload,fetched_at,expires_at) VALUES(?,?,?,?,?,?,?)",
-                    (*cache_key, *cache_values),
-                )
-            for locale in getattr(ingest, "locales", lambda: ["en"])():
-                MetadataSearchProjection(self.db).project(
-                    "local",
-                    "artist",
-                    artist_id,
-                    locale,
-                    document,
-                    target_entity_id=artist_id,
-                )
+                if cache_rows:
+                    self.db.execute(
+                        "UPDATE metadata_cache SET payload=?,fetched_at=?,expires_at=? "
+                        "WHERE provider=? AND entity_type=? AND provider_id=? AND locale=?",
+                        (*cache_values, *cache_key),
+                    )
+                else:
+                    self.db.execute(
+                        "INSERT INTO metadata_cache(provider,entity_type,provider_id,locale,payload,fetched_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+                        (*cache_key, *cache_values),
+                    )
+            if not local_identity_exists or not cache_current or not projection_current:
+                for locale in locales:
+                    MetadataSearchProjection(self.db).project(
+                        "local",
+                        "artist",
+                        artist_id,
+                        locale,
+                        document,
+                        target_entity_id=artist_id,
+                    )
+        persisted.add(artist_id)
+        self._music_local_artists_persisted = persisted
 
     def _music_mark_identity_changed(self, entity_id: str) -> None:
         if entity_id not in self._scan_created_ids:
@@ -8270,8 +8338,27 @@ class LibraryScanner:
             "id": album_artist_provider_id or primary_credit.get("id"),
         }
         attempted_provider_ids: set[str] = set()
-        materialized_artists: set[str] = set()
+        changed_artist_ids: set[str] = set()
+        marked_entities: dict[str, str] = {}
         artist_entities = getattr(self, "_music_artist_entities", {})
+
+        def mark_matched(entity: str, method: str) -> None:
+            if marked_entities.get(entity) == method:
+                return
+            current = self.db.execute(
+                "SELECT match_status,match_confidence,match_method "
+                "FROM library_entities WHERE id=?",
+                (entity,),
+            )
+            if current and tuple(current[0]) == ("matched", 1.0, method):
+                marked_entities[entity] = method
+                return
+            self.db.execute(
+                "UPDATE library_entities SET match_status='matched',"
+                "match_confidence=1.0,match_method=?,updated_at=? WHERE id=?",
+                (method, now(), entity),
+            )
+            marked_entities[entity] = method
 
         def dedupe(values: list[dict]) -> list[dict]:
             return self._music_document_credits({"artists": values})
@@ -8295,12 +8382,20 @@ class LibraryScanner:
             artist_entities[normalized_name] = entity
             self._persist_music_local_artist(entity, name, ingest)
             if provider_id:
-                self._replace_ids(entity, [("musicbrainz", "artist", provider_id)])
-                if not resolve_provider_metadata:
-                    self.db.execute(
-                        "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
-                        (now(), entity),
+                current_provider_id = self.db.execute(
+                    "SELECT provider_id FROM entity_provider_ids "
+                    "WHERE entity_id=? AND provider='musicbrainz' "
+                    "AND identifier_type='artist' LIMIT 1",
+                    (entity,),
+                )
+                if not current_provider_id or str(current_provider_id[0][0]) != str(
+                    provider_id
+                ):
+                    self._replace_ids(
+                        entity, [("musicbrainz", "artist", provider_id)]
                     )
+                if not resolve_provider_metadata:
+                    mark_matched(entity, "musicbrainz_credit")
                 elif provider_id not in attempted_provider_ids:
                     attempted_provider_ids.add(provider_id)
                     try:
@@ -8312,15 +8407,9 @@ class LibraryScanner:
                             force=False,
                             target_entity_id=entity,
                         )
-                        self.db.execute(
-                            "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='musicbrainz_credit',updated_at=? WHERE id=?",
-                            (now(), entity),
-                        )
+                        mark_matched(entity, "musicbrainz_credit")
                     except Exception as error:
-                        self.db.execute(
-                            "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
-                            (now(), entity),
-                        )
+                        mark_matched(entity, "local_metadata")
                         self._queue_metadata_repair(
                             entity,
                             library_id,
@@ -8329,11 +8418,7 @@ class LibraryScanner:
                             ingest.provider_locales("musicbrainz", "artist"),
                         )
             else:
-                self.db.execute(
-                    "UPDATE library_entities SET match_status='matched',match_confidence=1.0,match_method='local_metadata',updated_at=? WHERE id=?",
-                    (now(), entity),
-                )
-            materialized_artists.add(entity)
+                mark_matched(entity, "local_metadata")
             return entity
 
         for track in tracks:
@@ -8346,16 +8431,34 @@ class LibraryScanner:
             candidates.extend(values_from(track.get("resolved_artists")))
             credits = dedupe(candidates)
             rows = []
-            for order, credit in enumerate(credits):
-                artist_entity = resolve_artist(credit, primary=order == 0)
+            seen_artist_ids: set[str] = set()
+            for credit in credits:
+                artist_entity = resolve_artist(credit, primary=not rows)
+                if artist_entity in seen_artist_ids:
+                    continue
+                seen_artist_ids.add(artist_entity)
                 rows.append(
                     (
                         track["entity_id"],
                         artist_entity,
-                        order,
+                        len(rows),
                         credit["name"],
                     )
                 )
+            existing = [
+                (str(row[0]), int(row[1]), str(row[2]))
+                for row in self.db.execute(
+                    "SELECT artist_id,credit_order,credited_name "
+                    "FROM music_artist_credits WHERE track_id=? "
+                    "ORDER BY credit_order,artist_id",
+                    (track["entity_id"],),
+                )
+            ]
+            next_rows = [(str(row[1]), int(row[2]), str(row[3])) for row in rows]
+            if existing == next_rows:
+                continue
+            changed_artist_ids.update(row[0] for row in existing)
+            changed_artist_ids.update(row[1] for row in rows)
             self.db.execute(
                 "DELETE FROM music_artist_credits WHERE track_id=?",
                 (track["entity_id"],),
@@ -8369,7 +8472,7 @@ class LibraryScanner:
                     for row in rows
                 )
 
-        for entity in materialized_artists:
+        for entity in changed_artist_ids:
             self._scan_refresh_root_ids.add(entity)
             self._publish_root(entity)
         self._flush_publications()
@@ -8681,6 +8784,7 @@ class LibraryScanner:
             return 0
 
         self._music_local_metadata = {}
+        self._music_local_artists_persisted = set()
         self._music_artist_entities = {}
         release_rows = self.db.execute(
             "SELECT id,library_id,parent_id FROM library_entities "
@@ -9443,6 +9547,7 @@ class LibraryScanner:
         targets: set[str] | None = None,
     ) -> int:
         self._music_local_metadata = {}
+        self._music_local_artists_persisted = set()
         self._local_nfo_sources = {}
         if not hasattr(self, "_music_state_lock"):
             self._music_state_lock = threading.RLock()

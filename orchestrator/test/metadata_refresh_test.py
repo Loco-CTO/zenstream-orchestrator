@@ -79,6 +79,8 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
                 image_type: {"enabled": False, "maxAgeDays": 7}
                 for image_type in ("Primary", "Backdrop", "Logo", "Banner")
             }
+            if entity_type == "episode":
+                settings["itemTypes"][entity_type]["cutoffDays"] = -1
             self.add_entity(entity_type, entity_type, overview=None)
 
         candidates, _skipped = self.job._select(settings, ["en"])
@@ -160,6 +162,170 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
         self.assertEqual(candidates, [])
         self.assertEqual(skipped["cutoff"], 1)
         self.assertEqual(skipped["cooldown"], 1)
+
+    def test_episode_cutoff_uses_provider_air_date(self):
+        settings = self.settings()
+        settings["itemTypes"]["episode"]["cutoffDays"] = 90
+        settings["itemTypes"]["episode"]["artwork"] = {
+            image_type: {"enabled": False, "maxAgeDays": 1}
+            for image_type in ("Primary", "Backdrop", "Logo", "Banner")
+        }
+        now = datetime.now(timezone.utc)
+        self.add_entity(
+            "episode-recent-air-date",
+            "episode",
+            created_at=(now - timedelta(days=365)).isoformat(),
+            overview="Recent episode",
+        )
+        self.db.execute(
+            "UPDATE catalog_item_projection SET payload=? WHERE entity_id=?",
+            (
+                json.dumps(
+                    {
+                        "title": "Recent episode",
+                        "overview": "Recent episode",
+                        "date": (now - timedelta(days=30)).date().isoformat(),
+                    }
+                ),
+                "episode-recent-air-date",
+            ),
+        )
+        self.add_entity(
+            "episode-old-air-date",
+            "episode",
+            created_at=(now - timedelta(days=1)).isoformat(),
+            overview="Old episode",
+        )
+        self.db.execute(
+            "UPDATE catalog_item_projection SET payload=? WHERE entity_id=?",
+            (
+                json.dumps(
+                    {
+                        "title": "Old episode",
+                        "overview": "Old episode",
+                        "date": (now - timedelta(days=365)).date().isoformat(),
+                    }
+                ),
+                "episode-old-air-date",
+            ),
+        )
+        self.add_entity(
+            "episode-no-air-date",
+            "episode",
+            created_at=now.isoformat(),
+            overview="Unknown air date",
+        )
+
+        candidates, skipped = self.job._select(settings, ["en"])
+
+        self.assertEqual(
+            [candidate["entity"]["id"] for candidate in candidates],
+            ["episode-recent-air-date"],
+        )
+        self.assertEqual(skipped["cutoff"], 2)
+
+    def test_document_age_selects_complete_episode(self):
+        settings = self.settings()
+        settings["itemTypes"]["episode"]["cutoffDays"] = -1
+        settings["itemTypes"]["episode"]["documentMaxAgeDays"] = 1
+        settings["itemTypes"]["episode"]["artwork"] = {
+            image_type: {"enabled": False, "maxAgeDays": 1}
+            for image_type in ("Primary", "Backdrop", "Logo", "Banner")
+        }
+        self.add_entity("episode-1", "episode", overview="Complete overview")
+        fresh = datetime.now(timezone.utc).isoformat()
+        self.db.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?)",
+            (
+                "tmdb",
+                "episode",
+                "episode-1",
+                "en",
+                json.dumps({"title": "Example", "overview": "Complete overview"}),
+                fresh,
+            ),
+        )
+
+        candidates, _skipped = self.job._select(settings, ["en"])
+        self.assertEqual(candidates, [])
+
+        self.db.execute(
+            "UPDATE metadata_cache SET fetched_at=? WHERE provider_id='episode-1'",
+            ((datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),),
+        )
+        candidates, _skipped = self.job._select(settings, ["en"])
+
+        self.assertEqual(
+            [candidate["entity"]["id"] for candidate in candidates], ["episode-1"]
+        )
+        self.assertIn("document refresh age", candidates[0]["reasons"])
+
+    def test_missing_provider_artwork_category_waits_for_document_recheck(self):
+        settings = self.settings()
+        settings["itemTypes"]["episode"]["cutoffDays"] = -1
+        settings["itemTypes"]["episode"]["artwork"] = {
+            "Primary": {"enabled": False, "maxAgeDays": 1},
+            "Backdrop": {"enabled": True, "maxAgeDays": 1},
+            "Logo": {"enabled": True, "maxAgeDays": 1},
+            "Banner": {"enabled": True, "maxAgeDays": 1},
+        }
+        self.add_entity("episode-1", "episode", overview="Complete overview")
+        fresh = datetime.now(timezone.utc).isoformat()
+        self.db.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?)",
+            (
+                "tmdb",
+                "episode",
+                "episode-1",
+                "en",
+                json.dumps(
+                    {
+                        "title": "Example",
+                        "overview": "Complete overview",
+                        "images": [{"type": "Primary", "url": "https://example.test/1"}],
+                    }
+                ),
+                fresh,
+            ),
+        )
+
+        candidates, _skipped = self.job._select(settings, ["en"])
+
+        self.assertEqual(candidates, [])
+
+    def test_missing_provider_artwork_is_rechecked_after_document_age(self):
+        settings = self.settings()
+        settings["itemTypes"]["movie"]["artwork"] = {
+            "Primary": {"enabled": False, "maxAgeDays": 7},
+            "Backdrop": {"enabled": True, "maxAgeDays": 7},
+            "Logo": {"enabled": False, "maxAgeDays": 7},
+            "Banner": {"enabled": False, "maxAgeDays": 7},
+        }
+        self.add_entity("movie-1", "movie", overview="Complete overview")
+        self.db.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?)",
+            (
+                "tmdb",
+                "movie",
+                "movie-1",
+                "en",
+                json.dumps(
+                    {
+                        "title": "Example",
+                        "overview": "Complete overview",
+                        "images": [{"type": "Primary", "url": "https://example.test/1"}],
+                    }
+                ),
+                (datetime.now(timezone.utc) - timedelta(days=8)).isoformat(),
+            ),
+        )
+
+        candidates, _skipped = self.job._select(settings, ["en"])
+
+        self.assertEqual(
+            [candidate["entity"]["id"] for candidate in candidates], ["movie-1"]
+        )
+        self.assertIn("artwork discovery age (Backdrop)", candidates[0]["reasons"])
 
     def test_shared_provider_identity_is_grouped_once(self):
         settings = self.settings()

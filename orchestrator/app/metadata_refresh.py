@@ -69,6 +69,8 @@ class MetadataRefreshJob:
         self.db = store.db
         self._tables = None
         self._columns: dict[str, set[str]] = {}
+        self._cached_values_cache: dict[tuple, list[dict]] = {}
+        self._metadata_due_cache: dict[tuple, bool] = {}
 
     def _table_names(self) -> set[str]:
         if self._tables is None:
@@ -206,6 +208,13 @@ class MetadataRefreshJob:
     ) -> list[dict]:
         if "metadata_cache" not in self._table_names():
             return []
+        cache_key = (
+            entity_type,
+            tuple((identity["provider"], identity["id"]) for identity in identities),
+            tuple(locales),
+        )
+        if cache_key in self._cached_values_cache:
+            return self._cached_values_cache[cache_key]
         values = []
         for identity in identities:
             placeholders = ",".join("?" for _ in locales)
@@ -221,7 +230,49 @@ class MetadataRefreshJob:
                     continue
                 if isinstance(value, dict):
                     values.append(value)
+        self._cached_values_cache[cache_key] = values
         return values
+
+    def _cached_artwork_types(
+        self, entity_type: str, identities: list[dict], locales: list[str]
+    ) -> set[str] | None:
+        """Return provider artwork types, or None when no document is cached."""
+        values = self._cached_values(entity_type, identities, locales)
+        if not values:
+            return None
+        image_types = set()
+        for value in values:
+            images = value.get("images")
+            if not isinstance(images, list):
+                continue
+            image_types.update(
+                str(image.get("type"))
+                for image in images
+                if isinstance(image, dict)
+                and image.get("type")
+                and _usable(image.get("url"))
+            )
+        return image_types
+
+    def _episode_air_date(
+        self,
+        values: list[dict],
+        entity_type: str,
+        identities: list[dict],
+        locales: list[str],
+    ) -> datetime | None:
+        if entity_type != "episode":
+            return None
+        documents = [*values]
+        cached_values = self._cached_values(entity_type, identities, locales)
+        if cached_values:
+            documents.extend(cached_values)
+        for document in documents:
+            for key in ("date", "firstAired"):
+                parsed = _utc(document.get(key))
+                if parsed is not None:
+                    return parsed
+        return None
 
     def _metadata_bucket_due(
         self, entity_type: str, identities: list[dict], locales: list[str], days: int
@@ -230,6 +281,14 @@ class MetadataRefreshJob:
             return True
         if "metadata_cache" not in self._table_names():
             return True
+        cache_key = (
+            entity_type,
+            tuple((identity["provider"], identity["id"]) for identity in identities),
+            tuple(locales),
+            days,
+        )
+        if cache_key in self._metadata_due_cache:
+            return self._metadata_due_cache[cache_key]
         rows = []
         placeholders = ",".join("?" for _ in locales)
         for identity in identities:
@@ -241,9 +300,12 @@ class MetadataRefreshJob:
                 )
             )
         if not rows:
+            self._metadata_due_cache[cache_key] = True
             return True
         current = datetime.now(timezone.utc)
-        return any(_age_exceeded(row[0], days, current) for row in rows)
+        result = any(_age_exceeded(row[0], days, current) for row in rows)
+        self._metadata_due_cache[cache_key] = result
+        return result
 
     def _artwork_available(
         self,
@@ -378,20 +440,6 @@ class MetadataRefreshJob:
         ):
             return None, "series block list"
         current = datetime.now(timezone.utc)
-        created = _utc(entity.get("createdAt"))
-        if (
-            config["cutoffDays"] != -1
-            and created is not None
-            and current - created > timedelta(days=config["cutoffDays"])
-        ):
-            return None, "outside catalog age cutoff"
-        last_attempted, last_completed = self._state(entity["id"])
-        if config["cooldownMinutes"] != -1 and not _age_exceeded(
-            last_attempted,
-            config["cooldownMinutes"] / 1440,
-            current,
-        ):
-            return None, "refresh cooldown"
         identities = self._identities(entity["id"], entity["type"])
         if len(identities) < config["minimumProviderIds"]:
             return None, "minimum provider IDs"
@@ -400,6 +448,32 @@ class MetadataRefreshJob:
         titles, overviews, values = self._titles_and_overviews(
             entity, identities, locales
         )
+        if config["cutoffDays"] != -1:
+            # Episode created_at is catalog admission time, not the provider's
+            # air date. Unknown air dates are not provably inside the window.
+            episode_air_date = self._episode_air_date(
+                values, entity["type"], identities, locales
+            )
+            cutoff_date = (
+                episode_air_date
+                if entity["type"] == "episode"
+                else _utc(entity.get("createdAt"))
+            )
+            if (
+                entity["type"] == "episode"
+                and episode_air_date is None
+            ) or (
+                cutoff_date is not None
+                and current - cutoff_date > timedelta(days=config["cutoffDays"])
+            ):
+                return None, "outside catalog age cutoff"
+        last_attempted, last_completed = self._state(entity["id"])
+        if config["cooldownMinutes"] != -1 and not _age_exceeded(
+            last_attempted,
+            config["cooldownMinutes"] / 1440,
+            current,
+        ):
+            return None, "refresh cooldown"
         reasons = []
         metadata_due = False
         checks = config["checks"]
@@ -452,6 +526,11 @@ class MetadataRefreshJob:
             metadata_due = metadata_due or self._metadata_bucket_due(
                 entity["type"], identities, locales, config["documentMaxAgeDays"]
             )
+        if entity["type"] == "episode" and self._metadata_bucket_due(
+            entity["type"], identities, locales, config["documentMaxAgeDays"]
+        ):
+            reasons.append("document refresh age")
+            metadata_due = True
         if entity["type"] == "series" and config["statusAfterDays"] != -1:
             statuses = {str(value.get("status") or "").casefold() for value in values}
             if statuses.intersection(
@@ -460,14 +539,34 @@ class MetadataRefreshJob:
                 reasons.append("status refresh age")
                 metadata_due = True
         artwork_due = False
+        cached_artwork_types = None
+        cached_artwork_checked = False
         for image_type, image_config in config["artwork"].items():
             if not image_config["enabled"]:
                 continue
             if not self._artwork_available(
                 entity["id"], entity["type"], identities, locales, image_type
             ):
+                if not cached_artwork_checked:
+                    cached_artwork_types = self._cached_artwork_types(
+                        entity["type"], identities, locales
+                    )
+                    cached_artwork_checked = True
+                if (
+                    cached_artwork_types is not None
+                    and image_type not in cached_artwork_types
+                ):
+                    if not metadata_due and self._metadata_bucket_due(
+                        entity["type"],
+                        identities,
+                        locales,
+                        config["documentMaxAgeDays"],
+                    ):
+                        reasons.append(f"artwork discovery age ({image_type})")
+                        artwork_due = True
+                    continue
                 reasons.append(f"missing {image_type} artwork")
-                if self._artwork_bucket_due(
+                if cached_artwork_types is not None or self._artwork_bucket_due(
                     entity["type"],
                     identities,
                     locales,
@@ -491,6 +590,8 @@ class MetadataRefreshJob:
     def _select(
         self, settings: dict, locales: list[str]
     ) -> tuple[list[dict], dict[str, int]]:
+        self._cached_values_cache.clear()
+        self._metadata_due_cache.clear()
         entities = self._entities()
         entities_by_id = {entity["id"]: entity for entity in entities}
         candidates = []

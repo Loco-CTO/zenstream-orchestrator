@@ -56,6 +56,28 @@ class LocalArtworkCacheTest(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_prune_ignores_a_cache_file_locked_by_another_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = DatabaseHandler("sqlite", {}, str(root / "orchestrator.db"))
+            try:
+                db.execute("CREATE TABLE media_files(quick_fingerprint TEXT,role TEXT)")
+                cache = LocalArtworkCache(db)
+                cache.root.mkdir(parents=True, exist_ok=True)
+                locked = cache.root / ("a" * 64 + ".webp")
+                locked.write_bytes(b"webp")
+
+                with patch.object(
+                    Path,
+                    "unlink",
+                    side_effect=PermissionError("file is in use"),
+                ):
+                    cache.prune()
+
+                self.assertTrue(locked.exists())
+            finally:
+                db.close()
+
     def test_ffmpeg_artwork_commands_are_non_interactive_and_use_level_five(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

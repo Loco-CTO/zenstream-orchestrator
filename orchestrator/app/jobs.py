@@ -13,6 +13,7 @@ from app.config import Config
 from app.foreground import active_requests
 from app.intro_outro import IntroOutroDetector
 from app.library import (
+    CatalogWorkCoordinator,
     PRIMARY_METADATA_IDENTITIES,
     JobTerminated,
     LibraryScanner,
@@ -49,6 +50,11 @@ METADATA_MISSING_RETRY_BASE_SECONDS = 60 * 60
 METADATA_MISSING_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
 METADATA_IDENTITY_PROVIDER = "__identity__"
 METADATA_JOB_KINDS = {"metadata_missing", "metadata_upgrade", "metadata_refresh"}
+# Orphan cleanup can delete catalog/cache rows without needing the library
+# runtime. Give it an exclusive window against inventory admission; metadata
+# upgrade/refresh page writes are fenced by CatalogReadModel instead, so a
+# multi-hour metadata walk cannot starve a library scan.
+CATALOG_EXCLUSIVE_KINDS = {"metadata_cleanup"}
 METADATA_UPGRADE_VERSION = 1
 METADATA_UPGRADE_STATE_COLUMNS = {
     "provider",
@@ -1027,6 +1033,84 @@ class JobStore:
             return "id,job_key,name,description,kind,interval_minutes,enabled,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at"
         return "id,job_key,name,description,kind,config,next_run_at,last_run_at,last_run_id,last_state,last_message,created_at,updated_at"
 
+    def _definition_columns(self, executor=None) -> set[str]:
+        executor = executor or self.db
+        try:
+            return {
+                row[1]
+                for row in executor.execute("PRAGMA table_info(job_definitions)")
+            }
+        except Exception:
+            return set()
+
+    def _mark_definition_queued(
+        self, definition_id: str, run_id: str, timestamp: str, executor=None
+    ) -> None:
+        """Keep the definition pointer aligned with a newly queued run."""
+        executor = executor or self.db
+        columns = self._definition_columns(executor)
+        values = {
+            "last_state": "queued",
+            "last_message": "Queued",
+            "updated_at": timestamp,
+        }
+        if "last_run_id" in columns:
+            values["last_run_id"] = run_id
+        if "last_run_at" in columns:
+            values["last_run_at"] = timestamp
+        fields = [key for key in values if key in columns]
+        if not fields:
+            return
+        executor.execute(
+            "UPDATE job_definitions SET "
+            + ",".join(f"{key}=?" for key in fields)
+            + " WHERE id=?",
+            [values[key] for key in fields] + [definition_id],
+        )
+
+    def _update_definition_from_run(self, row: tuple) -> None:
+        (
+            definition_id,
+            state,
+            message,
+            error,
+            created_at,
+            started_at,
+            _finished_at,
+            run_id,
+        ) = row
+        columns = self._definition_columns()
+        values = {
+            "last_state": state,
+            "last_message": message or error,
+            "updated_at": now(),
+        }
+        if "last_run_id" in columns:
+            values["last_run_id"] = run_id
+        if "last_run_at" in columns:
+            # last_run_at is the run's admission/start instant, matching the
+            # trigger-owned timestamp semantics; terminal duration is exposed
+            # by the run's finished_at field instead.
+            values["last_run_at"] = started_at or created_at
+        fields = [key for key in values if key in columns]
+        if not fields:
+            return
+        self.db.execute(
+            "UPDATE job_definitions SET "
+            + ",".join(f"{key}=?" for key in fields)
+            + " WHERE id=?",
+            [values[key] for key in fields] + [definition_id],
+        )
+
+    def _sync_definition_from_run(self, run_id: str) -> None:
+        rows = self.db.execute(
+            "SELECT definition_id,state,message,error,created_at,started_at,finished_at,id "
+            "FROM job_runs WHERE id=?",
+            (run_id,),
+        )
+        if rows:
+            self._update_definition_from_run(rows[0])
+
     def _with_triggers(self, definition: dict) -> dict:
         try:
             rows = self.db.execute(
@@ -1862,10 +1946,7 @@ class JobStore:
             "INSERT INTO job_runs(id,definition_id,library_id,kind,created_at) VALUES(?,?,?,?,?)",
             (run_id, definition["id"], library_id, definition["kind"], timestamp),
         )
-        self.db.execute(
-            "UPDATE job_definitions SET last_state='queued',last_message=?,updated_at=? WHERE id=?",
-            ("Queued", timestamp, definition["id"]),
-        )
+        self._mark_definition_queued(definition["id"], run_id, timestamp)
         return self.runs(definition["id"], 1)[0]
 
     def create_or_get_active_run(
@@ -1920,9 +2001,8 @@ class JobStore:
                             timestamp,
                         ),
                     )
-                cursor.execute(
-                    "UPDATE job_definitions SET last_state='queued',last_message=?,updated_at=? WHERE id=?",
-                    ("Queued", timestamp, definition["id"]),
+                self._mark_definition_queued(
+                    definition["id"], run_id, timestamp, executor=cursor
                 )
                 created = True
         runs = [run for run in self.runs(definition["id"], 100) if run["id"] == run_id]
@@ -2027,14 +2107,12 @@ class JobStore:
                 [value for _, value in updates] + [run_id],
             )
         row = self.db.execute(
-            "SELECT definition_id,state,message,error FROM job_runs WHERE id=?",
+            "SELECT definition_id,state,message,error,created_at,started_at,finished_at,id "
+            "FROM job_runs WHERE id=?",
             (run_id,),
         )
         if row:
-            self.db.execute(
-                "UPDATE job_definitions SET last_state=?,last_message=?,updated_at=? WHERE id=?",
-                (row[0][1], row[0][2] or row[0][3], now(), row[0][0]),
-            )
+            self._update_definition_from_run(row[0])
 
 
 class MetadataMissingJob:
@@ -4139,6 +4217,17 @@ class JobScheduler:
     def __init__(self, library_runtime):
         self.store = JobStore()
         self.library_runtime = library_runtime
+        self.catalog_work_coordinator = CatalogWorkCoordinator()
+        set_coordinator = getattr(
+            library_runtime, "set_catalog_work_coordinator", None
+        )
+        if callable(set_coordinator):
+            set_coordinator(self.catalog_work_coordinator)
+        set_status_callback = getattr(
+            library_runtime, "set_job_status_callback", None
+        )
+        if callable(set_status_callback):
+            set_status_callback(self._on_library_job_status)
         self.condition = threading.Condition()
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
@@ -4148,6 +4237,80 @@ class JobScheduler:
         self.worker_threads: dict[str, threading.Thread] = {}
         self.active_lock = threading.RLock()
         self.analysis_maintenance: set[str] = set()
+
+    def _on_library_job_status(self, job: dict | None) -> None:
+        """Mirror full library-job state onto its scheduler definition."""
+        if not job or job.get("kind") not in {"scan", "collection_rebuild"}:
+            return
+        library_id = str(job.get("libraryId") or "")
+        if not library_id:
+            return
+        rows = self.store.db.execute(
+            "SELECT id,config FROM job_definitions WHERE kind='library_scan'"
+        )
+        definition_ids = []
+        for definition_id, config_text in rows:
+            try:
+                config = json.loads(config_text or "{}")
+            except (TypeError, json.JSONDecodeError):
+                config = {}
+            if str((config or {}).get("libraryId") or "") == library_id:
+                definition_ids.append(definition_id)
+        if not definition_ids:
+            return
+        columns = {
+            row[1]
+            for row in self.store.db.execute("PRAGMA table_info(job_definitions)")
+        }
+        values = {
+            "last_state": job.get("state"),
+            "last_message": job.get("message") or job.get("error"),
+            "updated_at": now(),
+        }
+        if "last_run_id" in columns:
+            values["last_run_id"] = job.get("id")
+        if "last_run_at" in columns:
+            values["last_run_at"] = job.get("startedAt") or job.get("createdAt")
+        fields = [key for key in values if key in columns]
+        if not fields:
+            return
+        for definition_id in definition_ids:
+            self.store.db.execute(
+                "UPDATE job_definitions SET "
+                + ",".join(f"{key}=?" for key in fields)
+                + " WHERE id=?",
+                [values[key] for key in fields] + [definition_id],
+            )
+
+    def _sync_library_definitions(self) -> None:
+        """Repair library definition pointers after startup/recovery."""
+        runtime_store = getattr(self.library_runtime, "store", None)
+        if runtime_store is None:
+            return
+        try:
+            definitions = self.store.db.execute(
+                "SELECT id,config FROM job_definitions WHERE kind='library_scan'"
+            )
+        except Exception:
+            return
+        for _definition_id, config_text in definitions:
+            try:
+                library_id = str(
+                    (json.loads(config_text or "{}") or {}).get("libraryId") or ""
+                )
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not library_id:
+                continue
+            rows = runtime_store.db.execute(
+                "SELECT id FROM library_jobs WHERE library_id=? "
+                "AND kind IN ('scan','collection_rebuild') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (library_id,),
+            )
+            if rows:
+                job = runtime_store.job(rows[0][0])
+                self._on_library_job_status(job)
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -4172,6 +4335,7 @@ class JobScheduler:
                 "DELETE FROM job_definitions WHERE id=?", (definition_id,)
             )
         self.store.reconcile_library_definitions(self.library_runtime.store.list())
+        self._sync_library_definitions()
         try:
             has_bazarr_mappings = bool(
                 self.store.db.execute("SELECT 1 FROM bazarr_episode_mappings LIMIT 1")
@@ -4373,10 +4537,11 @@ class JobScheduler:
             library_id = (definition.get("config") or {}).get("libraryId")
             job = self.library_runtime.enqueue(library_id, "scan")
             self.store.db.execute(
-                "UPDATE job_definitions SET last_state=?,last_run_at=?,last_message=?,updated_at=? WHERE id=?",
+                "UPDATE job_definitions SET last_state=?,last_run_at=?,last_run_id=?,last_message=?,updated_at=? WHERE id=?",
                 (
                     job["state"],
                     now(),
+                    job.get("id"),
                     job.get("message") or "Library scan queued",
                     now(),
                     definition_id,
@@ -4504,7 +4669,8 @@ class JobScheduler:
             by_definition.setdefault(definition_id, []).append((run_id, state))
         timestamp = now()
         with self.store.db.transaction() as cursor:
-            for runs in by_definition.values():
+            definition_sync_ids: list[tuple[str, str]] = []
+            for definition_id, runs in by_definition.items():
                 resumable = [run for run in runs if run[1] != "terminating"]
                 keep_id = resumable[0][0] if resumable else None
                 for run_id, state in runs:
@@ -4518,6 +4684,14 @@ class JobScheduler:
                             "UPDATE job_runs SET state='terminated',message='Superseded by the active task run',error=NULL,finished_at=? WHERE id=?",
                             (timestamp, run_id),
                         )
+                definition_sync_ids.append(
+                    (definition_id, keep_id or runs[0][0])
+                )
+        # Recovery changes durable run state before worker dispatch. Sync the
+        # definition pointer now so a restarted task cannot look idle or point
+        # at a run that was just superseded.
+        for _definition_id, run_id in definition_sync_ids:
+            self.store._sync_definition_from_run(run_id)
 
     def _schedule_due(self):
         # Versioned repairs are one-time work items rather than recurring
@@ -4551,10 +4725,16 @@ class JobScheduler:
                 continue
             if definition["kind"] == "library_scan":
                 library_id = (definition.get("config") or {}).get("libraryId")
-                if library_id:
+                job = (
                     self.library_runtime.enqueue(library_id, "scan")
+                    if library_id
+                    else None
+                )
                 self.store.mark_trigger_scheduled(
-                    definition["id"], trigger, None, "Library scan queued"
+                    definition["id"],
+                    trigger,
+                    job.get("id") if job else None,
+                    "Library scan queued",
                 )
             else:
                 trigger_options = trigger.get("options") or {}
@@ -4586,6 +4766,14 @@ class JobScheduler:
                 if run["kind"] in METADATA_JOB_KINDS and metadata_work_active:
                     continue
                 if (
+                    run["kind"] in CATALOG_EXCLUSIVE_KINDS
+                    and self._library_work_active()
+                ):
+                    # Inventory admission owns the mutable catalog snapshot;
+                    # the coordinator below closes the remaining check/start
+                    # race when both workers become runnable together.
+                    continue
+                if (
                     run["kind"] in ANALYSIS_KINDS or run["kind"] == "bazarr_sync"
                 ) and self._library_work_active():
                     continue
@@ -4611,6 +4799,20 @@ class JobScheduler:
                         self.active_definitions.discard(run["definitionId"])
                         self.cancel_events.pop(run["id"], None)
                         continue
+                    try:
+                        # Claiming is intentionally a small atomic SQL update,
+                        # but it still changes the definition's observable
+                        # state. Keep the dashboard pointer in sync before
+                        # the worker starts, including analysis jobs whose
+                        # implementation does not emit an initial progress
+                        # update.
+                        self.store._sync_definition_from_run(run["id"])
+                    except Exception:
+                        logger.warning(
+                            "could not synchronize claimed scheduler run=%s",
+                            run["id"],
+                            exc_info=True,
+                        )
                     if run["kind"] in METADATA_JOB_KINDS:
                         metadata_work_active = True
                 thread = threading.Thread(
@@ -4626,6 +4828,7 @@ class JobScheduler:
                 self.condition.wait(timeout=1)
 
     def _execute(self, run_id: str):
+        catalog_work_acquired = False
         try:
             columns = {
                 row[1] for row in self.store.db.execute("PRAGMA table_info(job_runs)")
@@ -4652,6 +4855,10 @@ class JobScheduler:
                 run_options = json.loads(options_text or "{}")
             except (TypeError, json.JSONDecodeError):
                 run_options = {}
+            coordinator = getattr(self, "catalog_work_coordinator", None)
+            if kind in CATALOG_EXCLUSIVE_KINDS and coordinator is not None:
+                coordinator.acquire_metadata()
+                catalog_work_acquired = True
             self.store.begin_progress(run_id, kind)
             if kind == "metadata_missing":
                 MetadataMissingJob(self.store).run(
@@ -4770,6 +4977,10 @@ class JobScheduler:
                 finished_at=now(),
             )
         finally:
+            if catalog_work_acquired:
+                coordinator = getattr(self, "catalog_work_coordinator", None)
+                if coordinator is not None:
+                    coordinator.release_metadata()
             self.store.end_progress(run_id)
             with self.active_lock:
                 self.active.discard(run_id)

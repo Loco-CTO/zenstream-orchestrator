@@ -8,11 +8,14 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from app.logging_config import get_logger
+
 WEBP_QUALITY = 85
 WEBP_COMPRESSION_LEVEL = 5
 _SVG_MAX_DIMENSION = 4096
 _SVG_MAX_PIXELS = 16 * 1024 * 1024
 _BASE83 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz#$%*+,-.:;=?@[]^_{|}~"
+logger = get_logger("images")
 
 
 def _base83(value: int, length: int) -> str:
@@ -410,6 +413,19 @@ class LocalArtworkCache:
             }
         except Exception:
             return
+        skipped = 0
         for candidate in self.root.glob("*.webp"):
             if candidate.stem.lower() not in hashes:
-                candidate.unlink(missing_ok=True)
+                try:
+                    candidate.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    # Windows may briefly keep a cache file open while a
+                    # reader or encoder is finishing. Cache pruning is
+                    # best-effort and must not fail an otherwise valid scan.
+                    skipped += 1
+        if skipped:
+            logger.warning(
+                "local artwork prune skipped locked files count=%s", skipped
+            )

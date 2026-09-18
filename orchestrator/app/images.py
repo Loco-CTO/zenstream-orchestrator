@@ -426,6 +426,4 @@ class LocalArtworkCache:
                     # best-effort and must not fail an otherwise valid scan.
                     skipped += 1
         if skipped:
-            logger.warning(
-                "local artwork prune skipped locked files count=%s", skipped
-            )
+            logger.warning("local artwork prune skipped locked files count=%s", skipped)

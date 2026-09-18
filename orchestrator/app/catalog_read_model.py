@@ -1541,8 +1541,7 @@ class CatalogReadModel:
                 for row in entities.values()
                 if row[3] == "release"
                 and (
-                    allow_music_page_refresh
-                    or row[1] not in active_inventory_libraries
+                    allow_music_page_refresh or row[1] not in active_inventory_libraries
                 )
             ]
             if release_ids:

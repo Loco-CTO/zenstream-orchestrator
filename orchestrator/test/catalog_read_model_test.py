@@ -162,9 +162,7 @@ class CatalogReadModelTest(unittest.TestCase):
         model = CatalogReadModel(self.db)
         model.rebuild(["en"])
         self.assertEqual(
-            self.db.read_execute(
-                "SELECT release_id FROM catalog_music_album_page"
-            ),
+            self.db.read_execute("SELECT release_id FROM catalog_music_album_page"),
             [("release",)],
         )
 
@@ -180,9 +178,7 @@ class CatalogReadModelTest(unittest.TestCase):
         # Summary/projection rows can move through intermediate states, but the
         # complete album page remains at the last committed inventory snapshot.
         self.assertEqual(
-            self.db.read_execute(
-                "SELECT release_id FROM catalog_music_album_page"
-            ),
+            self.db.read_execute("SELECT release_id FROM catalog_music_album_page"),
             [("release",)],
         )
 
@@ -191,9 +187,7 @@ class CatalogReadModelTest(unittest.TestCase):
             [], affected_library_ids=["music"], allow_music_page_refresh=True
         )
         self.assertEqual(
-            self.db.read_execute(
-                "SELECT release_id FROM catalog_music_album_page"
-            ),
+            self.db.read_execute("SELECT release_id FROM catalog_music_album_page"),
             [],
         )
 

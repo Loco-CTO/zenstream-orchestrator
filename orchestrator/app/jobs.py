@@ -13,8 +13,8 @@ from app.config import Config
 from app.foreground import active_requests
 from app.intro_outro import IntroOutroDetector
 from app.library import (
-    CatalogWorkCoordinator,
     PRIMARY_METADATA_IDENTITIES,
+    CatalogWorkCoordinator,
     JobTerminated,
     LibraryScanner,
     LibraryStore,
@@ -1037,8 +1037,7 @@ class JobStore:
         executor = executor or self.db
         try:
             return {
-                row[1]
-                for row in executor.execute("PRAGMA table_info(job_definitions)")
+                row[1] for row in executor.execute("PRAGMA table_info(job_definitions)")
             }
         except Exception:
             return set()
@@ -4218,14 +4217,10 @@ class JobScheduler:
         self.store = JobStore()
         self.library_runtime = library_runtime
         self.catalog_work_coordinator = CatalogWorkCoordinator()
-        set_coordinator = getattr(
-            library_runtime, "set_catalog_work_coordinator", None
-        )
+        set_coordinator = getattr(library_runtime, "set_catalog_work_coordinator", None)
         if callable(set_coordinator):
             set_coordinator(self.catalog_work_coordinator)
-        set_status_callback = getattr(
-            library_runtime, "set_job_status_callback", None
-        )
+        set_status_callback = getattr(library_runtime, "set_job_status_callback", None)
         if callable(set_status_callback):
             set_status_callback(self._on_library_job_status)
         self.condition = threading.Condition()
@@ -4684,9 +4679,7 @@ class JobScheduler:
                             "UPDATE job_runs SET state='terminated',message='Superseded by the active task run',error=NULL,finished_at=? WHERE id=?",
                             (timestamp, run_id),
                         )
-                definition_sync_ids.append(
-                    (definition_id, keep_id or runs[0][0])
-                )
+                definition_sync_ids.append((definition_id, keep_id or runs[0][0]))
         # Recovery changes durable run state before worker dispatch. Sync the
         # definition pointer now so a restarted task cannot look idle or point
         # at a run that was just superseded.

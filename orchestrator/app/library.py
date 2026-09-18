@@ -2428,9 +2428,15 @@ class LibraryScanner:
                 if root_id not in self._scan_published_music_roots
             ]
         for offset in range(0, len(roots), 300):
-            model.refresh_roots(roots[offset : offset + 300])
+            model.refresh_roots(
+                roots[offset : offset + 300], allow_music_page_refresh=True
+            )
         if len(roots) != 1 or self._scan_delta.get("removed"):
-            model.refresh_roots([], affected_library_ids=[library_id])
+            model.refresh_roots(
+                [],
+                affected_library_ids=[library_id],
+                allow_music_page_refresh=True,
+            )
 
     @staticmethod
     def _refresh_calendar_links(library_id: str, job_id: str) -> None:
@@ -2461,7 +2467,9 @@ class LibraryScanner:
                 from app.catalog_read_model import CatalogReadModel
 
                 CatalogReadModel(self.db).refresh_music_publication(
-                    music_release_id, root_id
+                    music_release_id,
+                    root_id,
+                    allow_music_page_refresh=False,
                 )
                 return True
             except Exception:
@@ -11297,6 +11305,51 @@ class _LibraryChangeHandler(FileSystemEventHandler):
         )
 
 
+class CatalogWorkCoordinator:
+    """Coordinate catalog-mutating metadata work with inventory workers.
+
+    Multiple library inventories may run in parallel, but metadata walks that
+    rewrite catalog rows need an exclusive window. A waiter count prevents a
+    steady stream of new scans from starving that exclusive work.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._active_inventory = 0
+        self._metadata_active = False
+        self._metadata_waiters = 0
+
+    def can_start_inventory(self) -> bool:
+        with self._condition:
+            return not self._metadata_active and self._metadata_waiters == 0
+
+    def acquire_inventory(self) -> None:
+        with self._condition:
+            while self._metadata_active or self._metadata_waiters:
+                self._condition.wait()
+            self._active_inventory += 1
+
+    def release_inventory(self) -> None:
+        with self._condition:
+            self._active_inventory = max(0, self._active_inventory - 1)
+            self._condition.notify_all()
+
+    def acquire_metadata(self) -> None:
+        with self._condition:
+            self._metadata_waiters += 1
+            try:
+                while self._metadata_active or self._active_inventory:
+                    self._condition.wait()
+                self._metadata_active = True
+            finally:
+                self._metadata_waiters = max(0, self._metadata_waiters - 1)
+
+    def release_metadata(self) -> None:
+        with self._condition:
+            self._metadata_active = False
+            self._condition.notify_all()
+
+
 class LibraryRuntime:
     """Durable scan worker with daily repair scheduling and optional filesystem watching."""
 
@@ -11334,6 +11387,33 @@ class LibraryRuntime:
         self._reconcile_table_available: bool | None = None
         self._reconcile_last_flush = 0.0
         self._notification_suppressed_libraries: set[str] = set()
+        self._catalog_work_coordinator: CatalogWorkCoordinator | None = None
+        self._job_status_callback: Callable[[dict | None], None] | None = None
+
+    def set_catalog_work_coordinator(
+        self, coordinator: CatalogWorkCoordinator | None
+    ) -> None:
+        self._catalog_work_coordinator = coordinator
+
+    def set_job_status_callback(
+        self, callback: Callable[[dict | None], None] | None
+    ) -> None:
+        self._job_status_callback = callback
+
+    def _notify_job_status(self, job: dict | None) -> None:
+        callback = getattr(self, "_job_status_callback", None)
+        if not callable(callback):
+            return
+        try:
+            callback(job)
+        except Exception:
+            # Scheduler status is observational; a stale dashboard projection
+            # must never break a library worker or its durable history.
+            logger.warning(
+                "could not synchronize scheduler status for library job=%s",
+                job.get("id") if job else None,
+                exc_info=True,
+            )
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -11468,6 +11548,7 @@ class LibraryRuntime:
                 self._job_force_metadata = {}
             self._job_force_metadata[job_id] = True
         job = self.store.job(job_id)
+        self._notify_job_status(job)
         with self.condition:
             self.condition.notify_all()
         return job  # type: ignore[return-value]
@@ -12203,6 +12284,11 @@ class LibraryRuntime:
                     self.condition.wait(timeout=1)
                 continue
             job_id, library_id, kind = row
+            coordinator = getattr(self, "_catalog_work_coordinator", None)
+            if coordinator is not None and not coordinator.can_start_inventory():
+                with self.condition:
+                    self.condition.wait(timeout=0.25)
+                continue
             with self._active_lock:
                 if job_id in self._active_jobs:
                     with self.condition:
@@ -12220,6 +12306,7 @@ class LibraryRuntime:
                     self._active_jobs.discard(job_id)
                     self._cancel_events.pop(job_id, None)
                     continue
+            self._notify_job_status(self.store.job(job_id))
             worker = threading.Thread(
                 target=self._execute_job,
                 args=(job_id, library_id, kind),
@@ -12233,6 +12320,7 @@ class LibraryRuntime:
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
         locks: list[threading.Lock] = []
         inventory_lock: threading.Lock | None = None
+        catalog_work_acquired = False
         full_music_reconcile = False
         force_metadata = getattr(self, "_job_force_metadata", {}).pop(job_id, False)
         try:
@@ -12243,6 +12331,10 @@ class LibraryRuntime:
                 # complete operation; durable watcher revisions remain queued
                 # while a worker waits here.
                 inventory_lock.acquire()
+                coordinator = getattr(self, "_catalog_work_coordinator", None)
+                if coordinator is not None:
+                    coordinator.acquire_inventory()
+                    catalog_work_acquired = True
                 targets = self._job_targets.pop(job_id, None)
                 target_revisions: dict[str, int] = {}
                 library = self.store.get(library_id) or {}
@@ -12327,6 +12419,10 @@ class LibraryRuntime:
         finally:
             for lock in reversed(locks):
                 lock.release()
+            if catalog_work_acquired:
+                coordinator = getattr(self, "_catalog_work_coordinator", None)
+                if coordinator is not None:
+                    coordinator.release_inventory()
             if inventory_lock is not None:
                 inventory_lock.release()
             revisions = getattr(self, "_job_target_revisions", {}).pop(job_id, {})
@@ -12349,6 +12445,7 @@ class LibraryRuntime:
                 self._cancel_events.pop(job_id, None)
                 getattr(self, "_worker_threads", {}).pop(job_id, None)
             self._aggregate_scan_state(library_id)
+            self._notify_job_status(self.store.job(job_id))
             with self.condition:
                 self.condition.notify_all()
 

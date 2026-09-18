@@ -139,6 +139,58 @@ class CatalogReadModelTest(unittest.TestCase):
         )
         self.assertTrue(model._music_album_pages_ready())
 
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_music_album_page_keeps_last_complete_view_during_inventory(
+        self, _languages
+    ):
+        self.db.execute(
+            "INSERT INTO libraries VALUES('music','Music','music','ready',NULL,'2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('artist','music',NULL,'artist','Artist',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('release','music','artist','release','Album',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('track','music','release','track','Album/01.mp3',NULL,NULL,NULL,1,1,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES('audio','track','Album/01.mp3','media',10)"
+        )
+
+        model = CatalogReadModel(self.db)
+        model.rebuild(["en"])
+        self.assertEqual(
+            self.db.read_execute("SELECT release_id FROM catalog_music_album_page"),
+            [("release",)],
+        )
+
+        self.db.execute(
+            "CREATE TABLE library_jobs(id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,state TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO library_jobs VALUES('scan','music','scan','running')"
+        )
+        self.db.execute("DELETE FROM media_files")
+        model.refresh_roots(["artist"])
+
+        # Summary/projection rows can move through intermediate states, but the
+        # complete album page remains at the last committed inventory snapshot.
+        self.assertEqual(
+            self.db.read_execute("SELECT release_id FROM catalog_music_album_page"),
+            [("release",)],
+        )
+
+        self.db.execute("UPDATE library_jobs SET state='completed'")
+        model.refresh_roots(
+            [], affected_library_ids=["music"], allow_music_page_refresh=True
+        )
+        self.assertEqual(
+            self.db.read_execute("SELECT release_id FROM catalog_music_album_page"),
+            [],
+        )
+
     def test_music_album_page_status_ids_filter_requested_music_libraries(self):
         self.db.execute(
             "INSERT INTO libraries VALUES('music','Music','music','ready',NULL,'2026')"
@@ -421,6 +473,46 @@ class CatalogReadModelTest(unittest.TestCase):
                 "SELECT COUNT(*) FROM catalog_entity_summary WHERE entity_id='unpublished'"
             )[0][0],
             0,
+        )
+
+    @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])
+    def test_bootstrap_defers_full_rebuild_while_inventory_is_active(self, _languages):
+        model = CatalogReadModel(self.db)
+        self.db.execute(
+            "INSERT INTO libraries VALUES('music','Music','music','ready',NULL,'2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('artist','music',NULL,'artist','Artist',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('release','music','artist','release','Album',NULL,NULL,NULL,NULL,NULL,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('track','music','release','track','Album/01.mp3',NULL,NULL,NULL,1,1,'2026','2026')"
+        )
+        self.db.execute(
+            "INSERT INTO media_files VALUES('audio','track','Album/01.mp3','media',10)"
+        )
+        model.rebuild(["en"])
+        self.db.execute(
+            "CREATE TABLE library_jobs(id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,state TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO library_jobs VALUES('job','library','scan','running')"
+        )
+        self.db.execute(
+            "UPDATE catalog_read_model_status SET state='building' WHERE id=1"
+        )
+
+        with patch.object(
+            model, "rebuild", side_effect=AssertionError("unexpected full rebuild")
+        ):
+            result = model.bootstrap(["en"])
+
+        self.assertEqual(result, 8)
+        self.assertEqual(
+            self.db.read_execute("SELECT COUNT(*) FROM catalog_music_album_page")[0][0],
+            1,
         )
 
     @patch("app.catalog_read_model.MetadataLanguageSettings.get", return_value=["en"])

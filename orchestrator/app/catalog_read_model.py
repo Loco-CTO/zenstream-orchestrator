@@ -1087,12 +1087,28 @@ class CatalogReadModel:
             roots.append(current)
         return list(dict.fromkeys(roots))
 
+    def _active_inventory_libraries(self, library_ids: Iterable[str]) -> set[str]:
+        """Return libraries whose inventory is not yet a committed snapshot."""
+        requested = {str(value) for value in library_ids if value}
+        if not requested or not self._has_table("library_jobs"):
+            return set()
+        placeholders = ",".join("?" for _ in requested)
+        rows = self.db.read_execute(
+            "SELECT DISTINCT library_id FROM library_jobs "
+            "WHERE library_id IN ("
+            + placeholders
+            + ") AND kind IN ('scan','reconcile','collection_rebuild') "
+            "AND state IN ('queued','running','terminating')",
+            sorted(requested),
+        )
+        return {str(row[0]) for row in rows}
+
     def _active_inventory_jobs(self) -> bool:
         if not self._has_table("library_jobs"):
             return False
         return bool(
             self.db.read_execute(
-                "SELECT 1 FROM library_jobs WHERE kind IN ('scan','reconcile') "
+                "SELECT 1 FROM library_jobs WHERE kind IN ('scan','reconcile','collection_rebuild') "
                 "AND state IN ('queued','running','terminating') LIMIT 1"
             )
         )
@@ -1192,7 +1208,23 @@ class CatalogReadModel:
         missing_ids = list(
             dict.fromkeys([*missing_summary_ids, *missing_projection_ids])
         )
-        if status and status[0] == "ready" and self._active_inventory_jobs():
+        active_inventory = self._active_inventory_jobs()
+        if active_inventory and (not status or status[0] != "ready"):
+            # A full rebuild deletes and recreates every read-model table,
+            # including the complete-view music page. Never overlap that
+            # destructive replacement with inventory admission: the scanner
+            # will publish a terminal snapshot, after which bootstrap can
+            # repair any remaining coverage.
+            logger.info(
+                "catalog read model bootstrap deferred full rebuild active_inventory=true entities=%s summaries=%s projections=%s expected_projections=%s missing_entities=%s",
+                entity_count,
+                summary_count,
+                projection_count,
+                expected_projections,
+                len(missing_ids),
+            )
+            return summary_count
+        if status and status[0] == "ready" and active_inventory:
             logger.info(
                 "catalog read model bootstrap deferred coverage repair active_inventory=true entities=%s summaries=%s projections=%s expected_projections=%s missing_entities=%s",
                 entity_count,
@@ -1277,8 +1309,15 @@ class CatalogReadModel:
         root_ids: Iterable[str],
         *,
         affected_library_ids: Iterable[str] = (),
+        allow_music_page_refresh: bool = False,
     ) -> int:
-        """Refresh committed scanner subtrees without touching unrelated roots."""
+        """Refresh committed scanner subtrees without touching unrelated roots.
+
+        Inventory workers publish summaries and projections incrementally, but
+        the music album page is a complete-view cache. Keep that cache at its
+        last committed snapshot while any inventory job is active; the owning
+        scanner explicitly refreshes it once its cleanup is complete.
+        """
         if not self.available():
             return 0
         roots = list(dict.fromkeys(root_ids))
@@ -1484,17 +1523,38 @@ class CatalogReadModel:
                     _latest_root_by_library[library_id] = library_roots[0]
                 else:
                     _latest_root_by_library.pop(library_id, None)
-        if explicit_libraries:
+        active_inventory_libraries = (
+            set()
+            if allow_music_page_refresh
+            else self._active_inventory_libraries(
+                explicit_libraries | {row[1] for row in entities.values()}
+            )
+        )
+        page_libraries = explicit_libraries - active_inventory_libraries
+        if explicit_libraries and page_libraries:
             # An explicit library refresh also covers removed releases, so the
             # page cache must be rebuilt from the current catalog set.
-            self.rebuild_music_album_pages(explicit_libraries)
+            self.rebuild_music_album_pages(page_libraries)
         elif entities:
-            self.refresh_music_album_pages(
-                row[0] for row in entities.values() if row[3] == "release"
-            )
+            release_ids = [
+                row[0]
+                for row in entities.values()
+                if row[3] == "release"
+                and (
+                    allow_music_page_refresh or row[1] not in active_inventory_libraries
+                )
+            ]
+            if release_ids:
+                self.refresh_music_album_pages(release_ids)
         return len(summaries)
 
-    def refresh_music_publication(self, release_id: str, artist_id: str) -> int:
+    def refresh_music_publication(
+        self,
+        release_id: str,
+        artist_id: str,
+        *,
+        allow_music_page_refresh: bool = True,
+    ) -> int:
         """Refresh one music release and its artist without walking the artist tree."""
         if not self.available():
             return 0
@@ -1753,7 +1813,8 @@ class CatalogReadModel:
                     "error=NULL,updated_at=excluded.updated_at",
                     (library_id, library_id, now),
                 )
-        self.refresh_music_album_pages([release_id])
+        if allow_music_page_refresh:
+            self.refresh_music_album_pages([release_id])
         with _latest_root_lock:
             _latest_root_by_library[artist[1]] = artist_id
         return len(summaries)

@@ -19,6 +19,7 @@ from app.jobs import (
     _metadata_upgrade_digest,
     _repair_missing_tv_child_identities,
 )
+from app.library import CatalogWorkCoordinator
 from app.progress import PROGRESS_TOTAL, WholeJobProgress
 from app.providers import ProviderError, ProviderNotFoundError
 
@@ -1922,6 +1923,148 @@ class JobMappingTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_new_run_and_progress_keep_definition_run_pointer_current(self):
+        db, store = self._scheduler_store()
+        try:
+            db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,kind,config,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    "definition-1",
+                    "metadata_refresh",
+                    "Refresh",
+                    "metadata_refresh",
+                    "{}",
+                    "created",
+                    "updated",
+                ),
+            )
+            definition = store.definition("definition-1")
+            run, created = store.create_or_get_active_run(definition)
+
+            self.assertTrue(created)
+            self.assertEqual(
+                db.execute(
+                    "SELECT last_run_id,last_state FROM job_definitions WHERE id=?",
+                    ("definition-1",),
+                ),
+                [(run["id"], "queued")],
+            )
+
+            store.update_run(
+                run["id"],
+                state="running",
+                started_at="started",
+                message="Working",
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT last_run_id,last_run_at,last_state,last_message FROM job_definitions WHERE id=?",
+                    ("definition-1",),
+                ),
+                [(run["id"], "started", "running", "Working")],
+            )
+        finally:
+            db.close()
+
+    def test_dispatch_syncs_definition_when_claiming_run(self):
+        db, store = self._scheduler_store()
+        try:
+            db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,kind,config,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    "definition-1",
+                    "trickplay_extract",
+                    "Extract trickplay",
+                    "trickplay_extract",
+                    "{}",
+                    "created",
+                    "updated",
+                ),
+            )
+            db.execute(
+                "INSERT INTO job_runs(id,definition_id,kind,state,created_at) VALUES(?,?,?,?,?)",
+                (
+                    "run-1",
+                    "definition-1",
+                    "trickplay_extract",
+                    "queued",
+                    "created",
+                ),
+            )
+            scheduler = JobScheduler.__new__(JobScheduler)
+            scheduler.store = store
+            scheduler.library_runtime = MagicMock()
+            scheduler._schedule_due = lambda: None
+            scheduler._library_work_active = lambda: False
+            scheduler._metadata_work_active = lambda: False
+            scheduler._execute = lambda _run_id: scheduler.stop_event.set()
+            scheduler.stop_event = threading.Event()
+            scheduler.condition = threading.Condition()
+            scheduler.active = set()
+            scheduler.active_definitions = set()
+            scheduler.cancel_events = {}
+            scheduler.worker_threads = {}
+            scheduler.active_lock = threading.RLock()
+            scheduler.analysis_maintenance = set()
+
+            scheduler._dispatch()
+
+            self.assertEqual(
+                db.execute(
+                    "SELECT last_run_id,last_state,last_message FROM job_definitions WHERE id=?",
+                    ("definition-1",),
+                ),
+                [("run-1", "running", "Starting task")],
+            )
+        finally:
+            db.close()
+
+    def test_library_job_status_updates_scheduler_definition(self):
+        db, store = self._scheduler_store()
+        try:
+            db.execute(
+                "INSERT INTO job_definitions(id,job_key,name,kind,config,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    "definition-1",
+                    "library_scan:library-1",
+                    "Scan",
+                    "library_scan",
+                    '{"libraryId":"library-1"}',
+                    "created",
+                    "updated",
+                ),
+            )
+            scheduler = JobScheduler.__new__(JobScheduler)
+            scheduler.store = store
+            scheduler._on_library_job_status(
+                {
+                    "id": "library-job-1",
+                    "libraryId": "library-1",
+                    "kind": "scan",
+                    "state": "completed_with_warnings",
+                    "message": "Indexed 10 entries",
+                    "createdAt": "created",
+                    "startedAt": "started",
+                }
+            )
+
+            self.assertEqual(
+                db.execute(
+                    "SELECT last_run_id,last_run_at,last_state,last_message FROM job_definitions WHERE id=?",
+                    ("definition-1",),
+                ),
+                [
+                    (
+                        "library-job-1",
+                        "started",
+                        "completed_with_warnings",
+                        "Indexed 10 entries",
+                    )
+                ],
+            )
+        finally:
+            db.close()
+
 
 class JobLockingTest(unittest.TestCase):
     def setUp(self):
@@ -1967,6 +2110,29 @@ class JobLockingTest(unittest.TestCase):
         self.assertTrue(scheduler._metadata_work_active())
         self.db.execute("UPDATE job_runs SET state='completed'")
         self.assertFalse(scheduler._metadata_work_active())
+
+
+class CatalogWorkCoordinatorTest(unittest.TestCase):
+    def test_metadata_waits_for_inventory_and_blocks_new_inventory(self):
+        coordinator = CatalogWorkCoordinator()
+        coordinator.acquire_inventory()
+        metadata_acquired = threading.Event()
+
+        def acquire_metadata():
+            coordinator.acquire_metadata()
+            metadata_acquired.set()
+
+        worker = threading.Thread(target=acquire_metadata)
+        worker.start()
+        self.assertFalse(metadata_acquired.wait(0.05))
+        self.assertFalse(coordinator.can_start_inventory())
+
+        coordinator.release_inventory()
+        self.assertTrue(metadata_acquired.wait(1))
+        self.assertFalse(coordinator.can_start_inventory())
+        coordinator.release_metadata()
+        worker.join(timeout=1)
+        self.assertTrue(coordinator.can_start_inventory())
 
 
 class BazarrTaskQueueTest(unittest.TestCase):

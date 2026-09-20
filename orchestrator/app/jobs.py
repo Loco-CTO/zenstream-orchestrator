@@ -40,7 +40,8 @@ from app.progress import (
 )
 from app.providers import ProviderError, ProviderNotFoundError
 from app.trickplay import TrickplayExtractor
-from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 logger = get_logger("jobs")
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
@@ -4774,9 +4775,9 @@ class JobScheduler:
                 retry_delay = JOB_DISPATCH_BACKOFF_INITIAL
             except (SQLAlchemyTimeoutError, SQLAlchemyError) as error:
                 with self.active_lock:
-                    self._dispatch_consecutive_failures = getattr(
-                        self, "_dispatch_consecutive_failures", 0
-                    ) + 1
+                    self._dispatch_consecutive_failures = (
+                        getattr(self, "_dispatch_consecutive_failures", 0) + 1
+                    )
                     failures = self._dispatch_consecutive_failures
                     self._dispatch_last_error = type(error).__name__
                 logger.warning(
@@ -4791,9 +4792,9 @@ class JobScheduler:
                 retry_delay = min(JOB_DISPATCH_BACKOFF_MAX, retry_delay * 2)
             except Exception as error:
                 with self.active_lock:
-                    self._dispatch_consecutive_failures = getattr(
-                        self, "_dispatch_consecutive_failures", 0
-                    ) + 1
+                    self._dispatch_consecutive_failures = (
+                        getattr(self, "_dispatch_consecutive_failures", 0) + 1
+                    )
                     failures = self._dispatch_consecutive_failures
                     self._dispatch_last_error = type(error).__name__
                 logger.warning(
@@ -4816,10 +4817,7 @@ class JobScheduler:
                 continue
             if run["kind"] in METADATA_JOB_KINDS and metadata_work_active:
                 continue
-            if (
-                run["kind"] in CATALOG_EXCLUSIVE_KINDS
-                and self._library_work_active()
-            ):
+            if run["kind"] in CATALOG_EXCLUSIVE_KINDS and self._library_work_active():
                 # Inventory admission owns the mutable catalog snapshot;
                 # the coordinator below closes the remaining check/start
                 # race when both workers become runnable together.

@@ -54,8 +54,9 @@ class LibraryRuntimeDispatcherTest(unittest.TestCase):
             runtime.stop_event.set()
 
         runtime._run_iteration = run_iteration
-        with patch("app.library.LIBRARY_DISPATCH_BACKOFF_INITIAL", 0.01), patch(
-            "app.library.LIBRARY_DISPATCH_BACKOFF_MAX", 0.02
+        with (
+            patch("app.library.LIBRARY_DISPATCH_BACKOFF_INITIAL", 0.01),
+            patch("app.library.LIBRARY_DISPATCH_BACKOFF_MAX", 0.02),
         ):
             worker = threading.Thread(target=runtime._run)
             runtime.thread = worker

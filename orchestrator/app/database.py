@@ -10,7 +10,8 @@ from app.database_session import (
     create_sqlite_persistence,
 )
 from app.logging_config import get_logger
-from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 logger = get_logger("database")
 

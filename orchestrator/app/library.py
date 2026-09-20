@@ -39,7 +39,8 @@ from app.logging_config import get_logger
 from app.metadata_domain import clean_music_title, music_filename_parts
 from app.progress import WholeJobProgress
 from app.worker_config import configured_worker_limit
-from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 try:
     from app.filesystem_watcher import create_library_observer
@@ -11464,9 +11465,7 @@ class LibraryRuntime:
             "thread_alive": bool(thread and thread.is_alive()),
             "last_loop_success": getattr(self, "_last_loop_success", None),
             "last_loop_error": getattr(self, "_last_loop_error", None),
-            "consecutive_failures": getattr(
-                self, "_consecutive_loop_failures", 0
-            ),
+            "consecutive_failures": getattr(self, "_consecutive_loop_failures", 0),
             "last_backoff_seconds": getattr(
                 self, "_last_dispatch_backoff_seconds", 0.0
             ),
@@ -12404,16 +12403,12 @@ class LibraryRuntime:
                 self._record_dispatch_failure(error, retry_delay)
                 if self.stop_event.wait(retry_delay):
                     break
-                retry_delay = min(
-                    LIBRARY_DISPATCH_BACKOFF_MAX, retry_delay * 2
-                )
+                retry_delay = min(LIBRARY_DISPATCH_BACKOFF_MAX, retry_delay * 2)
             except Exception as error:
                 self._record_dispatch_failure(error, retry_delay)
                 if self.stop_event.wait(retry_delay):
                     break
-                retry_delay = min(
-                    LIBRARY_DISPATCH_BACKOFF_MAX, retry_delay * 2
-                )
+                retry_delay = min(LIBRARY_DISPATCH_BACKOFF_MAX, retry_delay * 2)
 
     def _run_iteration(self) -> None:
         # Keep the durable first-seen target cheap, then batch the noisy

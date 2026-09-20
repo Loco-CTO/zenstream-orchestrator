@@ -78,7 +78,9 @@ class DatabaseHandlerTest(unittest.TestCase):
                 with database.read_session(label="catalog:items"):
                     inside = database.metrics()
                     self.assertEqual(inside["reader_active"], 1)
-                    self.assertEqual(inside["reader_holders"][0]["label"], "catalog:items")
+                    self.assertEqual(
+                        inside["reader_holders"][0]["label"], "catalog:items"
+                    )
                     with database.read_session(label="ignored:nested"):
                         self.assertEqual(database.metrics()["reader_active"], 1)
                 after = database.metrics()
@@ -95,15 +97,19 @@ class DatabaseHandlerTest(unittest.TestCase):
             try:
                 database.execute("CREATE TABLE values_table(value INTEGER)")
                 with patch("app.database.READER_LONG_HOLD_SECONDS", 0.01):
-                    with database.read_session(label="library_cleanup:referenced_paths"):
+                    with database.read_session(
+                        label="library_cleanup:referenced_paths"
+                    ):
                         time.sleep(0.02)
-                with patch.object(
-                    database.persistence,
-                    "read_sessions",
-                    side_effect=SQLAlchemyTimeoutError("pool is busy"),
+                with (
+                    patch.object(
+                        database.persistence,
+                        "read_sessions",
+                        side_effect=SQLAlchemyTimeoutError("pool is busy"),
+                    ),
+                    self.assertRaises(SQLAlchemyTimeoutError),
                 ):
-                    with self.assertRaises(SQLAlchemyTimeoutError):
-                        database.read_execute("SELECT 1")
+                    database.read_execute("SELECT 1")
                 metrics = database.metrics()
                 self.assertGreaterEqual(metrics["reader_max_hold_seconds"], 0.01)
                 self.assertGreaterEqual(metrics["reader_long_holds"], 1)

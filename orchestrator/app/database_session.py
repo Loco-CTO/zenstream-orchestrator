@@ -8,7 +8,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool, StaticPool
 
-
 READER_POOL_SIZE = 16
 READER_MAX_OVERFLOW = 16
 READER_POOL_TIMEOUT = 5

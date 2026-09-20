@@ -39,6 +39,7 @@ from app.logging_config import get_logger
 from app.metadata_domain import clean_music_title, music_filename_parts
 from app.progress import WholeJobProgress
 from app.worker_config import configured_worker_limit
+from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
 try:
     from app.filesystem_watcher import create_library_observer
@@ -110,6 +111,9 @@ SUBTITLE_EXTENSIONS = {
     ".mpsub",
     ".xss",
 }
+
+LIBRARY_DISPATCH_BACKOFF_INITIAL = 0.25
+LIBRARY_DISPATCH_BACKOFF_MAX = 5.0
 LYRIC_EXTENSIONS = {
     ".lrc",
     ".elrc",
@@ -11361,6 +11365,11 @@ class LibraryRuntime:
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.observer = None
+        self._lifecycle_lock = threading.RLock()
+        self._last_loop_success: float | None = None
+        self._last_loop_error: str | None = None
+        self._consecutive_loop_failures = 0
+        self._last_dispatch_backoff_seconds = 0.0
         self._watch_paths: set[str] = set()
         # Compatibility buffers are only used when an older test/database has
         # not yet run migration 0024. Normal installations always use the
@@ -11373,6 +11382,7 @@ class LibraryRuntime:
         self._active_jobs: set[str] = set()
         self._cancel_events: dict[str, threading.Event] = {}
         self._worker_threads: dict[str, threading.Thread] = {}
+        self._claim_repair_ids: set[str] = set()
         self._active_lock = threading.RLock()
         self._root_locks: dict[tuple[str, str], threading.Lock] = {}
         self._root_lock_last_used: dict[tuple[str, str], float] = {}
@@ -11416,15 +11426,52 @@ class LibraryRuntime:
             )
 
     def start(self):
+        lifecycle_lock = getattr(self, "_lifecycle_lock", None)
+        if lifecycle_lock is None:
+            lifecycle_lock = threading.RLock()
+            self._lifecycle_lock = lifecycle_lock
+        with lifecycle_lock:
+            if self.thread and self.thread.is_alive():
+                return False
+            live_workers = {
+                job_id
+                for job_id, worker in getattr(self, "_worker_threads", {}).items()
+                if worker.is_alive()
+            }
+            self._recover_active_jobs(preserve_job_ids=live_workers)
+            self.stop_event.clear()
+            self._configure_watchers()
+            self.thread = threading.Thread(
+                target=self._run, name="zenstream-library-jobs", daemon=True
+            )
+            self.thread.start()
+            return True
+
+    def ensure_running(self) -> bool:
+        """Restart a dead dispatcher unless shutdown has been requested."""
+        if self.stop_event.is_set():
+            return False
         if self.thread and self.thread.is_alive():
-            return
-        self._recover_active_jobs()
-        self.stop_event.clear()
-        self._configure_watchers()
-        self.thread = threading.Thread(
-            target=self._run, name="zenstream-library-jobs", daemon=True
-        )
-        self.thread.start()
+            return True
+        self.start()
+        return bool(self.thread and self.thread.is_alive())
+
+    def diagnostics(self) -> dict[str, object]:
+        thread = getattr(self, "thread", None)
+        with getattr(self, "_active_lock", threading.RLock()):
+            active_jobs = len(getattr(self, "_active_jobs", set()))
+        return {
+            "thread_alive": bool(thread and thread.is_alive()),
+            "last_loop_success": getattr(self, "_last_loop_success", None),
+            "last_loop_error": getattr(self, "_last_loop_error", None),
+            "consecutive_failures": getattr(
+                self, "_consecutive_loop_failures", 0
+            ),
+            "last_backoff_seconds": getattr(
+                self, "_last_dispatch_backoff_seconds", 0.0
+            ),
+            "active_jobs": active_jobs,
+        }
 
     def stop(self, timeout: float = 30.0):
         self.stop_event.set()
@@ -11673,8 +11720,9 @@ class LibraryRuntime:
             return row
         return None
 
-    def _recover_active_jobs(self) -> None:
+    def _recover_active_jobs(self, preserve_job_ids: set[str] | None = None) -> None:
         """Re-queue interrupted inventory jobs after an Orchestrator restart."""
+        preserve_job_ids = preserve_job_ids or set()
         rows = self.store.db.execute(
             "SELECT id,library_id,state FROM library_jobs WHERE state IN ('queued','running','terminating') ORDER BY created_at DESC"
         )
@@ -11695,7 +11743,13 @@ class LibraryRuntime:
                     (job_id for job_id, state in jobs if state != "terminating"),
                     None,
                 )
+                preserved_id = next(
+                    (job_id for job_id, _state in jobs if job_id in preserve_job_ids),
+                    None,
+                )
                 for job_id, state in jobs:
+                    if job_id == preserved_id:
+                        continue
                     if job_id == keep_id:
                         cursor.execute(
                             "UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after Orchestrator restart',error=NULL,error_details=NULL,started_at=NULL,finished_at=NULL WHERE id=?",
@@ -12235,78 +12289,97 @@ class LibraryRuntime:
             if due:
                 self.enqueue(library["id"], "scan")
 
-    def _run(self):
-        while not self.stop_event.is_set():
-            # Keep the durable first-seen target cheap, then batch the noisy
-            # follow-up event counters/revisions before the due-target query.
-            self._flush_reconcile_updates()
-            has_queue = self._durable_reconcile_targets_available()
-            if has_queue:
-                due_rows = self.store.db.execute(
-                    "SELECT DISTINCT library_id FROM library_reconcile_targets WHERE debounce_until<=?",
-                    (time.time(),),
+    def _record_dispatch_success(self) -> None:
+        with self._active_lock:
+            previous_failures = getattr(self, "_consecutive_loop_failures", 0)
+            self._last_loop_success = time.time()
+            self._last_loop_error = None
+            self._consecutive_loop_failures = 0
+            self._last_dispatch_backoff_seconds = 0.0
+        if previous_failures:
+            logger.info(
+                "library job dispatcher recovered after failures=%s",
+                previous_failures,
+            )
+
+    def _record_dispatch_failure(self, error: Exception, retry_delay: float) -> None:
+        with self._active_lock:
+            self._consecutive_loop_failures = (
+                getattr(self, "_consecutive_loop_failures", 0) + 1
+            )
+            failures = self._consecutive_loop_failures
+            self._last_loop_error = type(error).__name__
+            self._last_dispatch_backoff_seconds = retry_delay
+        try:
+            database_metrics = self.store.db.metrics()
+        except Exception:
+            database_metrics = {}
+        logger.warning(
+            "library job dispatcher iteration failed error_type=%s consecutive_failures=%s retry_delay_seconds=%.3f reader_active=%s reader_peak=%s reader_checkout_timeouts=%s",
+            type(error).__name__,
+            failures,
+            retry_delay,
+            database_metrics.get("reader_active"),
+            database_metrics.get("reader_peak"),
+            database_metrics.get("reader_checkout_timeouts"),
+            exc_info=True,
+        )
+
+    def _requeue_claimed_job(self, job_id: str) -> None:
+        """Undo a claim when dispatch setup fails before a worker starts."""
+        try:
+            with self.store.db.transaction() as cursor:
+                cursor.execute(
+                    "UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after dispatcher recovery',error=NULL,error_details=NULL,started_at=NULL,finished_at=NULL WHERE id=? AND state='running'",
+                    (job_id,),
                 )
-                for (library_id,) in due_rows:
-                    self.enqueue(library_id, "reconcile")
-            else:
-                full_music_scan_due = getattr(self, "_full_music_scan_due", {})
-                full_due = [
-                    library_id
-                    for library_id, deadline in full_music_scan_due.items()
-                    if time.monotonic() >= deadline
-                ]
-                for library_id in full_due:
-                    active_inventory = self.store.db.execute(
-                        "SELECT 1 FROM library_jobs WHERE library_id=? "
-                        "AND kind IN ('scan','reconcile','collection_rebuild') "
-                        "AND state IN ('queued','running','terminating') LIMIT 1",
-                        (library_id,),
-                    )
-                    if active_inventory:
-                        continue
-                    self.enqueue(library_id, "scan")
-                    full_music_scan_due.pop(library_id, None)
-                due = [
-                    library_id
-                    for library_id, deadline in self._reconcile_due.items()
-                    if time.monotonic() >= deadline
-                ]
-                for library_id in due:
-                    self.enqueue(
-                        library_id,
-                        "reconcile",
-                        self._reconcile_targets.get(library_id, set()).copy(),
-                    )
-                    self._reconcile_due.pop(library_id, None)
-            row = self._next_queued_job()
-            if row is None:
-                with self.condition:
-                    self.condition.wait(timeout=1)
-                continue
-            job_id, library_id, kind = row
-            coordinator = getattr(self, "_catalog_work_coordinator", None)
-            if coordinator is not None and not coordinator.can_start_inventory():
-                with self.condition:
-                    self.condition.wait(timeout=0.25)
-                continue
+        except Exception:
+            # If the database is also unavailable, restart recovery will repair
+            # the durable running row. Keep a bounded in-process repair marker
+            # so the next healthy dispatcher pass can repair it without a
+            # process restart.
             with self._active_lock:
-                if job_id in self._active_jobs:
-                    with self.condition:
-                        self.condition.wait(timeout=0.2)
-                    continue
-                self._active_jobs.add(job_id)
-                self._cancel_events[job_id] = threading.Event()
-                with self.store.db.transaction() as cursor:
-                    cursor.execute(
-                        "UPDATE library_jobs SET state='running',started_at=?,message='Starting scan' WHERE id=? AND state='queued'",
-                        (now(), job_id),
-                    )
-                    claimed = cursor.rowcount == 1
-                if not claimed:
-                    self._active_jobs.discard(job_id)
-                    self._cancel_events.pop(job_id, None)
-                    continue
-            self._notify_job_status(self.store.job(job_id))
+                if not hasattr(self, "_claim_repair_ids"):
+                    self._claim_repair_ids = set()
+                self._claim_repair_ids.add(job_id)
+            logger.warning(
+                "could not requeue library job after dispatch setup failure job_id=%s",
+                job_id,
+                exc_info=True,
+            )
+        finally:
+            with self._active_lock:
+                self._active_jobs.discard(job_id)
+                self._cancel_events.pop(job_id, None)
+                self._worker_threads.pop(job_id, None)
+            with self.condition:
+                self.condition.notify_all()
+
+    def _retry_claim_repairs(self) -> None:
+        pending = list(getattr(self, "_claim_repair_ids", set()))
+        for job_id in pending:
+            with self.store.db.transaction() as cursor:
+                cursor.execute(
+                    "UPDATE library_jobs SET state='queued',progress_current=0,progress_total=0,message='Queued again after dispatcher recovery',error=NULL,error_details=NULL,started_at=NULL,finished_at=NULL WHERE id=? AND state='running'",
+                    (job_id,),
+                )
+            with self._active_lock:
+                if hasattr(self, "_claim_repair_ids"):
+                    self._claim_repair_ids.discard(job_id)
+
+    def _dispatch_claimed_job(
+        self,
+        job_id: str,
+        library_id: str,
+        kind: str,
+        job: dict,
+        claimed_at: str,
+    ) -> None:
+        job["state"] = "running"
+        job["startedAt"] = claimed_at
+        job["message"] = "Starting scan"
+        try:
+            self._notify_job_status(job)
             worker = threading.Thread(
                 target=self._execute_job,
                 args=(job_id, library_id, kind),
@@ -12316,6 +12389,113 @@ class LibraryRuntime:
             with self._active_lock:
                 self._worker_threads[job_id] = worker
             worker.start()
+        except Exception:
+            self._requeue_claimed_job(job_id)
+            raise
+
+    def _run(self):
+        retry_delay = LIBRARY_DISPATCH_BACKOFF_INITIAL
+        while not self.stop_event.is_set():
+            try:
+                self._run_iteration()
+                self._record_dispatch_success()
+                retry_delay = LIBRARY_DISPATCH_BACKOFF_INITIAL
+            except (SQLAlchemyTimeoutError, SQLAlchemyError) as error:
+                self._record_dispatch_failure(error, retry_delay)
+                if self.stop_event.wait(retry_delay):
+                    break
+                retry_delay = min(
+                    LIBRARY_DISPATCH_BACKOFF_MAX, retry_delay * 2
+                )
+            except Exception as error:
+                self._record_dispatch_failure(error, retry_delay)
+                if self.stop_event.wait(retry_delay):
+                    break
+                retry_delay = min(
+                    LIBRARY_DISPATCH_BACKOFF_MAX, retry_delay * 2
+                )
+
+    def _run_iteration(self) -> None:
+        # Keep the durable first-seen target cheap, then batch the noisy
+        # follow-up event counters/revisions before the due-target query.
+        self._retry_claim_repairs()
+        self._flush_reconcile_updates()
+        has_queue = self._durable_reconcile_targets_available()
+        if has_queue:
+            due_rows = self.store.db.execute(
+                "SELECT DISTINCT library_id FROM library_reconcile_targets WHERE debounce_until<=?",
+                (time.time(),),
+            )
+            for (library_id,) in due_rows:
+                self.enqueue(library_id, "reconcile")
+        else:
+            full_music_scan_due = getattr(self, "_full_music_scan_due", {})
+            full_due = [
+                library_id
+                for library_id, deadline in full_music_scan_due.items()
+                if time.monotonic() >= deadline
+            ]
+            for library_id in full_due:
+                active_inventory = self.store.db.execute(
+                    "SELECT 1 FROM library_jobs WHERE library_id=? "
+                    "AND kind IN ('scan','reconcile','collection_rebuild') "
+                    "AND state IN ('queued','running','terminating') LIMIT 1",
+                    (library_id,),
+                )
+                if active_inventory:
+                    continue
+                self.enqueue(library_id, "scan")
+                full_music_scan_due.pop(library_id, None)
+            due = [
+                library_id
+                for library_id, deadline in self._reconcile_due.items()
+                if time.monotonic() >= deadline
+            ]
+            for library_id in due:
+                self.enqueue(
+                    library_id,
+                    "reconcile",
+                    self._reconcile_targets.get(library_id, set()).copy(),
+                )
+                self._reconcile_due.pop(library_id, None)
+        row = self._next_queued_job()
+        if row is None:
+            with self.condition:
+                self.condition.wait(timeout=1)
+            return
+        job_id, library_id, kind = row
+        coordinator = getattr(self, "_catalog_work_coordinator", None)
+        if coordinator is not None and not coordinator.can_start_inventory():
+            with self.condition:
+                self.condition.wait(timeout=0.25)
+            return
+        job = self.store.job(job_id)
+        if job is None:
+            return
+        with self._active_lock:
+            if job_id in self._active_jobs:
+                with self.condition:
+                    self.condition.wait(timeout=0.2)
+                return
+            self._active_jobs.add(job_id)
+            self._cancel_events[job_id] = threading.Event()
+            claimed_at = now()
+            try:
+                with self.store.db.transaction() as cursor:
+                    cursor.execute(
+                        "UPDATE library_jobs SET state='running',started_at=?,message='Starting scan' WHERE id=? AND state='queued'",
+                        (claimed_at, job_id),
+                    )
+                    claimed = cursor.rowcount == 1
+            except Exception:
+                self._active_jobs.discard(job_id)
+                self._cancel_events.pop(job_id, None)
+                raise
+            if not claimed:
+                self._active_jobs.discard(job_id)
+                self._cancel_events.pop(job_id, None)
+                return
+        self._dispatch_claimed_job(job_id, library_id, kind, job, claimed_at)
 
     def _execute_job(self, job_id: str, library_id: str, kind: str) -> None:
         locks: list[threading.Lock] = []

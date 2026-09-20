@@ -167,7 +167,7 @@ def _catalog_read(method):
         token = self._read_context.set(context)
         started = time.perf_counter()
         try:
-            with self.db.read_session():
+            with self.db.read_session(label=f"catalog:{method.__name__}"):
                 return method(self, user_id, *args, **kwargs)
         finally:
             elapsed = time.perf_counter() - started

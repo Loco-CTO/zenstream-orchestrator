@@ -9,11 +9,18 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool, StaticPool
 
 
+READER_POOL_SIZE = 16
+READER_MAX_OVERFLOW = 16
+READER_POOL_TIMEOUT = 5
+READER_POOL_CAPACITY = READER_POOL_SIZE + READER_MAX_OVERFLOW
+
+
 @dataclass
 class SQLitePersistence:
     writer_engine: Engine
     read_engine: Engine | None
     read_sessions: sessionmaker[Session] | None
+    read_capacity: int | None = None
 
     def close(self) -> None:
         if self.read_engine is not None:
@@ -57,7 +64,7 @@ def create_sqlite_persistence(db_file: str) -> SQLitePersistence:
             poolclass=StaticPool,
         )
         event.listen(writer_engine, "connect", _writer_pragmas)
-        return SQLitePersistence(writer_engine, None, None)
+        return SQLitePersistence(writer_engine, None, None, None)
 
     url = URL.create("sqlite+pysqlite", database=db_file)
     writer_engine = create_engine(
@@ -75,13 +82,14 @@ def create_sqlite_persistence(db_file: str) -> SQLitePersistence:
         connect_args={"check_same_thread": False, "timeout": 0.5},
         isolation_level="AUTOCOMMIT",
         poolclass=QueuePool,
-        pool_size=16,
-        max_overflow=16,
-        pool_timeout=5,
+        pool_size=READER_POOL_SIZE,
+        max_overflow=READER_MAX_OVERFLOW,
+        pool_timeout=READER_POOL_TIMEOUT,
     )
     event.listen(read_engine, "connect", _reader_pragmas)
     return SQLitePersistence(
         writer_engine,
         read_engine,
         sessionmaker(bind=read_engine, autoflush=False, expire_on_commit=False),
+        READER_POOL_CAPACITY,
     )

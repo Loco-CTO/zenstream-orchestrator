@@ -22,9 +22,9 @@ def _termination_requested(should_terminate: Callable[[], bool] | None) -> bool:
     return bool(should_terminate and should_terminate())
 
 
-def _read_session(db):
+def _read_session(db, label: str = "library_cleanup:read"):
     read_session = getattr(db, "read_session", None)
-    return read_session() if callable(read_session) else nullcontext()
+    return read_session(label=label) if callable(read_session) else nullcontext()
 
 
 def _referenced_paths(
@@ -46,7 +46,7 @@ def _referenced_paths(
         return set(), True
 
     referenced: set[str] = set()
-    with _read_session(db):
+    with _read_session(db, label="library_cleanup:referenced_paths"):
         for batch in _chunks(values):
             if _termination_requested(should_terminate):
                 return referenced, False

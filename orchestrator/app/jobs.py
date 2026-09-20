@@ -40,6 +40,7 @@ from app.progress import (
 )
 from app.providers import ProviderError, ProviderNotFoundError
 from app.trickplay import TrickplayExtractor
+from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
 logger = get_logger("jobs")
 VIDEO_ENTITY_TYPES = {"movie", "series", "season", "episode"}
@@ -55,6 +56,8 @@ METADATA_JOB_KINDS = {"metadata_missing", "metadata_upgrade", "metadata_refresh"
 # upgrade/refresh page writes are fenced by CatalogReadModel instead, so a
 # multi-hour metadata walk cannot starve a library scan.
 CATALOG_EXCLUSIVE_KINDS = {"metadata_cleanup"}
+JOB_DISPATCH_BACKOFF_INITIAL = 0.25
+JOB_DISPATCH_BACKOFF_MAX = 5.0
 METADATA_UPGRADE_VERSION = 1
 METADATA_UPGRADE_STATE_COLUMNS = {
     "provider",
@@ -4237,6 +4240,9 @@ class JobScheduler:
         self.worker_threads: dict[str, threading.Thread] = {}
         self.active_lock = threading.RLock()
         self.analysis_maintenance: set[str] = set()
+        self._dispatch_last_success: float | None = None
+        self._dispatch_last_error: str | None = None
+        self._dispatch_consecutive_failures = 0
 
     def _on_library_job_status(self, job: dict | None) -> None:
         """Mirror full library-job state onto its scheduler definition."""
@@ -4756,76 +4762,149 @@ class JobScheduler:
                 self.store.mark_trigger_scheduled(definition["id"], trigger, run["id"])
 
     def _dispatch(self):
+        retry_delay = JOB_DISPATCH_BACKOFF_INITIAL
         while not self.stop_event.is_set():
-            self._schedule_due()
-            queued = self.store.runs(limit=1000)
-            metadata_work_active = self._metadata_work_active()
-            for run in queued:
-                if run["state"] != "queued":
-                    continue
-                if run["kind"] in METADATA_JOB_KINDS and metadata_work_active:
-                    continue
-                if (
-                    run["kind"] in CATALOG_EXCLUSIVE_KINDS
-                    and self._library_work_active()
-                ):
-                    # Inventory admission owns the mutable catalog snapshot;
-                    # the coordinator below closes the remaining check/start
-                    # race when both workers become runnable together.
-                    continue
-                if (
-                    run["kind"] in ANALYSIS_KINDS or run["kind"] == "bazarr_sync"
-                ) and self._library_work_active():
-                    continue
+            try:
+                self._dispatch_iteration()
                 with self.active_lock:
-                    if run["kind"] in getattr(self, "analysis_maintenance", set()):
-                        continue
-                    if (
-                        run["id"] in self.active
-                        or run["definitionId"] in self.active_definitions
-                    ):
-                        continue
-                    self.active.add(run["id"])
-                    self.active_definitions.add(run["definitionId"])
-                    self.cancel_events[run["id"]] = threading.Event()
+                    previous_failures = getattr(
+                        self, "_dispatch_consecutive_failures", 0
+                    )
+                    self._dispatch_last_success = time.time()
+                    self._dispatch_last_error = None
+                    self._dispatch_consecutive_failures = 0
+                if previous_failures:
+                    logger.info(
+                        "scheduled job dispatcher recovered after failures=%s",
+                        previous_failures,
+                    )
+                retry_delay = JOB_DISPATCH_BACKOFF_INITIAL
+            except (SQLAlchemyTimeoutError, SQLAlchemyError) as error:
+                with self.active_lock:
+                    self._dispatch_consecutive_failures = getattr(
+                        self, "_dispatch_consecutive_failures", 0
+                    ) + 1
+                    failures = self._dispatch_consecutive_failures
+                    self._dispatch_last_error = type(error).__name__
+                logger.warning(
+                    "scheduled job dispatcher iteration failed error_type=%s consecutive_failures=%s retry_delay_seconds=%.3f",
+                    type(error).__name__,
+                    failures,
+                    retry_delay,
+                    exc_info=True,
+                )
+                if self.stop_event.wait(retry_delay):
+                    break
+                retry_delay = min(JOB_DISPATCH_BACKOFF_MAX, retry_delay * 2)
+            except Exception as error:
+                with self.active_lock:
+                    self._dispatch_consecutive_failures = getattr(
+                        self, "_dispatch_consecutive_failures", 0
+                    ) + 1
+                    failures = self._dispatch_consecutive_failures
+                    self._dispatch_last_error = type(error).__name__
+                logger.warning(
+                    "scheduled job dispatcher iteration failed error_type=%s consecutive_failures=%s retry_delay_seconds=%.3f",
+                    type(error).__name__,
+                    failures,
+                    retry_delay,
+                    exc_info=True,
+                )
+                if self.stop_event.wait(retry_delay):
+                    break
+                retry_delay = min(JOB_DISPATCH_BACKOFF_MAX, retry_delay * 2)
+
+    def _dispatch_iteration(self):
+        self._schedule_due()
+        queued = self.store.runs(limit=1000)
+        metadata_work_active = self._metadata_work_active()
+        for run in queued:
+            if run["state"] != "queued":
+                continue
+            if run["kind"] in METADATA_JOB_KINDS and metadata_work_active:
+                continue
+            if (
+                run["kind"] in CATALOG_EXCLUSIVE_KINDS
+                and self._library_work_active()
+            ):
+                # Inventory admission owns the mutable catalog snapshot;
+                # the coordinator below closes the remaining check/start
+                # race when both workers become runnable together.
+                continue
+            if (
+                run["kind"] in ANALYSIS_KINDS or run["kind"] == "bazarr_sync"
+            ) and self._library_work_active():
+                continue
+            with self.active_lock:
+                if run["kind"] in getattr(self, "analysis_maintenance", set()):
+                    continue
+                if (
+                    run["id"] in self.active
+                    or run["definitionId"] in self.active_definitions
+                ):
+                    continue
+                self.active.add(run["id"])
+                self.active_definitions.add(run["definitionId"])
+                self.cancel_events[run["id"]] = threading.Event()
+                try:
                     with self.store.db.transaction() as cursor:
                         cursor.execute(
                             "UPDATE job_runs SET state='running',started_at=?,thread_name=?,message='Starting task' WHERE id=? AND state='queued'",
                             (now(), f"zenstream-job-{run['id'][:8]}", run["id"]),
                         )
                         claimed = cursor.rowcount == 1
-                    if not claimed:
-                        self.active.discard(run["id"])
-                        self.active_definitions.discard(run["definitionId"])
-                        self.cancel_events.pop(run["id"], None)
-                        continue
-                    try:
-                        # Claiming is intentionally a small atomic SQL update,
-                        # but it still changes the definition's observable
-                        # state. Keep the dashboard pointer in sync before
-                        # the worker starts, including analysis jobs whose
-                        # implementation does not emit an initial progress
-                        # update.
-                        self.store._sync_definition_from_run(run["id"])
-                    except Exception:
-                        logger.warning(
-                            "could not synchronize claimed scheduler run=%s",
-                            run["id"],
-                            exc_info=True,
-                        )
-                    if run["kind"] in METADATA_JOB_KINDS:
-                        metadata_work_active = True
-                thread = threading.Thread(
-                    target=self._execute,
-                    args=(run["id"],),
-                    name=f"zenstream-job-{run['id'][:8]}",
-                    daemon=True,
-                )
-                with self.active_lock:
-                    self.worker_threads[run["id"]] = thread
+                except Exception:
+                    self.active.discard(run["id"])
+                    self.active_definitions.discard(run["definitionId"])
+                    self.cancel_events.pop(run["id"], None)
+                    raise
+                if not claimed:
+                    self.active.discard(run["id"])
+                    self.active_definitions.discard(run["definitionId"])
+                    self.cancel_events.pop(run["id"], None)
+                    continue
+                try:
+                    # Claiming is intentionally a small atomic SQL update,
+                    # but it still changes the definition's observable
+                    # state. Keep the dashboard pointer in sync before
+                    # the worker starts, including analysis jobs whose
+                    # implementation does not emit an initial progress
+                    # update.
+                    self.store._sync_definition_from_run(run["id"])
+                except Exception:
+                    logger.warning(
+                        "could not synchronize claimed scheduler run=%s",
+                        run["id"],
+                        exc_info=True,
+                    )
+                if run["kind"] in METADATA_JOB_KINDS:
+                    metadata_work_active = True
+            thread = threading.Thread(
+                target=self._execute,
+                args=(run["id"],),
+                name=f"zenstream-job-{run['id'][:8]}",
+                daemon=True,
+            )
+            with self.active_lock:
+                self.worker_threads[run["id"]] = thread
+            try:
                 thread.start()
-            with self.condition:
-                self.condition.wait(timeout=1)
+            except Exception:
+                with self.active_lock:
+                    self.worker_threads.pop(run["id"], None)
+                    self.active.discard(run["id"])
+                    self.active_definitions.discard(run["definitionId"])
+                    self.cancel_events.pop(run["id"], None)
+                self.store.update_run(
+                    run["id"],
+                    state="queued",
+                    started_at=None,
+                    finished_at=None,
+                    message="Queued again after scheduler recovery",
+                )
+                raise
+        with self.condition:
+            self.condition.wait(timeout=1)
 
     def _execute(self, run_id: str):
         catalog_work_acquired = False

@@ -74,6 +74,12 @@ async def lifespan(_app: FastAPI):
             await asyncio.sleep(60)
             prune_rate_limit_events()
             try:
+                dispatcher_running = await run_control(library_runtime.ensure_running)
+                if not dispatcher_running:
+                    request_logger.warning(
+                        "library job dispatcher is not running diagnostics=%s",
+                        library_runtime.diagnostics(),
+                    )
                 await run_control(Account.flush_session_activity)
                 await run_control(run_resource_retention, job_scheduler.store)
             except Exception:
@@ -119,13 +125,14 @@ async def lifespan(_app: FastAPI):
             if lag >= 0.25:
                 socket_metrics = await hub.queue_metrics()
                 get_logger("event_loop").warning(
-                    "event loop lag lag_ms=%.1f foreground_active=%s control_active=%s auth_active=%s foreground_metrics=%s sqlite_metrics=%s websocket_metrics=%s",
+                    "event loop lag lag_ms=%.1f foreground_active=%s control_active=%s auth_active=%s foreground_metrics=%s sqlite_metrics=%s library_metrics=%s websocket_metrics=%s",
                     lag * 1000,
                     active_requests(),
                     active_control_work(),
                     active_auth_work(),
                     foreground_metrics(),
                     _database_metrics(),
+                    library_runtime.diagnostics(),
                     socket_metrics,
                 )
             expected = current + interval

@@ -3,8 +3,10 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.database import DatabaseHandler
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 
 class DatabaseHandlerTest(unittest.TestCase):
@@ -21,11 +23,13 @@ class DatabaseHandlerTest(unittest.TestCase):
 
             def read_value():
                 barrier.wait()
-                self.assertEqual(
-                    database.read_execute("SELECT value FROM values_table"), [(1,)]
-                )
-                with lock:
-                    connections.append(id(database.read_local.connection))
+                with database.read_session(label="test:per_thread"):
+                    self.assertEqual(
+                        database.read_execute("SELECT value FROM values_table"),
+                        [(1,)],
+                    )
+                    with lock:
+                        connections.append(id(database.read_local.connection))
 
             first = threading.Thread(target=read_value)
             second = threading.Thread(target=read_value)
@@ -36,6 +40,77 @@ class DatabaseHandlerTest(unittest.TestCase):
             database.close()
 
         self.assertEqual(len(set(connections)), 2)
+        self.assertIsNone(getattr(database.read_local, "connection", None))
+        self.assertEqual(database.metrics()["reader_active"], 0)
+
+    def test_reader_leases_release_on_success_and_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
+            try:
+                database.execute("CREATE TABLE values_table(value INTEGER)")
+                with database.read_session(label="test:success"):
+                    self.assertEqual(
+                        database.read_execute("SELECT COUNT(*) FROM values_table"),
+                        [(0,)],
+                    )
+                    time.sleep(0.01)
+                with self.assertRaisesRegex(RuntimeError, "expected"):
+                    with database.read_session(label="test:exception"):
+                        raise RuntimeError("expected")
+                metrics = database.metrics()
+                self.assertEqual(metrics["reader_active"], 0)
+                self.assertEqual(metrics["reader_holders"], [])
+                self.assertGreaterEqual(metrics["reader_sessions"], 2)
+                self.assertGreaterEqual(metrics["reader_hold_seconds"], 0)
+            finally:
+                database.close()
+
+    def test_nested_reader_sessions_share_one_lease_and_emit_safe_label(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
+            try:
+                database.execute("CREATE TABLE values_table(value INTEGER)")
+                before = database.metrics()["reader_sessions"]
+                with database.read_session(label="catalog:items"):
+                    inside = database.metrics()
+                    self.assertEqual(inside["reader_active"], 1)
+                    self.assertEqual(inside["reader_holders"][0]["label"], "catalog:items")
+                    with database.read_session(label="ignored:nested"):
+                        self.assertEqual(database.metrics()["reader_active"], 1)
+                after = database.metrics()
+                self.assertEqual(after["reader_sessions"], before + 1)
+                self.assertEqual(after["reader_active"], 0)
+            finally:
+                database.close()
+
+    def test_reader_hold_and_checkout_timeout_metrics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
+            try:
+                database.execute("CREATE TABLE values_table(value INTEGER)")
+                with patch("app.database.READER_LONG_HOLD_SECONDS", 0.01):
+                    with database.read_session(label="library_cleanup:referenced_paths"):
+                        time.sleep(0.02)
+                with patch.object(
+                    database.persistence,
+                    "read_sessions",
+                    side_effect=SQLAlchemyTimeoutError("pool is busy"),
+                ):
+                    with self.assertRaises(SQLAlchemyTimeoutError):
+                        database.read_execute("SELECT 1")
+                metrics = database.metrics()
+                self.assertGreaterEqual(metrics["reader_max_hold_seconds"], 0.01)
+                self.assertGreaterEqual(metrics["reader_long_holds"], 1)
+                self.assertGreaterEqual(metrics["reader_checkout_timeouts"], 1)
+                self.assertEqual(metrics["reader_active"], 0)
+            finally:
+                database.close()
 
     def test_write_many_prepares_generator_before_acquiring_writer(self):
         database = DatabaseHandler("sqlite", {}, ":memory:")

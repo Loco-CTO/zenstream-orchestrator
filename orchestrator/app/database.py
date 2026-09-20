@@ -3,11 +3,19 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from app.database_session import create_sqlite_persistence
+from app.database_session import (
+    READER_MAX_OVERFLOW,
+    READER_POOL_SIZE,
+    READER_POOL_TIMEOUT,
+    create_sqlite_persistence,
+)
 from app.logging_config import get_logger
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
 logger = get_logger("database")
+
+READER_LONG_HOLD_SECONDS = 1.0
+READER_HOLDER_SAMPLE_LIMIT = 8
 
 
 class FairWriteGate:
@@ -88,6 +96,17 @@ class DatabaseHandler:
         self._commit_count = 0
         self._reader_wait_seconds = 0.0
         self._reader_operations = 0
+        self._reader_capacity = 0
+        self._reader_active = 0
+        self._reader_peak = 0
+        self._reader_sessions = 0
+        self._reader_checkout_wait_seconds = 0.0
+        self._reader_hold_seconds = 0.0
+        self._reader_max_hold_seconds = 0.0
+        self._reader_long_holds = 0
+        self._reader_checkout_timeouts = 0
+        self._reader_lease_counter = 0
+        self._reader_holders: dict[int, tuple[str, str, float]] = {}
         self.connect()
 
     def connect(self):
@@ -99,6 +118,7 @@ class DatabaseHandler:
         """Connect to a SQLite database."""
         try:
             self.persistence = create_sqlite_persistence(db_file)
+            self._reader_capacity = self.persistence.read_capacity or 0
             self.connection = self.persistence.writer_engine.raw_connection()
             if db_file != ":memory:":
                 self.connection.execute("PRAGMA journal_mode = WAL")
@@ -193,14 +213,134 @@ class DatabaseHandler:
                 "transaction", wait_seconds, hold_seconds, wait_started
             )
 
+    @staticmethod
+    def _safe_reader_label(label: str | None) -> str:
+        raw = str(label or f"thread:{threading.current_thread().name}")
+        safe = "".join(
+            character if character.isalnum() or character in "._:-" else "_"
+            for character in raw
+        )
+        return safe[:80] or "reader"
+
+    def _reader_holders_snapshot(self) -> list[dict[str, object]]:
+        now = time.monotonic()
+        with self._timing_lock:
+            holders = [
+                {
+                    "label": label,
+                    "owner": label,
+                    "thread": thread_name,
+                    "hold_seconds": max(0.0, now - started),
+                }
+                for label, thread_name, started in self._reader_holders.values()
+            ]
+        holders.sort(key=lambda holder: float(holder["hold_seconds"]), reverse=True)
+        return holders[:READER_HOLDER_SAMPLE_LIMIT]
+
+    def _record_reader_timeout(self, label: str, wait_seconds: float) -> None:
+        with self._timing_lock:
+            self._reader_checkout_timeouts += 1
+            active = self._reader_active
+            peak = self._reader_peak
+            capacity = self._reader_capacity
+        logger.warning(
+            "sqlite reader checkout timeout label=%s owner=%s thread=%s wait_seconds=%.3f active=%s peak=%s capacity=%s holders=%s",
+            label,
+            label,
+            threading.current_thread().name,
+            wait_seconds,
+            active,
+            peak,
+            capacity,
+            self._reader_holders_snapshot(),
+        )
+
+    def _reader_lease_acquired(self, label: str, wait_seconds: float) -> int:
+        thread_name = threading.current_thread().name
+        started = time.monotonic()
+        with self._timing_lock:
+            self._reader_lease_counter += 1
+            lease_id = self._reader_lease_counter
+            self._reader_active += 1
+            self._reader_peak = max(self._reader_peak, self._reader_active)
+            self._reader_sessions += 1
+            self._reader_checkout_wait_seconds += max(0.0, wait_seconds)
+            self._reader_holders[lease_id] = (label, thread_name, started)
+        return lease_id
+
+    def _reader_lease_released(self, lease_id: int) -> None:
+        finished = time.monotonic()
+        with self._timing_lock:
+            holder = self._reader_holders.pop(lease_id, None)
+            if holder is None:
+                return
+            label, thread_name, started = holder
+            hold_seconds = max(0.0, finished - started)
+            self._reader_active = max(0, self._reader_active - 1)
+            self._reader_hold_seconds += hold_seconds
+            self._reader_max_hold_seconds = max(
+                self._reader_max_hold_seconds, hold_seconds
+            )
+            if hold_seconds >= READER_LONG_HOLD_SECONDS:
+                self._reader_long_holds += 1
+            active = self._reader_active
+            peak = self._reader_peak
+        if hold_seconds >= READER_LONG_HOLD_SECONDS:
+            logger.warning(
+                "sqlite reader long hold label=%s owner=%s thread=%s hold_seconds=%.3f active=%s peak=%s",
+                label,
+                label,
+                thread_name,
+                hold_seconds,
+                active,
+                peak,
+            )
+
     @contextmanager
-    def read_session(self):
+    def _tracked_read_session(
+        self, label: str | None = None, *, record_operation: bool = False
+    ):
+        """Acquire one reader session while recording checkout and hold timing."""
+        if self.persistence is None or self.persistence.read_sessions is None:
+            raise RuntimeError("SQLite read sessions are not available")
+        safe_label = self._safe_reader_label(label)
+        checkout_started = time.monotonic()
+        lease_id: int | None = None
+        timeout_recorded = False
+        try:
+            with self.persistence.read_sessions() as session:
+                try:
+                    session.connection()
+                except SQLAlchemyTimeoutError:
+                    timeout_recorded = True
+                    self._record_reader_timeout(
+                        safe_label, time.monotonic() - checkout_started
+                    )
+                    raise
+                wait_seconds = time.monotonic() - checkout_started
+                lease_id = self._reader_lease_acquired(safe_label, wait_seconds)
+                if record_operation:
+                    self._record_reader_timing(wait_seconds)
+                try:
+                    yield session
+                except Exception:
+                    session.rollback()
+                    raise
+                finally:
+                    self._reader_lease_released(lease_id)
+        except SQLAlchemyTimeoutError:
+            if not timeout_recorded:
+                self._record_reader_timeout(
+                    safe_label, time.monotonic() - checkout_started
+                )
+            raise
+
+    @contextmanager
+    def read_session(self, label: str | None = None):
         """Reuse one query-only SQLAlchemy session for a top-level read."""
         if self.db_file == ":memory:":
             yield
             return
-        if self.persistence is None or self.persistence.read_sessions is None:
-            raise RuntimeError("SQLite read sessions are not available")
         active = getattr(self.read_local, "session", None)
         if active is not None:
             self.read_local.depth = getattr(self.read_local, "depth", 1) + 1
@@ -209,18 +349,18 @@ class DatabaseHandler:
             finally:
                 self.read_local.depth -= 1
             return
-        with self.persistence.read_sessions() as session:
+        with self._tracked_read_session(label) as session:
             self.read_local.session = session
             self.read_local.connection = session.connection()
             self.read_local.depth = 1
+            self.read_local.label = self._safe_reader_label(label)
             try:
                 yield
-            except Exception:
-                session.rollback()
-                raise
             finally:
                 self.read_local.session = None
+                self.read_local.connection = None
                 self.read_local.depth = 0
+                self.read_local.label = None
 
     def read_execute(self, query, params=None):
         """Execute a read without waiting on writer or unrelated reader locks."""
@@ -246,8 +386,9 @@ class DatabaseHandler:
                     active.rollback()
                     print(f"Database read error: {e}")
                     raise
-            with self.persistence.read_sessions() as session:
-                self._record_reader_timing(time.monotonic() - started)
+            with self._tracked_read_session(
+                "database:read_execute", record_operation=True
+            ) as session:
                 connection = session.connection()
                 self.read_local.connection = connection
                 try:
@@ -257,6 +398,8 @@ class DatabaseHandler:
                     session.rollback()
                     print(f"Database read error: {e}")
                     raise
+                finally:
+                    self.read_local.connection = None
 
         def execute_read():
             cursor = connection.cursor()
@@ -407,16 +550,30 @@ class DatabaseHandler:
             self._reader_operations += 1
             self._reader_wait_seconds += max(0.0, elapsed_seconds)
 
-    def metrics(self) -> dict[str, float | int]:
+    def metrics(self) -> dict[str, object]:
         with self._timing_lock:
-            return {
+            metrics = {
                 "writer_operations": self._writer_operations,
                 "commit_count": self._commit_count,
                 "writer_wait_seconds": self._writer_wait_seconds,
                 "writer_hold_seconds": self._writer_hold_seconds,
                 "reader_operations": self._reader_operations,
                 "reader_wait_seconds": self._reader_wait_seconds,
+                "reader_pool_size": READER_POOL_SIZE,
+                "reader_max_overflow": READER_MAX_OVERFLOW,
+                "reader_pool_timeout_seconds": READER_POOL_TIMEOUT,
+                "reader_capacity": self._reader_capacity,
+                "reader_active": self._reader_active,
+                "reader_peak": self._reader_peak,
+                "reader_sessions": self._reader_sessions,
+                "reader_checkout_wait_seconds": self._reader_checkout_wait_seconds,
+                "reader_hold_seconds": self._reader_hold_seconds,
+                "reader_max_hold_seconds": self._reader_max_hold_seconds,
+                "reader_long_holds": self._reader_long_holds,
+                "reader_checkout_timeouts": self._reader_checkout_timeouts,
             }
+        metrics["reader_holders"] = self._reader_holders_snapshot()
+        return metrics
 
     def _log_writer_timing(
         self, operation: str, wait_seconds: float, hold_seconds: float, started: float

@@ -1409,7 +1409,8 @@ class MetadataSearchProjection:
                         local_fields = set()
                     if replace_metadata and is_primary:
                         for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
-                            merged.pop(field, None)
+                            if field not in local_fields:
+                                merged.pop(field, None)
                     for field in (TEXT_FIELDS | FACT_FIELDS) - {"trailers"}:
                         candidate = payload.get(field)
                         if not _usable_projection_value(candidate):
@@ -1442,12 +1443,15 @@ class MetadataSearchProjection:
                         )
                     ]
                     trailer_reader = MetadataReadService(self.db)
-                    trailer_payloads = (
-                        trailer_reader.payloads(entity_type, provider_ids)
+                    cached_payloads = (
+                        dict(trailer_reader.payloads(entity_type, provider_ids))
                         if "metadata_cache" in tables
                         else {}
                     )
+                    trailer_payloads = dict(cached_payloads)
                     trailer_payloads[(provider, locale)] = payload
+                    factual_payloads = dict(cached_payloads)
+                    factual_payloads.setdefault((provider, locale), payload)
                     if entity_type in MUSIC_ENTITY_TYPES:
                         resolved_music = (
                             trailer_reader.resolve_raw(
@@ -1475,6 +1479,20 @@ class MetadataSearchProjection:
                             merged.setdefault("providers", {})["lastfm"] = (
                                 copy.deepcopy(current_namespaces["lastfm"])
                             )
+                    if "metadata_cache" in tables:
+                        resolved_facts = trailer_reader.resolve_facts(
+                            entity_type,
+                            provider_ids,
+                            locale,
+                            payloads=factual_payloads,
+                        )
+                        for field in FACT_FIELDS - {"trailers"}:
+                            if field in local_fields:
+                                continue
+                            merged.pop(field, None)
+                            candidate = resolved_facts.get(field)
+                            if _usable_projection_value(candidate):
+                                merged[field] = copy.deepcopy(candidate)
                     if entity_type == "track":
                         self._apply_music_track_context(
                             entity_id, locale, merged, local_fields
@@ -1981,16 +1999,13 @@ class MetadataReadService:
         self._payloads[cache_key] = payloads
         return payloads
 
-    def resolve_raw(
+    def _resolution_context(
         self,
         entity_type: str,
-        provider_ids: Iterable[dict],
+        provider_ids: list[dict],
+        payloads: dict[tuple[str, str], dict],
         requested: str,
-        *,
-        entity_id: str | None = None,
-    ) -> dict:
-        provider_ids = list(provider_ids)
-        payloads = self.payloads(entity_type, provider_ids)
+    ) -> tuple[list[str], list[str], set[str], str | None]:
         available = {locale for _, locale in payloads}
         original = next(
             (
@@ -2023,7 +2038,74 @@ class MetadataReadService:
             # to satisfy every configured display locale before the generic
             # English/original-language fallbacks.
             tiers = list(dict.fromkeys([requested, "", *tiers[1:]]))
-        providers = self.providers(entity_type)
+        return self.providers(entity_type), tiers, available, original
+
+    @staticmethod
+    def _resolve_fact_fields(
+        payloads: dict[tuple[str, str], dict],
+        providers: list[str],
+        tiers: list[str],
+        available: set[str],
+        fields: Iterable[str] = FACT_FIELDS,
+    ) -> dict:
+        result: dict = {}
+        for key in fields:
+            for provider in providers:
+                value = next(
+                    (
+                        payloads[(provider, locale)].get(key)
+                        for tier in tiers
+                        for locale in locale_variants(tier, available)
+                        if (provider, locale) in payloads
+                        and usable_text(key, payloads[(provider, locale)].get(key))
+                    ),
+                    None,
+                )
+                if nonempty(value):
+                    result[key] = (
+                        _canonical_metadata_language(value)
+                        if key == "originalLanguage"
+                        else value
+                    )
+                    break
+        return result
+
+    def resolve_facts(
+        self,
+        entity_type: str,
+        provider_ids: Iterable[dict],
+        requested: str,
+        *,
+        payloads: dict[tuple[str, str], dict] | None = None,
+    ) -> dict:
+        provider_ids = list(provider_ids)
+        payloads = payloads if payloads is not None else self.payloads(
+            entity_type, provider_ids
+        )
+        providers, tiers, available, _original = self._resolution_context(
+            entity_type, provider_ids, payloads, requested
+        )
+        return self._resolve_fact_fields(
+            payloads,
+            providers,
+            tiers,
+            available,
+            fields=FACT_FIELDS - {"trailers"},
+        )
+
+    def resolve_raw(
+        self,
+        entity_type: str,
+        provider_ids: Iterable[dict],
+        requested: str,
+        *,
+        entity_id: str | None = None,
+    ) -> dict:
+        provider_ids = list(provider_ids)
+        payloads = self.payloads(entity_type, provider_ids)
+        providers, tiers, available, original = self._resolution_context(
+            entity_type, provider_ids, payloads, requested
+        )
         result: dict = {}
 
         for key in TEXT_FIELDS:
@@ -2079,25 +2161,9 @@ class MetadataReadService:
                 if isinstance(person, dict)
             ]
 
-        for key in FACT_FIELDS:
-            for provider in providers:
-                value = next(
-                    (
-                        payloads[(provider, locale)].get(key)
-                        for tier in tiers
-                        for locale in locale_variants(tier, available)
-                        if (provider, locale) in payloads
-                        and usable_text(key, payloads[(provider, locale)].get(key))
-                    ),
-                    None,
-                )
-                if nonempty(value):
-                    result[key] = (
-                        _canonical_metadata_language(value)
-                        if key == "originalLanguage"
-                        else value
-                    )
-                    break
+        result.update(
+            self._resolve_fact_fields(payloads, providers, tiers, available)
+        )
 
         locale_order: list[str] = []
         for tier in tiers:

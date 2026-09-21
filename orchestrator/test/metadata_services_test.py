@@ -615,7 +615,9 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertNotIn("criticRating", projected)
         self.assertNotIn("date", projected)
 
-    def test_local_factual_override_survives_primary_refresh_and_restores_fallback(self):
+    def test_local_factual_override_survives_primary_refresh_and_restores_fallback(
+        self,
+    ):
         _create_projection_tables(self.db)
         self.db.execute(
             "INSERT INTO library_entities VALUES('episode','library',NULL,'episode')"

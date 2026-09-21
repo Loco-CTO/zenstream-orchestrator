@@ -2079,8 +2079,10 @@ class MetadataReadService:
         payloads: dict[tuple[str, str], dict] | None = None,
     ) -> dict:
         provider_ids = list(provider_ids)
-        payloads = payloads if payloads is not None else self.payloads(
-            entity_type, provider_ids
+        payloads = (
+            payloads
+            if payloads is not None
+            else self.payloads(entity_type, provider_ids)
         )
         providers, tiers, available, _original = self._resolution_context(
             entity_type, provider_ids, payloads, requested
@@ -2161,9 +2163,7 @@ class MetadataReadService:
                 if isinstance(person, dict)
             ]
 
-        result.update(
-            self._resolve_fact_fields(payloads, providers, tiers, available)
-        )
+        result.update(self._resolve_fact_fields(payloads, providers, tiers, available))
 
         locale_order: list[str] = []
         for tier in tiers:

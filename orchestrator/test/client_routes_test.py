@@ -16,6 +16,7 @@ def _json_request(
     host: str = "example.test",
     method: str = "POST",
     path: str = "/api/auth/browser-login",
+    cookies: dict[str, str] | None = None,
 ) -> Request:
     body = json.dumps(payload).encode("utf-8")
     delivered = False
@@ -27,6 +28,20 @@ def _json_request(
         delivered = True
         return {"type": "http.request", "body": body, "more_body": False}
 
+    headers = [
+        (b"host", host.encode("ascii")),
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]
+    if cookies:
+        headers.append(
+            (
+                b"cookie",
+                "; ".join(f"{key}={value}" for key, value in cookies.items()).encode(
+                    "ascii"
+                ),
+            )
+        )
     return Request(
         {
             "type": "http",
@@ -34,11 +49,7 @@ def _json_request(
             "scheme": scheme,
             "path": path,
             "query_string": b"",
-            "headers": [
-                (b"host", host.encode("ascii")),
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode("ascii")),
-            ],
+            "headers": headers,
             "client": ("127.0.0.1", 12345),
             "server": (host, 443 if scheme == "https" else 80),
         },
@@ -182,6 +193,90 @@ class ClientBrowserLoginRouteTest(unittest.TestCase):
         )
         scoped = next(value for value in cookies if "opaque-session" in value)
         self.assertNotIn("Secure", scoped)
+
+
+class ClientRefreshRouteTest(unittest.TestCase):
+    def setUp(self):
+        client_routes._RATE_LIMIT_EVENTS.clear()
+
+    @staticmethod
+    def _session():
+        return {
+            "token": "new-access",
+            "expiresAt": "2026-09-22T12:15:00+00:00",
+            "expiresIn": 900,
+            "refreshToken": "new-refresh",
+            "refreshExpiresAt": "2026-10-22T12:00:00+00:00",
+            "refreshExpiresIn": 2_592_000,
+            "sessionId": "session-1",
+            "user": {"id": "user-1", "username": "viewer"},
+        }
+
+    def test_bearer_refresh_returns_rotated_pair(self):
+        refreshed = self._session()
+        with patch.object(
+            client_routes,
+            "run_auth",
+            new=AsyncMock(return_value=refreshed),
+        ) as auth:
+            response = asyncio.run(
+                client_routes.refresh(
+                    _json_request({"refreshToken": "old-refresh"}, path="/api/auth/refresh")
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body), refreshed)
+        self.assertEqual(auth.await_args.args[1], "old-refresh")
+        self.assertNotIn("set-cookie", response.headers)
+
+    def test_cookie_refresh_sets_new_cookies_without_exposing_tokens(self):
+        refreshed = self._session()
+        with patch.object(
+            client_routes,
+            "run_auth",
+            new=AsyncMock(return_value=refreshed),
+        ):
+            response = asyncio.run(
+                client_routes.refresh(
+                    _json_request(
+                        {},
+                        path="/api/auth/refresh",
+                        cookies={client_routes.REFRESH_SESSION_COOKIE: "old-refresh"},
+                    )
+                )
+            )
+
+        payload = json.loads(response.body)
+        self.assertEqual(payload["user"], refreshed["user"])
+        self.assertNotIn("token", payload)
+        self.assertNotIn("refreshToken", payload)
+        cookies = [
+            value.decode("latin-1")
+            for name, value in response.raw_headers
+            if name.lower() == b"set-cookie"
+        ]
+        self.assertTrue(any("__Host-zenstream-session=new-access" in value for value in cookies))
+        self.assertTrue(
+            any("__Host-zenstream-refresh=new-refresh" in value for value in cookies)
+        )
+
+    def test_invalid_refresh_maps_to_unauthorized(self):
+        with patch.object(
+            client_routes,
+            "run_auth",
+            new=AsyncMock(side_effect=client_routes.RefreshTokenError("invalid refresh")),
+        ):
+            with self.assertRaises(client_routes.HTTPException) as raised:
+                asyncio.run(
+                    client_routes.refresh(
+                        _json_request(
+                            {"refreshToken": "invalid"}, path="/api/auth/refresh"
+                        )
+                    )
+                )
+
+        self.assertEqual(raised.exception.status_code, 401)
 
 
 class ClientAvatarRouteTest(unittest.TestCase):

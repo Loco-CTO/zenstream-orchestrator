@@ -23,6 +23,11 @@ _RESERVED_TICKET_CLAIMS = {"uid", "kind", "iat", "exp"}
 CLIENT_SESSION_COOKIE = "__Host-zenstream-session"
 DEV_CLIENT_SESSION_COOKIE = "zenstream-session"
 DEV_CLIENT_SESSION_COOKIE_PREFIX = f"{DEV_CLIENT_SESSION_COOKIE}-"
+REFRESH_SESSION_COOKIE = "__Host-zenstream-refresh"
+DEV_REFRESH_SESSION_COOKIE = "zenstream-refresh"
+DEV_REFRESH_SESSION_COOKIE_PREFIX = f"{DEV_REFRESH_SESSION_COOKIE}-"
+AUTH_FLOW_HEADER = "X-ZenStream-Auth-Flow"
+AUTH_FLOW_VERSION = "refresh-v1"
 _DEFAULT_BROWSER_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -104,6 +109,12 @@ def session_cookie_name(request: Request) -> str:
     return f"{DEV_CLIENT_SESSION_COOKIE_PREFIX}{_request_port(request)}"
 
 
+def refresh_cookie_name(request: Request) -> str:
+    if cookie_secure(request):
+        return REFRESH_SESSION_COOKIE
+    return f"{DEV_REFRESH_SESSION_COOKIE_PREFIX}{_request_port(request)}"
+
+
 def _session_cookie_token(request: Request) -> str | None:
     primary = request.cookies.get(session_cookie_name(request))
     if primary:
@@ -116,8 +127,13 @@ def _session_cookie_token(request: Request) -> str | None:
     return None
 
 
-def _token_hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+def refresh_cookie_token(request: Request) -> str | None:
+    primary = request.cookies.get(refresh_cookie_name(request))
+    if primary:
+        return primary
+    if not cookie_secure(request):
+        return request.cookies.get(DEV_REFRESH_SESSION_COOKIE)
+    return None
 
 
 def bearer_token(value: str | None) -> str | None:
@@ -141,19 +157,7 @@ def require_account(request: Request) -> tuple[dict, str]:
 
 def session_id_for_token(token: str | None) -> str | None:
     """Resolve the server-owned session id without exposing it as identity."""
-    if not token:
-        return None
-    rows = Account().db.read_execute(
-        "SELECT id FROM user_sessions WHERE token_hash=? AND expires_at>?",
-        (_token_hash(token), _iso_now()),
-    )
-    return rows[0][0] if rows else None
-
-
-def _iso_now() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
+    return Account().session_id_for_token(token)
 
 
 def optional_account(request: Request) -> tuple[dict, str] | None:
@@ -272,11 +276,7 @@ def account_from_access(
     session_id = payload.get("sessionId")
     if not isinstance(session_id, str) or not session_id:
         raise HTTPException(401, "Invalid or expired access ticket.")
-    session_rows = Account().db.read_execute(
-        "SELECT 1 FROM user_sessions WHERE id=? AND user_id=? AND expires_at>?",
-        (session_id, payload["uid"], _iso_now()),
-    )
-    if not session_rows:
+    if not account_model.session_is_valid(session_id, payload["uid"]):
         raise HTTPException(401, "Invalid or expired access ticket.")
     route_session_id = request.path_params.get("session_id")
     if claimed_entity is not None and route_session_id is not None:
@@ -305,8 +305,5 @@ def websocket_account(websocket: WebSocket) -> dict | None:
     if not rows or rows[0][4]:
         return None
     session_id = payload.get("sessionId")
-    valid_session = account_model.db.read_execute(
-        "SELECT 1 FROM user_sessions WHERE id=? AND user_id=? AND expires_at>?",
-        (session_id, payload.get("uid"), _iso_now()),
-    )
+    valid_session = account_model.session_is_valid(session_id, payload.get("uid"))
     return account_model.public(rows[0]) if valid_session else None

@@ -19,7 +19,7 @@ from app.metadata_services import (
     merge_music_projection_fallback,
     metadata_fetch_activity,
 )
-from app.models.metadata import MetadataCache
+from app.models.metadata import IMAGE_LANGUAGE_SCHEMA, MetadataCache
 
 
 class _Settings:
@@ -31,6 +31,26 @@ class _Settings:
 
     def prefer_no_language_for_backdrop(self):
         return False
+
+
+def _create_projection_tables(database):
+    for statement in (
+        "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT)",
+        "CREATE TABLE entity_provider_ids(entity_id TEXT,provider TEXT,provider_id TEXT,is_primary INTEGER)",
+        "CREATE TABLE catalog_search(entity_id TEXT,library_id TEXT,locale TEXT,title TEXT)",
+        "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,entity_type TEXT,payload TEXT,title_sort TEXT,rating_sort REAL,release_sort TEXT,runtime_sort REAL,updated_at TEXT,generation INTEGER,PRIMARY KEY(entity_id,locale))",
+        "CREATE TABLE catalog_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,parent_id TEXT,PRIMARY KEY(gram,entity_id,locale))",
+        "CREATE TABLE catalog_root_search_grams(gram TEXT,entity_id TEXT,locale TEXT,library_id TEXT,title_sort TEXT,runtime_sort REAL,PRIMARY KEY(gram,entity_id,locale))",
+        "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,genre_key TEXT,genre_name TEXT,PRIMARY KEY(entity_id,locale,genre_key))",
+        "CREATE TABLE catalog_artwork_selection(entity_id TEXT,locale TEXT,image_type TEXT,provider TEXT,local_path TEXT,blur_hash TEXT,version TEXT,updated_at TEXT,PRIMARY KEY(entity_id,locale,image_type))",
+        "CREATE TABLE metadata_images(provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,image_type TEXT,image_url TEXT,local_path TEXT,fetched_at TEXT,blur_hash TEXT)",
+        "CREATE TABLE media_files(entity_id TEXT,relative_path TEXT,role TEXT,quick_fingerprint TEXT,image_blur_hash TEXT)",
+    ):
+        database.execute(statement)
+
+
+def _encoded_metadata(payload):
+    return json.dumps({"_imageLanguageSchema": IMAGE_LANGUAGE_SCHEMA, **payload})
 
 
 class _Fetcher:
@@ -455,6 +475,241 @@ class MetadataServicesTest(unittest.TestCase):
                 self.assertEqual(restored["overview"], "Refreshed provider overview")
             finally:
                 database.close()
+
+    def test_factual_projection_uses_secondary_fallback_and_rebuilds_values(self):
+        _create_projection_tables(self.db)
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('episode','library',NULL,'episode')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('episode','tvdb','tvdb-1',1)"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('episode','tmdb','tmdb-1',0)"
+        )
+        secondary = {
+            "title": "Secondary",
+            "communityRating": 8.2,
+            "criticRating": 7.4,
+            "date": "2020-01-01",
+            "runtimeMinutes": 22,
+            "ids": [{"provider": "tmdb", "id": "tmdb-1"}],
+            "children": ["tmdb-child"],
+            "images": [],
+        }
+        primary = {
+            "title": "Primary",
+            "runtimeMinutes": 24,
+            "ids": [{"provider": "tvdb", "id": "tvdb-1"}],
+            "children": ["tvdb-child"],
+            "images": [],
+        }
+        self.db.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+            (
+                "tmdb",
+                "episode",
+                "tmdb-1",
+                "en",
+                _encoded_metadata(secondary),
+                "now",
+                "later",
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+            (
+                "tvdb",
+                "episode",
+                "tvdb-1",
+                "en",
+                _encoded_metadata(primary),
+                "now",
+                "later",
+            ),
+        )
+        projection = MetadataSearchProjection(self.db)
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en"]),
+        ):
+            projection.project("tmdb", "episode", "tmdb-1", "en", secondary)
+            projection.project(
+                "tvdb",
+                "episode",
+                "tvdb-1",
+                "en",
+                primary,
+                replace_metadata=True,
+            )
+        projected = json.loads(
+            self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id='episode'"
+            )[0][0]
+        )
+        self.assertEqual(projected["title"], "Primary")
+        self.assertEqual(projected["communityRating"], 8.2)
+        self.assertEqual(projected["criticRating"], 7.4)
+        self.assertEqual(projected["date"], "2020-01-01")
+        self.assertEqual(projected["runtimeMinutes"], 24)
+        self.assertEqual(projected["ids"], primary["ids"])
+        self.assertEqual(projected["children"], primary["children"])
+
+        primary_with_facts = {
+            **primary,
+            "communityRating": 7.1,
+            "date": "2026-02-03",
+        }
+        self.db.execute(
+            "UPDATE metadata_cache SET payload=? WHERE provider='tvdb'",
+            (_encoded_metadata(primary_with_facts),),
+        )
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en"]),
+        ):
+            projection.project(
+                "tvdb",
+                "episode",
+                "tvdb-1",
+                "en",
+                primary_with_facts,
+                replace_metadata=True,
+            )
+        projected = json.loads(
+            self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id='episode'"
+            )[0][0]
+        )
+        self.assertEqual(projected["communityRating"], 7.1)
+        self.assertEqual(projected["date"], "2026-02-03")
+
+        secondary_without_facts = {"title": "Secondary", "images": []}
+        primary_without_facts = {"title": "Primary", "images": []}
+        self.db.execute(
+            "UPDATE metadata_cache SET payload=? WHERE provider='tmdb'",
+            (_encoded_metadata(secondary_without_facts),),
+        )
+        self.db.execute(
+            "UPDATE metadata_cache SET payload=? WHERE provider='tvdb'",
+            (_encoded_metadata(primary_without_facts),),
+        )
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en"]),
+        ):
+            projection.project(
+                "tvdb",
+                "episode",
+                "tvdb-1",
+                "en",
+                primary_without_facts,
+                replace_metadata=True,
+            )
+        projected = json.loads(
+            self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id='episode'"
+            )[0][0]
+        )
+        self.assertNotIn("communityRating", projected)
+        self.assertNotIn("criticRating", projected)
+        self.assertNotIn("date", projected)
+
+    def test_local_factual_override_survives_primary_refresh_and_restores_fallback(
+        self,
+    ):
+        _create_projection_tables(self.db)
+        self.db.execute(
+            "INSERT INTO library_entities VALUES('episode','library',NULL,'episode')"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('episode','tvdb','tvdb-1',1)"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('episode','tmdb','tmdb-1',0)"
+        )
+        self.db.execute(
+            "INSERT INTO entity_provider_ids VALUES('episode','local','episode',0)"
+        )
+        secondary = {"title": "Secondary", "communityRating": 8.2, "images": []}
+        primary = {"title": "Primary", "images": []}
+        local = {"title": "Local", "communityRating": 9.5, "images": []}
+        for provider, provider_id, payload in (
+            ("tmdb", "tmdb-1", secondary),
+            ("tvdb", "tvdb-1", primary),
+            ("local", "episode", local),
+        ):
+            self.db.execute(
+                "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+                (
+                    provider,
+                    "episode",
+                    provider_id,
+                    "en",
+                    _encoded_metadata(payload),
+                    "now",
+                    "later",
+                ),
+            )
+        projection = MetadataSearchProjection(self.db)
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en"]),
+        ):
+            projection.project("tmdb", "episode", "tmdb-1", "en", secondary)
+            projection.project(
+                "tvdb",
+                "episode",
+                "tvdb-1",
+                "en",
+                primary,
+                replace_metadata=True,
+            )
+            projection.project(
+                "local",
+                "episode",
+                "episode",
+                "en",
+                local,
+                replace_metadata=True,
+            )
+            projection.project(
+                "tvdb",
+                "episode",
+                "tvdb-1",
+                "en",
+                primary,
+                replace_metadata=True,
+            )
+        projected = json.loads(
+            self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id='episode'"
+            )[0][0]
+        )
+        self.assertEqual(projected["communityRating"], 9.5)
+
+        self.db.execute(
+            "UPDATE metadata_cache SET payload=? WHERE provider='local'",
+            (_encoded_metadata({"title": "Local", "images": []}),),
+        )
+        with patch(
+            "app.metadata_services.MetadataLanguageSettings",
+            return_value=_Settings(["en"]),
+        ):
+            projection.project(
+                "local",
+                "episode",
+                "episode",
+                "en",
+                {"title": "Local", "images": []},
+                replace_metadata=True,
+            )
+        projected = json.loads(
+            self.db.execute(
+                "SELECT payload FROM catalog_item_projection WHERE entity_id='episode'"
+            )[0][0]
+        )
+        self.assertEqual(projected["communityRating"], 8.2)
 
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")

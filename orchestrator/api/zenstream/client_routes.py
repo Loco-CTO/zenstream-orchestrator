@@ -27,11 +27,18 @@ from app.catalog import Catalog
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import (
     ARTWORK_TICKET_TTL_SECONDS,
+    AUTH_FLOW_HEADER,
+    AUTH_FLOW_VERSION,
     CLIENT_SESSION_COOKIE,
     DEV_CLIENT_SESSION_COOKIE,
+    DEV_REFRESH_SESSION_COOKIE,
+    REFRESH_SESSION_COOKIE,
     account_from_access,
+    bearer_token,
     cookie_secure,
     issue_ticket,
+    refresh_cookie_name,
+    refresh_cookie_token,
     require_account,
     session_cookie_name,
     session_id_for_token,
@@ -45,7 +52,7 @@ from app.local_metadata import local_artwork_type
 from app.logging_config import get_logger
 from app.lyrics import lyrics_to_vtt
 from app.metadata_services import asset_executor
-from app.models.account import Account
+from app.models.account import Account, RefreshTokenError
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
 from app.models.playback_viewer import PlaybackViewerStore, normalize_device_metadata
@@ -264,18 +271,34 @@ def _authenticate_and_create_session(
     password: str,
     device_metadata: dict | None = None,
     ip_address: str | None = None,
+    supports_refresh: bool = False,
 ):
     account_model = Account()
     account = account_model.authenticate_password(username, password)
     if not account:
         return None
     if device_metadata is None:
-        session = account_model.create_session(account["id"])
+        if supports_refresh:
+            session = account_model.create_session(account["id"], supports_refresh=True)
+        else:
+            session = account_model.create_session(account["id"])
     else:
-        session = account_model.create_session(
-            account["id"], device_metadata=device_metadata, ip_address=ip_address
-        )
+        if supports_refresh:
+            session = account_model.create_session(
+                account["id"],
+                device_metadata=device_metadata,
+                ip_address=ip_address,
+                supports_refresh=True,
+            )
+        else:
+            session = account_model.create_session(
+                account["id"], device_metadata=device_metadata, ip_address=ip_address
+            )
     return account, session
+
+
+def _supports_refresh_flow(data: dict) -> bool:
+    return data.get("authFlow") == AUTH_FLOW_VERSION
 
 
 def _heartbeat_playback_viewer(
@@ -454,6 +477,33 @@ async def _bounded_json_object(
     return value
 
 
+def _clear_browser_refresh_cookies(response: Response, request: Request) -> None:
+    refresh_primary = refresh_cookie_name(request)
+    response.delete_cookie(
+        refresh_primary,
+        secure=cookie_secure(request),
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    if refresh_primary != REFRESH_SESSION_COOKIE:
+        response.delete_cookie(
+            REFRESH_SESSION_COOKIE,
+            secure=True,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    if refresh_primary != DEV_REFRESH_SESSION_COOKIE:
+        response.delete_cookie(
+            DEV_REFRESH_SESSION_COOKIE,
+            secure=False,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+
+
 def _clear_browser_session_cookies(response: Response, request: Request) -> None:
     primary_cookie = session_cookie_name(request)
     response.delete_cookie(
@@ -475,6 +525,44 @@ def _clear_browser_session_cookies(response: Response, request: Request) -> None
         response.delete_cookie(
             DEV_CLIENT_SESSION_COOKIE,
             secure=False,
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    _clear_browser_refresh_cookies(response, request)
+
+
+def _set_browser_session_cookies(
+    response: Response, request: Request, session: dict
+) -> None:
+    access_max_age = max(1, int(session.get("expiresIn") or 7 * 24 * 60 * 60))
+    response.set_cookie(
+        session_cookie_name(request),
+        session["token"],
+        max_age=access_max_age,
+        secure=cookie_secure(request),
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    refresh_token = session.get("refreshToken")
+    if refresh_token:
+        response.set_cookie(
+            refresh_cookie_name(request),
+            refresh_token,
+            max_age=max(1, int(session.get("refreshExpiresIn") or 30 * 24 * 60 * 60)),
+            secure=cookie_secure(request),
+            httponly=True,
+            samesite="strict",
+            path="/",
+        )
+    else:
+        _clear_browser_session_cookies(response, request)
+        response.set_cookie(
+            session_cookie_name(request),
+            session["token"],
+            max_age=access_max_age,
+            secure=cookie_secure(request),
             httponly=True,
             samesite="strict",
             path="/",
@@ -611,6 +699,7 @@ async def login(request: Request):
         password,
         _request_device_metadata(data),
         _client_address(request),
+        _supports_refresh_flow(data),
     )
 
     if not authenticated:
@@ -697,7 +786,22 @@ async def auth_bootstrap(request: Request):
     catalog JSON can render before artwork authorization is available.
     """
     account, token = await _require_account(request)
-    session_id = await run_auth(session_id_for_token, token)
+    upgraded_session = None
+    if request.headers.get(AUTH_FLOW_HEADER) == AUTH_FLOW_VERSION:
+        upgraded_session = await run_auth(
+            Account().upgrade_legacy_session,
+            token,
+            None,
+            _client_address(request),
+        )
+        if upgraded_session:
+            account = upgraded_session["user"]
+            token = upgraded_session["token"]
+            session_id = upgraded_session["sessionId"]
+        else:
+            session_id = await run_auth(session_id_for_token, token)
+    else:
+        session_id = await run_auth(session_id_for_token, token)
     if not session_id:
         raise HTTPException(401, "Authentication required.")
     preference = AccountPreference(account["id"])
@@ -706,7 +810,7 @@ async def auth_bootstrap(request: Request):
         run_control(preference.metadata_language),
         run_control(MetadataLanguageSettings().get),
     )
-    return {
+    payload = {
         "user": account,
         "resourceTicket": issue_ticket(
             account["id"],
@@ -727,6 +831,24 @@ async def auth_bootstrap(request: Request):
         "languages": languages,
         "languageOptions": language_options(locale),
     }
+    if upgraded_session:
+        if bearer_token(request.headers.get("authorization")):
+            payload.update(
+                {
+                    "token": upgraded_session["token"],
+                    "expiresAt": upgraded_session["expiresAt"],
+                    "expiresIn": upgraded_session["expiresIn"],
+                    "refreshToken": upgraded_session["refreshToken"],
+                    "refreshExpiresAt": upgraded_session["refreshExpiresAt"],
+                    "refreshExpiresIn": upgraded_session["refreshExpiresIn"],
+                    "sessionId": upgraded_session["sessionId"],
+                }
+            )
+            return payload
+        response = JSONResponse(payload)
+        _set_browser_session_cookies(response, request, upgraded_session)
+        return response
+    return payload
 
 
 @router.post("/api/auth/browser-login")
@@ -742,27 +864,45 @@ async def browser_login(request: Request):
         password,
         _request_device_metadata(data),
         _client_address(request),
+        _supports_refresh_flow(data),
     )
     if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
     account, session = authenticated
     response = JSONResponse({"user": account}, status_code=200)
-    response.set_cookie(
-        session_cookie_name(request),
-        session["token"],
-        max_age=7 * 24 * 60 * 60,
-        secure=cookie_secure(request),
-        httponly=True,
-        samesite="strict",
-        path="/",
-    )
-    response.delete_cookie(
-        DEV_CLIENT_SESSION_COOKIE,
-        secure=False,
-        httponly=True,
-        samesite="strict",
-        path="/",
-    )
+    _set_browser_session_cookies(response, request, session)
+    return response
+
+
+@router.post("/api/auth/refresh")
+async def refresh(request: Request):
+    _enforce_rate_limit(request, "refresh", 60)
+    data = await _bounded_json_object(request, allow_empty=True)
+    supplied_cookie = refresh_cookie_token(request)
+    refresh_token = str(data.get("refreshToken") or supplied_cookie or "")
+    if not refresh_token:
+        raise HTTPException(401, "Authentication required.")
+    try:
+        session = await run_auth(
+            Account().refresh_session,
+            refresh_token,
+            _request_device_metadata(data),
+            _client_address(request),
+        )
+    except RefreshTokenError as error:
+        raise HTTPException(401, str(error)) from error
+    if supplied_cookie:
+        payload = {
+            "user": session["user"],
+            "expiresAt": session.get("expiresAt"),
+            "expiresIn": session.get("expiresIn"),
+        }
+    else:
+        payload = {key: value for key, value in session.items() if key != "user"}
+        payload["user"] = session["user"]
+    response = JSONResponse(payload, status_code=200)
+    if supplied_cookie:
+        _set_browser_session_cookies(response, request, session)
     return response
 
 

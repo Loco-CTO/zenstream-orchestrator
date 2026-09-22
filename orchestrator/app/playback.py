@@ -1080,6 +1080,7 @@ class PlaybackManager:
                 "mimeType": self._mime(source),
                 "startPositionSeconds": start_time,
                 "durationSeconds": source.get("durationSeconds"),
+                "accessExpiresIn": PLAYBACK_RESOURCE_TICKET_TTL_SECONDS,
             }
             if viewer_id:
                 result["viewerSessionId"] = viewer_id
@@ -1101,6 +1102,7 @@ class PlaybackManager:
         result["audioStreamId"] = profile.get("audioStreamId")
         result["startPositionSeconds"] = start_time
         result["durationSeconds"] = source.get("durationSeconds")
+        result["accessExpiresIn"] = PLAYBACK_RESOURCE_TICKET_TTL_SECONDS
         viewer_id = self._register_viewer(
             user_id,
             entity_id,

@@ -34,6 +34,15 @@ _DEFAULT_BROWSER_ORIGINS = (
     "http://localhost:3001",
     "http://127.0.0.1:3001",
 )
+_PRIVATE_LAN_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+_DEV_LAN_ORIGIN_REGEX = (
+    r"^http://(?:(?:10(?:\.\d{1,3}){3})|"
+    r"(?:172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})|"
+    r"(?:192\.168(?:\.\d{1,3}){2})):3000$"
+)
 
 
 def _normalized_origin(value: str | None) -> str | None:
@@ -54,6 +63,11 @@ def browser_origins() -> list[str]:
         values.append(public_web_url)
     values.extend(_DEFAULT_BROWSER_ORIGINS)
     return list(dict.fromkeys(filter(None, map(_normalized_origin, values))))
+
+
+def browser_origin_regex() -> str | None:
+    """Allow a private-IP Next.js dev origin only while the reloader is enabled."""
+    return _DEV_LAN_ORIGIN_REGEX if _dev_reloader_enabled() else None
 
 
 def administrator_origin_allowed(request: Request) -> bool:
@@ -96,11 +110,29 @@ def _is_loopback_host(hostname: str) -> bool:
         return False
 
 
-def cookie_secure(request: Request) -> bool:
-    """Use secure cookies in production; permit explicit loopback HTTP development."""
-    return request.url.scheme == "https" or not _is_loopback_host(
-        _request_hostname(request)
+def _dev_reloader_enabled() -> bool:
+    return os.getenv("USE_RELOADER", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _is_private_lan_host(hostname: str) -> bool:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return any(
+        address.version == network.version and address in network
+        for network in _PRIVATE_LAN_NETWORKS
     )
+
+
+def cookie_secure(request: Request) -> bool:
+    """Require HTTPS outside loopback, except private LAN hosts in dev reload mode."""
+    if request.url.scheme == "https":
+        return True
+    hostname = _request_hostname(request)
+    if _is_loopback_host(hostname):
+        return False
+    return not (_dev_reloader_enabled() and _is_private_lan_host(hostname))
 
 
 def session_cookie_name(request: Request) -> str:

@@ -12,6 +12,7 @@ import traceback
 import unicodedata
 import uuid
 from bisect import bisect_left
+from contextlib import contextmanager
 from collections import deque
 from collections.abc import Callable, Iterable
 from concurrent.futures import (
@@ -11323,14 +11324,19 @@ class CatalogWorkCoordinator:
         self._active_inventory = 0
         self._metadata_active = False
         self._metadata_waiters = 0
+        self._metadata_suspended = 0
 
     def can_start_inventory(self) -> bool:
         with self._condition:
-            return not self._metadata_active and self._metadata_waiters == 0
+            return not self._metadata_active and (
+                not self._metadata_waiters or self._metadata_suspended
+            )
 
     def acquire_inventory(self) -> None:
         with self._condition:
-            while self._metadata_active or self._metadata_waiters:
+            while self._metadata_active or (
+                self._metadata_waiters and not self._metadata_suspended
+            ):
                 self._condition.wait()
             self._active_inventory += 1
 
@@ -11343,11 +11349,42 @@ class CatalogWorkCoordinator:
         with self._condition:
             self._metadata_waiters += 1
             try:
-                while self._metadata_active or self._active_inventory:
+                while (
+                    self._metadata_active
+                    or self._active_inventory
+                    or self._metadata_suspended
+                ):
                     self._condition.wait()
                 self._metadata_active = True
             finally:
                 self._metadata_waiters = max(0, self._metadata_waiters - 1)
+
+    @contextmanager
+    def suspend_metadata(self):
+        """Temporarily admit nested inventory without admitting metadata."""
+        with self._condition:
+            if not self._metadata_active:
+                raise RuntimeError("metadata work is not active")
+            self._metadata_active = False
+            self._metadata_suspended += 1
+            self._condition.notify_all()
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._metadata_suspended = max(0, self._metadata_suspended - 1)
+                self._metadata_waiters += 1
+                try:
+                    while (
+                        self._metadata_active
+                        or self._active_inventory
+                        or self._metadata_suspended
+                    ):
+                        self._condition.wait()
+                    self._metadata_active = True
+                finally:
+                    self._metadata_waiters = max(0, self._metadata_waiters - 1)
+                    self._condition.notify_all()
 
     def release_metadata(self) -> None:
         with self._condition:

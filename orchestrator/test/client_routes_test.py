@@ -266,21 +266,21 @@ class ClientRefreshRouteTest(unittest.TestCase):
         )
 
     def test_invalid_refresh_maps_to_unauthorized(self):
-        with patch.object(
-            client_routes,
-            "run_auth",
-            new=AsyncMock(
-                side_effect=client_routes.RefreshTokenError("invalid refresh")
+        with (
+            patch.object(
+                client_routes,
+                "run_auth",
+                new=AsyncMock(
+                    side_effect=client_routes.RefreshTokenError("invalid refresh")
+                ),
             ),
+            self.assertRaises(client_routes.HTTPException) as raised,
         ):
-            with self.assertRaises(client_routes.HTTPException) as raised:
-                asyncio.run(
-                    client_routes.refresh(
-                        _json_request(
-                            {"refreshToken": "invalid"}, path="/api/auth/refresh"
-                        )
-                    )
+            asyncio.run(
+                client_routes.refresh(
+                    _json_request({"refreshToken": "invalid"}, path="/api/auth/refresh")
                 )
+            )
 
         self.assertEqual(raised.exception.status_code, 401)
 

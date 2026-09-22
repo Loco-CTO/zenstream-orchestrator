@@ -22,7 +22,7 @@ from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_ope
 from app.artwork_variants import queue_selected, record_sweep_error
 from app.artwork_variants import stop_all as stop_artwork_variants
 from app.catalog_read_model import CatalogReadModel
-from app.client_auth import browser_origins
+from app.client_auth import browser_origin_regex, browser_origins
 from app.config import Config, load_config
 from app.foreground import (
     active_auth_work,
@@ -179,6 +179,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=browser_origins(),
+    allow_origin_regex=browser_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

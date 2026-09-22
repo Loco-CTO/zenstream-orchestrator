@@ -6,6 +6,7 @@ import threading
 import time
 import traceback
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,11 +53,9 @@ METADATA_MISSING_RETRY_BASE_SECONDS = 60 * 60
 METADATA_MISSING_RETRY_MAX_SECONDS = 7 * 24 * 60 * 60
 METADATA_IDENTITY_PROVIDER = "__identity__"
 METADATA_JOB_KINDS = {"metadata_missing", "metadata_upgrade", "metadata_refresh"}
-# Orphan cleanup can delete catalog/cache rows without needing the library
-# runtime. Give it an exclusive window against inventory admission; metadata
-# upgrade/refresh page writes are fenced by CatalogReadModel instead, so a
-# multi-hour metadata walk cannot starve a library scan.
-CATALOG_EXCLUSIVE_KINDS = {"metadata_cleanup"}
+# Catalog-mutating metadata jobs need the same exclusive window as orphan
+# cleanup so their read-model snapshots cannot overlap inventory admission.
+CATALOG_EXCLUSIVE_KINDS = METADATA_JOB_KINDS | {"metadata_cleanup"}
 JOB_DISPATCH_BACKOFF_INITIAL = 0.25
 JOB_DISPATCH_BACKOFF_MAX = 5.0
 METADATA_UPGRADE_VERSION = 1
@@ -2119,7 +2118,12 @@ class JobStore:
 
 
 class MetadataMissingJob:
-    def __init__(self, store: JobStore, library_runtime=None):
+    def __init__(
+        self,
+        store: JobStore,
+        library_runtime=None,
+        catalog_work_coordinator: CatalogWorkCoordinator | None = None,
+    ):
         self.store = store
         self.db = store.db
         self.library_runtime = (
@@ -2127,6 +2131,17 @@ class MetadataMissingJob:
             if library_runtime is not None
             else globals().get("library_runtime")
         )
+        self.catalog_work_coordinator = catalog_work_coordinator
+
+    @contextmanager
+    def _suspend_metadata_catalog_lock(self):
+        """Allow providerless recovery to run its nested library reconcile."""
+        coordinator = self.catalog_work_coordinator
+        if coordinator is None:
+            yield
+            return
+        with coordinator.suspend_metadata():
+            yield
 
     def _missing_primary_entity_rows(self) -> list[tuple]:
         """Find non-manual entities invisible to provider-ID worklists."""
@@ -2406,61 +2421,62 @@ class MetadataMissingJob:
                 if not targets:
                     error_text = "Providerless entities have no targetable library path"
                     raise RuntimeError(error_text)
-                job = runtime.enqueue(
-                    library_id,
-                    "reconcile",
-                    targets=targets,
-                    force_metadata=True,
-                )
-                if not job:
-                    error_text = "Library reconcile could not be queued"
-                    failures.append(
-                        {
-                            "kind": "identity_recovery",
-                            "libraryId": library_id,
-                            "name": name,
-                            "error": error_text,
-                        }
+                with self._suspend_metadata_catalog_lock():
+                    job = runtime.enqueue(
+                        library_id,
+                        "reconcile",
+                        targets=targets,
+                        force_metadata=True,
                     )
-                    for row in library_rows:
-                        _record_metadata_recovery_state(
-                            self.db,
-                            METADATA_IDENTITY_PROVIDER,
-                            row[3],
-                            row[0],
-                            error=error_text,
-                            source_job_id=run_id,
+                    if not job:
+                        error_text = "Library reconcile could not be queued"
+                        failures.append(
+                            {
+                                "kind": "identity_recovery",
+                                "libraryId": library_id,
+                                "name": name,
+                                "error": error_text,
+                            }
                         )
-                    continue
-                was_active = job.get("state") in {
-                    "running",
-                    "terminating",
-                }
-                result = runtime.wait_for_job(
-                    job["id"],
-                    should_terminate=should_terminate,
-                )
-                if should_terminate():
-                    raise JobTerminated()
-                if not result or result.get("state") not in {
-                    "completed",
-                    "completed_with_warnings",
-                }:
-                    error_text = (result.get("error") if result else None) or (
-                        f"Library reconcile ended in {result.get('state')}"
-                        if result
-                        else "Library reconcile result was not found"
+                        for row in library_rows:
+                            _record_metadata_recovery_state(
+                                self.db,
+                                METADATA_IDENTITY_PROVIDER,
+                                row[3],
+                                row[0],
+                                error=error_text,
+                                source_job_id=run_id,
+                            )
+                        continue
+                    was_active = job.get("state") in {
+                        "running",
+                        "terminating",
+                    }
+                    result = runtime.wait_for_job(
+                        job["id"],
+                        should_terminate=should_terminate,
                     )
-                    failures.append(
-                        {
-                            "kind": "identity_recovery",
-                            "libraryId": library_id,
-                            "name": name,
-                            "jobId": job.get("id"),
-                            "state": result.get("state") if result else "missing",
-                            "error": error_text,
-                        }
-                    )
+                    if should_terminate():
+                        raise JobTerminated()
+                    if not result or result.get("state") not in {
+                        "completed",
+                        "completed_with_warnings",
+                    }:
+                        error_text = (result.get("error") if result else None) or (
+                            f"Library reconcile ended in {result.get('state')}"
+                            if result
+                            else "Library reconcile result was not found"
+                        )
+                        failures.append(
+                            {
+                                "kind": "identity_recovery",
+                                "libraryId": library_id,
+                                "name": name,
+                                "jobId": job.get("id"),
+                                "state": result.get("state") if result else "missing",
+                                "error": error_text,
+                            }
+                        )
                 remaining_ids = {
                     row[0]
                     for row in self._missing_primary_entity_rows()
@@ -2471,50 +2487,51 @@ class MetadataMissingJob:
                 # follow-up, never another library-wide pass or an unbounded
                 # feedback loop.
                 if not error_text and was_active and remaining_ids:
-                    retry_job = runtime.enqueue(
-                        library_id,
-                        "reconcile",
-                        targets=targets,
-                        force_metadata=True,
-                    )
-                    if retry_job:
-                        retry_result = runtime.wait_for_job(
-                            retry_job["id"],
-                            should_terminate=should_terminate,
+                    with self._suspend_metadata_catalog_lock():
+                        retry_job = runtime.enqueue(
+                            library_id,
+                            "reconcile",
+                            targets=targets,
+                            force_metadata=True,
                         )
-                        if should_terminate():
-                            raise JobTerminated()
-                        if not retry_result or retry_result.get("state") not in {
-                            "completed",
-                            "completed_with_warnings",
-                        }:
-                            error_text = (
-                                retry_result.get("error") if retry_result else None
-                            ) or (
-                                f"Targeted recovery reconcile ended in {retry_result.get('state')}"
-                                if retry_result
-                                else "Targeted recovery reconcile result was not found"
+                        if retry_job:
+                            retry_result = runtime.wait_for_job(
+                                retry_job["id"],
+                                should_terminate=should_terminate,
                             )
-                            failures.append(
-                                {
-                                    "kind": "identity_recovery",
-                                    "libraryId": library_id,
-                                    "name": name,
-                                    "jobId": retry_job.get("id"),
-                                    "state": (
-                                        retry_result.get("state")
-                                        if retry_result
-                                        else "missing"
-                                    ),
-                                    "error": (error_text),
+                            if should_terminate():
+                                raise JobTerminated()
+                            if not retry_result or retry_result.get("state") not in {
+                                "completed",
+                                "completed_with_warnings",
+                            }:
+                                error_text = (
+                                    retry_result.get("error") if retry_result else None
+                                ) or (
+                                    f"Targeted recovery reconcile ended in {retry_result.get('state')}"
+                                    if retry_result
+                                    else "Targeted recovery reconcile result was not found"
+                                )
+                                failures.append(
+                                    {
+                                        "kind": "identity_recovery",
+                                        "libraryId": library_id,
+                                        "name": name,
+                                        "jobId": retry_job.get("id"),
+                                        "state": (
+                                            retry_result.get("state")
+                                            if retry_result
+                                            else "missing"
+                                        ),
+                                        "error": (error_text),
+                                    }
+                                )
+                            else:
+                                remaining_ids = {
+                                    row[0]
+                                    for row in self._missing_primary_entity_rows()
+                                    if row[1] == library_id
                                 }
-                            )
-                        else:
-                            remaining_ids = {
-                                row[0]
-                                for row in self._missing_primary_entity_rows()
-                                if row[1] == library_id
-                            }
                 if error_text:
                     for row in library_rows:
                         _record_metadata_recovery_state(
@@ -4931,9 +4948,12 @@ class JobScheduler:
                 catalog_work_acquired = True
             self.store.begin_progress(run_id, kind)
             if kind == "metadata_missing":
-                MetadataMissingJob(self.store).run(
-                    run_id, definition, self.cancel_events[run_id].is_set
-                )
+                MetadataMissingJob(
+                    self.store,
+                    catalog_work_coordinator=(
+                        coordinator if catalog_work_acquired else None
+                    ),
+                ).run(run_id, definition, self.cancel_events[run_id].is_set)
             elif kind == "metadata_upgrade":
                 MetadataUpgradeJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set
@@ -4944,7 +4964,12 @@ class JobScheduler:
                 )
             elif kind == "metadata_refresh":
                 if bool(run_options.get("refreshAll", False)):
-                    MetadataMissingJob(self.store).run(
+                    MetadataMissingJob(
+                        self.store,
+                        catalog_work_coordinator=(
+                            coordinator if catalog_work_acquired else None
+                        ),
+                    ).run(
                         run_id,
                         definition,
                         self.cancel_events[run_id].is_set,

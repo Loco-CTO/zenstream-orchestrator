@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from app.database import DatabaseHandler
 from app.jobs import (
+    CATALOG_EXCLUSIVE_KINDS,
     METADATA_UPGRADE_VERSION,
     AnalysisMaintenanceTimeout,
     JobScheduler,
@@ -531,14 +532,27 @@ class MetadataMissingInspectionTest(unittest.TestCase):
                 ),
             },
         )()
+        coordinator = CatalogWorkCoordinator()
+        coordinator.acquire_metadata()
         runtime = MagicMock()
         runtime.thread = None
         runtime.enqueue.return_value = {"id": "scan-1", "state": "queued"}
         runtime.wait_for_job.return_value = {"id": "scan-1", "state": "completed"}
 
-        failures, incomplete = MetadataMissingJob(
-            store, runtime
-        )._recover_missing_primary_entities("run-1", lambda: False)
+        def enqueue(*args, **kwargs):
+            self.assertTrue(coordinator.can_start_inventory())
+            return {"id": "scan-1", "state": "queued"}
+
+        runtime.enqueue.side_effect = enqueue
+
+        try:
+            failures, incomplete = MetadataMissingJob(
+                store,
+                runtime,
+                catalog_work_coordinator=coordinator,
+            )._recover_missing_primary_entities("run-1", lambda: False)
+        finally:
+            coordinator.release_metadata()
 
         self.assertEqual(failures, [])
         self.assertEqual(incomplete[0]["libraryId"], "library-1")
@@ -2132,6 +2146,112 @@ class CatalogWorkCoordinatorTest(unittest.TestCase):
         self.assertFalse(coordinator.can_start_inventory())
         coordinator.release_metadata()
         worker.join(timeout=1)
+        self.assertTrue(coordinator.can_start_inventory())
+
+    def test_metadata_recovery_releases_lock_for_nested_reconcile(self):
+        coordinator = CatalogWorkCoordinator()
+        coordinator.acquire_metadata()
+        job = MetadataMissingJob.__new__(MetadataMissingJob)
+        job.catalog_work_coordinator = coordinator
+
+        with job._suspend_metadata_catalog_lock():
+            self.assertTrue(coordinator.can_start_inventory())
+
+        self.assertFalse(coordinator.can_start_inventory())
+        coordinator.release_metadata()
+        self.assertTrue(coordinator.can_start_inventory())
+
+    def test_metadata_suspension_blocks_other_metadata_but_allows_inventory(self):
+        coordinator = CatalogWorkCoordinator()
+        coordinator.acquire_metadata()
+        metadata_started = threading.Event()
+
+        def wait_for_metadata():
+            coordinator.acquire_metadata()
+            metadata_started.set()
+            coordinator.release_metadata()
+
+        waiter = threading.Thread(target=wait_for_metadata)
+        waiter.start()
+        try:
+            self.assertFalse(metadata_started.wait(0.05))
+            with coordinator.suspend_metadata():
+                self.assertTrue(coordinator.can_start_inventory())
+                coordinator.acquire_inventory()
+                coordinator.release_inventory()
+                self.assertFalse(metadata_started.is_set())
+            coordinator.release_metadata()
+            self.assertTrue(metadata_started.wait(1))
+        finally:
+            coordinator.release_metadata()
+            waiter.join(timeout=1)
+        self.assertFalse(waiter.is_alive())
+
+    def test_metadata_catalog_jobs_are_exclusive_but_music_repair_is_nested_scan(self):
+        self.assertTrue(
+            {"metadata_missing", "metadata_upgrade", "metadata_refresh"}
+            <= CATALOG_EXCLUSIVE_KINDS
+        )
+        self.assertIn("metadata_cleanup", CATALOG_EXCLUSIVE_KINDS)
+        self.assertNotIn("music_catalog_repair", CATALOG_EXCLUSIVE_KINDS)
+
+
+class CatalogWorkSchedulerTest(unittest.TestCase):
+    def _scheduler(self, kind):
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = MagicMock()
+        scheduler.store.db.execute.side_effect = [
+            [(0, "options")],
+            [("run-1", "definition-1", kind, "{}", "Catalog task", "{}")],
+            [],
+        ]
+        scheduler.store.definition.return_value = {
+            "id": "definition-1",
+            "kind": kind,
+            "config": {},
+            "name": "Catalog task",
+        }
+        scheduler.library_runtime = MagicMock()
+        scheduler.catalog_work_coordinator = CatalogWorkCoordinator()
+        scheduler.cancel_events = {"run-1": threading.Event()}
+        scheduler.active = {"run-1"}
+        scheduler.active_definitions = {"definition-1"}
+        scheduler.worker_threads = {"run-1": threading.current_thread()}
+        scheduler.active_lock = threading.RLock()
+        scheduler.stop_event = threading.Event()
+        scheduler.condition = threading.Condition()
+        return scheduler
+
+    def test_metadata_refresh_waits_for_inventory_before_running(self):
+        scheduler = self._scheduler("metadata_refresh")
+        coordinator = scheduler.catalog_work_coordinator
+        coordinator.acquire_inventory()
+        body_started = threading.Event()
+
+        with patch("app.jobs.MetadataRefreshJob") as job_class:
+
+            def run(*args, **kwargs):
+                body_started.set()
+
+            job_class.return_value.run.side_effect = run
+            worker = threading.Thread(target=scheduler._execute, args=("run-1",))
+            worker.start()
+            self.assertFalse(body_started.wait(0.05))
+            coordinator.release_inventory()
+            self.assertTrue(body_started.wait(1))
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(coordinator.can_start_inventory())
+
+    def test_metadata_failure_releases_catalog_lock(self):
+        scheduler = self._scheduler("metadata_upgrade")
+        coordinator = scheduler.catalog_work_coordinator
+
+        with patch("app.jobs.MetadataUpgradeJob") as job_class:
+            job_class.return_value.run.side_effect = RuntimeError("provider failed")
+            scheduler._execute("run-1")
+
         self.assertTrue(coordinator.can_start_inventory())
 
 

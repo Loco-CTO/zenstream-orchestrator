@@ -12,7 +12,6 @@ import traceback
 import unicodedata
 import uuid
 from bisect import bisect_left
-from contextlib import contextmanager
 from collections import deque
 from collections.abc import Callable, Iterable
 from concurrent.futures import (
@@ -22,6 +21,7 @@ from concurrent.futures import (
     as_completed,
     wait,
 )
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone

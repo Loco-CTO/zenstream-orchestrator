@@ -2229,6 +2229,7 @@ class CatalogWorkSchedulerTest(unittest.TestCase):
         body_started = threading.Event()
 
         with patch("app.jobs.MetadataRefreshJob") as job_class:
+
             def run(*args, **kwargs):
                 body_started.set()
 

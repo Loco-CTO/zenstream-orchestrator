@@ -4953,9 +4953,7 @@ class JobScheduler:
                     catalog_work_coordinator=(
                         coordinator if catalog_work_acquired else None
                     ),
-                ).run(
-                    run_id, definition, self.cancel_events[run_id].is_set
-                )
+                ).run(run_id, definition, self.cancel_events[run_id].is_set)
             elif kind == "metadata_upgrade":
                 MetadataUpgradeJob(self.store).run(
                     run_id, definition, self.cancel_events[run_id].is_set

@@ -221,7 +221,9 @@ class ClientRefreshRouteTest(unittest.TestCase):
         ) as auth:
             response = asyncio.run(
                 client_routes.refresh(
-                    _json_request({"refreshToken": "old-refresh"}, path="/api/auth/refresh")
+                    _json_request(
+                        {"refreshToken": "old-refresh"}, path="/api/auth/refresh"
+                    )
                 )
             )
 
@@ -256,7 +258,9 @@ class ClientRefreshRouteTest(unittest.TestCase):
             for name, value in response.raw_headers
             if name.lower() == b"set-cookie"
         ]
-        self.assertTrue(any("__Host-zenstream-session=new-access" in value for value in cookies))
+        self.assertTrue(
+            any("__Host-zenstream-session=new-access" in value for value in cookies)
+        )
         self.assertTrue(
             any("__Host-zenstream-refresh=new-refresh" in value for value in cookies)
         )
@@ -265,7 +269,9 @@ class ClientRefreshRouteTest(unittest.TestCase):
         with patch.object(
             client_routes,
             "run_auth",
-            new=AsyncMock(side_effect=client_routes.RefreshTokenError("invalid refresh")),
+            new=AsyncMock(
+                side_effect=client_routes.RefreshTokenError("invalid refresh")
+            ),
         ):
             with self.assertRaises(client_routes.HTTPException) as raised:
                 asyncio.run(

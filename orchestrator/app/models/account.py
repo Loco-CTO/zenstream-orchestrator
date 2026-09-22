@@ -338,9 +338,7 @@ class Account:
             "sessionId": session_id,
             "refreshToken": refresh_token,
             "refreshExpiresAt": _iso(refresh_expires),
-            "refreshExpiresIn": max(
-                1, int((refresh_expires - now).total_seconds())
-            ),
+            "refreshExpiresIn": max(1, int((refresh_expires - now).total_seconds())),
             "sessionExpiresAt": _iso(session_expires),
             "user": user,
         }
@@ -582,9 +580,7 @@ class Account:
             db.execute("DELETE FROM user_sessions WHERE expires_at<=?", (_iso(),))
             cls._forget_session_ids(expired)
         try:
-            db.execute(
-                "DELETE FROM user_refresh_tokens WHERE expires_at<=?", (_iso(),)
-            )
+            db.execute("DELETE FROM user_refresh_tokens WHERE expires_at<=?", (_iso(),))
         except Exception as error:
             if "no such table: user_refresh_tokens" not in str(error):
                 raise

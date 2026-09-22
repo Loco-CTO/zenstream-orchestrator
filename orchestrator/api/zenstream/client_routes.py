@@ -26,9 +26,9 @@ from app.avatar import (
 from app.catalog import Catalog
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import (
+    ARTWORK_TICKET_TTL_SECONDS,
     AUTH_FLOW_HEADER,
     AUTH_FLOW_VERSION,
-    ARTWORK_TICKET_TTL_SECONDS,
     CLIENT_SESSION_COOKIE,
     DEV_CLIENT_SESSION_COOKIE,
     DEV_REFRESH_SESSION_COOKIE,
@@ -37,9 +37,9 @@ from app.client_auth import (
     bearer_token,
     cookie_secure,
     issue_ticket,
-    require_account,
     refresh_cookie_name,
     refresh_cookie_token,
+    require_account,
     session_cookie_name,
     session_id_for_token,
     websocket_account,
@@ -279,9 +279,7 @@ def _authenticate_and_create_session(
         return None
     if device_metadata is None:
         if supports_refresh:
-            session = account_model.create_session(
-                account["id"], supports_refresh=True
-            )
+            session = account_model.create_session(account["id"], supports_refresh=True)
         else:
             session = account_model.create_session(account["id"])
     else:

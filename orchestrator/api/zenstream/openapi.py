@@ -179,7 +179,9 @@ class SessionResponse(DocsModel):
     )
     refreshExpiresIn: int | None = Field(default=None)
     sessionExpiresAt: str | None = Field(
-        default=None, description="Absolute session cap.", json_schema_extra={"readOnly": True}
+        default=None,
+        description="Absolute session cap.",
+        json_schema_extra={"readOnly": True},
     )
     user: User | None = None
 

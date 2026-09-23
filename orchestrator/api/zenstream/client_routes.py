@@ -1365,14 +1365,16 @@ async def following(request: Request, language: str | None = Query(None)):
 
 
 @router.get("/api/account/playlists")
-async def get_playlists(request: Request, language: str | None = Query(None)):
+async def get_playlists(request: Request, language: str | None = Query(None), membershipSourceId: str | None = Query(None)):
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(playlists.list_playlists, account["id"], preferred)
+    return await run_foreground(playlists.list_playlists, account["id"], preferred, membershipSourceId)
 
 
 @router.post("/api/account/playlists")
-async def create_playlist(request: Request):
+async def create_playlist(request: Request, view: str | None = Query(None)):
+    if view not in (None, "summary"):
+        raise HTTPException(400, "Unsupported playlist view.")
     account, _ = await _require_account(request)
     payload = await _bounded_json_object(request)
     preferred = await run_foreground(_preferred, account, payload.get("language"))
@@ -1384,20 +1386,26 @@ async def create_playlist(request: Request):
         description=payload.get("description"),
         is_private=payload.get("isPrivate", True),
         entity_id=payload.get("entityId"),
+        summary=view == "summary",
     )
 
 
 @router.get("/api/account/playlists/{playlist_id}")
-async def get_playlist(playlist_id: str, request: Request, language: str | None = Query(None)):
+async def get_playlist(playlist_id: str, request: Request, language: str | None = Query(None), page: int | None = Query(None, ge=1), pageSize: int | None = Query(None, ge=1, le=100)):
+    if (page is None) != (pageSize is None):
+        raise HTTPException(400, "page and pageSize must be provided together.")
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
     return await run_foreground(
-        playlists.get_playlist, account["id"], playlist_id, preferred
+        playlists.get_playlist, account["id"], playlist_id, preferred,
+        page=page, page_size=pageSize,
     )
 
 
 @router.patch("/api/account/playlists/{playlist_id}")
-async def update_playlist(playlist_id: str, request: Request):
+async def update_playlist(playlist_id: str, request: Request, view: str | None = Query(None)):
+    if view not in (None, "summary"):
+        raise HTTPException(400, "Unsupported playlist view.")
     account, _ = await _require_account(request)
     payload = await _bounded_json_object(request)
     preferred = await run_foreground(_preferred, account, payload.get("language"))
@@ -1407,6 +1415,7 @@ async def update_playlist(playlist_id: str, request: Request):
         playlist_id,
         preferred,
         payload,
+        summary=view == "summary",
     )
 
 
@@ -1418,7 +1427,9 @@ async def delete_playlist(playlist_id: str, request: Request):
 
 
 @router.post("/api/account/playlists/{playlist_id}/items")
-async def add_playlist_items(playlist_id: str, request: Request):
+async def add_playlist_items(playlist_id: str, request: Request, view: str | None = Query(None)):
+    if view not in (None, "summary"):
+        raise HTTPException(400, "Unsupported playlist view.")
     account, _ = await _require_account(request)
     payload = await _bounded_json_object(request)
     preferred = await run_foreground(_preferred, account, payload.get("language"))
@@ -1431,11 +1442,23 @@ async def add_playlist_items(playlist_id: str, request: Request):
         playlist_id,
         preferred,
         entity_ids,
+        summary=view == "summary",
+    )
+
+
+@router.delete("/api/account/playlists/{playlist_id}/items/by-source/{source_id}")
+async def remove_playlist_source(playlist_id: str, source_id: str, request: Request):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, None)
+    return await run_control(
+        playlists.remove_source, account["id"], playlist_id, source_id, preferred
     )
 
 
 @router.delete("/api/account/playlists/{playlist_id}/items/{entry_id}")
-async def remove_playlist_item(playlist_id: str, entry_id: str, request: Request):
+async def remove_playlist_item(playlist_id: str, entry_id: str, request: Request, view: str | None = Query(None)):
+    if view not in (None, "summary"):
+        raise HTTPException(400, "Unsupported playlist view.")
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, None)
     return await run_control(
@@ -1444,6 +1467,19 @@ async def remove_playlist_item(playlist_id: str, entry_id: str, request: Request
         playlist_id,
         entry_id,
         preferred,
+        summary=view == "summary",
+    )
+
+
+@router.patch("/api/account/playlists/{playlist_id}/items/{entry_id}/move")
+async def move_playlist_item(playlist_id: str, entry_id: str, request: Request):
+    account, _ = await _require_account(request)
+    payload = await _bounded_json_object(request)
+    preferred = await run_foreground(_preferred, account, payload.get("language"))
+    return await run_control(
+        playlists.move_entry, account["id"], playlist_id, entry_id, preferred,
+        before_entry_id=payload.get("beforeEntryId"),
+        after_entry_id=payload.get("afterEntryId"),
     )
 
 
@@ -1463,12 +1499,15 @@ async def reorder_playlist(playlist_id: str, request: Request):
 
 @router.get("/api/shared/playlists/{share_token}")
 async def get_shared_playlist(
-    share_token: str, request: Request, language: str | None = Query(None)
+    share_token: str, request: Request, language: str | None = Query(None), page: int | None = Query(None, ge=1), pageSize: int | None = Query(None, ge=1, le=100)
 ):
+    if (page is None) != (pageSize is None):
+        raise HTTPException(400, "page and pageSize must be provided together.")
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
     return await run_foreground(
-        playlists.get_shared_playlist, account["id"], share_token, preferred
+        playlists.get_shared_playlist, account["id"], share_token, preferred,
+        page=page, page_size=pageSize,
     )
 
 

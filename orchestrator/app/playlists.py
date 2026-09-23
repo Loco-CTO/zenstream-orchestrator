@@ -50,15 +50,26 @@ class PlaylistService:
             raise HTTPException(404, "Playlist not found.")
         return rows[0]
 
-    def _entries(self, playlist_id: str):
+    def _entries(self, playlist_id: str, user_id: str, *, page=None, page_size=None):
+        allowed = sorted(self.catalog.allowed_libraries(user_id))
+        if not allowed:
+            return []
+        placeholders = ",".join("?" for _ in allowed)
+        limit = "" if page is None else " LIMIT ? OFFSET ?"
+        params = [playlist_id, *allowed]
+        if page is not None:
+            params.extend([page_size, (page - 1) * page_size])
         return self.db.execute(
-            "SELECT id,entity_id,position,added_at FROM user_playlist_items "
-            "WHERE playlist_id=? ORDER BY position,id",
-            (playlist_id,),
+            "SELECT i.id,i.entity_id,i.position,i.added_at FROM user_playlist_items i "
+            "JOIN library_entities e ON e.id=i.entity_id "
+            "WHERE i.playlist_id=? AND e.entity_type='track' "
+            f"AND e.library_id IN ({placeholders}) "
+            "AND EXISTS (SELECT 1 FROM media_files m WHERE m.entity_id=e.id AND m.role='media') "
+            f"ORDER BY i.position,i.id{limit}",
+            params,
         )
 
-    def _resolved_entries(self, user_id: str, playlist_id: str, language: str):
-        entries = self._entries(playlist_id)
+    def _resolved_entries(self, user_id: str, entries, language: str):
         catalog_items = self.catalog.items_by_ids(
             user_id, [row[1] for row in entries], language
         )
@@ -74,6 +85,42 @@ class PlaylistService:
             if row[1] in by_id
         ]
 
+    def _visible_counts_and_artwork(self, user_id: str, playlist_ids: list[str], language: str):
+        """Count grant-visible entries in SQL and hydrate at most four per card."""
+        allowed = sorted(self.catalog.allowed_libraries(user_id))
+        counts: dict[str, int] = {}
+        artwork: dict[str, list[dict]] = {}
+        if not allowed or not playlist_ids:
+            return counts, artwork
+        library_params = ",".join("?" for _ in allowed)
+        for start in range(0, len(playlist_ids), 400):
+            batch = playlist_ids[start : start + 400]
+            playlist_params = ",".join("?" for _ in batch)
+            visible = (
+                " FROM user_playlist_items i JOIN library_entities e ON e.id=i.entity_id "
+                f"WHERE i.playlist_id IN ({playlist_params}) AND e.library_id IN ({library_params}) "
+                "AND e.entity_type='track' "
+                "AND EXISTS (SELECT 1 FROM media_files m WHERE m.entity_id=e.id AND m.role='media')"
+            )
+            params = [*batch, *allowed]
+            for playlist_id, count in self.db.execute(
+                "SELECT i.playlist_id,COUNT(*)" + visible + " GROUP BY i.playlist_id", params
+            ):
+                counts[playlist_id] = count
+            rows = self.db.execute(
+                "SELECT playlist_id,entity_id FROM ("
+                "SELECT i.playlist_id,i.entity_id,"
+                "ROW_NUMBER() OVER (PARTITION BY i.playlist_id ORDER BY i.position,i.id) AS rn"
+                + visible + ") WHERE rn<=4 ORDER BY playlist_id,rn",
+                params,
+            )
+            hydrated = self.catalog.items_by_ids(user_id, [row[1] for row in rows], language)
+            by_id = {item["id"]: item for item in hydrated}
+            for playlist_id, entity_id in rows:
+                if entity_id in by_id:
+                    artwork.setdefault(playlist_id, []).append(by_id[entity_id])
+        return counts, artwork
+
     def _playlist_payload(
         self,
         row,
@@ -82,16 +129,22 @@ class PlaylistService:
         *,
         include_items: bool,
         owner: bool,
+        page: int | None = None,
+        page_size: int | None = None,
+        count: int | None = None,
+        artwork: list[dict] | None = None,
     ) -> dict:
-        entries = self._resolved_entries(user_id, row[0], language)
-        items = [entry["item"] for entry in entries]
+        if count is None or artwork is None:
+            counts, artwork_by_id = self._visible_counts_and_artwork(user_id, [row[0]], language)
+            count = counts.get(row[0], 0)
+            artwork = artwork_by_id.get(row[0], [])
         payload = {
             "id": row[0],
             "name": row[2],
             "description": row[3],
             "isPrivate": bool(row[4]),
-            "itemCount": len(entries),
-            "artworkItems": items[:4],
+            "itemCount": count,
+            "artworkItems": artwork,
             "createdAt": row[6],
             "updatedAt": row[7],
             "isOwner": owner,
@@ -99,31 +152,57 @@ class PlaylistService:
         if owner:
             payload["shareToken"] = row[5]
         if include_items:
-            payload["items"] = entries
+            rows = self._entries(row[0], user_id, page=page, page_size=page_size)
+            payload["items"] = self._resolved_entries(user_id, rows, language)
+            if page is not None:
+                payload.update(page=page, pageSize=page_size, hasMore=page * page_size < count)
         return payload
 
-    def list_playlists(self, user_id: str, language: str) -> dict:
+    def list_playlists(self, user_id: str, language: str, membership_source_id: str | None = None) -> dict:
         rows = self.db.execute(
             "SELECT id,user_id,name,description,is_private,share_token,created_at,updated_at "
             "FROM user_playlists WHERE user_id=? ORDER BY updated_at DESC,name COLLATE NOCASE,id",
             (user_id,),
         )
+        counts, artwork = self._visible_counts_and_artwork(
+            user_id, [row[0] for row in rows], language
+        )
+        membership: dict[str, int] = {}
+        source_ids = None
+        if membership_source_id is not None:
+            source_ids = self._expand(user_id, membership_source_id, language)
+            for start in range(0, len(source_ids), 400):
+                batch = source_ids[start : start + 400]
+                placeholders = ",".join("?" for _ in batch)
+                for playlist_id, matched in self.db.execute(
+                    "SELECT i.playlist_id,COUNT(*) FROM user_playlist_items i "
+                    "JOIN user_playlists p ON p.id=i.playlist_id "
+                    f"WHERE p.user_id=? AND i.entity_id IN ({placeholders}) GROUP BY i.playlist_id",
+                    [user_id, *batch],
+                ):
+                    membership[playlist_id] = membership.get(playlist_id, 0) + matched
         return {
             "items": [
-                self._playlist_payload(
-                    row, user_id, language, include_items=False, owner=True
-                )
+                {
+                    **self._playlist_payload(
+                        row, user_id, language, include_items=False, owner=True,
+                        count=counts.get(row[0], 0), artwork=artwork.get(row[0], []),
+                    ),
+                    **({"isMember": bool(source_ids) and membership.get(row[0], 0) == len(source_ids)}
+                       if source_ids is not None else {}),
+                }
                 for row in rows
             ]
         }
 
-    def get_playlist(self, user_id: str, playlist_id: str, language: str) -> dict:
+    def get_playlist(self, user_id: str, playlist_id: str, language: str, *, page=None, page_size=None) -> dict:
         row = self._owned(user_id, playlist_id)
         return self._playlist_payload(
-            row, user_id, language, include_items=True, owner=True
+            row, user_id, language, include_items=True, owner=True,
+            page=page, page_size=page_size,
         )
 
-    def get_shared_playlist(self, user_id: str, share_token: str, language: str) -> dict:
+    def get_shared_playlist(self, user_id: str, share_token: str, language: str, *, page=None, page_size=None) -> dict:
         rows = self.db.execute(
             "SELECT id,user_id,name,description,is_private,share_token,created_at,updated_at "
             "FROM user_playlists WHERE share_token=? AND is_private=0",
@@ -132,7 +211,14 @@ class PlaylistService:
         if not rows:
             raise HTTPException(404, "Playlist not found.")
         return self._playlist_payload(
-            rows[0], user_id, language, include_items=True, owner=False
+            rows[0], user_id, language, include_items=True, owner=False,
+            page=page, page_size=page_size,
+        )
+
+    def get_summary(self, user_id: str, playlist_id: str, language: str) -> dict:
+        return self._playlist_payload(
+            self._owned(user_id, playlist_id), user_id, language,
+            include_items=False, owner=True,
         )
 
     def _expand(self, user_id: str, entity_id: str, language: str) -> list[str]:
@@ -200,6 +286,7 @@ class PlaylistService:
         description=None,
         is_private=True,
         entity_id: str | None = None,
+        summary: bool = False,
     ) -> dict:
         playlist_name = self._name(name)
         playlist_description = self._description(description)
@@ -233,10 +320,10 @@ class PlaylistService:
                     "(id,playlist_id,entity_id,position,added_at) VALUES(?,?,?,?,?)",
                     (_new_id(), playlist_id, item_id, position, timestamp),
                 )
-        return self.get_playlist(user_id, playlist_id, language)
+        return (self.get_summary if summary else self.get_playlist)(user_id, playlist_id, language)
 
     def update_playlist(
-        self, user_id: str, playlist_id: str, language: str, payload: dict
+        self, user_id: str, playlist_id: str, language: str, payload: dict, *, summary: bool = False
     ) -> dict:
         row = self._owned(user_id, playlist_id)
         name = self._name(payload["name"]) if "name" in payload else row[2]
@@ -261,7 +348,7 @@ class PlaylistService:
                 "WHERE id=? AND user_id=?",
                 (name, description, is_private, token, _now(), playlist_id, user_id),
             )
-        return self.get_playlist(user_id, playlist_id, language)
+        return (self.get_summary if summary else self.get_playlist)(user_id, playlist_id, language)
 
     def delete_playlist(self, user_id: str, playlist_id: str) -> None:
         self._owned(user_id, playlist_id)
@@ -277,6 +364,8 @@ class PlaylistService:
         playlist_id: str,
         language: str,
         entity_ids,
+        *,
+        summary: bool = False,
     ) -> dict:
         self._owned(user_id, playlist_id)
         sources = self._validate_entity_ids(entity_ids)
@@ -317,10 +406,10 @@ class PlaylistService:
                     "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
                     (timestamp, playlist_id, user_id),
                 )
-        return self.get_playlist(user_id, playlist_id, language)
+        return (self.get_summary if summary else self.get_playlist)(user_id, playlist_id, language)
 
     def remove_entry(
-        self, user_id: str, playlist_id: str, entry_id: str, language: str
+        self, user_id: str, playlist_id: str, entry_id: str, language: str, *, summary: bool = False
     ) -> dict:
         self._owned(user_id, playlist_id)
         with self.db.transaction() as cursor:
@@ -332,7 +421,55 @@ class PlaylistService:
                 "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
                 (_now(), playlist_id, user_id),
             )
-        return self.get_playlist(user_id, playlist_id, language)
+        return (self.get_summary if summary else self.get_playlist)(user_id, playlist_id, language)
+
+    def remove_source(self, user_id: str, playlist_id: str, source_id: str, language: str) -> dict:
+        self._owned(user_id, playlist_id)
+        entity_ids = self._expand(user_id, source_id, language)
+        if not entity_ids:
+            raise HTTPException(400, "The selected item has no playable items.")
+        with self.db.transaction() as cursor:
+            for start in range(0, len(entity_ids), 400):
+                batch = entity_ids[start : start + 400]
+                placeholders = ",".join("?" for _ in batch)
+                cursor.execute(
+                    f"DELETE FROM user_playlist_items WHERE playlist_id=? AND entity_id IN ({placeholders})",
+                    [playlist_id, *batch],
+                )
+            cursor.execute(
+                "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
+                (_now(), playlist_id, user_id),
+            )
+        return self.get_summary(user_id, playlist_id, language)
+
+    def move_entry(self, user_id: str, playlist_id: str, entry_id: str,
+                   language: str, *, before_entry_id=None, after_entry_id=None) -> dict:
+        self._owned(user_id, playlist_id)
+        if (before_entry_id is None) == (after_entry_id is None):
+            raise HTTPException(400, "Provide exactly one beforeEntryId or afterEntryId.")
+        anchor = before_entry_id if before_entry_id is not None else after_entry_id
+        current = [row[0] for row in self.db.execute(
+            "SELECT id FROM user_playlist_items WHERE playlist_id=? ORDER BY position,id",
+            (playlist_id,),
+        )]
+        if entry_id not in current or anchor not in current:
+            raise HTTPException(404, "Playlist entry not found.")
+        if entry_id == anchor:
+            return self.get_summary(user_id, playlist_id, language)
+        current.remove(entry_id)
+        offset = 0 if before_entry_id is not None else 1
+        current.insert(current.index(anchor) + offset, entry_id)
+        with self.db.transaction() as cursor:
+            for position, item_id in enumerate(current):
+                cursor.execute(
+                    "UPDATE user_playlist_items SET position=? WHERE id=? AND playlist_id=?",
+                    (position, item_id, playlist_id),
+                )
+            cursor.execute(
+                "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
+                (_now(), playlist_id, user_id),
+            )
+        return self.get_summary(user_id, playlist_id, language)
 
     def reorder_entries(
         self, user_id: str, playlist_id: str, language: str, entry_ids

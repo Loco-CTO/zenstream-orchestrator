@@ -85,6 +85,19 @@ class OpenApiContractTest(unittest.TestCase):
         for path in DOCUMENTATION_EXCLUDED_PATHS:
             self.assertNotIn(path, self.schema["paths"])
 
+    def test_playlist_paging_membership_and_anchor_move_are_documented(self):
+        owned = self.schema["paths"]["/api/account/playlists/{playlist_id}"]["get"]
+        shared = self.schema["paths"]["/api/shared/playlists/{share_token}"]["get"]
+        for operation in (owned, shared):
+            names = {parameter["name"] for parameter in operation["parameters"]}
+            self.assertTrue({"page", "pageSize"}.issubset(names))
+        list_names = {parameter["name"] for parameter in self.schema["paths"]["/api/account/playlists"]["get"]["parameters"]}
+        self.assertIn("membershipSourceId", list_names)
+        detail = self.schema["components"]["schemas"]["PlaylistDetail"]["properties"]
+        self.assertTrue({"page", "pageSize", "hasMore", "isMember"}.issubset(detail))
+        self.assertIn("delete", self.schema["paths"]["/api/account/playlists/{playlist_id}/items/by-source/{source_id}"])
+        self.assertIn("patch", self.schema["paths"]["/api/account/playlists/{playlist_id}/items/{entry_id}/move"])
+
     def test_operation_ids_are_explicit_stable_and_unique(self):
         operation_ids = [
             operation["operationId"] for _, _, operation in self.operations

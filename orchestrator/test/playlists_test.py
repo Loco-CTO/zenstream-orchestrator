@@ -251,6 +251,104 @@ class PlaylistServiceTest(unittest.TestCase):
                 "owner", playlist["id"], "en", [entry_ids[0], entry_ids[0]]
             )
 
+    def test_paging_filters_grants_before_boundaries_and_keeps_unpaged_read(self):
+        playlist = self.service.create_playlist("owner", "en", name="Long", is_private=False)
+        for number in range(25):
+            entity_id = f"long-{number:02d}"
+            self._entity(entity_id, "track", "release", track_number=number)
+            self.db.execute("INSERT INTO media_files VALUES(?, 'media')", (entity_id,))
+            self.db.execute(
+                "INSERT INTO user_playlist_items VALUES(?,?,?,?,?)",
+                (f"entry-{number:02d}", playlist["id"], entity_id, number, "2026-01-01"),
+            )
+        self._entity("hidden-track", "track", "release", library_id="hidden")
+        self.db.execute("INSERT INTO media_files VALUES('hidden-track', 'media')")
+        self.db.execute(
+            "INSERT INTO user_playlist_items VALUES('hidden-entry',?,?,10,'2026-01-01')",
+            (playlist["id"], "hidden-track"),
+        )
+        calls = []
+        original = self.catalog.items_by_ids
+        def counted(user_id, ids, language):
+            calls.append(len(ids))
+            return original(user_id, ids, language)
+        self.catalog.items_by_ids = counted
+
+        first = self.service.get_shared_playlist("viewer", playlist["shareToken"], "en", page=1, page_size=20)
+        second = self.service.get_shared_playlist("viewer", playlist["shareToken"], "en", page=2, page_size=20)
+        self.assertEqual(first["itemCount"], 25)
+        self.assertEqual((first["page"], first["pageSize"], first["hasMore"]), (1, 20, True))
+        self.assertEqual(len(first["items"]), 20)
+        self.assertEqual([row["item"]["id"] for row in second["items"]], [f"long-{number:02d}" for number in range(20, 25)])
+        self.assertFalse(second["hasMore"])
+        self.assertLessEqual(max(calls), 20)
+        self.assertEqual(len(self.service.get_playlist("owner", playlist["id"], "en")["items"]), 25)
+
+    def test_summary_membership_bulk_removal_and_anchor_move(self):
+        playlist = self.service.create_playlist("owner", "en", name="Actions", entity_id="release")
+        other = self.service.create_playlist("owner", "en", name="Empty")
+        ids = [entry["entryId"] for entry in playlist["items"]]
+        summary = self.service.list_playlists("owner", "en", "release")
+        by_id = {item["id"]: item for item in summary["items"]}
+        self.assertTrue(by_id[playlist["id"]]["isMember"])
+        self.assertFalse(by_id[other["id"]]["isMember"])
+        self.assertNotIn("items", by_id[playlist["id"]])
+        moved = self.service.move_entry("owner", playlist["id"], ids[0], "en", after_entry_id=ids[1])
+        self.assertNotIn("items", moved)
+        self.assertEqual([entry["entryId"] for entry in self.service.get_playlist("owner", playlist["id"], "en")["items"]], list(reversed(ids)))
+        with self.assertRaises(HTTPException):
+            self.service.move_entry("viewer", playlist["id"], ids[0], "en", before_entry_id=ids[1])
+        removed = self.service.remove_source("owner", playlist["id"], "release", "en")
+        self.assertEqual(removed["itemCount"], 0)
+        self.assertFalse(self.service.list_playlists("owner", "en", "release")["items"][0]["isMember"])
+
+    def test_empty_and_exact_page_boundaries(self):
+        playlist = self.service.create_playlist("owner", "en", name="Boundaries")
+        empty = self.service.get_playlist("owner", playlist["id"], "en", page=1, page_size=20)
+        self.assertEqual(empty["items"], [])
+        self.assertFalse(empty["hasMore"])
+        self.service.add_entities("owner", playlist["id"], "en", ["track-a"], summary=True)
+        one = self.service.get_playlist("owner", playlist["id"], "en", page=1, page_size=20)
+        self.assertEqual(len(one["items"]), 1)
+        self.assertFalse(one["hasMore"])
+
+        for number in range(19):
+            entity_id = f"boundary-{number}"
+            self._entity(entity_id, "track", "release", track_number=number)
+            self.db.execute("INSERT INTO media_files VALUES(?, 'media')", (entity_id,))
+            self.service.add_entities("owner", playlist["id"], "en", [entity_id], summary=True)
+        exact = self.service.get_playlist("owner", playlist["id"], "en", page=1, page_size=20)
+        self.assertEqual(len(exact["items"]), 20)
+        self.assertFalse(exact["hasMore"])
+        self.service.add_entities("owner", playlist["id"], "en", ["track-b"], summary=True)
+        beyond = self.service.get_playlist("owner", playlist["id"], "en", page=1, page_size=20)
+        self.assertTrue(beyond["hasMore"])
+        self.assertEqual(len(self.service.get_playlist("owner", playlist["id"], "en", page=2, page_size=20)["items"]), 1)
+
+    def test_cards_hydrate_only_four_artwork_tracks_even_for_large_playlist(self):
+        playlist = self.service.create_playlist("owner", "en", name="Large")
+        for number in range(425):
+            entity_id = f"large-{number}"
+            self._entity(entity_id, "track", "release", track_number=number)
+            self.db.execute("INSERT INTO media_files VALUES(?, 'media')", (entity_id,))
+            self.db.execute(
+                "INSERT INTO user_playlist_items VALUES(?,?,?,?,?)",
+                (f"large-entry-{number}", playlist["id"], entity_id, number, "2026-01-01"),
+            )
+        calls = []
+        original = self.catalog.items_by_ids
+        def counted(user_id, ids, language):
+            calls.append(len(ids))
+            return original(user_id, ids, language)
+        self.catalog.items_by_ids = counted
+        summary = self.service.list_playlists("owner", "en")["items"][0]
+        self.assertEqual(summary["itemCount"], 425)
+        self.assertEqual(len(summary["artworkItems"]), 4)
+        self.assertEqual(calls, [4])
+        page = self.service.get_playlist("owner", playlist["id"], "en", page=22, page_size=20)
+        self.assertEqual(len(page["items"]), 5)
+        self.assertFalse(page["hasMore"])
+
     def test_watchlist_returns_followed_media_with_progress_and_next_episode(self):
         for entity_id, created_at in (
             ("artist", "2026-09-01T10:00:00Z"),

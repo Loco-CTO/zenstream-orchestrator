@@ -255,19 +255,21 @@ class PlaylistService:
             token = None
         elif row[4] or not token:
             token = secrets.token_urlsafe(32)
-        self.db.execute(
-            "UPDATE user_playlists SET name=?,description=?,is_private=?,share_token=?,updated_at=? "
-            "WHERE id=? AND user_id=?",
-            (name, description, is_private, token, _now(), playlist_id, user_id),
-        )
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "UPDATE user_playlists SET name=?,description=?,is_private=?,share_token=?,updated_at=? "
+                "WHERE id=? AND user_id=?",
+                (name, description, is_private, token, _now(), playlist_id, user_id),
+            )
         return self.get_playlist(user_id, playlist_id, language)
 
     def delete_playlist(self, user_id: str, playlist_id: str) -> None:
         self._owned(user_id, playlist_id)
-        self.db.execute(
-            "DELETE FROM user_playlists WHERE id=? AND user_id=?",
-            (playlist_id, user_id),
-        )
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM user_playlists WHERE id=? AND user_id=?",
+                (playlist_id, user_id),
+            )
 
     def add_entities(
         self,
@@ -321,14 +323,15 @@ class PlaylistService:
         self, user_id: str, playlist_id: str, entry_id: str, language: str
     ) -> dict:
         self._owned(user_id, playlist_id)
-        self.db.execute(
-            "DELETE FROM user_playlist_items WHERE id=? AND playlist_id=?",
-            (entry_id, playlist_id),
-        )
-        self.db.execute(
-            "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
-            (_now(), playlist_id, user_id),
-        )
+        with self.db.transaction() as cursor:
+            cursor.execute(
+                "DELETE FROM user_playlist_items WHERE id=? AND playlist_id=?",
+                (entry_id, playlist_id),
+            )
+            cursor.execute(
+                "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
+                (_now(), playlist_id, user_id),
+            )
         return self.get_playlist(user_id, playlist_id, language)
 
     def reorder_entries(

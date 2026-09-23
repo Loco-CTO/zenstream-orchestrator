@@ -57,6 +57,7 @@ from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
 from app.models.playback_viewer import PlaybackViewerStore, normalize_device_metadata
 from app.playback import PlaybackManager, ffmpeg_path
+from app.playlists import PlaylistService
 from app.trickplay import TrickplayExtractor
 from fastapi import (
     APIRouter,
@@ -73,6 +74,7 @@ from api.zenstream.library_routes import authenticate_admin_request
 
 router = APIRouter()
 catalog = Catalog()
+playlists = PlaylistService(catalog)
 media = PlaybackManager()
 trickplay = TrickplayExtractor()
 intro_outro = IntroOutroStore()
@@ -1353,6 +1355,121 @@ async def favorites(
         sortOrder,
     )
     return _catalog_response(result, view)
+
+
+@router.get("/api/catalog/following")
+async def following(request: Request, language: str | None = Query(None)):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(playlists.watchlist, account["id"], preferred)
+
+
+@router.get("/api/account/playlists")
+async def get_playlists(request: Request, language: str | None = Query(None)):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(playlists.list_playlists, account["id"], preferred)
+
+
+@router.post("/api/account/playlists")
+async def create_playlist(request: Request):
+    account, _ = await _require_account(request)
+    payload = await _bounded_json_object(request)
+    preferred = await run_foreground(_preferred, account, payload.get("language"))
+    return await run_control(
+        playlists.create_playlist,
+        account["id"],
+        preferred,
+        name=payload.get("name"),
+        description=payload.get("description"),
+        is_private=payload.get("isPrivate", True),
+        entity_id=payload.get("entityId"),
+    )
+
+
+@router.get("/api/account/playlists/{playlist_id}")
+async def get_playlist(playlist_id: str, request: Request, language: str | None = Query(None)):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(
+        playlists.get_playlist, account["id"], playlist_id, preferred
+    )
+
+
+@router.patch("/api/account/playlists/{playlist_id}")
+async def update_playlist(playlist_id: str, request: Request):
+    account, _ = await _require_account(request)
+    payload = await _bounded_json_object(request)
+    preferred = await run_foreground(_preferred, account, payload.get("language"))
+    return await run_control(
+        playlists.update_playlist,
+        account["id"],
+        playlist_id,
+        preferred,
+        payload,
+    )
+
+
+@router.delete("/api/account/playlists/{playlist_id}", status_code=204)
+async def delete_playlist(playlist_id: str, request: Request):
+    account, _ = await _require_account(request)
+    await run_control(playlists.delete_playlist, account["id"], playlist_id)
+    return Response(status_code=204)
+
+
+@router.post("/api/account/playlists/{playlist_id}/items")
+async def add_playlist_items(playlist_id: str, request: Request):
+    account, _ = await _require_account(request)
+    payload = await _bounded_json_object(request)
+    preferred = await run_foreground(_preferred, account, payload.get("language"))
+    entity_ids = payload.get("entityIds")
+    if entity_ids is None and payload.get("entityId") is not None:
+        entity_ids = [payload["entityId"]]
+    return await run_control(
+        playlists.add_entities,
+        account["id"],
+        playlist_id,
+        preferred,
+        entity_ids,
+    )
+
+
+@router.delete("/api/account/playlists/{playlist_id}/items/{entry_id}")
+async def remove_playlist_item(playlist_id: str, entry_id: str, request: Request):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, None)
+    return await run_control(
+        playlists.remove_entry,
+        account["id"],
+        playlist_id,
+        entry_id,
+        preferred,
+    )
+
+
+@router.put("/api/account/playlists/{playlist_id}/order")
+async def reorder_playlist(playlist_id: str, request: Request):
+    account, _ = await _require_account(request)
+    payload = await _bounded_json_object(request)
+    preferred = await run_foreground(_preferred, account, payload.get("language"))
+    return await run_control(
+        playlists.reorder_entries,
+        account["id"],
+        playlist_id,
+        preferred,
+        payload.get("entryIds"),
+    )
+
+
+@router.get("/api/shared/playlists/{share_token}")
+async def get_shared_playlist(
+    share_token: str, request: Request, language: str | None = Query(None)
+):
+    account, _ = await _require_account(request)
+    preferred = await run_foreground(_preferred, account, language)
+    return await run_foreground(
+        playlists.get_shared_playlist, account["id"], share_token, preferred
+    )
 
 
 @router.get("/api/catalog/items/{entity_id}")

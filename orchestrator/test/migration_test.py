@@ -159,8 +159,30 @@ class PersistenceMigrationTest(unittest.TestCase):
                         "catalog_music_album_page",
                         "catalog_music_album_page_status",
                         "catalog_search_row_lookup",
+                        "user_playlists",
+                        "user_playlist_items",
                     }
                     <= tables
+                )
+                self.assertTrue(
+                    {
+                        "ix_user_playlists_user_updated",
+                        "ix_user_playlist_items_order",
+                    }
+                    <= indexes
+                )
+                playlist_triggers = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='trigger'"
+                    )
+                }
+                self.assertTrue(
+                    {
+                        "user_playlist_items_track_only_insert",
+                        "user_playlist_items_track_only_update",
+                    }
+                    <= playlist_triggers
                 )
                 self.assertTrue(
                     {

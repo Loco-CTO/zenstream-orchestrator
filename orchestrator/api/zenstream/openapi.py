@@ -326,6 +326,7 @@ class CatalogItem(DocsModel):
     images: dict[str, CatalogArtwork] = Field(default_factory=dict)
     credits: list[CatalogCredit] = Field(default_factory=list)
     state: CatalogState | None = None
+    watchlistStatus: dict[str, Any] | None = None
     children: list[Any] = Field(default_factory=list)
 
 
@@ -341,6 +342,53 @@ class CatalogPage(DocsModel):
     )
     libraryRows: list[Any] = Field(default_factory=list)
     sections: list[Any] = Field(default_factory=list)
+
+
+class PlaylistCreateRequest(DocsModel):
+    name: str = Field(examples=["Road Trip"])
+    description: str | None = Field(default=None, examples=["Songs for the drive"])
+    isPrivate: bool = Field(default=True, examples=[True])
+    entityId: str | None = Field(default=None, examples=["track-0001"])
+
+
+class PlaylistUpdateRequest(DocsModel):
+    name: str | None = Field(default=None, examples=["Road Trip"])
+    description: str | None = Field(default=None, examples=["Updated description"])
+    isPrivate: bool | None = Field(default=None, examples=[False])
+
+
+class PlaylistItemsRequest(DocsModel):
+    entityIds: list[str] = Field(default_factory=list, examples=[["track-0001"]])
+    entityId: str | None = Field(default=None, examples=["track-0001"])
+
+
+class PlaylistOrderRequest(DocsModel):
+    entryIds: list[str] = Field(default_factory=list, examples=[["entry-0001"]])
+
+
+class PlaylistEntry(DocsModel):
+    entryId: str | None = Field(default=None, examples=["entry-0001"])
+    position: int | None = Field(default=None, examples=[0])
+    addedAt: str | None = Field(default=None, examples=["2026-09-23T12:00:00Z"])
+    item: CatalogItem | None = None
+
+
+class PlaylistDetail(DocsModel):
+    id: str | None = Field(default=None, examples=["playlist-0001"])
+    name: str | None = Field(default=None, examples=["Road Trip"])
+    description: str | None = None
+    isPrivate: bool | None = Field(default=None, examples=[True])
+    shareToken: str | None = None
+    itemCount: int | None = Field(default=None, examples=[12])
+    artworkItems: list[CatalogItem] = Field(default_factory=list)
+    items: list[PlaylistEntry] = Field(default_factory=list)
+    createdAt: str | None = None
+    updatedAt: str | None = None
+    isOwner: bool | None = None
+
+
+class PlaylistPage(DocsModel):
+    items: list[PlaylistDetail] = Field(default_factory=list)
 
 
 class CatalogLibrary(DocsModel):
@@ -1017,6 +1065,13 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     CatalogState,
     CatalogItem,
     CatalogPage,
+    PlaylistCreateRequest,
+    PlaylistUpdateRequest,
+    PlaylistItemsRequest,
+    PlaylistOrderRequest,
+    PlaylistEntry,
+    PlaylistDetail,
+    PlaylistPage,
     CatalogLibrary,
     CatalogLibrariesResponse,
     CatalogItemResponse,
@@ -1480,6 +1535,16 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/catalog/music/artists/{artist_id}/tracks"): "List an artist's tracks",
     ("GET", "/api/catalog/search"): "Search the catalog",
     ("GET", "/api/catalog/favorites"): "List favorite catalog items",
+    ("GET", "/api/catalog/following"): "List followed catalog items for the Watchlist",
+    ("GET", "/api/account/playlists"): "List the current user's playlists",
+    ("POST", "/api/account/playlists"): "Create a playlist",
+    ("GET", "/api/account/playlists/{playlist_id}"): "Get an owned playlist",
+    ("PATCH", "/api/account/playlists/{playlist_id}"): "Update a playlist",
+    ("DELETE", "/api/account/playlists/{playlist_id}"): "Delete a playlist",
+    ("POST", "/api/account/playlists/{playlist_id}/items"): "Add catalog items to a playlist",
+    ("DELETE", "/api/account/playlists/{playlist_id}/items/{entry_id}"): "Remove an item from a playlist",
+    ("PUT", "/api/account/playlists/{playlist_id}/order"): "Reorder playlist items",
+    ("GET", "/api/shared/playlists/{share_token}"): "View a shared playlist",
     ("GET", "/api/catalog/items/{entity_id}"): "Get a catalog item",
     ("GET", "/api/catalog/items/{entity_id}/similar"): "List similar items",
     ("GET", "/api/catalog/items/{entity_id}/metadata"): "Get item metadata",
@@ -1823,6 +1888,10 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/preferences/playback"): PlaybackPreferences,
     ("PATCH", "/api/preferences/watch-history"): WatchHistoryPreferences,
     ("PATCH", "/api/catalog/items/{entity_id}/state"): CatalogStatePatchRequest,
+    ("POST", "/api/account/playlists"): PlaylistCreateRequest,
+    ("PATCH", "/api/account/playlists/{playlist_id}"): PlaylistUpdateRequest,
+    ("POST", "/api/account/playlists/{playlist_id}/items"): PlaylistItemsRequest,
+    ("PUT", "/api/account/playlists/{playlist_id}/order"): PlaylistOrderRequest,
     ("PATCH", "/api/catalog/items/{entity_id}/progress"): ProgressPatchRequest,
     ("POST", "/api/catalog/items/{entity_id}/play-start"): PlayStartRequest,
     ("POST", "/api/playback/items/{entity_id}/negotiate"): PlaybackCapabilityRequest,
@@ -1881,6 +1950,7 @@ _NO_REQUEST_BODY = frozenset(
         ("POST", "/api/auth/socket-ticket"),
         ("DELETE", "/api/account/avatar"),
         ("DELETE", "/api/account/watch-history"),
+        ("DELETE", "/api/account/playlists/{playlist_id}"),
         ("DELETE", "/api/playback/viewers/{viewer_id}"),
         ("DELETE", "/api/playback/sessions/{session_id}"),
         ("DELETE", "/api/notifications/{notification_id}"),
@@ -1911,6 +1981,7 @@ _NO_CONTENT_RESPONSES = frozenset(
         ("POST", "/api/account/password"),
         ("POST", "/api/auth/logout"),
         ("DELETE", "/api/account/watch-history"),
+        ("DELETE", "/api/account/playlists/{playlist_id}"),
         ("DELETE", "/api/admin/users/{user_id}"),
         ("DELETE", "/api/admin/libraries/{library_id}"),
         ("DELETE", "/api/admin/invites/{invite_id}"),
@@ -1953,6 +2024,16 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("GET", "/api/catalog/music/artists/{artist_id}/tracks"): MusicTracksResponse,
     ("GET", "/api/catalog/search"): CatalogPage,
     ("GET", "/api/catalog/favorites"): CatalogPage,
+    ("GET", "/api/catalog/following"): CatalogPage,
+    ("GET", "/api/account/playlists"): PlaylistPage,
+    ("POST", "/api/account/playlists"): PlaylistDetail,
+    ("GET", "/api/account/playlists/{playlist_id}"): PlaylistDetail,
+    ("PATCH", "/api/account/playlists/{playlist_id}"): PlaylistDetail,
+    ("DELETE", "/api/account/playlists/{playlist_id}"): FlexibleObject,
+    ("POST", "/api/account/playlists/{playlist_id}/items"): PlaylistDetail,
+    ("DELETE", "/api/account/playlists/{playlist_id}/items/{entry_id}"): PlaylistDetail,
+    ("PUT", "/api/account/playlists/{playlist_id}/order"): PlaylistDetail,
+    ("GET", "/api/shared/playlists/{share_token}"): PlaylistDetail,
     ("GET", "/api/catalog/items/{entity_id}"): CatalogItemResponse,
     ("GET", "/api/catalog/items/{entity_id}/similar"): CatalogPage,
     ("GET", "/api/catalog/items/{entity_id}/metadata"): MetadataResponse,

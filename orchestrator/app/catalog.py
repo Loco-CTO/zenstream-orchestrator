@@ -1057,6 +1057,31 @@ class Catalog:
             user_id, row, metadata, [child[0] for child in children], language=language
         )
 
+    @_catalog_read
+    def items_by_ids(
+        self, user_id: str, entity_ids: list[str], language: str
+    ) -> list[dict]:
+        """Hydrate an ordered set of accessible catalog entities."""
+        ids = list(dict.fromkeys(str(value) for value in entity_ids if value))
+        allowed = self.allowed_libraries(user_id)
+        if not ids or not allowed:
+            return []
+        rows_by_id: dict[str, tuple] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.db.execute(
+                "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,"
+                "episode_number,episode_end_number,created_at,updated_at "
+                f"FROM library_entities WHERE id IN ({placeholders})",
+                chunk,
+            )
+            rows_by_id.update(
+                {str(row[0]): row for row in rows if str(row[1]) in allowed}
+            )
+        selected = [rows_by_id[entity_id] for entity_id in ids if entity_id in rows_by_id]
+        return self._hydrate_rows(user_id, selected, language)
+
     def _relationship_graph(
         self, user_id: str
     ) -> tuple[

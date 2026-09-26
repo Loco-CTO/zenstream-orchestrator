@@ -1079,7 +1079,9 @@ class Catalog:
             rows_by_id.update(
                 {str(row[0]): row for row in rows if str(row[1]) in allowed}
             )
-        selected = [rows_by_id[entity_id] for entity_id in ids if entity_id in rows_by_id]
+        selected = [
+            rows_by_id[entity_id] for entity_id in ids if entity_id in rows_by_id
+        ]
         return self._hydrate_rows(user_id, selected, language)
 
     def _relationship_graph(

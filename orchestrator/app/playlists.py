@@ -36,7 +36,9 @@ class PlaylistService:
         if value is None:
             return None
         if not isinstance(value, str) or len(value) > 500:
-            raise HTTPException(400, "Playlist description must be 500 characters or less.")
+            raise HTTPException(
+                400, "Playlist description must be 500 characters or less."
+            )
         normalized = value.strip()
         return normalized or None
 
@@ -85,7 +87,9 @@ class PlaylistService:
             if row[1] in by_id
         ]
 
-    def _visible_counts_and_artwork(self, user_id: str, playlist_ids: list[str], language: str):
+    def _visible_counts_and_artwork(
+        self, user_id: str, playlist_ids: list[str], language: str
+    ):
         """Count grant-visible entries in SQL and hydrate at most four per card."""
         allowed = sorted(self.catalog.allowed_libraries(user_id))
         counts: dict[str, int] = {}
@@ -104,17 +108,21 @@ class PlaylistService:
             )
             params = [*batch, *allowed]
             for playlist_id, count in self.db.execute(
-                "SELECT i.playlist_id,COUNT(*)" + visible + " GROUP BY i.playlist_id", params
+                "SELECT i.playlist_id,COUNT(*)" + visible + " GROUP BY i.playlist_id",
+                params,
             ):
                 counts[playlist_id] = count
             rows = self.db.execute(
                 "SELECT playlist_id,entity_id FROM ("
                 "SELECT i.playlist_id,i.entity_id,"
                 "ROW_NUMBER() OVER (PARTITION BY i.playlist_id ORDER BY i.position,i.id) AS rn"
-                + visible + ") WHERE rn<=4 ORDER BY playlist_id,rn",
+                + visible
+                + ") WHERE rn<=4 ORDER BY playlist_id,rn",
                 params,
             )
-            hydrated = self.catalog.items_by_ids(user_id, [row[1] for row in rows], language)
+            hydrated = self.catalog.items_by_ids(
+                user_id, [row[1] for row in rows], language
+            )
             by_id = {item["id"]: item for item in hydrated}
             for playlist_id, entity_id in rows:
                 if entity_id in by_id:
@@ -135,7 +143,9 @@ class PlaylistService:
         artwork: list[dict] | None = None,
     ) -> dict:
         if count is None or artwork is None:
-            counts, artwork_by_id = self._visible_counts_and_artwork(user_id, [row[0]], language)
+            counts, artwork_by_id = self._visible_counts_and_artwork(
+                user_id, [row[0]], language
+            )
             count = counts.get(row[0], 0)
             artwork = artwork_by_id.get(row[0], [])
         payload = {
@@ -155,10 +165,14 @@ class PlaylistService:
             rows = self._entries(row[0], user_id, page=page, page_size=page_size)
             payload["items"] = self._resolved_entries(user_id, rows, language)
             if page is not None:
-                payload.update(page=page, pageSize=page_size, hasMore=page * page_size < count)
+                payload.update(
+                    page=page, pageSize=page_size, hasMore=page * page_size < count
+                )
         return payload
 
-    def list_playlists(self, user_id: str, language: str, membership_source_id: str | None = None) -> dict:
+    def list_playlists(
+        self, user_id: str, language: str, membership_source_id: str | None = None
+    ) -> dict:
         rows = self.db.execute(
             "SELECT id,user_id,name,description,is_private,share_token,created_at,updated_at "
             "FROM user_playlists WHERE user_id=? ORDER BY updated_at DESC,name COLLATE NOCASE,id",
@@ -185,24 +199,56 @@ class PlaylistService:
             "items": [
                 {
                     **self._playlist_payload(
-                        row, user_id, language, include_items=False, owner=True,
-                        count=counts.get(row[0], 0), artwork=artwork.get(row[0], []),
+                        row,
+                        user_id,
+                        language,
+                        include_items=False,
+                        owner=True,
+                        count=counts.get(row[0], 0),
+                        artwork=artwork.get(row[0], []),
                     ),
-                    **({"isMember": bool(source_ids) and membership.get(row[0], 0) == len(source_ids)}
-                       if source_ids is not None else {}),
+                    **(
+                        {
+                            "isMember": bool(source_ids)
+                            and membership.get(row[0], 0) == len(source_ids)
+                        }
+                        if source_ids is not None
+                        else {}
+                    ),
                 }
                 for row in rows
             ]
         }
 
-    def get_playlist(self, user_id: str, playlist_id: str, language: str, *, page=None, page_size=None) -> dict:
+    def get_playlist(
+        self,
+        user_id: str,
+        playlist_id: str,
+        language: str,
+        *,
+        page=None,
+        page_size=None,
+    ) -> dict:
         row = self._owned(user_id, playlist_id)
         return self._playlist_payload(
-            row, user_id, language, include_items=True, owner=True,
-            page=page, page_size=page_size,
+            row,
+            user_id,
+            language,
+            include_items=True,
+            owner=True,
+            page=page,
+            page_size=page_size,
         )
 
-    def get_shared_playlist(self, user_id: str, share_token: str, language: str, *, page=None, page_size=None) -> dict:
+    def get_shared_playlist(
+        self,
+        user_id: str,
+        share_token: str,
+        language: str,
+        *,
+        page=None,
+        page_size=None,
+    ) -> dict:
         rows = self.db.execute(
             "SELECT id,user_id,name,description,is_private,share_token,created_at,updated_at "
             "FROM user_playlists WHERE share_token=? AND is_private=0",
@@ -211,14 +257,22 @@ class PlaylistService:
         if not rows:
             raise HTTPException(404, "Playlist not found.")
         return self._playlist_payload(
-            rows[0], user_id, language, include_items=True, owner=False,
-            page=page, page_size=page_size,
+            rows[0],
+            user_id,
+            language,
+            include_items=True,
+            owner=False,
+            page=page,
+            page_size=page_size,
         )
 
     def get_summary(self, user_id: str, playlist_id: str, language: str) -> dict:
         return self._playlist_payload(
-            self._owned(user_id, playlist_id), user_id, language,
-            include_items=False, owner=True,
+            self._owned(user_id, playlist_id),
+            user_id,
+            language,
+            include_items=False,
+            owner=True,
         )
 
     def _expand(self, user_id: str, entity_id: str, language: str) -> list[str]:
@@ -265,7 +319,9 @@ class PlaylistService:
                     visit(str(child[0]))
                 return
 
-            raise HTTPException(400, "Playlists only support music tracks, albums, and artists.")
+            raise HTTPException(
+                400, "Playlists only support music tracks, albums, and artists."
+            )
 
         visit(entity_id)
         return list(dict.fromkeys(expanded))
@@ -320,10 +376,18 @@ class PlaylistService:
                     "(id,playlist_id,entity_id,position,added_at) VALUES(?,?,?,?,?)",
                     (_new_id(), playlist_id, item_id, position, timestamp),
                 )
-        return (self.get_summary if summary else self.get_playlist)(user_id, playlist_id, language)
+        return (self.get_summary if summary else self.get_playlist)(
+            user_id, playlist_id, language
+        )
 
     def update_playlist(
-        self, user_id: str, playlist_id: str, language: str, payload: dict, *, summary: bool = False
+        self,
+        user_id: str,
+        playlist_id: str,
+        language: str,
+        payload: dict,
+        *,
+        summary: bool = False,
     ) -> dict:
         row = self._owned(user_id, playlist_id)
         name = self._name(payload["name"]) if "name" in payload else row[2]
@@ -348,7 +412,9 @@ class PlaylistService:
                 "WHERE id=? AND user_id=?",
                 (name, description, is_private, token, _now(), playlist_id, user_id),
             )
-        return (self.get_summary if summary else self.get_playlist)(user_id, playlist_id, language)
+        return (self.get_summary if summary else self.get_playlist)(
+            user_id, playlist_id, language
+        )
 
     def delete_playlist(self, user_id: str, playlist_id: str) -> None:
         self._owned(user_id, playlist_id)
@@ -406,10 +472,18 @@ class PlaylistService:
                     "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
                     (timestamp, playlist_id, user_id),
                 )
-        return (self.get_summary if summary else self.get_playlist)(user_id, playlist_id, language)
+        return (self.get_summary if summary else self.get_playlist)(
+            user_id, playlist_id, language
+        )
 
     def remove_entry(
-        self, user_id: str, playlist_id: str, entry_id: str, language: str, *, summary: bool = False
+        self,
+        user_id: str,
+        playlist_id: str,
+        entry_id: str,
+        language: str,
+        *,
+        summary: bool = False,
     ) -> dict:
         self._owned(user_id, playlist_id)
         with self.db.transaction() as cursor:
@@ -421,9 +495,13 @@ class PlaylistService:
                 "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
                 (_now(), playlist_id, user_id),
             )
-        return (self.get_summary if summary else self.get_playlist)(user_id, playlist_id, language)
+        return (self.get_summary if summary else self.get_playlist)(
+            user_id, playlist_id, language
+        )
 
-    def remove_source(self, user_id: str, playlist_id: str, source_id: str, language: str) -> dict:
+    def remove_source(
+        self, user_id: str, playlist_id: str, source_id: str, language: str
+    ) -> dict:
         self._owned(user_id, playlist_id)
         entity_ids = self._expand(user_id, source_id, language)
         if not entity_ids:
@@ -442,16 +520,29 @@ class PlaylistService:
             )
         return self.get_summary(user_id, playlist_id, language)
 
-    def move_entry(self, user_id: str, playlist_id: str, entry_id: str,
-                   language: str, *, before_entry_id=None, after_entry_id=None) -> dict:
+    def move_entry(
+        self,
+        user_id: str,
+        playlist_id: str,
+        entry_id: str,
+        language: str,
+        *,
+        before_entry_id=None,
+        after_entry_id=None,
+    ) -> dict:
         self._owned(user_id, playlist_id)
         if (before_entry_id is None) == (after_entry_id is None):
-            raise HTTPException(400, "Provide exactly one beforeEntryId or afterEntryId.")
+            raise HTTPException(
+                400, "Provide exactly one beforeEntryId or afterEntryId."
+            )
         anchor = before_entry_id if before_entry_id is not None else after_entry_id
-        current = [row[0] for row in self.db.execute(
-            "SELECT id FROM user_playlist_items WHERE playlist_id=? ORDER BY position,id",
-            (playlist_id,),
-        )]
+        current = [
+            row[0]
+            for row in self.db.execute(
+                "SELECT id FROM user_playlist_items WHERE playlist_id=? ORDER BY position,id",
+                (playlist_id,),
+            )
+        ]
         if entry_id not in current or anchor not in current:
             raise HTTPException(404, "Playlist entry not found.")
         if entry_id == anchor:
@@ -479,12 +570,17 @@ class PlaylistService:
             not isinstance(value, str) for value in entry_ids
         ):
             raise HTTPException(400, "Playlist order must be a list of entry IDs.")
-        current = [row[0] for row in self.db.execute(
-            "SELECT id FROM user_playlist_items WHERE playlist_id=? ORDER BY position,id",
-            (playlist_id,),
-        )]
+        current = [
+            row[0]
+            for row in self.db.execute(
+                "SELECT id FROM user_playlist_items WHERE playlist_id=? ORDER BY position,id",
+                (playlist_id,),
+            )
+        ]
         if len(entry_ids) != len(current) or set(entry_ids) != set(current):
-            raise HTTPException(400, "Playlist order must include every entry exactly once.")
+            raise HTTPException(
+                400, "Playlist order must include every entry exactly once."
+            )
         with self.db.transaction() as cursor:
             for position, entry_id in enumerate(entry_ids):
                 cursor.execute(
@@ -515,8 +611,7 @@ class PlaylistService:
         status = self._watchlist_status(user_id, items)
         return {
             "items": [
-                {**item, "watchlistStatus": status.get(item["id"])}
-                for item in items
+                {**item, "watchlistStatus": status.get(item["id"])} for item in items
             ]
         }
 

@@ -385,7 +385,10 @@ class PlaylistDetail(DocsModel):
     isPrivate: bool | None = Field(default=None, examples=[True])
     shareToken: str | None = None
     itemCount: int | None = Field(default=None, examples=[12])
-    isMember: bool | None = Field(default=None, description="When membershipSourceId is provided, all accessible source tracks are members.")
+    isMember: bool | None = Field(
+        default=None,
+        description="When membershipSourceId is provided, all accessible source tracks are members.",
+    )
     artworkItems: list[CatalogItem] = Field(default_factory=list)
     items: list[PlaylistEntry] = Field(default_factory=list)
     page: int | None = Field(default=None, examples=[1])
@@ -1551,10 +1554,22 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/account/playlists/{playlist_id}"): "Get an owned playlist",
     ("PATCH", "/api/account/playlists/{playlist_id}"): "Update a playlist",
     ("DELETE", "/api/account/playlists/{playlist_id}"): "Delete a playlist",
-    ("POST", "/api/account/playlists/{playlist_id}/items"): "Add catalog items to a playlist",
-    ("DELETE", "/api/account/playlists/{playlist_id}/items/by-source/{source_id}"): "Remove a source's tracks from a playlist",
-    ("DELETE", "/api/account/playlists/{playlist_id}/items/{entry_id}"): "Remove an item from a playlist",
-    ("PATCH", "/api/account/playlists/{playlist_id}/items/{entry_id}/move"): "Move a playlist entry before or after another entry",
+    (
+        "POST",
+        "/api/account/playlists/{playlist_id}/items",
+    ): "Add catalog items to a playlist",
+    (
+        "DELETE",
+        "/api/account/playlists/{playlist_id}/items/by-source/{source_id}",
+    ): "Remove a source's tracks from a playlist",
+    (
+        "DELETE",
+        "/api/account/playlists/{playlist_id}/items/{entry_id}",
+    ): "Remove an item from a playlist",
+    (
+        "PATCH",
+        "/api/account/playlists/{playlist_id}/items/{entry_id}/move",
+    ): "Move a playlist entry before or after another entry",
     ("PUT", "/api/account/playlists/{playlist_id}/order"): "Reorder playlist items",
     ("GET", "/api/shared/playlists/{share_token}"): "View a shared playlist",
     ("GET", "/api/catalog/items/{entity_id}"): "Get a catalog item",
@@ -1903,7 +1918,10 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("POST", "/api/account/playlists"): PlaylistCreateRequest,
     ("PATCH", "/api/account/playlists/{playlist_id}"): PlaylistUpdateRequest,
     ("POST", "/api/account/playlists/{playlist_id}/items"): PlaylistItemsRequest,
-    ("PATCH", "/api/account/playlists/{playlist_id}/items/{entry_id}/move"): PlaylistMoveRequest,
+    (
+        "PATCH",
+        "/api/account/playlists/{playlist_id}/items/{entry_id}/move",
+    ): PlaylistMoveRequest,
     ("PUT", "/api/account/playlists/{playlist_id}/order"): PlaylistOrderRequest,
     ("PATCH", "/api/catalog/items/{entity_id}/progress"): ProgressPatchRequest,
     ("POST", "/api/catalog/items/{entity_id}/play-start"): PlayStartRequest,
@@ -2046,9 +2064,15 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/account/playlists/{playlist_id}"): PlaylistDetail,
     ("DELETE", "/api/account/playlists/{playlist_id}"): FlexibleObject,
     ("POST", "/api/account/playlists/{playlist_id}/items"): PlaylistDetail,
-    ("DELETE", "/api/account/playlists/{playlist_id}/items/by-source/{source_id}"): PlaylistDetail,
+    (
+        "DELETE",
+        "/api/account/playlists/{playlist_id}/items/by-source/{source_id}",
+    ): PlaylistDetail,
     ("DELETE", "/api/account/playlists/{playlist_id}/items/{entry_id}"): PlaylistDetail,
-    ("PATCH", "/api/account/playlists/{playlist_id}/items/{entry_id}/move"): PlaylistDetail,
+    (
+        "PATCH",
+        "/api/account/playlists/{playlist_id}/items/{entry_id}/move",
+    ): PlaylistDetail,
     ("PUT", "/api/account/playlists/{playlist_id}/order"): PlaylistDetail,
     ("GET", "/api/shared/playlists/{share_token}"): PlaylistDetail,
     ("GET", "/api/catalog/items/{entity_id}"): CatalogItemResponse,
@@ -2371,12 +2395,18 @@ def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
             )
         if name == "view":
             parameter.setdefault("schema", {})["enum"] = (
-                ["summary"] if path.startswith("/api/account/playlists") else ["full", "card"]
+                ["summary"]
+                if path.startswith("/api/account/playlists")
+                else ["full", "card"]
             )
         if name == "membershipSourceId":
-            parameter["description"] = "Track, album, or artist ID; isMember is true when every accessible source track is in a playlist."
+            parameter["description"] = (
+                "Track, album, or artist ID; isMember is true when every accessible source track is in a playlist."
+            )
         if name in {"page", "pageSize"} and "playlists" in path:
-            parameter["description"] = "Provide page and pageSize together for one-based, grant-filtered track paging; omit both for the full playlist."
+            parameter["description"] = (
+                "Provide page and pageSize together for one-based, grant-filtered track paging; omit both for the full playlist."
+            )
         if name == "section":
             parameter.setdefault("schema", {})["enum"] = [
                 "featured",

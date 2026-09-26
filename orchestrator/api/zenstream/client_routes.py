@@ -1365,10 +1365,16 @@ async def following(request: Request, language: str | None = Query(None)):
 
 
 @router.get("/api/account/playlists")
-async def get_playlists(request: Request, language: str | None = Query(None), membershipSourceId: str | None = Query(None)):
+async def get_playlists(
+    request: Request,
+    language: str | None = Query(None),
+    membershipSourceId: str | None = Query(None),
+):
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
-    return await run_foreground(playlists.list_playlists, account["id"], preferred, membershipSourceId)
+    return await run_foreground(
+        playlists.list_playlists, account["id"], preferred, membershipSourceId
+    )
 
 
 @router.post("/api/account/playlists")
@@ -1391,19 +1397,31 @@ async def create_playlist(request: Request, view: str | None = Query(None)):
 
 
 @router.get("/api/account/playlists/{playlist_id}")
-async def get_playlist(playlist_id: str, request: Request, language: str | None = Query(None), page: int | None = Query(None, ge=1), pageSize: int | None = Query(None, ge=1, le=100)):
+async def get_playlist(
+    playlist_id: str,
+    request: Request,
+    language: str | None = Query(None),
+    page: int | None = Query(None, ge=1),
+    pageSize: int | None = Query(None, ge=1, le=100),
+):
     if (page is None) != (pageSize is None):
         raise HTTPException(400, "page and pageSize must be provided together.")
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
     return await run_foreground(
-        playlists.get_playlist, account["id"], playlist_id, preferred,
-        page=page, page_size=pageSize,
+        playlists.get_playlist,
+        account["id"],
+        playlist_id,
+        preferred,
+        page=page,
+        page_size=pageSize,
     )
 
 
 @router.patch("/api/account/playlists/{playlist_id}")
-async def update_playlist(playlist_id: str, request: Request, view: str | None = Query(None)):
+async def update_playlist(
+    playlist_id: str, request: Request, view: str | None = Query(None)
+):
     if view not in (None, "summary"):
         raise HTTPException(400, "Unsupported playlist view.")
     account, _ = await _require_account(request)
@@ -1427,7 +1445,9 @@ async def delete_playlist(playlist_id: str, request: Request):
 
 
 @router.post("/api/account/playlists/{playlist_id}/items")
-async def add_playlist_items(playlist_id: str, request: Request, view: str | None = Query(None)):
+async def add_playlist_items(
+    playlist_id: str, request: Request, view: str | None = Query(None)
+):
     if view not in (None, "summary"):
         raise HTTPException(400, "Unsupported playlist view.")
     account, _ = await _require_account(request)
@@ -1456,7 +1476,9 @@ async def remove_playlist_source(playlist_id: str, source_id: str, request: Requ
 
 
 @router.delete("/api/account/playlists/{playlist_id}/items/{entry_id}")
-async def remove_playlist_item(playlist_id: str, entry_id: str, request: Request, view: str | None = Query(None)):
+async def remove_playlist_item(
+    playlist_id: str, entry_id: str, request: Request, view: str | None = Query(None)
+):
     if view not in (None, "summary"):
         raise HTTPException(400, "Unsupported playlist view.")
     account, _ = await _require_account(request)
@@ -1477,7 +1499,11 @@ async def move_playlist_item(playlist_id: str, entry_id: str, request: Request):
     payload = await _bounded_json_object(request)
     preferred = await run_foreground(_preferred, account, payload.get("language"))
     return await run_control(
-        playlists.move_entry, account["id"], playlist_id, entry_id, preferred,
+        playlists.move_entry,
+        account["id"],
+        playlist_id,
+        entry_id,
+        preferred,
         before_entry_id=payload.get("beforeEntryId"),
         after_entry_id=payload.get("afterEntryId"),
     )
@@ -1499,15 +1525,23 @@ async def reorder_playlist(playlist_id: str, request: Request):
 
 @router.get("/api/shared/playlists/{share_token}")
 async def get_shared_playlist(
-    share_token: str, request: Request, language: str | None = Query(None), page: int | None = Query(None, ge=1), pageSize: int | None = Query(None, ge=1, le=100)
+    share_token: str,
+    request: Request,
+    language: str | None = Query(None),
+    page: int | None = Query(None, ge=1),
+    pageSize: int | None = Query(None, ge=1, le=100),
 ):
     if (page is None) != (pageSize is None):
         raise HTTPException(400, "page and pageSize must be provided together.")
     account, _ = await _require_account(request)
     preferred = await run_foreground(_preferred, account, language)
     return await run_foreground(
-        playlists.get_shared_playlist, account["id"], share_token, preferred,
-        page=page, page_size=pageSize,
+        playlists.get_shared_playlist,
+        account["id"],
+        share_token,
+        preferred,
+        page=page,
+        page_size=pageSize,
     )
 
 

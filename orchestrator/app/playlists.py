@@ -513,11 +513,51 @@ class PlaylistService:
         ids = [row[0] for row in rows]
         items = self.catalog.items_by_ids(user_id, ids, language)
         status = self._watchlist_status(user_id, items)
+        next_episode_ids = list(
+            dict.fromkeys(
+                value["nextEpisodeId"]
+                for value in status.values()
+                if value.get("nextEpisodeId")
+            )
+        )
+        next_episodes = {
+            item["id"]: item
+            for item in self.catalog.items_by_ids(user_id, next_episode_ids, language)
+        }
+        watchlist_items = []
+        for item in items:
+            item_status = status.get(item["id"])
+            if item_status:
+                next_episode_id = item_status.get("nextEpisodeId")
+                item_status = {
+                    key: value
+                    for key, value in item_status.items()
+                    if key != "nextEpisodeId"
+                }
+                if next_episode_id:
+                    episode = next_episodes.get(next_episode_id)
+                    if episode is None:
+                        # Do not expose episode metadata from a library the user
+                        # cannot access, even if its followed series is visible.
+                        item_status = None
+                    elif "metadata" in episode:
+                        item_status["nextEpisode"] = {
+                            "id": episode["id"],
+                            "libraryId": episode["libraryId"],
+                            "type": episode["type"],
+                            "name": episode["name"],
+                            "seasonNumber": episode["seasonNumber"],
+                            "episodeNumber": episode["episodeNumber"],
+                            "metadata": {
+                                "title": episode["metadata"].get("title"),
+                                "images": episode["metadata"].get("images") or {},
+                            },
+                        }
+            watchlist_items.append(
+                {**item, "watchlistStatus": item_status}
+            )
         return {
-            "items": [
-                {**item, "watchlistStatus": status.get(item["id"])}
-                for item in items
-            ]
+            "items": watchlist_items
         }
 
     def _watchlist_status(self, user_id: str, items: list[dict]) -> dict[str, dict]:
@@ -569,4 +609,6 @@ class PlaylistService:
                 "seasonNumber": selected[2],
                 "episodeNumber": selected[3],
             }
+            if kind == "upNext":
+                statuses[series_id]["nextEpisodeId"] = str(selected[0])
         return statuses

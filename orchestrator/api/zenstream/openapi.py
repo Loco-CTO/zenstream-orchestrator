@@ -316,6 +316,37 @@ class CatalogState(DocsModel):
     duration: float | None = Field(default=None, examples=[3600.0])
 
 
+class WatchlistNextEpisodeMetadata(DocsModel):
+    title: str | None = Field(default=None, examples=["The Next Step"])
+    images: dict[str, CatalogArtwork] = Field(
+        default_factory=dict,
+        description="Episode artwork, including its Primary screencap when available.",
+    )
+
+
+class WatchlistNextEpisode(DocsModel):
+    id: str = Field(examples=["episode-0001"])
+    libraryId: str = Field(examples=["library-0001"])
+    type: str = Field(default="episode", examples=["episode"])
+    name: str = Field(examples=["The Next Step"])
+    seasonNumber: int | None = Field(default=None, examples=[1])
+    episodeNumber: int | None = Field(default=None, examples=[2])
+    metadata: WatchlistNextEpisodeMetadata
+
+
+class CatalogWatchlistStatus(DocsModel):
+    kind: str = Field(
+        examples=["upNext"],
+        description="The series playback state: continue or upNext.",
+    )
+    seasonNumber: int | None = Field(default=None, examples=[1])
+    episodeNumber: int | None = Field(default=None, examples=[2])
+    nextEpisode: WatchlistNextEpisode | None = Field(
+        default=None,
+        description="Accessible upcoming episode details, present when kind is upNext.",
+    )
+
+
 class CatalogItem(DocsModel):
     id: str | None = Field(default=None, examples=["item-0001"])
     type: str | None = Field(default=None, examples=["movie"])
@@ -326,7 +357,7 @@ class CatalogItem(DocsModel):
     images: dict[str, CatalogArtwork] = Field(default_factory=dict)
     credits: list[CatalogCredit] = Field(default_factory=list)
     state: CatalogState | None = None
-    watchlistStatus: dict[str, Any] | None = None
+    watchlistStatus: CatalogWatchlistStatus | None = None
     children: list[Any] = Field(default_factory=list)
 
 

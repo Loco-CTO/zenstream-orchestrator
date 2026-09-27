@@ -450,6 +450,28 @@ class PlaybackTest(unittest.TestCase):
             "video-transcode",
         )
 
+    def test_requested_audio_transcode_recovers_media3_audio_renderer_failure(self):
+        self.assertEqual(
+            PlaybackManager._playback_mode(
+                {
+                    "container": "mp4",
+                    "videoCodec": "h264",
+                    "audioCodec": "aac",
+                    "streams": [
+                        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+                        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+                    ],
+                },
+                {
+                    "containers": ["mp4"],
+                    "videoCodecs": ["h264"],
+                    "audioCodecs": ["aac"],
+                    "requestedMode": "audio-transcode",
+                },
+            ),
+            "audio-transcode",
+        )
+
     def test_empty_capabilities_mean_no_direct_support(self):
         source = {
             "container": "mp4",

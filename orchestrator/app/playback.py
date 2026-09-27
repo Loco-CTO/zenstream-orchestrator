@@ -841,6 +841,16 @@ class PlaybackManager:
             or source.get("videoCodec")
         )
 
+    @staticmethod
+    def _source_has_audio(source: dict) -> bool:
+        return bool(
+            any(
+                str(stream.get("codec_type") or "").lower() == "audio"
+                for stream in source.get("streams", [])
+            )
+            or source.get("audioCodec")
+        )
+
     @classmethod
     def _playback_mode(cls, source: dict, profile: dict) -> str:
         if profile.get("forceTranscoding") is True:
@@ -854,6 +864,8 @@ class PlaybackManager:
             return (
                 requested_mode if cls._source_has_video(source) else "audio-transcode"
             )
+        if requested_mode == "audio-transcode" and cls._source_has_audio(source):
+            return requested_mode
         containers = cls._profile_values(profile, "containers", {"mp4", "webm"})
         video = {
             codec

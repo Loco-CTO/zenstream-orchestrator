@@ -91,12 +91,27 @@ class OpenApiContractTest(unittest.TestCase):
         for operation in (owned, shared):
             names = {parameter["name"] for parameter in operation["parameters"]}
             self.assertTrue({"page", "pageSize"}.issubset(names))
-        list_names = {parameter["name"] for parameter in self.schema["paths"]["/api/account/playlists"]["get"]["parameters"]}
+        list_names = {
+            parameter["name"]
+            for parameter in self.schema["paths"]["/api/account/playlists"]["get"][
+                "parameters"
+            ]
+        }
         self.assertIn("membershipSourceId", list_names)
         detail = self.schema["components"]["schemas"]["PlaylistDetail"]["properties"]
         self.assertTrue({"page", "pageSize", "hasMore", "isMember"}.issubset(detail))
-        self.assertIn("delete", self.schema["paths"]["/api/account/playlists/{playlist_id}/items/by-source/{source_id}"])
-        self.assertIn("patch", self.schema["paths"]["/api/account/playlists/{playlist_id}/items/{entry_id}/move"])
+        self.assertIn(
+            "delete",
+            self.schema["paths"][
+                "/api/account/playlists/{playlist_id}/items/by-source/{source_id}"
+            ],
+        )
+        self.assertIn(
+            "patch",
+            self.schema["paths"][
+                "/api/account/playlists/{playlist_id}/items/{entry_id}/move"
+            ],
+        )
 
     def test_operation_ids_are_explicit_stable_and_unique(self):
         operation_ids = [

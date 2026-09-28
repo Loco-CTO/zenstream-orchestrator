@@ -5,6 +5,7 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -20,6 +21,11 @@ class PersistenceMigrationTest(unittest.TestCase):
             "sqlalchemy.url", f"sqlite:///{database_path.as_posix()}"
         )
         return config
+
+    def test_migration_history_has_one_merged_head(self):
+        script = ScriptDirectory.from_config(self._config(Path("unused.db")))
+
+        self.assertEqual(len(script.get_heads()), 1)
 
     def test_clean_upgrade_builds_normalized_image_schema_and_hot_indexes(self):
         with tempfile.TemporaryDirectory() as directory:

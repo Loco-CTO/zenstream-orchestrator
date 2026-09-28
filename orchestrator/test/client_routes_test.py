@@ -222,7 +222,11 @@ class ClientRefreshRouteTest(unittest.TestCase):
             response = asyncio.run(
                 client_routes.refresh(
                     _json_request(
-                        {"refreshToken": "old-refresh"}, path="/api/auth/refresh"
+                        {
+                            "refreshToken": "old-refresh",
+                            "refreshAttemptId": "99e8a7d4-1f18-4ec7-82d5-e98bcf16252d",
+                        },
+                        path="/api/auth/refresh",
                     )
                 )
             )
@@ -230,7 +234,26 @@ class ClientRefreshRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.body), refreshed)
         self.assertEqual(auth.await_args.args[1], "old-refresh")
+        self.assertEqual(
+            auth.await_args.args[4], "99e8a7d4-1f18-4ec7-82d5-e98bcf16252d"
+        )
         self.assertNotIn("set-cookie", response.headers)
+
+    def test_invalid_refresh_attempt_id_is_bad_request(self):
+        with self.assertRaises(client_routes.HTTPException) as raised:
+            asyncio.run(
+                client_routes.refresh(
+                    _json_request(
+                        {
+                            "refreshToken": "old-refresh",
+                            "refreshAttemptId": "not-a-uuid",
+                        },
+                        path="/api/auth/refresh",
+                    )
+                )
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
 
     def test_cookie_refresh_sets_new_cookies_without_exposing_tokens(self):
         refreshed = self._session()

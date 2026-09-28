@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import time
+import uuid
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -884,15 +885,68 @@ async def refresh(request: Request):
     refresh_token = str(data.get("refreshToken") or supplied_cookie or "")
     if not refresh_token:
         raise HTTPException(401, "Authentication required.")
+    refresh_attempt_id = data.get("refreshAttemptId")
+    if refresh_attempt_id is not None:
+        if not isinstance(refresh_attempt_id, str):
+            raise HTTPException(400, "Refresh attempt ID must be a UUID.")
+        try:
+            refresh_attempt_id = str(uuid.UUID(refresh_attempt_id))
+        except ValueError as error:
+            raise HTTPException(400, "Refresh attempt ID must be a UUID.") from error
+    started_at = time.monotonic()
+    flow = "cookie" if supplied_cookie else "bearer"
+    host = (
+        "".join(
+            character
+            for character in (request.url.hostname or "unknown").lower()
+            if character.isalnum() or character in ".-:[]"
+        )[:120]
+        or "unknown"
+    )
+    logger.info(
+        "auth refresh started host=%s flow=%s attempt_id=%s",
+        host,
+        flow,
+        refresh_attempt_id or "legacy",
+    )
     try:
         session = await run_auth(
             Account().refresh_session,
             refresh_token,
             _request_device_metadata(data),
             _client_address(request),
+            refresh_attempt_id,
         )
     except RefreshTokenError as error:
+        logger.info(
+            "auth refresh completed host=%s flow=%s attempt_id=%s outcome=rejected status=401 duration_ms=%d",
+            host,
+            flow,
+            refresh_attempt_id or "legacy",
+            int((time.monotonic() - started_at) * 1000),
+        )
         raise HTTPException(401, str(error)) from error
+    except Exception as error:
+        status_code = getattr(error, "status_code", 500)
+        if not isinstance(status_code, int):
+            status_code = 500
+        logger.warning(
+            "auth refresh completed host=%s flow=%s attempt_id=%s outcome=error status=%d error_type=%s duration_ms=%d",
+            host,
+            flow,
+            refresh_attempt_id or "legacy",
+            status_code,
+            type(error).__name__,
+            int((time.monotonic() - started_at) * 1000),
+        )
+        raise
+    logger.info(
+        "auth refresh completed host=%s flow=%s attempt_id=%s outcome=success status=200 duration_ms=%d",
+        host,
+        flow,
+        refresh_attempt_id or "legacy",
+        int((time.monotonic() - started_at) * 1000),
+    )
     if supplied_cookie:
         payload = {
             "user": session["user"],

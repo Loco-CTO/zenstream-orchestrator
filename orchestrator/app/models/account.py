@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import threading
 import time
@@ -8,8 +9,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from app.config import Config
+from app.models.metadata import _fernet
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
+from cryptography.fernet import InvalidToken
 
 _hasher = PasswordHasher()
 
@@ -24,6 +27,22 @@ def _iso(value: datetime | None = None) -> str:
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _encode_refresh_response(value: dict) -> str:
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return _fernet().encrypt(encoded).decode("ascii")
+
+
+def _decode_refresh_response(value: str) -> dict:
+    try:
+        decoded = _fernet().decrypt(value.encode("ascii")).decode("utf-8")
+        response = json.loads(decoded)
+    except (InvalidToken, UnicodeDecodeError, ValueError, TypeError) as error:
+        raise RuntimeError("Stored refresh response cannot be decrypted") from error
+    if not isinstance(response, dict):
+        raise RuntimeError("Stored refresh response is malformed")
+    return response
 
 
 class RefreshTokenError(ValueError):
@@ -348,18 +367,25 @@ class Account:
         refresh_token: str,
         device_metadata: dict | None = None,
         ip_address: str | None = None,
+        refresh_attempt_id: str | None = None,
     ) -> dict:
         del device_metadata, ip_address
         if not refresh_token or not self._supports_refresh_schema():
             raise RefreshTokenError("Refresh token is invalid.")
+        if refresh_attempt_id is not None:
+            try:
+                refresh_attempt_id = str(uuid.UUID(refresh_attempt_id))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise RefreshTokenError("Refresh attempt ID is invalid.") from error
         now = _now()
         now_iso = _iso(now)
         reused = False
+        cached_response = None
         with self.db.transaction() as cursor:
             row = cursor.execute(
                 "SELECT r.id,r.session_id,r.user_id,r.family_id,r.expires_at,r.used_at,r.revoked_at,"
                 "s.expires_at,s.revoked_at,u.id,u.username,u.password,u.password_scheme,"
-                "COALESCE(u.disabled,0) "
+                "COALESCE(u.disabled,0),r.rotation_attempt_id,r.rotation_response_ciphertext "
                 "FROM user_refresh_tokens r "
                 "JOIN user_sessions s ON s.id=r.session_id "
                 "JOIN users u ON u.id=r.user_id "
@@ -369,17 +395,32 @@ class Account:
             if row is None:
                 raise RefreshTokenError("Refresh token is invalid.")
             if row[5] is not None:
-                cursor.execute(
-                    "UPDATE user_refresh_tokens SET revoked_at=? "
-                    "WHERE family_id=? AND revoked_at IS NULL",
-                    (now_iso, row[3]),
-                )
-                cursor.execute(
-                    "UPDATE user_sessions SET revoked_at=? "
-                    "WHERE id=? AND revoked_at IS NULL",
-                    (now_iso, row[1]),
-                )
-                reused = True
+                if refresh_attempt_id and refresh_attempt_id == row[14] and row[15]:
+                    # A cached rotation is only recoverable while its session is
+                    # still live. Replaying an idempotent response must not
+                    # resurrect credentials after logout, family revocation,
+                    # absolute expiry, or account disablement.
+                    if (
+                        row[6] is not None
+                        or row[8] is not None
+                        or row[13]
+                        or row[4] <= now_iso
+                        or row[7] <= now_iso
+                    ):
+                        raise RefreshTokenError("Refresh token is invalid.")
+                    cached_response = _decode_refresh_response(row[15])
+                else:
+                    cursor.execute(
+                        "UPDATE user_refresh_tokens SET revoked_at=? "
+                        "WHERE family_id=? AND revoked_at IS NULL",
+                        (now_iso, row[3]),
+                    )
+                    cursor.execute(
+                        "UPDATE user_sessions SET revoked_at=? "
+                        "WHERE id=? AND revoked_at IS NULL",
+                        (now_iso, row[1]),
+                    )
+                    reused = True
             elif (
                 row[6] is not None
                 or row[8] is not None
@@ -420,19 +461,32 @@ class Account:
                     ),
                 )
                 user_row = row[9:14]
+                user = self.public(user_row)
+                response = self._session_response(
+                    token=access,
+                    refresh_token=replacement,
+                    session_id=row[1],
+                    access_expires=access_expires,
+                    refresh_expires=refresh_expires,
+                    session_expires=datetime.fromisoformat(row[7]),
+                    now=now,
+                    user=user,
+                )
+                if refresh_attempt_id:
+                    cursor.execute(
+                        "UPDATE user_refresh_tokens SET rotation_attempt_id=?,"
+                        "rotation_response_ciphertext=? WHERE id=?",
+                        (
+                            refresh_attempt_id,
+                            _encode_refresh_response(response),
+                            row[0],
+                        ),
+                    )
+        if cached_response is not None:
+            return cached_response
         if reused:
             raise RefreshTokenError("Refresh token is invalid.")
-        user = self.public(user_row)
-        return self._session_response(
-            token=access,
-            refresh_token=replacement,
-            session_id=row[1],
-            access_expires=access_expires,
-            refresh_expires=refresh_expires,
-            session_expires=datetime.fromisoformat(row[7]),
-            now=now,
-            user=user,
-        )
+        return response
 
     def upgrade_legacy_session(
         self,

@@ -121,6 +121,15 @@ class RefreshRequest(DocsModel):
         description="Rotating refresh token for bearer clients. Browser clients use the HttpOnly cookie.",
         json_schema_extra={"writeOnly": True},
     )
+    refreshAttemptId: str | None = Field(
+        default=None,
+        description=(
+            "Stable UUID for retrying the same bearer refresh after an uncertain response. "
+            "The same ID must be reused with the same refresh token."
+        ),
+        examples=["99e8a7d4-1f18-4ec7-82d5-e98bcf16252d"],
+        json_schema_extra={"format": "uuid"},
+    )
     device: DeviceMetadata | None = Field(default=None)
 
 
@@ -1087,6 +1096,7 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     MetadataLanguagesResponse,
     DeviceMetadata,
     CredentialsRequest,
+    RefreshRequest,
     RegisterRequest,
     PasswordChangeRequest,
     PasswordResetRequest,

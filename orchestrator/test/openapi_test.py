@@ -85,6 +85,21 @@ class OpenApiContractTest(unittest.TestCase):
         for path in DOCUMENTATION_EXCLUDED_PATHS:
             self.assertNotIn(path, self.schema["paths"])
 
+    def test_refresh_attempt_id_is_documented_as_optional_uuid(self):
+        operation = self.schema["paths"]["/api/auth/refresh"]["post"]
+        request_schema = operation["requestBody"]["content"]["application/json"][
+            "schema"
+        ]
+        schema_name = request_schema["$ref"].rsplit("/", 1)[-1]
+        refresh_properties = self.schema["components"]["schemas"][schema_name][
+            "properties"
+        ]
+        self.assertEqual(refresh_properties["refreshAttemptId"]["format"], "uuid")
+        self.assertNotIn(
+            "refreshAttemptId",
+            self.schema["components"]["schemas"][schema_name].get("required", []),
+        )
+
     def test_playlist_paging_membership_and_anchor_move_are_documented(self):
         owned = self.schema["paths"]["/api/account/playlists/{playlist_id}"]["get"]
         shared = self.schema["paths"]["/api/shared/playlists/{share_token}"]["get"]

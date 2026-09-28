@@ -52,6 +52,17 @@ class Account:
         except Exception:
             return set()
 
+    def _has_table(self, table_name: str) -> bool:
+        try:
+            return bool(
+                self.db.read_execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table_name,),
+                )
+            )
+        except Exception:
+            return False
+
     def _supports_refresh_schema(self) -> bool:
         columns = self._session_columns()
         if not {
@@ -60,15 +71,7 @@ class Account:
             "revoked_at",
         }.issubset(columns):
             return False
-        try:
-            return bool(
-                self.db.read_execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    ("user_refresh_tokens",),
-                )
-            )
-        except Exception:
-            return False
+        return self._has_table("user_refresh_tokens")
 
     def _row(
         self,
@@ -590,15 +593,17 @@ class Account:
         rows = self.db.read_execute(
             "SELECT id FROM user_sessions WHERE token_hash=?", (_token_hash(token),)
         )
+        supports_playback_leases = self._has_table("playback_access_leases")
         if self._supports_refresh_schema():
             now = _iso()
             with self.db.transaction() as cursor:
-                cursor.execute(
-                    "UPDATE playback_access_leases SET revoked_at=? "
-                    "WHERE auth_session_id IN (SELECT id FROM user_sessions WHERE token_hash=?) "
-                    "AND revoked_at IS NULL",
-                    (now, _token_hash(token)),
-                )
+                if supports_playback_leases:
+                    cursor.execute(
+                        "UPDATE playback_access_leases SET revoked_at=? "
+                        "WHERE auth_session_id IN (SELECT id FROM user_sessions WHERE token_hash=?) "
+                        "AND revoked_at IS NULL",
+                        (now, _token_hash(token)),
+                    )
                 cursor.execute(
                     "UPDATE user_sessions SET revoked_at=? WHERE token_hash=?",
                     (now, _token_hash(token)),
@@ -611,12 +616,13 @@ class Account:
                 )
         else:
             with self.db.transaction() as cursor:
-                cursor.execute(
-                    "UPDATE playback_access_leases SET revoked_at=? "
-                    "WHERE auth_session_id IN (SELECT id FROM user_sessions WHERE token_hash=?) "
-                    "AND revoked_at IS NULL",
-                    (_iso(), _token_hash(token)),
-                )
+                if supports_playback_leases:
+                    cursor.execute(
+                        "UPDATE playback_access_leases SET revoked_at=? "
+                        "WHERE auth_session_id IN (SELECT id FROM user_sessions WHERE token_hash=?) "
+                        "AND revoked_at IS NULL",
+                        (_iso(), _token_hash(token)),
+                    )
                 cursor.execute(
                     "DELETE FROM user_sessions WHERE token_hash=?",
                     (_token_hash(token),),
@@ -627,14 +633,16 @@ class Account:
         rows = self.db.read_execute(
             "SELECT id FROM user_sessions WHERE user_id=?", (user_id,)
         )
+        supports_playback_leases = self._has_table("playback_access_leases")
         if self._supports_refresh_schema():
             now = _iso()
             with self.db.transaction() as cursor:
-                cursor.execute(
-                    "UPDATE playback_access_leases SET revoked_at=? "
-                    "WHERE user_id=? AND revoked_at IS NULL",
-                    (now, user_id),
-                )
+                if supports_playback_leases:
+                    cursor.execute(
+                        "UPDATE playback_access_leases SET revoked_at=? "
+                        "WHERE user_id=? AND revoked_at IS NULL",
+                        (now, user_id),
+                    )
                 cursor.execute(
                     "UPDATE user_sessions SET revoked_at=? WHERE user_id=?",
                     (now, user_id),
@@ -646,11 +654,12 @@ class Account:
                 )
         else:
             with self.db.transaction() as cursor:
-                cursor.execute(
-                    "UPDATE playback_access_leases SET revoked_at=? "
-                    "WHERE user_id=? AND revoked_at IS NULL",
-                    (_iso(), user_id),
-                )
+                if supports_playback_leases:
+                    cursor.execute(
+                        "UPDATE playback_access_leases SET revoked_at=? "
+                        "WHERE user_id=? AND revoked_at IS NULL",
+                        (_iso(), user_id),
+                    )
                 cursor.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
         self._forget_session_ids(row[0] for row in rows)
 

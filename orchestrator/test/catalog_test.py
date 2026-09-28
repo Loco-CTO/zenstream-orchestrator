@@ -1624,6 +1624,10 @@ class CatalogTest(unittest.TestCase):
         account.revoke(session["token"])
         self.assertIsNone(account.authenticate_token(session["token"]))
 
+        user_session = account.create_session(created["id"])
+        account.revoke_user(created["id"])
+        self.assertIsNone(account.authenticate_token(user_session["token"]))
+
         legacy_id = "legacy-id"
         self.db.execute(
             "INSERT INTO users VALUES(?,?,?,?,0)",

@@ -1,8 +1,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0060_refresh_attempt_recovery"
-down_revision = "0059_playlists"
+revision = "0061_refresh_attempt_recovery"
+down_revision = "0060_playback_access_leases"
 branch_labels = None
 depends_on = None
 

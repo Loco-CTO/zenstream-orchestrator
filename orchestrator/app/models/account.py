@@ -594,6 +594,12 @@ class Account:
             now = _iso()
             with self.db.transaction() as cursor:
                 cursor.execute(
+                    "UPDATE playback_access_leases SET revoked_at=? "
+                    "WHERE auth_session_id IN (SELECT id FROM user_sessions WHERE token_hash=?) "
+                    "AND revoked_at IS NULL",
+                    (now, _token_hash(token)),
+                )
+                cursor.execute(
                     "UPDATE user_sessions SET revoked_at=? WHERE token_hash=?",
                     (now, _token_hash(token)),
                 )
@@ -604,9 +610,16 @@ class Account:
                     (now, _token_hash(token)),
                 )
         else:
-            self.db.execute(
-                "DELETE FROM user_sessions WHERE token_hash=?", (_token_hash(token),)
-            )
+            with self.db.transaction() as cursor:
+                cursor.execute(
+                    "UPDATE playback_access_leases SET revoked_at=? "
+                    "WHERE auth_session_id IN (SELECT id FROM user_sessions WHERE token_hash=?) "
+                    "AND revoked_at IS NULL",
+                    (_iso(), _token_hash(token)),
+                )
+                cursor.execute(
+                    "DELETE FROM user_sessions WHERE token_hash=?", (_token_hash(token),)
+                )
         self._forget_session_ids(row[0] for row in rows)
 
     def revoke_user(self, user_id: str) -> None:
@@ -617,6 +630,11 @@ class Account:
             now = _iso()
             with self.db.transaction() as cursor:
                 cursor.execute(
+                    "UPDATE playback_access_leases SET revoked_at=? "
+                    "WHERE user_id=? AND revoked_at IS NULL",
+                    (now, user_id),
+                )
+                cursor.execute(
                     "UPDATE user_sessions SET revoked_at=? WHERE user_id=?",
                     (now, user_id),
                 )
@@ -626,7 +644,13 @@ class Account:
                     (now, user_id),
                 )
         else:
-            self.db.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+            with self.db.transaction() as cursor:
+                cursor.execute(
+                    "UPDATE playback_access_leases SET revoked_at=? "
+                    "WHERE user_id=? AND revoked_at IS NULL",
+                    (_iso(), user_id),
+                )
+                cursor.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
         self._forget_session_ids(row[0] for row in rows)
 
     def list(self) -> list[dict]:

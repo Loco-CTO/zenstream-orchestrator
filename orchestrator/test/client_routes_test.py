@@ -686,7 +686,12 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
 
     def test_playback_access_refresh_uses_authenticated_foreground_work(self):
         request = _json_request(
-            {"sourceId": "source-1", "sessionId": "playback-session-1"},
+            {
+                "sourceId": "source-1",
+                "sessionId": "playback-session-1",
+                "playbackAccessMode": "lease-v1",
+                "playbackLeaseToken": "pl1_opaque",
+            },
             path="/api/playback/items/entity-1/access",
         )
         with (
@@ -724,6 +729,8 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
                 "source-1",
                 "playback-session-1",
                 "auth-session-1",
+                "lease-v1",
+                "pl1_opaque",
             ),
         )
 

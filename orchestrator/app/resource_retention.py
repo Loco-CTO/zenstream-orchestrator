@@ -76,6 +76,7 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
     from app.models.account import Account
     from app.models.admin import Admin
     from app.models.playback_viewer import PlaybackViewerStore
+    from app.models.playback_access_lease import PlaybackAccessLeaseStore
     from app.models.syncplay import SyncplayGroup
     from app.notifications import NotificationService
     from app.playback import PlaybackManager
@@ -88,6 +89,9 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
         "admin_sessions": _run("admin_sessions", Admin.cleanup_expired_sessions),
         "viewer_history": _run(
             "viewer_history", PlaybackViewerStore(db).cleanup_history, days
+        ),
+        "playback_access_leases": _run(
+            "playback_access_leases", PlaybackAccessLeaseStore(db).cleanup_expired, days
         ),
         "syncplay_expiry": _run(
             "syncplay_expiry", SyncplayGroup.expire_due_host_disconnects

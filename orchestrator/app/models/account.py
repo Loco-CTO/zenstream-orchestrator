@@ -395,11 +395,7 @@ class Account:
             if row is None:
                 raise RefreshTokenError("Refresh token is invalid.")
             if row[5] is not None:
-                if (
-                    refresh_attempt_id
-                    and refresh_attempt_id == row[14]
-                    and row[15]
-                ):
+                if refresh_attempt_id and refresh_attempt_id == row[14] and row[15]:
                     # A cached rotation is only recoverable while its session is
                     # still live. Replaying an idempotent response must not
                     # resurrect credentials after logout, family revocation,

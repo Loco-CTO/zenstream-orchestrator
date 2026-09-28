@@ -87,13 +87,13 @@ class OpenApiContractTest(unittest.TestCase):
 
     def test_refresh_attempt_id_is_documented_as_optional_uuid(self):
         operation = self.schema["paths"]["/api/auth/refresh"]["post"]
-        request_schema = (
-            operation["requestBody"]["content"]["application/json"]["schema"]
-        )
+        request_schema = operation["requestBody"]["content"]["application/json"][
+            "schema"
+        ]
         schema_name = request_schema["$ref"].rsplit("/", 1)[-1]
-        refresh_properties = (
-            self.schema["components"]["schemas"][schema_name]["properties"]
-        )
+        refresh_properties = self.schema["components"]["schemas"][schema_name][
+            "properties"
+        ]
         self.assertEqual(refresh_properties["refreshAttemptId"]["format"], "uuid")
         self.assertNotIn(
             "refreshAttemptId",

@@ -55,9 +55,7 @@ class AccountRefreshTokenTest(unittest.TestCase):
 
     @patch.dict("os.environ", {"SECRET_KEY": "refresh-attempt-test-secret"})
     @patch("app.avatar.UserAvatarStore.version", return_value=None)
-    def test_same_refresh_attempt_returns_original_rotated_pair(
-        self, _avatar_version
-    ):
+    def test_same_refresh_attempt_returns_original_rotated_pair(self, _avatar_version):
         first = self.account.create_session("user-1", supports_refresh=True)
         attempt_id = "5e0cf88a-6f67-467d-8d3c-4f338680f4f1"
 

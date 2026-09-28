@@ -895,11 +895,14 @@ async def refresh(request: Request):
             raise HTTPException(400, "Refresh attempt ID must be a UUID.") from error
     started_at = time.monotonic()
     flow = "cookie" if supplied_cookie else "bearer"
-    host = "".join(
-        character
-        for character in (request.url.hostname or "unknown").lower()
-        if character.isalnum() or character in ".-:[]"
-    )[:120] or "unknown"
+    host = (
+        "".join(
+            character
+            for character in (request.url.hostname or "unknown").lower()
+            if character.isalnum() or character in ".-:[]"
+        )[:120]
+        or "unknown"
+    )
     logger.info(
         "auth refresh started host=%s flow=%s attempt_id=%s",
         host,

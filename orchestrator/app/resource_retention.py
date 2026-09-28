@@ -75,8 +75,8 @@ def run_resource_retention(job_store=None) -> dict[str, int]:
     from app.metadata_services import asset_executor
     from app.models.account import Account
     from app.models.admin import Admin
-    from app.models.playback_viewer import PlaybackViewerStore
     from app.models.playback_access_lease import PlaybackAccessLeaseStore
+    from app.models.playback_viewer import PlaybackViewerStore
     from app.models.syncplay import SyncplayGroup
     from app.notifications import NotificationService
     from app.playback import PlaybackManager

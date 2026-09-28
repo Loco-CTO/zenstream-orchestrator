@@ -87,9 +87,7 @@ class PlaybackAccessLeaseTest(unittest.TestCase):
         token = self.create_lease()
         self.db.execute(
             "UPDATE playback_access_leases SET expires_at=?",
-            (
-                (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
-            ),
+            ((datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),),
         )
         before = self.store._row(token)
         renewed = self.store.renew(

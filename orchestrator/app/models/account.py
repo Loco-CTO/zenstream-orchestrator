@@ -618,7 +618,8 @@ class Account:
                     (_iso(), _token_hash(token)),
                 )
                 cursor.execute(
-                    "DELETE FROM user_sessions WHERE token_hash=?", (_token_hash(token),)
+                    "DELETE FROM user_sessions WHERE token_hash=?",
+                    (_token_hash(token),),
                 )
         self._forget_session_ids(row[0] for row in rows)
 

@@ -10,12 +10,12 @@ import os
 import time
 from urllib.parse import urlsplit
 
+from app.logging_config import get_logger
 from app.models.account import Account
 from app.models.playback_access_lease import (
     PLAYBACK_ACCESS_LEASE_PREFIX,
     PlaybackAccessLeaseStore,
 )
-from app.logging_config import get_logger
 from fastapi import HTTPException, Request, WebSocket
 
 logger = get_logger("client_auth")
@@ -293,8 +293,10 @@ def account_from_access(
 ) -> dict:
     authenticated = optional_account(request)
     access_token = request.query_params.get("access")
-    if kind == "resource" and access_token and access_token.startswith(
-        PLAYBACK_ACCESS_LEASE_PREFIX
+    if (
+        kind == "resource"
+        and access_token
+        and access_token.startswith(PLAYBACK_ACCESS_LEASE_PREFIX)
     ):
         authenticated_user_id = authenticated[0]["id"] if authenticated else None
         authenticated_session_id = (
@@ -330,9 +332,7 @@ def account_from_access(
         return account
     if authenticated:
         return authenticated[0]
-    payload = read_ticket(
-        access_token, kind, expected_claims or None
-    )
+    payload = read_ticket(access_token, kind, expected_claims or None)
     route_entity = request.path_params.get("entity_id")
     claimed_entity = payload.get("entity")
     if (

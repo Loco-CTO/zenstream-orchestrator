@@ -749,7 +749,9 @@ class PlaybackTest(unittest.TestCase):
         ticket_issuer.assert_called_once()
 
     @patch("app.playback.issue_ticket")
-    def test_refresh_access_extends_a_lease_without_issuing_a_ticket(self, ticket_issuer):
+    def test_refresh_access_extends_a_lease_without_issuing_a_ticket(
+        self, ticket_issuer
+    ):
         manager = object.__new__(PlaybackManager)
         manager.catalog = MagicMock()
         manager.db = MagicMock()

@@ -93,7 +93,10 @@ class PlaybackAccessLeaseStore:
         }
         if (
             (user_id is not None and lease["userId"] != user_id)
-            or (auth_session_id is not None and lease["authSessionId"] != auth_session_id)
+            or (
+                auth_session_id is not None
+                and lease["authSessionId"] != auth_session_id
+            )
             or (entity_id is not None and lease["entityId"] != entity_id)
             or (source_id is not None and lease["sourceId"] != source_id)
             or lease["playbackSessionId"] != playback_session_id

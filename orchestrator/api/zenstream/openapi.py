@@ -602,6 +602,7 @@ class MusicTracksResponse(DocsModel):
 
 class PlaybackCapabilityRequest(DocsModel):
     sourceId: str | None = Field(default=None, examples=["source-0001"])
+    playbackAccessMode: str | None = Field(default=None, examples=["lease-v1"])
     device: DeviceMetadata | None = None
     playerEngine: str | None = Field(default=None, examples=["media3"])
     directPlay: bool | None = Field(default=None, examples=[True])
@@ -631,11 +632,15 @@ class PlaybackNegotiationResponse(DocsModel):
         default=None, examples=["/api/playback/items/item-0001/stream"]
     )
     accessExpiresIn: int | None = Field(default=None, examples=[900])
+    playbackAccessMode: str | None = Field(default=None, examples=["lease-v1"])
+    playbackLeaseToken: str | None = Field(default=None, examples=["pl1_opaque"])
 
 
 class PlaybackAccessRequest(DocsModel):
     sourceId: str | None = Field(default=None, examples=["source-0001"])
     sessionId: str | None = Field(default=None, examples=["session-0001"])
+    playbackAccessMode: str | None = Field(default=None, examples=["lease-v1"])
+    playbackLeaseToken: str | None = Field(default=None, examples=["pl1_opaque"])
 
 
 class PlaybackAccessResponse(DocsModel):
@@ -643,6 +648,8 @@ class PlaybackAccessResponse(DocsModel):
     sourceId: str | None = Field(default=None, examples=["source-0001"])
     access: str | None = Field(default=None, json_schema_extra={"readOnly": True})
     expiresIn: int | None = Field(default=None, examples=[900])
+    playbackAccessMode: str | None = Field(default=None, examples=["lease-v1"])
+    expiresAt: str | None = Field(default=None, examples=["2026-09-28T12:00:00+00:00"])
 
 
 class ViewerHeartbeatRequest(DocsModel):
@@ -2253,10 +2260,16 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     PlayStartRequest: {"sourceId": "source-0001", "position": 0},
     PlaybackCapabilityRequest: {
         "sourceId": "source-0001",
+        "playbackAccessMode": "lease-v1",
         "directPlay": True,
         "playerEngine": "media3",
     },
-    PlaybackAccessRequest: {"sourceId": "source-0001", "sessionId": "session-0001"},
+    PlaybackAccessRequest: {
+        "sourceId": "source-0001",
+        "sessionId": "session-0001",
+        "playbackAccessMode": "lease-v1",
+        "playbackLeaseToken": "pl1_opaque",
+    },
     ViewerHeartbeatRequest: {"position": 120.5, "duration": 3600.0, "playing": True},
     NotificationPatchRequest: {"read": True},
     AdminUserUpdateRequest: {"disabled": False},

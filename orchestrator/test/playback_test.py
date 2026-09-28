@@ -748,6 +748,45 @@ class PlaybackTest(unittest.TestCase):
         self.assertIn("playback_sessions", manager.db.execute.call_args.args[0])
         ticket_issuer.assert_called_once()
 
+    @patch("app.playback.issue_ticket")
+    def test_refresh_access_extends_a_lease_without_issuing_a_ticket(
+        self, ticket_issuer
+    ):
+        manager = object.__new__(PlaybackManager)
+        manager.catalog = MagicMock()
+        manager.db = MagicMock()
+        manager.db.execute.return_value = [("source-1", "ready")]
+        manager.access_leases = MagicMock()
+        manager.access_leases.renew.return_value = "2026-09-28T15:15:00+00:00"
+
+        result = manager.refresh_access(
+            "user-1",
+            "entity-1",
+            "source-1",
+            "session-1",
+            "auth-session-1",
+            "lease-v1",
+            "pl1_opaque",
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "playbackAccessMode": "lease-v1",
+                "expiresIn": 15 * 60,
+                "expiresAt": "2026-09-28T15:15:00+00:00",
+            },
+        )
+        manager.access_leases.renew.assert_called_once_with(
+            "pl1_opaque",
+            user_id="user-1",
+            auth_session_id="auth-session-1",
+            entity_id="entity-1",
+            source_id="source-1",
+            playback_session_id="session-1",
+        )
+        ticket_issuer.assert_not_called()
+
     def test_playback_recovery_timeouts_allow_slow_live_workers(self):
         self.assertEqual(PlaybackManager._startup_timeout_seconds, 30.0)
         self.assertEqual(PlaybackManager._segment_wait_timeout_seconds, 45.0)
@@ -790,6 +829,93 @@ class PlaybackTest(unittest.TestCase):
 
         self.assertEqual(result["sourceId"], "source-2")
         self.assertEqual(manager._transcode.call_args.args[2]["id"], "source-2")
+
+    @patch("app.playback.issue_ticket")
+    def test_negotiate_lease_v1_returns_a_stable_opaque_access_handle(self, ticket):
+        manager = object.__new__(PlaybackManager)
+        manager.sources = MagicMock(
+            return_value=[
+                {
+                    "id": "source-1",
+                    "mediaFileId": "file-1",
+                    "container": "mp4",
+                    "videoCodec": "h264",
+                    "audioCodec": "aac",
+                    "durationSeconds": 300.0,
+                }
+            ]
+        )
+        manager._playback_mode = MagicMock(return_value="direct")
+        manager._stream_for_profile = MagicMock(return_value={})
+        manager._register_viewer = MagicMock(return_value=None)
+        manager.access_leases = MagicMock()
+        manager.access_leases.new_token.return_value = "pl1_opaque"
+
+        result = manager.negotiate(
+            "user-1",
+            "entity-1",
+            {"playbackAccessMode": "lease-v1"},
+            "auth-session-1",
+        )
+
+        self.assertEqual(result["playbackAccessMode"], "lease-v1")
+        self.assertEqual(result["playbackLeaseToken"], "pl1_opaque")
+        self.assertIn("access=pl1_opaque", result["url"])
+        manager.access_leases.create.assert_called_once_with(
+            "pl1_opaque", "user-1", "auth-session-1", "entity-1", "source-1"
+        )
+        ticket.assert_not_called()
+
+    @patch("app.playback.issue_ticket")
+    def test_negotiate_hls_lease_is_bound_to_its_transcode_session(self, ticket):
+        manager = object.__new__(PlaybackManager)
+        manager.sources = MagicMock(
+            return_value=[
+                {
+                    "id": "source-1",
+                    "mediaFileId": "file-1",
+                    "container": "mp4",
+                    "videoCodec": "h264",
+                    "audioCodec": "aac",
+                    "durationSeconds": 300.0,
+                }
+            ]
+        )
+        manager._playback_mode = MagicMock(return_value="video-transcode")
+        manager._stream_for_profile = MagicMock(return_value={})
+
+        def transcode(_user_id, _entity_id, _source, access, _profile, _start, _mode):
+            return {
+                "mode": "video-transcode",
+                "url": f"/api/playback/sessions/worker-1/master.m3u8?access={access}",
+                "sessionId": "worker-1",
+                "sessionState": "ready",
+            }
+
+        manager._transcode = MagicMock(side_effect=transcode)
+        manager._register_viewer = MagicMock(return_value=None)
+        manager.access_leases = MagicMock()
+        manager.access_leases.new_token.return_value = "pl1_hls"
+
+        result = manager.negotiate(
+            "user-1",
+            "entity-1",
+            {"playbackAccessMode": "lease-v1"},
+            "auth-session-1",
+        )
+
+        self.assertEqual(result["playbackLeaseToken"], "pl1_hls")
+        self.assertIn("access=pl1_hls", result["url"])
+        self.assertEqual(result["sessionId"], "worker-1")
+        manager.access_leases.create.assert_called_once_with(
+            "pl1_hls",
+            "user-1",
+            "auth-session-1",
+            "entity-1",
+            "source-1",
+            "worker-1",
+        )
+        ticket.assert_not_called()
 
     @patch("app.playback.issue_ticket", return_value="ticket")
     def test_direct_only_does_not_start_transcoding(self, _ticket):

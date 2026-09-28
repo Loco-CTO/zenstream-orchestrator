@@ -1833,6 +1833,8 @@ async def refresh_playback_access(entity_id: str, request: Request):
         data.get("sourceId"),
         data.get("sessionId"),
         auth_session_id,
+        data.get("playbackAccessMode"),
+        data.get("playbackLeaseToken"),
     )
 
 

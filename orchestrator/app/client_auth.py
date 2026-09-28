@@ -10,8 +10,15 @@ import os
 import time
 from urllib.parse import urlsplit
 
+from app.logging_config import get_logger
 from app.models.account import Account
+from app.models.playback_access_lease import (
+    PLAYBACK_ACCESS_LEASE_PREFIX,
+    PlaybackAccessLeaseStore,
+)
 from fastapi import HTTPException, Request, WebSocket
+
+logger = get_logger("client_auth")
 
 ARTWORK_TICKET_TTL_SECONDS = 7 * 24 * 60 * 60
 _TICKET_TTL_LIMITS = {
@@ -285,11 +292,47 @@ def account_from_access(
     request: Request, kind: str = "resource", **expected_claims
 ) -> dict:
     authenticated = optional_account(request)
+    access_token = request.query_params.get("access")
+    if (
+        kind == "resource"
+        and access_token
+        and access_token.startswith(PLAYBACK_ACCESS_LEASE_PREFIX)
+    ):
+        authenticated_user_id = authenticated[0]["id"] if authenticated else None
+        authenticated_session_id = (
+            Account().session_id_for_token(authenticated[1]) if authenticated else None
+        )
+        entity_id = request.path_params.get("entity_id")
+        source_id = request.query_params.get("sourceId")
+        playback_session_id = request.path_params.get("session_id")
+        try:
+            account = PlaybackAccessLeaseStore(Account().db).validate(
+                access_token,
+                user_id=authenticated_user_id,
+                auth_session_id=authenticated_session_id,
+                entity_id=entity_id,
+                source_id=source_id,
+                playback_session_id=playback_session_id,
+            )
+        except HTTPException as error:
+            logger.warning(
+                "playback lease authorization failed status=%s entity_id=%s source_id=%s session_id=%s",
+                error.status_code,
+                entity_id,
+                source_id,
+                playback_session_id,
+            )
+            raise
+        logger.debug(
+            "playback lease authorization succeeded entity_id=%s source_id=%s session_id=%s",
+            entity_id,
+            source_id,
+            playback_session_id,
+        )
+        return account
     if authenticated:
         return authenticated[0]
-    payload = read_ticket(
-        request.query_params.get("access"), kind, expected_claims or None
-    )
+    payload = read_ticket(access_token, kind, expected_claims or None)
     route_entity = request.path_params.get("entity_id")
     claimed_entity = payload.get("entity")
     if (

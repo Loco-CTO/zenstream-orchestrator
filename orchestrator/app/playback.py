@@ -32,6 +32,10 @@ from app.media_probe import (
     first_audio_stream,
     select_usable_video_stream,
 )
+from app.models.playback_access_lease import (
+    PLAYBACK_ACCESS_LEASE_TTL_SECONDS,
+    PlaybackAccessLeaseStore,
+)
 from app.models.playback_settings import PlaybackSettings
 from app.models.playback_viewer import PlaybackViewerStore
 from fastapi import HTTPException
@@ -122,6 +126,7 @@ class PlaybackManager:
     def __init__(self, db=None, catalog=None):
         self.db = db if db is not None else Config().database
         self.catalog = catalog if catalog is not None else Catalog()
+        self.access_leases = PlaybackAccessLeaseStore(self.db)
         self._start_cleanup_thread()
 
     def _start_cleanup_thread(self) -> None:
@@ -738,6 +743,8 @@ class PlaybackManager:
         source_id: str | None,
         session_id: str | None,
         auth_session_id: str | None,
+        playback_access_mode: str | None = None,
+        playback_lease_token: str | None = None,
     ) -> dict:
         """Issue a new media ticket without creating another viewer/session."""
         if not auth_session_id:
@@ -761,6 +768,29 @@ class PlaybackManager:
             )
             if not rows:
                 raise HTTPException(404, "Media source not found.")
+        if playback_access_mode == "lease-v1":
+            if not playback_lease_token:
+                raise HTTPException(401, "Playback access lease is required.")
+            expires_at = self.access_leases.renew(
+                playback_lease_token,
+                user_id=user_id,
+                auth_session_id=auth_session_id,
+                entity_id=entity_id,
+                source_id=source_id,
+                playback_session_id=session_id,
+            )
+            logger.info(
+                "playback lease renewed user_id=%s entity_id=%s source_id=%s session_id=%s",
+                user_id,
+                entity_id,
+                source_id,
+                session_id,
+            )
+            return {
+                "playbackAccessMode": "lease-v1",
+                "expiresIn": PLAYBACK_ACCESS_LEASE_TTL_SECONDS,
+                "expiresAt": expires_at,
+            }
         return {
             "ticket": issue_ticket(
                 user_id,
@@ -1056,15 +1086,21 @@ class PlaybackManager:
             source.get("bitrate"),
             profile.get("maxStreamingBitrate"),
         )
-        ticket_claims = {"entity": entity_id}
-        if auth_session_id:
-            ticket_claims["sessionId"] = auth_session_id
-        access = issue_ticket(
-            user_id,
-            "resource",
-            PLAYBACK_RESOURCE_TICKET_TTL_SECONDS,
-            **ticket_claims,
-        )
+        lease_mode = profile.get("playbackAccessMode") == "lease-v1"
+        if lease_mode and not auth_session_id:
+            raise HTTPException(401, "Authentication required.")
+        if lease_mode:
+            access = self.access_leases.new_token()
+        else:
+            ticket_claims = {"entity": entity_id}
+            if auth_session_id:
+                ticket_claims["sessionId"] = auth_session_id
+            access = issue_ticket(
+                user_id,
+                "resource",
+                PLAYBACK_RESOURCE_TICKET_TTL_SECONDS,
+                **ticket_claims,
+            )
         start_time = max(0.0, float(profile.get("startPositionSeconds") or 0.0))
         duration_seconds = max(0.0, float(source.get("durationSeconds") or 0.0))
         if duration_seconds > 0:
@@ -1094,6 +1130,16 @@ class PlaybackManager:
                 "durationSeconds": source.get("durationSeconds"),
                 "accessExpiresIn": PLAYBACK_RESOURCE_TICKET_TTL_SECONDS,
             }
+            if lease_mode:
+                self.access_leases.create(
+                    access,
+                    user_id,
+                    auth_session_id,
+                    entity_id,
+                    source["id"],
+                )
+                result["playbackAccessMode"] = "lease-v1"
+                result["playbackLeaseToken"] = access
             if viewer_id:
                 result["viewerSessionId"] = viewer_id
             return result
@@ -1115,6 +1161,17 @@ class PlaybackManager:
         result["startPositionSeconds"] = start_time
         result["durationSeconds"] = source.get("durationSeconds")
         result["accessExpiresIn"] = PLAYBACK_RESOURCE_TICKET_TTL_SECONDS
+        if lease_mode:
+            self.access_leases.create(
+                access,
+                user_id,
+                auth_session_id,
+                entity_id,
+                source["id"],
+                result.get("sessionId"),
+            )
+            result["playbackAccessMode"] = "lease-v1"
+            result["playbackLeaseToken"] = access
         viewer_id = self._register_viewer(
             user_id,
             entity_id,

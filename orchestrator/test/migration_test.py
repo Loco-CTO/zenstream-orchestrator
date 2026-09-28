@@ -353,6 +353,83 @@ class PersistenceMigrationTest(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_playback_access_leases_are_revoked_with_auth_or_worker_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "orchestrator.db"
+            command.upgrade(self._config(database_path), "head")
+
+            connection = sqlite3.connect(database_path)
+            try:
+                connection.execute("PRAGMA foreign_keys=OFF")
+                connection.execute(
+                    "INSERT INTO user_sessions "
+                    "(id,user_id,token_hash,expires_at,created_at,last_seen_at) "
+                    "VALUES('auth-session','user-1','hash-1','2999-01-01','now','now')"
+                )
+                connection.execute(
+                    "INSERT INTO user_sessions "
+                    "(id,user_id,token_hash,expires_at,created_at,last_seen_at) "
+                    "VALUES('auth-session-2','user-1','hash-2','2999-01-01','now','now')"
+                )
+                connection.execute(
+                    "INSERT INTO playback_sessions "
+                    "(id,user_id,entity_id,source_id,mode,state,created_at,expires_at) "
+                    "VALUES('worker-session','user-1','entity-1','source-1','remux','ready','now','2999-01-01')"
+                )
+                connection.executemany(
+                    "INSERT INTO playback_access_leases "
+                    "(id,token_hash,user_id,auth_session_id,entity_id,source_id,"
+                    "playback_session_id,created_at,expires_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    [
+                        (
+                            "lease-auth",
+                            "hash-auth",
+                            "user-1",
+                            "auth-session",
+                            "entity-1",
+                            "source-1",
+                            None,
+                            "now",
+                            "2999-01-01",
+                        ),
+                        (
+                            "lease-worker",
+                            "hash-worker",
+                            "user-1",
+                            "auth-session-2",
+                            "entity-1",
+                            "source-1",
+                            "worker-session",
+                            "now",
+                            "2999-01-01",
+                        ),
+                    ],
+                )
+                connection.execute(
+                    "UPDATE user_sessions SET revoked_at='revoked' WHERE id='auth-session'"
+                )
+                revoked = {
+                    row[0]: row[1]
+                    for row in connection.execute(
+                        "SELECT id,revoked_at FROM playback_access_leases"
+                    )
+                }
+                self.assertEqual(revoked["lease-auth"], "revoked")
+                self.assertIsNone(revoked["lease-worker"])
+
+                connection.execute(
+                    "UPDATE playback_sessions SET state='stopping' "
+                    "WHERE id='worker-session'"
+                )
+                self.assertIsNotNone(
+                    connection.execute(
+                        "SELECT revoked_at FROM playback_access_leases WHERE id='lease-worker'"
+                    ).fetchone()[0]
+                )
+            finally:
+                connection.close()
+
     def test_search_write_index_migration_preserves_legacy_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "orchestrator.db"

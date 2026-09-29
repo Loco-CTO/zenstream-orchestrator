@@ -60,11 +60,23 @@ def _database_metrics():
     return instance.database.metrics() if instance is not None else {}
 
 
+_SECRET_KEY_PLACEHOLDER = "replace-with-a-random-secret"
+
+
+def _validate_secret_key(secret_key: str | None) -> None:
+    if not secret_key or not secret_key.strip():
+        raise RuntimeError("Environment variable `SECRET_KEY` not set")
+    if secret_key.strip() == _SECRET_KEY_PLACEHOLDER:
+        raise RuntimeError(
+            "Environment variable `SECRET_KEY` must be replaced with a random secret; "
+            "the documented placeholder is not allowed"
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     load_config()
-    if not os.getenv("SECRET_KEY"):
-        raise RuntimeError("Environment variable `SECRET_KEY` not set")
+    _validate_secret_key(os.getenv("SECRET_KEY"))
     await asyncio.to_thread(CatalogReadModel().bootstrap)
     library_runtime.start()
     job_scheduler.start()

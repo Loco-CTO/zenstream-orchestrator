@@ -9,8 +9,9 @@ from app.app import _SECRET_KEY_PLACEHOLDER, _validate_secret_key, lifespan
 class SecretKeyValidationTest(unittest.TestCase):
     def test_missing_and_blank_secrets_are_rejected(self):
         for secret_key in (None, "", " \t\r\n"):
-            with self.subTest(secret_key=secret_key), self.assertRaisesRegex(
-                RuntimeError, "SECRET_KEY.*not set"
+            with (
+                self.subTest(secret_key=secret_key),
+                self.assertRaisesRegex(RuntimeError, "SECRET_KEY.*not set"),
             ):
                 _validate_secret_key(secret_key)
 
@@ -19,8 +20,9 @@ class SecretKeyValidationTest(unittest.TestCase):
             _SECRET_KEY_PLACEHOLDER,
             f" \t{_SECRET_KEY_PLACEHOLDER} \r\n",
         ):
-            with self.subTest(secret_key=secret_key), self.assertRaisesRegex(
-                RuntimeError, "replaced with a random secret"
+            with (
+                self.subTest(secret_key=secret_key),
+                self.assertRaisesRegex(RuntimeError, "replaced with a random secret"),
             ):
                 _validate_secret_key(secret_key)
 

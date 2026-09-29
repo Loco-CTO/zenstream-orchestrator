@@ -13,24 +13,29 @@ on:
           - minor
           - major
       retry_version:
-        description: Existing release version to retry without bumping
+        description: Candidate or published release version to retry without bumping
         required: false
         type: string
 
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
-  group: version-release
+  group: orchestrator-release
   cancel-in-progress: false
 
 jobs:
-  version:
+  candidate:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-      sha: ${{ steps.commit.outputs.sha }}
+      version: ${{ steps.prepare.outputs.version }}
+      tag: ${{ steps.prepare.outputs.tag }}
+      sha: ${{ steps.prepare.outputs.sha }}
+      candidate_ref: ${{ steps.prepare.outputs.candidate_ref }}
+      candidate_ref_present: ${{ steps.prepare.outputs.candidate_ref_present }}
+      base_main: ${{ steps.prepare.outputs.base_main }}
+      base_stable: ${{ steps.prepare.outputs.base_stable }}
     steps:
       - name: Check out main
         uses: actions/checkout@v7
@@ -43,95 +48,157 @@ jobs:
         with:
           node-version: 24
 
-      - name: Bump Orchestrator and launcher versions
-        id: version
+      - name: Prepare or reuse release candidate
+        id: prepare
         env:
           BUMP: ${{ inputs.bump }}
           RETRY_VERSION: ${{ inputs.retry_version }}
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
-          version=$(sed -nE 's/^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' orchestrator/version.py)
-          [ -n "$version" ] || { echo 'Could not read orchestrator version.' >&2; exit 1; }
+          source scripts/release-candidate.sh
+          git fetch origin main stable
 
-          if [ -n "$RETRY_VERSION" ]; then
-            retry_version="${RETRY_VERSION#v}"
-            [[ "$retry_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-              echo "Retry version must be a semantic version such as 1.5.7." >&2
+          if [[ -n "$RETRY_VERSION" ]]; then
+            version="${RETRY_VERSION#v}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "retry_version must be a semantic version such as 1.6.5 or v1.6.5." >&2
               exit 1
             }
-            [ "$retry_version" = "$version" ] || {
-              echo "Retry version $retry_version must match orchestrator/version.py ($version)." >&2
+            tag="v$version"
+            candidate_ref="refs/heads/release-candidate/$tag"
+            tag_ref="refs/tags/$tag"
+            candidate_ref_sha="$(remote_ref_sha "$candidate_ref")"
+            candidate_ref_present=false
+            if [[ -n "$candidate_ref_sha" ]]; then
+              candidate_ref_present=true
+            fi
+            published=false
+            if gh release view "$tag" --json isDraft --jq '.isDraft' >"$RUNNER_TEMP/release-is-draft" 2>/dev/null; then
+              if [[ "$(cat "$RUNNER_TEMP/release-is-draft")" == "false" ]]; then
+                published=true
+              fi
+            fi
+            sha="$(resolve_retry_candidate "$candidate_ref" "$tag_ref" "$published")"
+            if [[ -n "$candidate_ref_sha" ]]; then
+              git fetch origin "$candidate_ref:refs/remotes/origin/release-candidate/$version"
+            else
+              git fetch origin "$tag_ref:refs/tags/$tag"
+            fi
+            git checkout --detach "$sha"
+            actual_version="$(sed -nE 's/^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' orchestrator/version.py)"
+            [[ "$actual_version" == "$version" ]] || {
+              echo "Candidate $sha contains version $actual_version, not requested version $version." >&2
               exit 1
             }
-            tag="v$retry_version"
-            git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 || {
-              echo "Release tag $tag does not exist; retry_version is only for an existing release." >&2
+            base_main="$(release_trailer "$sha" main)"
+            base_stable="$(release_trailer "$sha" stable)"
+            if [[ -z "$base_main" || -z "$base_stable" ]]; then
+              [[ "$(remote_ref_sha refs/heads/main)" == "$sha" && "$(remote_ref_sha refs/heads/stable)" == "$sha" ]] || {
+                echo "This published tag has no recorded branch bases and is not already promoted on both branches." >&2
+                exit 1
+              }
+              base_main="$sha"
+              base_stable="$sha"
+            else
+              [[ "$(git rev-parse "$sha^")" == "$base_main" ]] || {
+                echo "Candidate $sha does not have its recorded main base $base_main as its parent." >&2
+                exit 1
+              }
+            fi
+            echo "Reusing candidate SHA $sha for $tag."
+          else
+            base_main="$(remote_ref_sha refs/heads/main)"
+            base_stable="$(remote_ref_sha refs/heads/stable)"
+            [[ -n "$base_main" && -n "$base_stable" ]] || {
+              echo "Both main and stable must exist before an Orchestrator release." >&2
               exit 1
             }
-            gh release view "$tag" --json tagName >/dev/null || {
-              echo "GitHub release $tag does not exist; retry_version is only for an existing release." >&2
+            [[ "$(git rev-parse HEAD)" == "$base_main" ]] || {
+              echo "main moved while the release candidate was being prepared." >&2
               exit 1
             }
-            echo "Retrying existing release $tag without changing the version."
-            echo "version=$retry_version" >> "$GITHUB_OUTPUT"
-            echo "tag=$tag" >> "$GITHUB_OUTPUT"
-            echo "reuse_existing=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            current_version="$(sed -nE 's/^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' orchestrator/version.py)"
+            [[ -n "$current_version" ]] || {
+              echo "Could not read Orchestrator version." >&2
+              exit 1
+            }
+            IFS=. read -r major minor fix <<< "$current_version"
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; fix=0 ;;
+              minor) minor=$((minor + 1)); fix=0 ;;
+              fix) fix=$((fix + 1)) ;;
+              *) echo "Unsupported bump: $BUMP" >&2; exit 1 ;;
+            esac
+            version="$major.$minor.$fix"
+            tag="v$version"
+            candidate_ref="refs/heads/release-candidate/$tag"
+            tag_ref="refs/tags/$tag"
+            [[ -z "$(remote_ref_sha "$candidate_ref")" ]] || {
+              echo "Candidate $candidate_ref already exists; retry it with retry_version=$version." >&2
+              exit 1
+            }
+            [[ -z "$(remote_tag_commit_sha "$tag_ref")" ]] || {
+              echo "Release tag $tag already exists; retry it with retry_version=$version." >&2
+              exit 1
+            }
+            sed -i "s/^__version__ = \"$current_version\"$/__version__ = \"$version\"/" orchestrator/version.py
+            npm version "$version" --no-git-tag-version --allow-same-version --prefix launcher
+            printf '{\n  "main": 0\n}\n' > .main-version.json
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add orchestrator/version.py launcher/package.json launcher/package-lock.json .main-version.json
+            git commit -m "chore: release $tag" -m "release-base-main: $base_main" -m "release-base-stable: $base_stable"
+            sha="$(git rev-parse HEAD)"
+            git push origin "$sha:$candidate_ref"
+            [[ "$(remote_ref_sha "$candidate_ref")" == "$sha" ]] || {
+              echo "Release candidate ref did not settle at $sha." >&2
+              exit 1
+            }
+            candidate_ref_present=true
           fi
 
-          IFS=. read -r major minor fix <<< "$version"
-          case "$BUMP" in
-            major) major=$((major + 1)); minor=0; fix=0 ;;
-            minor) minor=$((minor + 1)); fix=0 ;;
-            fix) fix=$((fix + 1)) ;;
-            *) echo "Unsupported bump: $BUMP" >&2; exit 1 ;;
-          esac
-          new_version="$major.$minor.$fix"
-          tag="v$new_version"
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            echo "Release tag $tag already exists." >&2
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Resolved release candidate is not a full Git SHA: $sha" >&2
             exit 1
-          fi
-          sed -i "s/^__version__ = \"$version\"$/__version__ = \"$new_version\"/" orchestrator/version.py
-          npm version "$new_version" --no-git-tag-version --allow-same-version --prefix launcher
-          printf '{\n  "main": 0\n}\n' > .main-version.json
-          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "reuse_existing=false" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_ref=$candidate_ref" >> "$GITHUB_OUTPUT"
+          echo "candidate_ref_present=$candidate_ref_present" >> "$GITHUB_OUTPUT"
+          echo "base_main=$base_main" >> "$GITHUB_OUTPUT"
+          echo "base_stable=$base_stable" >> "$GITHUB_OUTPUT"
 
-      - name: Commit and push main
-        id: commit
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          REUSE_EXISTING: ${{ steps.version.outputs.reuse_existing }}
+      - name: Test release candidate and workflow guards
         run: |
-          set -euo pipefail
-          if [ "$REUSE_EXISTING" = "true" ]; then
-            echo "Reusing existing release version v$VERSION; no version commit needed."
-            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add orchestrator/version.py launcher/package.json launcher/package-lock.json .main-version.json
-          git commit -m "chore: release v$VERSION"
-          git push origin HEAD:main
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          bash scripts/release-candidate.test.sh
+          python3 scripts/release-workflow.test.py
 
-      - name: Align stable with main
-        run: |
-          git fetch origin stable || true
-          stable_sha=$(git rev-parse refs/remotes/origin/stable 2>/dev/null || printf '%040d' 0)
-          git push origin "HEAD:stable" --force-with-lease="refs/heads/stable:$stable_sha"
+  validate:
+    needs: candidate
+    uses: ./.github/workflows/coverage.yml
+    with:
+      candidate_sha: ${{ needs.candidate.outputs.sha }}
+      skip_coverage_upload: true
 
-  windows-package:
-    needs: version
+  validate-windows:
+    needs: candidate
+    uses: ./.github/workflows/windows-launcher.yml
+    with:
+      candidate_sha: ${{ needs.candidate.outputs.sha }}
+
+  publish:
+    needs: [candidate, validate, validate-windows]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out exact candidate
+        uses: actions/checkout@v7
         with:
-          ref: ${{ needs.version.outputs.sha }}
+          ref: ${{ needs.candidate.outputs.sha }}
+          fetch-depth: 0
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -139,147 +206,167 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             launcher/package-lock.json
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip
           cache-dependency-path: requirements.txt
+
+      - name: Verify branch refs before packaging and publishing
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+          CANDIDATE_REF: ${{ needs.candidate.outputs.candidate_ref }}
+          CANDIDATE_REF_PRESENT: ${{ needs.candidate.outputs.candidate_ref_present }}
+          BASE_MAIN: ${{ needs.candidate.outputs.base_main }}
+          BASE_STABLE: ${{ needs.candidate.outputs.base_stable }}
+        run: |
+          source scripts/release-candidate.sh
+          assert_candidate_ref_state "$CANDIDATE_REF" "$CANDIDATE_SHA" "$CANDIDATE_REF_PRESENT"
+          assert_ref_state refs/heads/main "$BASE_MAIN" "$CANDIDATE_SHA"
+          assert_ref_state refs/heads/stable "$BASE_STABLE" "$CANDIDATE_SHA"
+
       - name: Build signed-ready Windows artifacts
         shell: pwsh
         env:
           CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
         run: ./scripts/build-windows.ps1 -PythonExecutable python
+
       - name: Smoke-test packaged backend lifecycle
         run: node scripts/smoke-windows-backend.mjs
-      - name: Ensure GitHub release exists
+
+      - name: Recheck branch refs before publishing
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+          CANDIDATE_REF: ${{ needs.candidate.outputs.candidate_ref }}
+          CANDIDATE_REF_PRESENT: ${{ needs.candidate.outputs.candidate_ref_present }}
+          BASE_MAIN: ${{ needs.candidate.outputs.base_main }}
+          BASE_STABLE: ${{ needs.candidate.outputs.base_stable }}
+        run: |
+          source scripts/release-candidate.sh
+          assert_candidate_ref_state "$CANDIDATE_REF" "$CANDIDATE_SHA" "$CANDIDATE_REF_PRESENT"
+          assert_ref_state refs/heads/main "$BASE_MAIN" "$CANDIDATE_SHA"
+          assert_ref_state refs/heads/stable "$BASE_STABLE" "$CANDIDATE_SHA"
+
+      - name: Create or reuse draft GitHub release
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.version.outputs.tag }}
-          SHA: ${{ needs.version.outputs.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.candidate.outputs.tag }}
+          CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
         run: |
           & gh release view $env:TAG --json tagName *> $null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "GitHub release $env:TAG already exists; reusing it."
-            exit 0
-          }
-
-          Write-Host "Creating GitHub release $env:TAG."
-          & gh release create $env:TAG --target $env:SHA --title $env:TAG --generate-notes
           if ($LASTEXITCODE -ne 0) {
-            throw "Failed to create GitHub release $env:TAG."
+            & gh release create $env:TAG --target $env:CANDIDATE_SHA --draft --title $env:TAG --generate-notes
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not create draft release $env:TAG."
+            }
           }
-          Write-Host "Created GitHub release $env:TAG."
 
-      - name: Upload Windows release artifacts
+      - name: Verify release tag matches the candidate
+        shell: bash
+        env:
+          TAG: ${{ needs.candidate.outputs.tag }}
+          CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+        run: |
+          source scripts/release-candidate.sh
+          [[ "$(remote_tag_commit_sha "refs/tags/$TAG")" == "$CANDIDATE_SHA" ]]
+
+      - name: Upload and verify Windows release assets
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.version.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.candidate.outputs.tag }}
+          CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+          VERSION: ${{ needs.candidate.outputs.version }}
         run: |
-          $releaseFiles = @(
-            Get-ChildItem -LiteralPath launcher/release -File -Filter '*.exe' |
-              Sort-Object Name |
-              ForEach-Object { $_.FullName }
-            (Resolve-Path -LiteralPath launcher/release/SHA256SUMS.txt).Path
-          )
-          if ($releaseFiles.Count -lt 3) {
-            throw 'Expected both Windows executables and SHA256SUMS.txt in launcher/release.'
+          $releaseDirectory = Resolve-Path -LiteralPath launcher/release
+          $executables = @(Get-ChildItem -LiteralPath $releaseDirectory -File -Filter '*.exe' | Sort-Object Name)
+          $checksumFile = Join-Path $releaseDirectory 'SHA256SUMS.txt'
+          if ($executables.Count -ne 2 -or -not (Test-Path -LiteralPath $checksumFile -PathType Leaf)) {
+            throw 'Expected two Windows executables and SHA256SUMS.txt in launcher/release.'
+          }
+          $releaseFiles = @($executables | ForEach-Object { $_.FullName }) + @($checksumFile)
+          $assetNames = @($releaseFiles | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+          foreach ($releaseFile in $releaseFiles) {
+            if ((Get-Item -LiteralPath $releaseFile).Length -le 0) {
+              throw "Release artifact is empty: $releaseFile"
+            }
+          }
+
+          $downloadDirectory = Join-Path $env:RUNNER_TEMP 'zenstream-orchestrator-release-assets'
+          New-Item -ItemType Directory -Path $downloadDirectory -Force | Out-Null
+          $arguments = @('release', 'upload', $env:TAG) + $releaseFiles + @('--clobber')
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not upload release assets for $env:TAG."
+          }
+          & gh release download $env:TAG --dir $downloadDirectory
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not download release assets for verification from $env:TAG."
           }
 
           foreach ($releaseFile in $releaseFiles) {
-            if (-not (Test-Path -LiteralPath $releaseFile -PathType Leaf)) {
-              throw "Release artifact is missing: $releaseFile"
+            $assetName = [System.IO.Path]::GetFileName($releaseFile)
+            $downloadedFile = Join-Path $downloadDirectory $assetName
+            if (-not (Test-Path -LiteralPath $downloadedFile -PathType Leaf)) {
+              throw "Release asset is missing after upload: $assetName"
             }
-            $file = Get-Item -LiteralPath $releaseFile
-            Write-Host "Artifact path: $($file.FullName)"
-            Write-Host ("Artifact file size: {0:N0} bytes" -f $file.Length)
-          }
-
-          $assetNames = @(& gh release view $env:TAG --json assets --jq '.assets[].name' 2>$null)
-          if ($LASTEXITCODE -eq 0) {
-            foreach ($releaseFile in $releaseFiles) {
-              $assetName = [System.IO.Path]::GetFileName($releaseFile)
-              if ($assetNames -contains $assetName) {
-                Write-Host "Existing release asset $assetName found; it will be replaced with --clobber."
-              }
-              else {
-                Write-Host "No existing release asset named $assetName; uploading it as new."
-              }
-            }
-          }
-          else {
-            Write-Host 'Could not inspect existing release assets; --clobber will replace matching assets if present.'
-          }
-
-          function Invoke-GhReleaseUpload {
-            param(
-              [Parameter(Mandatory = $true)][string]$Tag,
-              [Parameter(Mandatory = $true)][string[]]$Files,
-              [Parameter(Mandatory = $true)][int]$TimeoutSeconds
-            )
-
-            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-            $startInfo.FileName = 'gh'
-            $startInfo.UseShellExecute = $false
-            $startInfo.RedirectStandardOutput = $true
-            $startInfo.RedirectStandardError = $true
-            foreach ($argument in @('release', 'upload', $Tag) + $Files + @('--clobber')) {
-              [void]$startInfo.ArgumentList.Add($argument)
-            }
-
-            $process = [System.Diagnostics.Process]::new()
-            $process.StartInfo = $startInfo
-            try {
-              if (-not $process.Start()) {
-                throw 'Could not start GitHub CLI upload process.'
-              }
-              $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-              $stderrTask = $process.StandardError.ReadToEndAsync()
-              if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-                Write-Warning "GitHub CLI upload exceeded the ${TimeoutSeconds}s timeout."
-                try { $process.Kill($true) } catch { Write-Warning "Could not terminate timed-out GitHub CLI process: $($_.Exception.Message)" }
-                $process.WaitForExit()
-                $stdout = $stdoutTask.GetAwaiter().GetResult()
-                $stderr = $stderrTask.GetAwaiter().GetResult()
-                if ($stdout) { Write-Host $stdout.TrimEnd() }
-                if ($stderr) { Write-Host $stderr.TrimEnd() }
-                return 124
-              }
-
-              $stdout = $stdoutTask.GetAwaiter().GetResult()
-              $stderr = $stderrTask.GetAwaiter().GetResult()
-              if ($stdout) { Write-Host $stdout.TrimEnd() }
-              if ($stderr) { Write-Host $stderr.TrimEnd() }
-              return $process.ExitCode
-            }
-            finally {
-              $process.Dispose()
+            $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseFile).Hash
+            $downloadHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloadedFile).Hash
+            if ($sourceHash -ne $downloadHash) {
+              throw "Downloaded release asset $assetName does not match the built file."
             }
           }
 
-          $uploadTimeoutSeconds = 600
-          Write-Host "Upload timeout per attempt: ${uploadTimeoutSeconds}s"
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-            Write-Host "Uploading Windows release artifacts to $env:TAG (attempt $attempt/3)..."
-            $uploadExitCode = Invoke-GhReleaseUpload -Tag $env:TAG -Files $releaseFiles -TimeoutSeconds $uploadTimeoutSeconds
-            if ($uploadExitCode -eq 0) {
-              Write-Host "Successfully uploaded Windows release artifacts to $env:TAG."
-              exit 0
+          $checksumLines = Get-Content -LiteralPath (Join-Path $downloadDirectory 'SHA256SUMS.txt')
+          foreach ($line in $checksumLines) {
+            if ($line -notmatch '^([A-Fa-f0-9]{64})\s+\*?(.+)$') {
+              throw "Malformed checksum entry: $line"
             }
-
-            if ($uploadExitCode -eq 124) {
-              Write-Warning "Upload attempt $attempt timed out after ${uploadTimeoutSeconds}s."
+            $expectedHash = $Matches[1]
+            $assetPath = Join-Path $downloadDirectory $Matches[2].Trim()
+            if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+              throw "Checksum file names missing asset $($Matches[2])."
             }
-            else {
-              Write-Warning "Upload attempt $attempt failed with exit code $uploadExitCode."
-            }
-            if ($attempt -lt 3) {
-              $delay = $attempt * 10
-              Write-Host "Retrying in ${delay}s."
-              Start-Sleep -Seconds $delay
+            $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash
+            if ($actualHash -ne $expectedHash) {
+              throw "Checksum verification failed for $($Matches[2])."
             }
           }
+          & gh release edit $env:TAG --draft=false
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not publish verified release $env:TAG."
+          }
+          $isDraft = & gh release view $env:TAG --json isDraft --jq '.isDraft'
+          if ($LASTEXITCODE -ne 0 -or $isDraft -ne 'false') {
+            throw "Release $env:TAG did not become public after asset verification."
+          }
 
-          throw 'Windows release asset upload failed after 3 attempts.'
+  promote:
+    needs: [candidate, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact release candidate
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Promote main and stable with compare-and-swap
+        env:
+          CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+          CANDIDATE_REF: ${{ needs.candidate.outputs.candidate_ref }}
+          CANDIDATE_REF_PRESENT: ${{ needs.candidate.outputs.candidate_ref_present }}
+          BASE_MAIN: ${{ needs.candidate.outputs.base_main }}
+          BASE_STABLE: ${{ needs.candidate.outputs.base_stable }}
+        run: |
+          source scripts/release-candidate.sh
+          assert_candidate_ref_state "$CANDIDATE_REF" "$CANDIDATE_SHA" "$CANDIDATE_REF_PRESENT"
+          assert_ref_state refs/heads/main "$BASE_MAIN" "$CANDIDATE_SHA"
+          assert_ref_state refs/heads/stable "$BASE_STABLE" "$CANDIDATE_SHA"
+          promote_refs "$CANDIDATE_SHA" refs/heads/main "$BASE_MAIN" refs/heads/stable "$BASE_STABLE"
+          delete_candidate_ref "$CANDIDATE_REF" "$CANDIDATE_SHA"

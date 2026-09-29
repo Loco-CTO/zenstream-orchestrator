@@ -128,6 +128,115 @@ class OpenApiContractTest(unittest.TestCase):
             ],
         )
 
+    def test_catalog_item_schema_documents_the_live_client_payload_shape(self):
+        schemas = self.schema["components"]["schemas"]
+        item_response = self.schema["paths"]["/api/catalog/items/{entity_id}"]["get"][
+            "responses"
+        ]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(item_response["$ref"], "#/components/schemas/CatalogItem")
+        item = schemas["CatalogItem"]["properties"]
+        self.assertTrue(
+            {
+                "id",
+                "type",
+                "name",
+                "libraryId",
+                "metadata",
+                "userState",
+                "childIds",
+                "seriesPrimaryImage",
+                "albumId",
+                "artistId",
+            }.issubset(item)
+        )
+        self.assertEqual(
+            item["userState"]["anyOf"][0]["$ref"],
+            "#/components/schemas/CatalogUserState",
+        )
+        metadata_ref = item["metadata"]["anyOf"][0]["$ref"]
+        metadata = schemas[metadata_ref.rsplit("/", 1)[-1]]["properties"]
+        self.assertTrue(
+            {"images", "credits", "artists", "contributingArtists"}.issubset(metadata)
+        )
+
+    def test_syncplay_group_schema_documents_the_live_websocket_payload(self):
+        schemas = self.schema["components"]["schemas"]
+        group = schemas["SyncplayGroup"]["properties"]
+        self.assertTrue(
+            {
+                "id",
+                "name",
+                "hostUserId",
+                "hostName",
+                "allowViewerControls",
+                "itemId",
+                "position",
+                "playing",
+                "resumeWhenReady",
+                "revision",
+                "timelineRevision",
+                "mediaGeneration",
+                "anchorPosition",
+                "anchorServerTime",
+                "updatedAt",
+            }.issubset(group)
+        )
+        member_ref = group["members"]["items"]["$ref"]
+        member = schemas[member_ref.rsplit("/", 1)[-1]]["properties"]
+        self.assertTrue({"role", "readyGeneration"}.issubset(member))
+
+    def test_shared_client_response_schemas_match_live_payload_names(self):
+        schemas = self.schema["components"]["schemas"]
+        notifications = schemas["NotificationPage"]["properties"]
+        self.assertTrue({"items", "unreadCount", "nextCursor"}.issubset(notifications))
+        notification = schemas["Notification"]["properties"]
+        self.assertTrue(
+            {
+                "kind",
+                "title",
+                "subtitle",
+                "itemId",
+                "seriesId",
+                "artistId",
+                "readAt",
+                "navigationTarget",
+                "thumbnail",
+            }.issubset(notification)
+        )
+
+        calendar_event = schemas["CalendarEvent"]["properties"]
+        self.assertTrue(
+            {
+                "provider",
+                "libraryName",
+                "kind",
+                "releaseType",
+                "eventAt",
+                "eventDate",
+                "allDay",
+                "monitored",
+                "state",
+                "seriesTitle",
+                "catalogItemId",
+                "catalogSeriesId",
+                "metadataStatus",
+                "followAvailable",
+            }.issubset(calendar_event)
+        )
+
+        lyrics = schemas["LyricsResponse"]["properties"]
+        self.assertIn("trackId", lyrics)
+        lyrics_schema = lyrics["lyrics"]
+        content_schema = next(
+            value for value in lyrics_schema["anyOf"] if value.get("$ref")
+        )
+        lyrics_content = schemas[content_schema["$ref"].rsplit("/", 1)[-1]][
+            "properties"
+        ]
+        self.assertTrue(
+            {"source", "timed", "language", "lines"}.issubset(lyrics_content)
+        )
+
     def test_operation_ids_are_explicit_stable_and_unique(self):
         operation_ids = [
             operation["operationId"] for _, _, operation in self.operations

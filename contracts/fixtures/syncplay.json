@@ -1,0 +1,112 @@
+{
+  "channel": "/api/ws/syncplay",
+  "messages": [
+    {
+      "direction": "server-to-client",
+      "name": "initial-groups",
+      "payload": {
+        "groups": [
+          {
+            "allowViewerControls": false,
+            "anchorPosition": 1.25,
+            "anchorServerTime": 1.25,
+            "effectiveAt": 1.25,
+            "ended": false,
+            "groupRevision": 1,
+            "hostDisconnectedAt": 1.25,
+            "hostName": "Fixture Host",
+            "hostUserId": "fixture-user",
+            "id": "fixture-group",
+            "itemId": "fixture-id",
+            "mediaGeneration": 1,
+            "members": [],
+            "name": "Fixture Item",
+            "pauseReason": "x",
+            "playbackState": "paused",
+            "playing": false,
+            "position": 0.0,
+            "resumeWhenReady": false,
+            "revision": 7,
+            "timelineRevision": 1,
+            "updatedAt": 1.25
+          }
+        ],
+        "type": "groups",
+        "version": 1
+      }
+    },
+    {
+      "direction": "server-to-client",
+      "name": "group-update",
+      "payload": {
+        "group": {
+          "allowViewerControls": false,
+          "anchorPosition": 1.25,
+          "anchorServerTime": 1.25,
+          "effectiveAt": 1.25,
+          "ended": false,
+          "groupRevision": 1,
+          "hostDisconnectedAt": 1.25,
+          "hostName": "Fixture Host",
+          "hostUserId": "fixture-user",
+          "id": "fixture-group",
+          "itemId": "fixture-id",
+          "mediaGeneration": 1,
+          "members": [],
+          "name": "Fixture Item",
+          "pauseReason": "x",
+          "playbackState": "paused",
+          "playing": false,
+          "position": 0.0,
+          "resumeWhenReady": false,
+          "revision": 7,
+          "timelineRevision": 1,
+          "updatedAt": 1.25
+        },
+        "type": "group",
+        "version": 1
+      }
+    },
+    {
+      "direction": "server-to-client",
+      "name": "group-ended",
+      "payload": {
+        "id": "fixture-group",
+        "revision": 8,
+        "type": "group-ended",
+        "version": 1
+      }
+    },
+    {
+      "direction": "server-to-client",
+      "name": "participant-replaced",
+      "payload": {
+        "id": "fixture-group",
+        "revision": 9,
+        "type": "participant-replaced",
+        "version": 1
+      }
+    },
+    {
+      "direction": "client-to-server",
+      "name": "clock-request",
+      "payload": {
+        "clientSentAt": 1790683200000,
+        "type": "clock",
+        "version": 1
+      }
+    },
+    {
+      "direction": "server-to-client",
+      "name": "clock-response",
+      "payload": {
+        "clientSentAt": 1790683200000,
+        "serverReceivedAt": 1790683200.025,
+        "serverSentAt": 1790683200.026,
+        "type": "clock",
+        "version": 1
+      }
+    }
+  ],
+  "version": 1
+}

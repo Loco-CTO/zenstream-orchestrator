@@ -293,7 +293,27 @@ class CatalogCredit(DocsModel):
     name: str | None = Field(default=None, examples=["Example Person"])
     role: str | None = Field(default=None, examples=["Director"])
     character: str | None = Field(default=None, examples=["Lead"])
+    job: str | None = Field(default=None, examples=["Director"])
+    department: str | None = Field(default=None, examples=["Directing"])
+    joinPhrase: str | None = Field(default=None, examples=[" & "])
     image: CatalogArtwork | None = None
+
+
+class CatalogCredits(DocsModel):
+    cast: list[CatalogCredit] = Field(default_factory=list)
+    crew: list[CatalogCredit] = Field(default_factory=list)
+
+
+class CatalogUserState(DocsModel):
+    favorite: bool | None = Field(default=None, examples=[True])
+    played: bool | None = Field(default=None, examples=[False])
+    following: bool | None = Field(default=None, examples=[False])
+    playCount: int | None = Field(default=None, examples=[2])
+    positionSeconds: float | None = Field(default=None, examples=[120.5])
+    durationSeconds: float | None = Field(default=None, examples=[3600.0])
+    playedPercentage: float | None = Field(default=None, examples=[0.35])
+    unplayedItemCount: int | None = Field(default=None, examples=[3])
+    lastPlayedAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
 
 
 class CatalogMetadata(DocsModel):
@@ -303,16 +323,32 @@ class CatalogMetadata(DocsModel):
         default=None, examples=["A credential-free example catalog item."]
     )
     date: str | None = Field(default=None, examples=["2025-01-15"])
+    releaseDate: str | None = Field(default=None, examples=["2025-01-15"])
     year: int | None = Field(default=None, examples=[2025])
     runtimeMinutes: int | None = Field(default=None, examples=[104])
+    durationSeconds: float | None = Field(default=None, examples=[104.0])
     communityRating: float | None = Field(default=None, examples=[8.2])
     officialRating: str | None = Field(default=None, examples=["PG-13"])
+    description: str | None = Field(
+        default=None, examples=["A synthetic catalog description."]
+    )
+    show: str | None = Field(default=None, examples=["Example Series"])
     genres: list[str] = Field(default_factory=list, examples=[["Drama"]])
     tags: list[str] = Field(default_factory=list)
+    people: list[CatalogCredit] = Field(default_factory=list)
+    studios: list[Any] = Field(default_factory=list)
+    credits: CatalogCredits | None = None
+    images: dict[str, CatalogArtwork] = Field(default_factory=dict)
+    artists: list[CatalogCredit] = Field(default_factory=list)
+    contributingArtists: list[CatalogCredit] = Field(default_factory=list)
     album: str | None = Field(default=None, examples=["Example Album"])
+    albumId: str | None = Field(default=None, examples=["release-0001"])
+    artistId: str | None = Field(default=None, examples=["artist-0001"])
     albumArtist: str | None = Field(default=None, examples=["Example Artist"])
     albumType: str | None = Field(default=None, examples=["Album"])
     albumSecondaryTypes: list[str] = Field(default_factory=list)
+    discNumber: int | None = Field(default=None, examples=[1])
+    trackNumber: int | None = Field(default=None, examples=[1])
     label: str | None = Field(default=None, examples=["Example Records"])
 
 
@@ -359,15 +395,36 @@ class CatalogWatchlistStatus(DocsModel):
 class CatalogItem(DocsModel):
     id: str | None = Field(default=None, examples=["item-0001"])
     type: str | None = Field(default=None, examples=["movie"])
+    name: str | None = Field(default=None, examples=["Example Feature"])
     title: str | None = Field(default=None, examples=["Example Feature"])
     parentId: str | None = Field(default=None, examples=["series-0001"])
     libraryId: str | None = Field(default=None, examples=["library-0001"])
+    seriesId: str | None = Field(default=None, examples=["series-0001"])
+    seriesName: str | None = Field(default=None, examples=["Example Series"])
+    seriesProductionYear: int | None = Field(default=None, examples=[2025])
+    seriesPrimaryImage: CatalogArtwork | None = None
+    seasonId: str | None = Field(default=None, examples=["season-0001"])
+    seasonNumber: int | None = Field(default=None, examples=[1])
+    episodeNumber: int | None = Field(default=None, examples=[2])
+    episodeEndNumber: int | None = Field(default=None, examples=[2])
+    dateAdded: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
+    addedAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
+    lastAddedAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
+    updatedAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
+    collectionYearRange: str | None = Field(default=None, examples=["2020-2025"])
+    albumId: str | None = Field(default=None, examples=["release-0001"])
+    artistId: str | None = Field(default=None, examples=["artist-0001"])
+    discNumber: int | None = Field(default=None, examples=[1])
+    trackNumber: int | None = Field(default=None, examples=[1])
+    durationSeconds: float | None = Field(default=None, examples=[104.0])
     metadata: CatalogMetadata | None = None
     images: dict[str, CatalogArtwork] = Field(default_factory=dict)
     credits: list[CatalogCredit] = Field(default_factory=list)
+    userState: CatalogUserState | None = None
     state: CatalogState | None = None
     watchlistStatus: CatalogWatchlistStatus | None = None
     children: list[Any] = Field(default_factory=list)
+    childIds: list[str] = Field(default_factory=list)
 
 
 class CatalogPage(DocsModel):
@@ -696,10 +753,22 @@ class PlaybackSessionResponse(DocsModel):
     progress: float | None = Field(default=None, examples=[0.5])
 
 
+class LyricsLine(DocsModel):
+    text: str = Field(examples=["Example lyric"])
+    startSeconds: float | None = Field(default=None, examples=[1.0])
+    endSeconds: float | None = Field(default=None, examples=[2.5])
+
+
+class AudioLyrics(DocsModel):
+    source: str = Field(default="sidecar", examples=["embedded"])
+    timed: bool = Field(default=False, examples=[True])
+    language: str | None = Field(default=None, examples=["en"])
+    lines: list[LyricsLine] = Field(default_factory=list)
+
+
 class LyricsResponse(DocsModel):
-    lyrics: str | None = Field(default=None, examples=["[00:01.00] Example lyric"])
-    format: str | None = Field(default=None, examples=["lrc"])
-    lines: list[Any] = Field(default_factory=list)
+    trackId: str | None = Field(default=None, examples=["track-0001"])
+    lyrics: AudioLyrics | None = None
 
 
 class NotificationThumbnail(DocsModel):
@@ -713,44 +782,64 @@ class NotificationThumbnail(DocsModel):
 
 class Notification(DocsModel):
     id: str | None = Field(default=None, examples=["notification-0001"])
-    type: str | None = Field(default=None, examples=["new_release"])
-    itemId: str | None = Field(default=None, examples=["release-0001"])
-    artistId: str | None = Field(default=None, examples=["artist-0001"])
+    kind: str | None = Field(default=None, examples=["new_release"])
     title: str | None = Field(default=None, examples=["New release available"])
-    message: str | None = Field(
+    subtitle: str | None = Field(
         default=None, examples=["Example Artist released Example Album."]
     )
+    itemId: str | None = Field(default=None, examples=["release-0001"])
+    seriesId: str | None = Field(default=None, examples=["series-0001"])
+    artistId: str | None = Field(default=None, examples=["artist-0001"])
+    seasonNumber: int | None = Field(default=None, examples=[1])
+    episodeNumber: int | None = Field(default=None, examples=[1])
     createdAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
-    read: bool | None = Field(default=None, examples=[False])
+    readAt: str | None = Field(default=None, examples=["2025-01-16T12:00:00Z"])
+    navigationTarget: str | None = Field(default=None, examples=["/album/release-0001"])
     thumbnail: NotificationThumbnail | None = None
 
 
 class NotificationPage(DocsModel):
-    notifications: list[Notification] = Field(default_factory=list)
+    items: list[Notification] = Field(default_factory=list)
+    unreadCount: int = Field(default=0, examples=[2])
     nextCursor: str | None = Field(default=None, examples=["cursor-next"])
-    hasMore: bool | None = Field(default=None, examples=[False])
 
 
 class NotificationSummary(DocsModel):
-    unread: int | None = Field(default=None, examples=[2])
-    total: int | None = Field(default=None, examples=[5])
+    unreadCount: int = Field(default=0, examples=[2])
 
 
-class NotificationMutationResponse(DocsModel):
-    notification: Notification | None = None
-    updated: bool | None = Field(default=None, examples=[True])
+class NotificationReadResponse(DocsModel):
+    id: str = Field(examples=["notification-0001"])
+    readAt: str | None = Field(default=None, examples=["2025-01-16T12:00:00Z"])
+
+
+class NotificationDeleteResponse(DocsModel):
+    id: str = Field(examples=["notification-0001"])
+    removed: bool = Field(default=True, examples=[True])
 
 
 class CalendarEvent(DocsModel):
     id: str | None = Field(default=None, examples=["event-0001"])
-    title: str | None = Field(default=None, examples=["Example Feature"])
-    type: str | None = Field(default=None, examples=["movie"])
+    provider: str | None = Field(default=None, examples=["radarr"])
     libraryId: str | None = Field(default=None, examples=["library-0001"])
-    airDate: str | None = Field(default=None, examples=["2025-01-15"])
-    releaseDate: str | None = Field(default=None, examples=["2025-01-15"])
+    libraryName: str | None = Field(default=None, examples=["Movies"])
+    kind: str | None = Field(default=None, examples=["movie"])
+    releaseType: str | None = Field(default=None, examples=["digital"])
+    eventAt: str | None = Field(default=None, examples=["2025-01-15T12:00:00Z"])
+    eventDate: str | None = Field(default=None, examples=["2025-01-15"])
+    allDay: bool | None = Field(default=None, examples=[False])
+    seasonNumber: int | None = Field(default=None, examples=[1])
+    episodeNumber: int | None = Field(default=None, examples=[1])
     hasFile: bool | None = Field(default=None, examples=[False])
+    monitored: bool | None = Field(default=None, examples=[True])
+    state: str | None = Field(default=None, examples=["future"])
+    title: str | None = Field(default=None, examples=["Example Feature"])
+    seriesTitle: str | None = Field(default=None, examples=["Example Series"])
+    catalogItemId: str | None = Field(default=None, examples=["item-0001"])
+    catalogSeriesId: str | None = Field(default=None, examples=["series-0001"])
+    metadataStatus: str | None = Field(default=None, examples=["catalog"])
     following: bool | None = Field(default=None, examples=[True])
-    metadata: CatalogMetadata | None = None
+    followAvailable: bool | None = Field(default=None, examples=[True])
 
 
 class CalendarPage(DocsModel):
@@ -766,6 +855,10 @@ class CalendarSettings(DocsModel):
 
 class CalendarFollowRequest(DocsModel):
     following: bool = Field(default=False, examples=[True])
+
+
+class CalendarFollowResponse(DocsModel):
+    following: bool = Field(examples=[True])
 
 
 class BazarrSettings(DocsModel):
@@ -1039,19 +1132,31 @@ class SyncplayMember(DocsModel):
     watchingTogether: bool | None = Field(default=None, examples=[True])
     viewing: bool | None = Field(default=None, examples=[True])
     loading: bool | None = Field(default=None, examples=[False])
+    readyGeneration: int | None = Field(default=None, examples=[1])
+    role: Literal["host", "viewer"] | None = Field(default=None, examples=["host"])
 
 
 class SyncplayGroup(DocsModel):
     id: str | None = Field(default=None, examples=["group-0001"])
+    name: str | None = Field(default=None, examples=["Example Host's group"])
     hostUserId: str | None = Field(default=None, examples=["user-0001"])
+    hostName: str | None = Field(default=None, examples=["Example Host"])
     itemId: str | None = Field(default=None, examples=["item-0001"])
     members: list[SyncplayMember] = Field(default_factory=list)
     revision: int | None = Field(default=None, examples=[4])
+    groupRevision: int | None = Field(default=None, examples=[4])
     timelineRevision: int | None = Field(default=None, examples=[2])
     mediaGeneration: int | None = Field(default=None, examples=[1])
     position: float | None = Field(default=None, examples=[120.5])
     playing: bool | None = Field(default=None, examples=[True])
+    resumeWhenReady: bool | None = Field(default=None, examples=[False])
+    anchorPosition: float | None = Field(default=None, examples=[120.5])
+    anchorServerTime: float | None = Field(default=None, examples=[1736942400.0])
+    effectiveAt: float | None = Field(default=None, examples=[1736942400.0])
     playbackState: str | None = Field(default=None, examples=["playing"])
+    pauseReason: str | None = Field(default=None, examples=["user"])
+    hostDisconnectedAt: float | None = Field(default=None, examples=[1736942400.0])
+    updatedAt: float | None = Field(default=None, examples=[1736942400.0])
     allowViewerControls: bool | None = Field(default=None, examples=[False])
     ended: bool | None = Field(default=None, examples=[False])
 
@@ -1167,16 +1272,20 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     TrickplayManifest,
     PlaybackSegmentsResponse,
     PlaybackSessionResponse,
+    LyricsLine,
+    AudioLyrics,
     LyricsResponse,
     NotificationThumbnail,
     Notification,
     NotificationPage,
     NotificationSummary,
-    NotificationMutationResponse,
+    NotificationReadResponse,
+    NotificationDeleteResponse,
     CalendarEvent,
     CalendarPage,
     CalendarSettings,
     CalendarFollowRequest,
+    CalendarFollowResponse,
     BazarrSettings,
     BazarrStatus,
     BazarrSearchRequest,
@@ -2126,7 +2235,7 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ): PlaylistDetail,
     ("PUT", "/api/account/playlists/{playlist_id}/order"): PlaylistDetail,
     ("GET", "/api/shared/playlists/{share_token}"): PlaylistDetail,
-    ("GET", "/api/catalog/items/{entity_id}"): CatalogItemResponse,
+    ("GET", "/api/catalog/items/{entity_id}"): CatalogItem,
     ("GET", "/api/catalog/items/{entity_id}/similar"): CatalogPage,
     ("GET", "/api/catalog/items/{entity_id}/metadata"): MetadataResponse,
     ("GET", "/api/catalog/items/{entity_id}/detail"): CatalogPage,
@@ -2154,12 +2263,12 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("GET", "/api/admin/bazarr/settings"): BazarrSettings,
     ("PUT", "/api/admin/bazarr/settings"): BazarrSettings,
     ("GET", "/api/calendar"): CalendarPage,
-    ("PATCH", "/api/calendar/events/{event_id}/follow"): CalendarEvent,
+    ("PATCH", "/api/calendar/events/{event_id}/follow"): CalendarFollowResponse,
     ("GET", "/api/admin/calendar/settings"): CalendarSettings,
     ("PUT", "/api/admin/calendar/settings"): CalendarSettings,
     ("GET", "/api/notifications"): NotificationPage,
-    ("PATCH", "/api/notifications/{notification_id}"): NotificationMutationResponse,
-    ("DELETE", "/api/notifications/{notification_id}"): NotificationMutationResponse,
+    ("PATCH", "/api/notifications/{notification_id}"): NotificationReadResponse,
+    ("DELETE", "/api/notifications/{notification_id}"): NotificationDeleteResponse,
     ("POST", "/api/notifications/read-all"): NotificationSummary,
     ("GET", "/api/notifications/summary"): NotificationSummary,
     ("GET", "/api/admin/metadata/providers"): MetadataProviderSettings,
@@ -2380,7 +2489,10 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
         "total": 0,
         "hasNext": False,
     },
-    NotificationPage: {"notifications": [], "nextCursor": None, "hasMore": False},
+    NotificationPage: {"items": [], "unreadCount": 0, "nextCursor": None},
+    NotificationSummary: {"unreadCount": 2},
+    NotificationReadResponse: {"id": "notification-0001", "readAt": None},
+    NotificationDeleteResponse: {"id": "notification-0001", "removed": True},
     CalendarPage: {"events": [], "start": "2025-01-01", "end": "2025-02-01"},
     SyncplayGroupsResponse: {"groups": []},
     SyncplayGroup: {"id": "group-0001", "revision": 4, "members": [], "ended": False},

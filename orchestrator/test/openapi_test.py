@@ -147,9 +147,9 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertEqual(operation["security"], [])
         self.assertIn("200", operation["responses"])
         self.assertIn("503", operation["responses"])
-        error_schema = operation["responses"]["503"]["content"][
-            "application/json"
-        ]["schema"]
+        error_schema = operation["responses"]["503"]["content"]["application/json"][
+            "schema"
+        ]
         self.assertEqual(error_schema["$ref"], "#/components/schemas/ErrorResponse")
 
     def test_write_operations_have_documented_request_bodies(self):

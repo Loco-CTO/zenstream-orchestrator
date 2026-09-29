@@ -1,5 +1,5 @@
 fastapi>=0.141.1
-uvicorn[standard]>=0.53.0
+uvicorn[standard]>=0.54.0
 websockets>=17.1
 python-dotenv>=1.2.3
 requests>=2.34.2
@@ -7,7 +7,7 @@ httpx>=0.28.1
 termcolor>=3.3.0
 nodeenv>=1.10.0
 alembic>=1.20.0
-SQLAlchemy>=2.1.0
+SQLAlchemy>=2.1.1
 cryptography>=50.0.1
 argon2-cffi>=25.1.0
 mutagen>=1.48.1

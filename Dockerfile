@@ -29,4 +29,5 @@ RUN mkdir -p ./assets/ffmpeg/linux && \
 COPY orchestrator/ ./orchestrator/
 COPY --from=dashboard-build /frontend/out/ ./orchestrator/web/
 EXPOSE 9088
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9088/health/ready', timeout=4)"]
 CMD ["python", "orchestrator/init.py"]

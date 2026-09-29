@@ -70,8 +70,12 @@ class CandidateFirstWorkflowTest(unittest.TestCase):
         self.assertIn("& gh release edit $env:TAG --target $env:CANDIDATE_SHA", publish)
         self.assertIn("if (-not $release.isDraft)", publish)
         self.assertIn("$release.targetCommitish -ne $env:CANDIDATE_SHA", publish)
-        self.assertIn("gh release view $env:TAG --json tagName,targetCommitish", publish)
-        self.assertNotIn("gh api \"repos/$env:GITHUB_REPOSITORY/releases/tags/$env:TAG\"", publish)
+        self.assertIn(
+            "gh release view $env:TAG --json tagName,targetCommitish", publish
+        )
+        self.assertNotIn(
+            'gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:TAG"', publish
+        )
         self.assertIn("remote_tag_commit_sha", publish)
 
 

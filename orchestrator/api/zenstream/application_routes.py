@@ -14,6 +14,7 @@ from app.client_auth import (
     session_cookie_name,
     websocket_account,
 )
+from app.config import Config
 from app.foreground import run_auth, run_control
 from app.intro_outro import IntroOutroStore
 from app.jobs import AnalysisMaintenanceTimeout, scheduler
@@ -526,6 +527,19 @@ web_root, _assets_root = _static_roots()
 
 @router.get("/")
 async def root():
+    return {"status": "ok"}
+
+
+@router.get("/health/ready")
+def health_ready():
+    """Report readiness only after SQLite can successfully serve a read."""
+    config = Config._instance
+    if config is None:
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+    try:
+        config.database.execute("SELECT 1")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Database unavailable.") from None
     return {"status": "ok"}
 
 

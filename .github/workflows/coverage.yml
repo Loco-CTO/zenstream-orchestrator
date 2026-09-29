@@ -63,6 +63,9 @@ jobs:
         working-directory: launcher
         run: npm run test:coverage
 
+      - name: Smoke production Docker Compose image
+        run: bash ./scripts/smoke-docker.sh
+
       - name: Install DeepSource CLI
         run: curl -fsSL https://cli.deepsource.com/install | BINDIR=./bin sh
 

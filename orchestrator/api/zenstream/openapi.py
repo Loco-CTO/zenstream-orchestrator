@@ -1563,6 +1563,7 @@ _PARAMETER_EXAMPLES = {
 
 _SUMMARY_OVERRIDES = {
     ("GET", "/"): "Check API health",
+    ("GET", "/health/ready"): "Check database readiness",
     ("POST", "/api/auth/login"): "Create a bearer session",
     ("GET", "/api/auth/me"): "Get the current user",
     ("POST", "/api/auth/refresh"): "Rotate the current refresh token",
@@ -1801,6 +1802,7 @@ def _stable_operation_id(method: str, path: str) -> str:
 
 def _tag_for_path(path: str) -> str:
     if path == "/" or path in {
+        "/health/ready",
         "/api/version",
         "/api/config",
         "/api/config/public-web-url",
@@ -2074,6 +2076,7 @@ _NO_CONTENT_RESPONSES = frozenset(
 
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("GET", "/"): HealthResponse,
+    ("GET", "/health/ready"): HealthResponse,
     ("POST", "/api/auth/login"): SessionResponse,
     ("GET", "/api/auth/me"): UserResponse,
     ("POST", "/api/auth/refresh"): SessionResponse,
@@ -2524,6 +2527,7 @@ def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
 def _security_for(path: str, method: str) -> list[dict[str, list[Any]]] | list[Any]:
     if path in {
         "/",
+        "/health/ready",
         "/api/version",
         "/api/config",
         "/api/config/public-web-url",
@@ -2758,6 +2762,8 @@ def _response_for(path: str, method: str) -> dict[str, Any]:
 
 
 def _error_statuses(path: str, method: str) -> tuple[int, ...]:
+    if path == "/health/ready":
+        return (503,)
     if path in {"/", "/api/version", "/api/config", "/api/config/public-web-url"}:
         return ()
     if path == "/api/account/avatar" and method == "POST":

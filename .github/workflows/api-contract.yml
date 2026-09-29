@@ -96,6 +96,17 @@ jobs:
           ref: main
           path: web
 
+      - name: Check whether Web fixture tests are on main
+        id: web-contract-tests
+        working-directory: web
+        run: |
+          if [ -f test/api-contract-fixtures.test.ts ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Web fixture tests have not landed on main; leaving this rollout gate staged."
+          fi
+
       - name: Check out this Orchestrator pull request's fixtures
         uses: actions/checkout@v7
         with:
@@ -105,21 +116,25 @@ jobs:
           sparse-checkout: contracts/fixtures
 
       - name: Set up pnpm
+        if: steps.web-contract-tests.outputs.ready == 'true'
         uses: pnpm/action-setup@v6
         with:
           version: 11.10.0
 
       - name: Set up Node.js
+        if: steps.web-contract-tests.outputs.ready == 'true'
         uses: actions/setup-node@v7
         with:
           node-version: 22
           package-manager-cache: false
 
       - name: Install Web dependencies
+        if: steps.web-contract-tests.outputs.ready == 'true'
         working-directory: web
         run: pnpm install --frozen-lockfile
 
       - name: Run Web contract tests
+        if: steps.web-contract-tests.outputs.ready == 'true'
         working-directory: web
         env:
           ZENSTREAM_API_FIXTURE_ROOT: ${{ github.workspace }}/web/_contracts/zenstream-orchestrator/contracts/fixtures
@@ -137,6 +152,17 @@ jobs:
           ref: main
           path: android
 
+      - name: Check whether Android fixture tests are on main
+        id: android-contract-tests
+        working-directory: android
+        run: |
+          if [ -f app/src/test/java/com/zenstream/zenstreammobile/data/ApiContractFixturesTest.kt ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Android fixture tests have not landed on main; leaving this rollout gate staged."
+          fi
+
       - name: Check out this Orchestrator pull request's fixtures
         uses: actions/checkout@v7
         with:
@@ -146,12 +172,14 @@ jobs:
           sparse-checkout: contracts/fixtures
 
       - name: Set up Java
+        if: steps.android-contract-tests.outputs.ready == 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Set up Android SDK
+        if: steps.android-contract-tests.outputs.ready == 'true'
         uses: android-actions/setup-android@v4
         with:
           packages: >-
@@ -160,9 +188,11 @@ jobs:
             build-tools;37.0.0
 
       - name: Set up Gradle
+        if: steps.android-contract-tests.outputs.ready == 'true'
         uses: gradle/actions/setup-gradle@v6
 
       - name: Run Android contract tests
+        if: steps.android-contract-tests.outputs.ready == 'true'
         working-directory: android
         env:
           ZENSTREAM_API_FIXTURE_ROOT: ${{ github.workspace }}/android/_contracts/zenstream-orchestrator/contracts/fixtures

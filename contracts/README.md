@@ -39,5 +39,6 @@ Their focused tests load these shared fixtures through
 Orchestrator `main` branch, and the Orchestrator pull request gate runs those
 tests against the pull request's fixture directory. The first Orchestrator
 pull request establishes the snapshot baseline, so its cross-client jobs are
-skipped until that snapshot exists on `main`; subsequent Orchestrator pull
-requests require both consumer test suites to pass.
+skipped until that snapshot exists on `main`. Each consumer gate activates once
+its fixture test has landed on that repository's `main`, allowing the changes
+to roll out in the documented order.

@@ -1,7 +1,6 @@
-from pathlib import Path
 import re
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / ".github" / "workflows" / "release.yaml"
@@ -46,9 +45,9 @@ class CandidateFirstWorkflowTest(unittest.TestCase):
         coverage = (ROOT / ".github" / "workflows" / "coverage.yml").read_text(
             encoding="utf-8"
         )
-        windows = (
-            ROOT / ".github" / "workflows" / "windows-launcher.yml"
-        ).read_text(encoding="utf-8")
+        windows = (ROOT / ".github" / "workflows" / "windows-launcher.yml").read_text(
+            encoding="utf-8"
+        )
         for workflow in (coverage, windows):
             self.assertRegex(workflow, r"workflow_call:")
             self.assertRegex(workflow, r"candidate_sha:")

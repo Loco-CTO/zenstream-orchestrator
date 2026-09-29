@@ -54,17 +54,24 @@ class CandidateFirstWorkflowTest(unittest.TestCase):
             self.assertRegex(workflow, r"ref:.*inputs\.candidate_sha")
             self.assertNotRegex(workflow, r"format --write|spotlessApply")
 
-    def test_publish_checks_draft_before_upload_and_tag_after(self) -> None:
+    def test_publish_retargets_draft_and_verifies_release_before_upload(self) -> None:
         publish = job_block(RELEASE.read_text(encoding="utf-8"), "publish")
-        draft_check = publish.index("Verify draft release targets the candidate")
+        prepare_release = publish.index("Create or reuse draft GitHub release")
+        draft_check = publish.index("Verify release targets the candidate")
         asset_upload = publish.index("Upload and verify Windows release assets")
         publish_release = publish.index("& gh release edit $env:TAG --draft=false")
         tag_check = publish.index("Verify published release tag matches the candidate")
 
+        self.assertLess(prepare_release, draft_check)
         self.assertLess(draft_check, asset_upload)
         self.assertLess(asset_upload, publish_release)
         self.assertLess(publish_release, tag_check)
-        self.assertIn("$release.target_commitish -ne $env:CANDIDATE_SHA", publish)
+        self.assertIn("--json tagName,targetCommitish,isDraft", publish)
+        self.assertIn("& gh release edit $env:TAG --target $env:CANDIDATE_SHA", publish)
+        self.assertIn("if (-not $release.isDraft)", publish)
+        self.assertIn("$release.targetCommitish -ne $env:CANDIDATE_SHA", publish)
+        self.assertIn("gh release view $env:TAG --json tagName,targetCommitish", publish)
+        self.assertNotIn("gh api \"repos/$env:GITHUB_REPOSITORY/releases/tags/$env:TAG\"", publish)
         self.assertIn("remote_tag_commit_sha", publish)
 
 

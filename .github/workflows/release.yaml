@@ -266,14 +266,21 @@ jobs:
             }
           }
 
-      - name: Verify release tag matches the candidate
-        shell: bash
+      - name: Verify draft release targets the candidate
+        shell: pwsh
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.candidate.outputs.tag }}
           CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
         run: |
-          source scripts/release-candidate.sh
-          [[ "$(remote_tag_commit_sha "refs/tags/$TAG")" == "$CANDIDATE_SHA" ]]
+          $releaseJson = & gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:TAG"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not inspect GitHub release $env:TAG."
+          }
+          $release = $releaseJson | ConvertFrom-Json
+          if ($release.tag_name -ne $env:TAG -or $release.target_commitish -ne $env:CANDIDATE_SHA) {
+            throw "GitHub release $env:TAG does not target candidate $env:CANDIDATE_SHA."
+          }
 
       - name: Upload and verify Windows release assets
         shell: pwsh
@@ -345,6 +352,15 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $isDraft -ne 'false') {
             throw "Release $env:TAG did not become public after asset verification."
           }
+
+      - name: Verify published release tag matches the candidate
+        shell: bash
+        env:
+          TAG: ${{ needs.candidate.outputs.tag }}
+          CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+        run: |
+          source scripts/release-candidate.sh
+          [[ "$(remote_tag_commit_sha "refs/tags/$TAG")" == "$CANDIDATE_SHA" ]]
 
   promote:
     needs: [candidate, publish]

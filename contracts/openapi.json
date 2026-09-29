@@ -27553,6 +27553,42 @@
           "System & Client Bootstrap"
         ]
       }
+    },
+    "/health/ready": {
+      "get": {
+        "description": "Check database readiness. Use this endpoint during client startup or registration. Method: `GET`; path: `/health/ready`.",
+        "operationId": "get_health_ready",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "status": "ok"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The required service or media tool is unavailable."
+          }
+        },
+        "security": [],
+        "summary": "Check database readiness",
+        "tags": [
+          "System & Client Bootstrap"
+        ]
+      }
     }
   },
   "tags": [

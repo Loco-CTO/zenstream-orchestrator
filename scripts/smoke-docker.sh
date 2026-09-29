@@ -12,8 +12,24 @@ cleanup() {
     docker compose --project-name "$project_name" logs --no-color orchestrator 2>/dev/null \
       | sed -E 's/Password: .*/Password: [redacted]/' >&2 || true
   fi
+  cleanup_image="$(docker compose --project-name "$project_name" images --quiet orchestrator 2>/dev/null | head -n 1 || true)"
   docker compose --project-name "$project_name" down --remove-orphans >/dev/null 2>&1 || true
-  rm -rf -- "$run_root"
+  if [[ -n "$cleanup_image" ]]; then
+    docker run --rm --user 0:0 --volume "$run_root:/smoke" --entrypoint python "$cleanup_image" \
+      -c 'import pathlib, shutil
+root=pathlib.Path("/smoke")
+for entry in root.iterdir():
+    if entry.is_dir() and not entry.is_symlink():
+        shutil.rmtree(entry)
+    else:
+        entry.unlink()' >/dev/null 2>&1 || true
+  fi
+  if ! rm -rf -- "$run_root"; then
+    echo "Could not remove the Orchestrator smoke directory." >&2
+    if (( result == 0 )); then
+      result=1
+    fi
+  fi
   exit "$result"
 }
 trap cleanup EXIT

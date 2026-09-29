@@ -258,27 +258,42 @@ jobs:
           TAG: ${{ needs.candidate.outputs.tag }}
           CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
         run: |
-          & gh release view $env:TAG --json tagName *> $null
-          if ($LASTEXITCODE -ne 0) {
+          $releaseJson = & gh release view $env:TAG --json tagName,targetCommitish,isDraft 2>$null
+          $viewExitCode = $LASTEXITCODE
+          if ($viewExitCode -eq 0) {
+            $release = $releaseJson | ConvertFrom-Json
+            if ($release.tagName -ne $env:TAG) {
+              throw "GitHub release lookup returned an unexpected tag for $env:TAG."
+            }
+            if ($release.targetCommitish -ne $env:CANDIDATE_SHA) {
+              if (-not $release.isDraft) {
+                throw "Published release $env:TAG targets $($release.targetCommitish); refusing to retarget it."
+              }
+              & gh release edit $env:TAG --target $env:CANDIDATE_SHA
+              if ($LASTEXITCODE -ne 0) {
+                throw "Could not retarget draft release $env:TAG to candidate $env:CANDIDATE_SHA."
+              }
+            }
+          } else {
             & gh release create $env:TAG --target $env:CANDIDATE_SHA --draft --title $env:TAG --generate-notes
             if ($LASTEXITCODE -ne 0) {
               throw "Could not create draft release $env:TAG."
             }
           }
 
-      - name: Verify draft release targets the candidate
+      - name: Verify release targets the candidate
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.candidate.outputs.tag }}
           CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
         run: |
-          $releaseJson = & gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:TAG"
+          $releaseJson = & gh release view $env:TAG --json tagName,targetCommitish
           if ($LASTEXITCODE -ne 0) {
             throw "Could not inspect GitHub release $env:TAG."
           }
           $release = $releaseJson | ConvertFrom-Json
-          if ($release.tag_name -ne $env:TAG -or $release.target_commitish -ne $env:CANDIDATE_SHA) {
+          if ($release.tagName -ne $env:TAG -or $release.targetCommitish -ne $env:CANDIDATE_SHA) {
             throw "GitHub release $env:TAG does not target candidate $env:CANDIDATE_SHA."
           }
 

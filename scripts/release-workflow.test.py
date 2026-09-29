@@ -54,6 +54,19 @@ class CandidateFirstWorkflowTest(unittest.TestCase):
             self.assertRegex(workflow, r"ref:.*inputs\.candidate_sha")
             self.assertNotRegex(workflow, r"format --write|spotlessApply")
 
+    def test_publish_checks_draft_before_upload_and_tag_after(self) -> None:
+        publish = job_block(RELEASE.read_text(encoding="utf-8"), "publish")
+        draft_check = publish.index("Verify draft release targets the candidate")
+        asset_upload = publish.index("Upload and verify Windows release assets")
+        publish_release = publish.index("& gh release edit $env:TAG --draft=false")
+        tag_check = publish.index("Verify published release tag matches the candidate")
+
+        self.assertLess(draft_check, asset_upload)
+        self.assertLess(asset_upload, publish_release)
+        self.assertLess(publish_release, tag_check)
+        self.assertIn("$release.target_commitish -ne $env:CANDIDATE_SHA", publish)
+        self.assertIn("remote_tag_commit_sha", publish)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -126,8 +126,9 @@ async def _run(
             from app.logging_config import get_logger
 
             get_logger("foreground").warning(
-                "blocking work complete lane=%s queue_duration_ms=%.1f execution_duration_ms=%.1f",
+                "blocking work complete lane=%s operation=%s queue_duration_ms=%.1f execution_duration_ms=%.1f",
                 lane,
+                getattr(function, "__qualname__", type(function).__name__),
                 queue_seconds * 1000,
                 execution_seconds * 1000,
             )

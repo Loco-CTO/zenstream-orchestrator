@@ -446,8 +446,10 @@ class SyncplayGroup:
 
         return self.mutate(user_id, None, operation_id, apply)
 
-    def mark_host_disconnected(self):
+    def mark_host_disconnected(self, *, guard=lambda: True):
         with self.db.transaction() as cursor:
+            if not guard():
+                return None
             state = self._state(cursor)
             if not state or state["hostDisconnectedAt"] is not None:
                 return state
@@ -473,17 +475,21 @@ class SyncplayGroup:
             )
             return self._state(cursor, include_ended=True)
 
-    def clear_host_disconnected(self):
+    def clear_host_disconnected(self, *, guard=lambda: True):
         with self.db.transaction() as cursor:
+            if not guard():
+                return None
             state = self._state(cursor)
             if not state or state["hostDisconnectedAt"] is None:
                 return state
             self.transition(cursor, state, host_disconnected_at=None)
             return self._state(cursor, include_ended=True)
 
-    def expire_host_disconnect(self, now=None):
+    def expire_host_disconnect(self, now=None, *, guard=lambda: True):
         now = time.time() if now is None else now
         with self.db.transaction() as cursor:
+            if not guard():
+                return None
             state = self._state(cursor)
             if (
                 not state
@@ -521,9 +527,13 @@ class SyncplayGroup:
                 states.append(state)
         return states
 
-    def remove_disconnected_member(self, user_id, participant_id="legacy"):
+    def remove_disconnected_member(
+        self, user_id, participant_id="legacy", *, guard=lambda: True
+    ):
         """Remove a member whose final Syncplay socket did not reconnect."""
         with self.db.transaction() as cursor:
+            if not guard():
+                return None
             state = self._state(cursor)
             if not state:
                 return None
@@ -570,9 +580,13 @@ class SyncplayGroup:
             )
             return self._state(cursor, include_ended=True)
 
-    def mark_member_backgrounded(self, user_id, participant_id="legacy"):
+    def mark_member_backgrounded(
+        self, user_id, participant_id="legacy", *, guard=lambda: True
+    ):
         """Pause for a disconnected watching member until they return."""
         with self.db.transaction() as cursor:
+            if not guard():
+                return None
             state = self._state(cursor)
             if not state:
                 return None

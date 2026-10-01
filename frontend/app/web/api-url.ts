@@ -1,4 +1,5 @@
 const configuredApiUrl = process.env.NEXT_PUBLIC_ORCHESTRATOR_API_URL?.trim();
+const isDevelopment = process.env.NODE_ENV === "development";
 
 function isLoopback(hostname: string) {
 	return (
@@ -9,12 +10,12 @@ function isLoopback(hostname: string) {
 export function apiUrl(path: string) {
 	if (!configuredApiUrl) return path;
 	const base = new URL(configuredApiUrl);
-	// Keep loopback development requests same-site even when Next and the
-	// Orchestrator were configured with different localhost spellings.
+	// In LAN development, localhost in the browser points at the browser device.
+	// Keep a loopback-configured API on the host that served the dashboard.
 	if (
+		isDevelopment &&
 		typeof window !== "undefined" &&
-		isLoopback(base.hostname) &&
-		isLoopback(window.location.hostname)
+		isLoopback(base.hostname)
 	) {
 		base.hostname = window.location.hostname;
 	}

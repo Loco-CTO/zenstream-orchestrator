@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ from app.config import Config
 from app.foreground import run_auth, run_control
 from app.intro_outro import IntroOutroStore
 from app.jobs import AnalysisMaintenanceTimeout, scheduler
+from app.logging_config import get_logger
 from app.models import Invite
 from app.models.admin import ADMIN_SESSION_COOKIE, Admin
 from app.models.playback_settings import PlaybackSettings
@@ -117,8 +119,118 @@ class WebSocketHub:
         self._connections: dict[WebSocket, _SocketClient] = {}
         self.disconnect_epochs: dict[tuple[str, str], int] = {}
         self._disconnect_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._epoch_tokens: dict[tuple[str, str], threading.Event] = {}
+        self._lifecycle_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._lifecycle_tasks: dict[tuple[str, str], set[asyncio.Task]] = {}
+        self._shutting_down = False
         self._queue_overflows = 0
         self.lock = asyncio.Lock()
+
+    def _advance_epoch_locked(self, key: tuple[str, str]) -> int:
+        previous = self._epoch_tokens.get(key)
+        if previous is not None:
+            previous.set()
+        self._epoch_tokens[key] = threading.Event()
+        epoch = self.disconnect_epochs.get(key, 0) + 1
+        self.disconnect_epochs[key] = epoch
+        return epoch
+
+    def _forget_identity_locked(self, key: tuple[str, str]) -> None:
+        if (
+            key in self._disconnect_tasks
+            or self._lifecycle_tasks.get(key)
+            or any(
+                connection.identity == key for connection in self._connections.values()
+            )
+        ):
+            return
+        token = self._epoch_tokens.pop(key, None)
+        if token is not None:
+            token.set()
+        self.disconnect_epochs.pop(key, None)
+        self._lifecycle_locks.pop(key, None)
+        self._lifecycle_tasks.pop(key, None)
+
+    async def run_lifecycle(
+        self,
+        user: str,
+        participant: str,
+        epoch: int,
+        function,
+        *,
+        connected: bool = False,
+    ):
+        key = (user, participant)
+        async with self.lock:
+            token = self._epoch_tokens.get(key)
+            has_socket = any(
+                connection.identity == key for connection in self._connections.values()
+            )
+            if (
+                self._shutting_down
+                or token is None
+                or token.is_set()
+                or self.disconnect_epochs.get(key) != epoch
+                or has_socket != connected
+            ):
+                return None
+            serial = self._lifecycle_locks.setdefault(key, asyncio.Lock())
+
+            async def execute():
+                try:
+                    async with serial:
+                        if token.is_set():
+                            return None
+                        result = await run_control(
+                            function,
+                            user,
+                            participant,
+                            guard=lambda: not token.is_set(),
+                        )
+                        outcome = "superseded" if token.is_set() else "settled"
+                        states = result[0] if connected and result else result or []
+                        revisions = [
+                            (state["id"], state["revision"])
+                            for entry in states
+                            if isinstance(
+                                state := entry[1]
+                                if isinstance(entry, tuple)
+                                else entry,
+                                dict,
+                            )
+                        ]
+                        get_logger("syncplay").debug(
+                            "socket lifecycle operation=%s participant=%s epoch=%s outcome=%s revisions=%s",
+                            function.__name__,
+                            participant,
+                            epoch,
+                            outcome,
+                            revisions,
+                        )
+                        return None if token.is_set() else result
+                except Exception:
+                    get_logger("syncplay").exception(
+                        "socket lifecycle failed operation=%s participant=%s epoch=%s",
+                        function.__name__,
+                        participant,
+                        epoch,
+                    )
+                    raise
+                finally:
+                    async with self.lock:
+                        tasks = self._lifecycle_tasks.get(key)
+                        if tasks is not None:
+                            tasks.discard(asyncio.current_task())
+                        self._forget_identity_locked(key)
+
+            operation = asyncio.create_task(execute())
+            operation.add_done_callback(
+                lambda done: None if done.cancelled() else done.exception()
+            )
+            self._lifecycle_tasks.setdefault(key, set()).add(operation)
+        # The owner retains serialization until the synchronous worker settles,
+        # even when the grace timer or socket handler awaiting it is cancelled.
+        return await asyncio.shield(operation)
 
     async def connect(
         self,
@@ -154,8 +266,11 @@ class WebSocketHub:
             self.clients.add(websocket)
             self.identities[websocket] = key
             self._connections[websocket] = connection
-            self.disconnect_epochs[key] = self.disconnect_epochs.get(key, 0) + 1
+            epoch = self._advance_epoch_locked(key)
             connection.sender = asyncio.create_task(self._sender(connection))
+        get_logger("syncplay").debug(
+            "socket installed participant=%s epoch=%s", participant, epoch
+        )
         if stale_cleanup is not None and not stale_cleanup.done():
             stale_cleanup.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -169,6 +284,7 @@ class WebSocketHub:
                     await sender
             with contextlib.suppress(Exception):
                 await existing.websocket.close(code=1000, reason="Replaced")
+        return epoch
 
     async def _sender(self, connection: _SocketClient):
         websocket = connection.websocket
@@ -247,13 +363,16 @@ class WebSocketHub:
         async with self.lock:
             if self._disconnect_tasks.get(key) is task:
                 self._disconnect_tasks.pop(key, None)
-            if self.disconnect_epochs.get(key) == epoch and not any(
-                connection.identity == key for connection in self._connections.values()
-            ):
-                self.disconnect_epochs.pop(key, None)
+            self._forget_identity_locked(key)
 
     async def shutdown(self) -> None:
         async with self.lock:
+            self._shutting_down = True
+            for token in self._epoch_tokens.values():
+                token.set()
+            operations = [
+                task for tasks in self._lifecycle_tasks.values() for task in tasks
+            ]
             tasks = list(self._disconnect_tasks.values())
             senders = [
                 connection.sender
@@ -264,7 +383,6 @@ class WebSocketHub:
             self.clients.clear()
             self.identities.clear()
             self._connections.clear()
-            self.disconnect_epochs.clear()
         for task in tasks + [sender for sender in senders if sender is not None]:
             if not task.done():
                 task.cancel()
@@ -273,6 +391,15 @@ class WebSocketHub:
                 *(tasks + [sender for sender in senders if sender is not None]),
                 return_exceptions=True,
             )
+        if operations:
+            _, pending = await asyncio.wait(operations, timeout=5)
+            if pending:
+                get_logger("syncplay").warning(
+                    "socket lifecycle shutdown pending=%s", len(pending)
+                )
+        async with self.lock:
+            for key in list(self._epoch_tokens):
+                self._forget_identity_locked(key)
 
     async def remove(self, websocket: WebSocket):
         sender = None
@@ -285,9 +412,7 @@ class WebSocketHub:
             if identity and not any(
                 value == identity for value in self.identities.values()
             ):
-                self.disconnect_epochs[identity] = (
-                    self.disconnect_epochs.get(identity, 0) + 1
-                )
+                self._advance_epoch_locked(identity)
             epoch = self.disconnect_epochs.get(identity, 0) if identity else None
         current = asyncio.current_task()
         if sender is not None and sender is not current:
@@ -319,8 +444,20 @@ class WebSocketHub:
         for socket in sockets:
             await self.send(socket, payload)
 
-    async def broadcast(self, message: dict):
+    async def broadcast(
+        self,
+        message: dict,
+        *,
+        identity: tuple[str, str] | None = None,
+        epoch: int | None = None,
+    ):
         async with self.lock:
+            if identity is not None and (
+                self.disconnect_epochs.get(identity) != epoch
+                or self._epoch_tokens.get(identity) is None
+                or self._epoch_tokens[identity].is_set()
+            ):
+                return
             connections = tuple(self._connections.values())
             dead = []
             for connection in connections:
@@ -356,9 +493,13 @@ class WebSocketHub:
 hub = WebSocketHub()
 
 
-async def _broadcast_group(state):
+async def _broadcast_group(state, *, identity=None, epoch=None):
     if state:
-        await hub.broadcast({"version": 1, "type": "group", "group": state})
+        await hub.broadcast(
+            {"version": 1, "type": "group", "group": state},
+            identity=identity,
+            epoch=epoch,
+        )
 
 
 async def _disconnect_cleanup(user, participant, epoch):
@@ -369,19 +510,27 @@ async def _disconnect_cleanup(user, participant, epoch):
             user, participant
         ):
             return
-        states = await run_control(_mark_disconnected_sync, user, participant)
+        states = await hub.run_lifecycle(
+            user, participant, epoch, _mark_disconnected_sync
+        )
+        if states is None:
+            return
         for state in states:
-            await _broadcast_group(state)
+            await _broadcast_group(state, identity=(user, participant), epoch=epoch)
 
         await asyncio.sleep(270)
         if await hub.epoch(user, participant) != epoch or await hub.sockets_for(
             user, participant
         ):
             return
-        states = await run_control(_expire_disconnected_sync, user, participant)
+        states = await hub.run_lifecycle(
+            user, participant, epoch, _expire_disconnected_sync
+        )
+        if states is None:
+            return
         for kind, state in states:
             if kind == "group":
-                await _broadcast_group(state)
+                await _broadcast_group(state, identity=(user, participant), epoch=epoch)
             else:
                 await hub.broadcast(
                     {
@@ -389,34 +538,42 @@ async def _disconnect_cleanup(user, participant, epoch):
                         "type": "group-ended",
                         "id": state["id"],
                         "revision": state["revision"],
-                    }
+                    },
+                    identity=(user, participant),
+                    epoch=epoch,
                 )
     finally:
         if task is not None:
             await hub.finish_disconnect_cleanup(user, participant, epoch, task)
 
 
-def _mark_disconnected_sync(user, participant):
+def _mark_disconnected_sync(user, participant, *, guard=lambda: True):
     states = []
     for group in SyncplayGroup.active_groups_for_user(user, participant):
         state = group.state()
         if state and state["hostUserId"] == user:
-            state = group.mark_host_disconnected()
+            state = group.mark_host_disconnected(guard=guard)
         elif state:
-            state = group.mark_member_backgrounded(user, participant)
+            state = group.mark_member_backgrounded(user, participant, guard=guard)
         if state:
             states.append(state)
+            get_logger("syncplay").debug(
+                "socket disconnect participant=%s group=%s revision=%s",
+                participant,
+                state["id"],
+                state["revision"],
+            )
     return states
 
 
-def _expire_disconnected_sync(user, participant):
+def _expire_disconnected_sync(user, participant, *, guard=lambda: True):
     results = []
     for group in SyncplayGroup.active_groups_for_user(user, participant):
-        state = group.remove_disconnected_member(user, participant)
+        state = group.remove_disconnected_member(user, participant, guard=guard)
         if state and state["hostUserId"] != user:
             results.append(("group", state))
             continue
-        state = group.expire_host_disconnect()
+        state = group.expire_host_disconnect(guard=guard)
         if state:
             results.append(("ended", state))
     return results
@@ -1094,10 +1251,17 @@ def _syncplay_group_snapshot_sync(group_id: str, user: str, participant: str):
     return group, state, bool(state and group.member(user, participant))
 
 
-def _syncplay_socket_initial_sync(user: str, participant: str):
+def _syncplay_socket_initial_sync(user: str, participant: str, *, guard=lambda: True):
     changed = []
     for group in SyncplayGroup.active_groups_for_user(user, participant):
-        state = group.clear_host_disconnected()
+        state = group.state()
+        if (
+            not state
+            or state["hostUserId"] != user
+            or state["hostDisconnectedAt"] is None
+        ):
+            continue
+        state = group.clear_host_disconnected(guard=guard)
         if state:
             changed.append(state)
     states = SyncplayGroup.states()
@@ -1536,13 +1700,16 @@ async def syncplay_socket(websocket: WebSocket):
     ):
         await websocket.close(code=1008)
         return
-    await hub.connect(websocket, user_id, participant, initialize=True)
+    epoch = await hub.connect(websocket, user_id, participant, initialize=True)
     try:
-        changed, groups = await run_control(
-            _syncplay_socket_initial_sync, user_id, participant
+        initial = await hub.run_lifecycle(
+            user_id, participant, epoch, _syncplay_socket_initial_sync, connected=True
         )
+        if initial is None:
+            return
+        changed, groups = initial
         for state in changed:
-            await _broadcast_group(state)
+            await _broadcast_group(state, identity=(user_id, participant), epoch=epoch)
         if not await hub.finish_initial(
             websocket,
             {"version": 1, "type": "groups", "groups": groups},

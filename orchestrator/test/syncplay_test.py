@@ -1,7 +1,12 @@
+import asyncio
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 
+from api.zenstream import application_routes as routes
 from app.config import Config
 from app.database import DatabaseHandler
 from app.models.syncplay import (
@@ -45,6 +50,189 @@ class SyncplayModelTests(unittest.TestCase):
         self.config._database.close()
         self.config._database = self.previous_database
         self.temp_directory.cleanup()
+
+    def test_lifecycle_guards_run_after_transaction_admission(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        before = group.state()
+        original = group.db.transaction
+        admitted = False
+
+        @contextmanager
+        def transaction():
+            nonlocal admitted
+            with original() as cursor:
+                admitted = True
+                try:
+                    yield cursor
+                finally:
+                    admitted = False
+
+        def guard():
+            self.assertTrue(admitted)
+            return False
+
+        with patch.object(group.db, "transaction", transaction):
+            self.assertIsNone(group.mark_host_disconnected(guard=guard))
+            self.assertIsNone(group.clear_host_disconnected(guard=guard))
+            self.assertIsNone(
+                group.mark_member_backgrounded("host", "host-tab", guard=guard)
+            )
+            self.assertIsNone(
+                group.remove_disconnected_member("host", "host-tab", guard=guard)
+            )
+            self.assertIsNone(group.expire_host_disconnect(guard=guard))
+        self.assertEqual(group.state(), before)
+
+    def _exercise_cancelled_cleanup(self, user, expire):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+
+        def prepare(cursor, state):
+            cursor.execute(
+                "INSERT INTO syncplay_members (group_id,user_id,participant_id,username,viewing,loading,ready_generation) VALUES (?,?,?,?,1,0,1)",
+                (group.id, "viewer", "viewer-tab", "Viewer"),
+            )
+            cursor.execute(
+                "UPDATE syncplay_members SET viewing=1,loading=0,ready_generation=1 WHERE group_id=?",
+                (group.id,),
+            )
+            group.transition(cursor, state, item_id="movie", media_generation=1)
+
+        group.mutate("host", None, None, prepare)
+        if expire and user == "host":
+            group.mark_host_disconnected()
+            group.db.execute(
+                "UPDATE syncplay_groups SET host_disconnected_at=? WHERE id=?",
+                (time.time() - 400, group.id),
+            )
+        started = threading.Event()
+        release = threading.Event()
+        original = group.db.transaction
+        first = [True]
+
+        @contextmanager
+        def delayed_transaction():
+            if threading.current_thread() is not threading.main_thread() and first:
+                first.pop()
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError("cleanup worker was not released")
+            with original() as cursor:
+                yield cursor
+
+        class Socket:
+            @staticmethod
+            async def accept():
+                return None
+
+            @staticmethod
+            async def send_json(payload):
+                return None
+
+            @staticmethod
+            async def close(**kwargs):
+                return None
+
+        async def scenario():
+            hub = routes.WebSocketHub()
+            old, new, other = Socket(), Socket(), Socket()
+            participant = user + "-tab"
+            await hub.connect(old, user, participant)
+            _, old_epoch = await hub.remove(old)
+            operation = (
+                routes._expire_disconnected_sync
+                if expire
+                else routes._mark_disconnected_sync
+            )
+            waiting = asyncio.create_task(
+                hub.run_lifecycle(user, participant, old_epoch, operation)
+            )
+            initial = None
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait, 2))
+                waiting.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await waiting
+                epoch = await hub.connect(new, user, participant)
+                initial = asyncio.create_task(
+                    hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch,
+                        routes._syncplay_socket_initial_sync,
+                        connected=True,
+                    )
+                )
+                await asyncio.sleep(0.02)
+                self.assertFalse(initial.done())
+                other_epoch = await hub.connect(other, "unrelated", "other-tab")
+                await asyncio.wait_for(
+                    hub.run_lifecycle(
+                        "unrelated",
+                        "other-tab",
+                        other_epoch,
+                        routes._syncplay_socket_initial_sync,
+                        connected=True,
+                    ),
+                    1,
+                )
+                release.set()
+                result = await asyncio.wait_for(initial, 2)
+                self.assertIsNotNone(result)
+                restored = group.state()
+                self.assertIsNotNone(restored)
+                self.assertIsNone(restored["hostDisconnectedAt"])
+                self.assertTrue(group.member(user, participant))
+                member = next(
+                    value for value in restored["members"] if value["userId"] == user
+                )
+                if not (expire and user == "host"):
+                    self.assertFalse(member["loading"])
+                self.assertEqual(await hub.sockets_for(user, participant), (new,))
+            finally:
+                release.set()
+                if initial is not None:
+                    await asyncio.gather(initial, return_exceptions=True)
+                await hub.shutdown()
+            self.assertFalse(hub._lifecycle_tasks)
+            self.assertFalse(hub._lifecycle_locks)
+            self.assertFalse(hub._epoch_tokens)
+
+        with patch.object(group.db, "transaction", delayed_transaction):
+            asyncio.run(scenario())
+
+    def test_cancelled_host_cleanup_cannot_overwrite_reconnect(self):
+        self._exercise_cancelled_cleanup("host", expire=False)
+
+    def test_cancelled_viewer_cleanup_cannot_overwrite_reconnect(self):
+        self._exercise_cancelled_cleanup("viewer", expire=False)
+
+    def test_cancelled_host_expiry_cannot_end_reconnected_group(self):
+        self._exercise_cancelled_cleanup("host", expire=True)
+
+    def test_cancelled_viewer_expiry_cannot_remove_reconnected_member(self):
+        self._exercise_cancelled_cleanup("viewer", expire=True)
+
+    def test_guest_socket_initialization_does_not_clear_host_disconnect(self):
+        group = SyncplayGroup.create("host", "host-tab", "Host")
+        group.mutate(
+            "viewer",
+            None,
+            None,
+            lambda cursor, state: cursor.execute(
+                "INSERT INTO syncplay_members (group_id,user_id,participant_id,username) VALUES (?,?,?,?)",
+                (group.id, "viewer", "viewer-tab", "Viewer"),
+            ),
+        )
+        marked = group.mark_host_disconnected()
+        changed, _ = routes._syncplay_socket_initial_sync("viewer", "viewer-tab")
+        self.assertEqual(changed, [])
+        self.assertEqual(
+            group.state()["hostDisconnectedAt"], marked["hostDisconnectedAt"]
+        )
+        changed, _ = routes._syncplay_socket_initial_sync("host", "host-tab")
+        self.assertEqual(len(changed), 1)
+        self.assertIsNone(group.state()["hostDisconnectedAt"])
+        self.assertFalse(group.state()["playing"])
 
     def test_user_can_have_only_one_active_group(self):
         SyncplayGroup.create("host", "Host")

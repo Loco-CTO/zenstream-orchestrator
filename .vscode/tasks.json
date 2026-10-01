@@ -5,13 +5,7 @@
       "label": "Orchestrator: Frontend",
       "type": "shell",
       "command": "npm",
-      "args": [
-        "run",
-        "dev",
-        "--",
-        "--port",
-        "3001"
-      ],
+      "args": ["run", "dev", "--", "--port", "3001"],
       "isBackground": true,
       "problemMatcher": {
         "owner": "orchestrator-frontend",
@@ -31,9 +25,18 @@
       "options": {
         "cwd": "${workspaceFolder}/frontend",
         "env": {
-          "ORCHESTRATOR_API_URL": "http://127.0.0.1:9090"
+          "ORCHESTRATOR_API_URL": "http://127.0.0.1:9090",
+          "NEXT_ALLOWED_DEV_ORIGINS": "${input:lanHost}"
         }
       }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "lanHost",
+      "type": "promptString",
+      "description": "Private IPv4 address used to open the Orchestrator dashboard from the LAN; use localhost for local-only access",
+      "default": "localhost"
     }
   ]
 }

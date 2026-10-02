@@ -1128,7 +1128,9 @@ class Catalog:
     ) -> tuple[
         dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]
     ]:
-        roots = list(dict.fromkeys([entity_id, *self._state_ancestor_ids(user_id, entity_id)]))
+        roots = list(
+            dict.fromkeys([entity_id, *self._state_ancestor_ids(user_id, entity_id)])
+        )
         root_values = ",".join("(?)" for _ in roots)
         collection_recursive = (
             " UNION SELECT member.source_entity_id FROM scoped collection "
@@ -1180,9 +1182,7 @@ class Catalog:
                 parents.setdefault(source_id, []).append(collection_id)
         return entities, children, parents
 
-    def _preload_state_relationships(
-        self, user_id: str, root_ids: list[str]
-    ) -> None:
+    def _preload_state_relationships(self, user_id: str, root_ids: list[str]) -> None:
         context = self._context(user_id)
         if context is None:
             return
@@ -1234,14 +1234,12 @@ class Catalog:
             return
         context.relationship_roots.update(roots)
         scoped_entity_ids = {row[0] for row in rows}
-        context.relationship_entities.update(
-            {row[0]: (row[1], row[2]) for row in rows}
-        )
-        for entity_id, (parent_id, _) in (
-            (row[0], (row[1], row[2])) for row in rows
-        ):
+        context.relationship_entities.update({row[0]: (row[1], row[2]) for row in rows})
+        for entity_id, (parent_id, _) in ((row[0], (row[1], row[2])) for row in rows):
             if parent_id in scoped_entity_ids:
-                context.relationship_children.setdefault(parent_id, []).append(entity_id)
+                context.relationship_children.setdefault(parent_id, []).append(
+                    entity_id
+                )
         if self._has_table("collection_members") and context.relationship_entities:
             scoped_ids = list(scoped_entity_ids)
             for start in range(0, len(scoped_ids), 400):
@@ -1484,10 +1482,7 @@ class Catalog:
         if context:
             self._preload_projected_states(user_id, leaves)
         leaf_states = [
-            self._direct_state(
-                self._state_row(user_id, leaf_id)
-            )
-            for leaf_id in leaves
+            self._direct_state(self._state_row(user_id, leaf_id)) for leaf_id in leaves
         ]
         direct["played"] = bool(leaf_states) and all(
             state["played"] for state in leaf_states
@@ -1532,11 +1527,11 @@ class Catalog:
         if context is None or not entity_ids:
             return
         missing = [
-            entity_id for entity_id in dict.fromkeys(entity_ids)
+            entity_id
+            for entity_id in dict.fromkeys(entity_ids)
             if entity_id not in context.projected_states
             and not (
-                context.direct_states is not None
-                and entity_id in context.direct_states
+                context.direct_states is not None and entity_id in context.direct_states
             )
         ]
         if not missing:
@@ -1606,6 +1601,7 @@ class Catalog:
             context.direct_states.update({row[0]: row[1:] for row in rows})
             for entity_id in remaining:
                 context.direct_states.setdefault(entity_id, None)
+
     def _preload_projected_metadata(
         self, user_id: str, entity_ids: list[str], language: str
     ) -> None:
@@ -3474,12 +3470,8 @@ class Catalog:
         def serialize_values():
             context = self._context(user_id)
             if context:
-                context.entity_rows.update(
-                    {row[0]: row for row in display_rows}
-                )
-            self._preload_state_relationships(
-                user_id, [row[0] for row in display_rows]
-            )
+                context.entity_rows.update({row[0]: row for row in display_rows})
+            self._preload_state_relationships(user_id, [row[0] for row in display_rows])
             self._preload_projected_states(user_id, [row[0] for row in display_rows])
             self._preload_projected_metadata(
                 user_id, [row[0] for row in display_rows], language
@@ -3860,7 +3852,9 @@ class Catalog:
                 )
         self._invalidate_home_cache(user_id)
 
-    def _state_ancestor_ids(self, user_id: str, entity_id: str, cursor=None) -> list[str]:
+    def _state_ancestor_ids(
+        self, user_id: str, entity_id: str, cursor=None
+    ) -> list[str]:
         collection_seed = ""
         collection_recursive = ""
         collection_params: list[str] = []
@@ -3896,7 +3890,13 @@ class Catalog:
             "AND grant_access.user_id=?"
             f"{collection_recursive}) SELECT id FROM ancestors"
         )
-        params = [user_id, entity_id, *collection_params[:2], user_id, *collection_params[2:]]
+        params = [
+            user_id,
+            entity_id,
+            *collection_params[:2],
+            user_id,
+            *collection_params[2:],
+        ]
         rows = (
             cursor.execute(sql, params).fetchall()
             if cursor is not None
@@ -3989,7 +3989,8 @@ class Catalog:
         now = _now()
         timestamp = (
             now
-            if forced_played is True or (has_progress and (persisted_position or played))
+            if forced_played is True
+            or (has_progress and (persisted_position or played))
             else current.get("lastPlayedAt")
         )
         summary_ready = (
@@ -4006,7 +4007,9 @@ class Catalog:
                 else []
             )
             previous_play_count = current["playCount"]
-            next_play_count = previous_play_count + int(played and not current["played"])
+            next_play_count = previous_play_count + int(
+                played and not current["played"]
+            )
             cursor.execute(
                 "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,"
                 "position_seconds,duration_seconds,last_played_at,updated_at) "
@@ -4026,7 +4029,11 @@ class Catalog:
                     now,
                 ),
             )
-            if changed_played and entity[3] in {"movie", "episode", "track"} and summary_ready:
+            if (
+                changed_played
+                and entity[3] in {"movie", "episode", "track"}
+                and summary_ready
+            ):
                 self._apply_user_leaf_played_delta(
                     cursor,
                     user_id,
@@ -4589,7 +4596,9 @@ class Catalog:
                                 row[:10],
                                 {
                                     "addedAt": _date_from_ns(row[10]) or row[8] or "",
-                                    "lastAddedAt": _date_from_ns(row[11]) or row[8] or "",
+                                    "lastAddedAt": _date_from_ns(row[11])
+                                    or row[8]
+                                    or "",
                                 },
                             )
                         )
@@ -4909,7 +4918,17 @@ class Catalog:
                         [
                             season_id,
                             library_id,
-                            *([anchor_episode_end_number if anchor_episode_end_number is not None else _episode_number if _episode_number is not None else -1] if same_season else []),
+                            *(
+                                [
+                                    anchor_episode_end_number
+                                    if anchor_episode_end_number is not None
+                                    else _episode_number
+                                    if _episode_number is not None
+                                    else -1
+                                ]
+                                if same_season
+                                else []
+                            ),
                             remaining_episodes,
                             user_id,
                         ],
@@ -4926,7 +4945,9 @@ class Catalog:
                             break
                         results.append((*candidate[:10], series_id, activity_at))
                         break
-                    if blocked_by_partial or any(row[10] == series_id for row in results):
+                    if blocked_by_partial or any(
+                        row[10] == series_id for row in results
+                    ):
                         break
             results.sort(key=lambda row: row[0])
             results.sort(key=lambda row: row[10])

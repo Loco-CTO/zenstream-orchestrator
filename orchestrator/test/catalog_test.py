@@ -1329,7 +1329,9 @@ class CatalogTest(unittest.TestCase):
             "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
             (user_id, "movie", 0, 1, 1, 0, 100, "2026-05-01", "2026-05-01"),
         )
-        self.db.execute("CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY)")
+        self.db.execute(
+            "CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY)"
+        )
         self.db.execute(
             "CREATE TABLE catalog_item_projection("
             "entity_id TEXT,locale TEXT,rating_sort REAL,title_sort TEXT,payload TEXT,"

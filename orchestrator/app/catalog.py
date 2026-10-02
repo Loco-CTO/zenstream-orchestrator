@@ -36,6 +36,21 @@ from fastapi import HTTPException
 logger = get_logger("catalog")
 
 SEARCH_ENTITY_TYPES = ("movie", "series", "collection", "release", "artist", "track")
+HOME_RECOMMENDATION_HISTORY_LIMIT = 100
+HOME_RECOMMENDATION_ACTIVITY_SAMPLE_LIMIT = 500
+HOME_RECOMMENDATION_GENRE_LIMIT = 6
+HOME_RECOMMENDATION_CANDIDATES_PER_GENRE = 48
+HOME_RECOMMENDATION_RESULT_LIMIT = 18
+HOME_USER_STATE_SAMPLE_LIMIT = 500
+HOME_CONTINUE_STATE_SAMPLE_LIMIT = 500
+HOME_NEXT_UP_STATE_SAMPLE_LIMIT = 5000
+HOME_NEXT_UP_SERIES_LIMIT = 36
+HOME_NEXT_UP_SEASON_LIMIT = 32
+HOME_NEXT_UP_EPISODE_SCAN_LIMIT = 128
+HOME_DEGRADED_CANDIDATE_LIMIT = 500
+HOME_RECENT_FILE_SAMPLE_LIMIT = 4096
+HOME_STATE_RELATIONSHIP_SCAN_LIMIT = 2000
+HOME_DISCOVERY_CANDIDATE_LIMIT = 36
 
 
 def _search_facets(counts: dict[str, int] | None = None) -> dict[str, int]:
@@ -115,7 +130,11 @@ class _CatalogReadContext:
         self.entity_rows: dict[str, tuple | None] = {}
         self.provider_ids: dict[str, list[dict]] = {}
         self.graph: tuple[dict, dict, dict] | None = None
-        self.direct_states: dict[str, tuple] | None = None
+        self.relationship_roots: set[str] = set()
+        self.relationship_entities: dict[str, tuple[str | None, str]] = {}
+        self.relationship_children: dict[str, list[str]] = {}
+        self.incomplete_relationship_roots: set[str] = set()
+        self.direct_states: dict[str, tuple | None] | None = None
         self.projected_states: dict[str, tuple] = {}
         self.empty_state_counts: dict[str, int] = {}
         self.projected_metadata: dict[tuple[str, str], dict] = {}
@@ -1101,6 +1120,148 @@ class Catalog:
             context.graph = graph
         return graph
 
+    def _relationship_graph_for_entity(
+        self,
+        user_id: str,
+        entity_id: str,
+        max_entities: int | None = None,
+    ) -> tuple[
+        dict[str, tuple[str | None, str]], dict[str, list[str]], dict[str, list[str]]
+    ]:
+        roots = list(
+            dict.fromkeys([entity_id, *self._state_ancestor_ids(user_id, entity_id)])
+        )
+        root_values = ",".join("(?)" for _ in roots)
+        collection_recursive = (
+            " UNION SELECT member.source_entity_id FROM scoped collection "
+            "JOIN collection_members member ON member.collection_entity_id=collection.id "
+            "JOIN library_entities source ON source.id=member.source_entity_id "
+            "JOIN user_library_access access ON access.user_id=? AND access.library_id=source.library_id"
+            if self._has_table("collection_members")
+            else ""
+        )
+        scope_cte = (
+            f"WITH RECURSIVE roots(id) AS (VALUES {root_values}), scoped(id) AS ("
+            "SELECT entity.id FROM roots JOIN library_entities entity ON entity.id=roots.id "
+            "JOIN user_library_access access ON access.user_id=? AND access.library_id=entity.library_id "
+            "UNION SELECT child.id FROM scoped parent JOIN library_entities child "
+            "ON child.parent_id=parent.id JOIN user_library_access access "
+            "ON access.user_id=? AND access.library_id=child.library_id"
+            f"{collection_recursive}"
+        )
+        if max_entities is not None:
+            scope_cte += f" LIMIT {int(max_entities) + 1}"
+        scope_cte += ") "
+        params = [*roots, user_id, user_id]
+        if collection_recursive:
+            params.append(user_id)
+        rows = self.db.execute(
+            scope_cte
+            + "SELECT entity.id,entity.parent_id,entity.entity_type FROM scoped "
+            "JOIN library_entities entity ON entity.id=scoped.id",
+            params,
+        )
+        entities = {row[0]: (row[1], row[2]) for row in rows}
+        children: dict[str, list[str]] = {}
+        parents: dict[str, list[str]] = {}
+        for entity_id_value, (parent_id, _) in entities.items():
+            if parent_id in entities:
+                children.setdefault(parent_id, []).append(entity_id_value)
+                parents.setdefault(entity_id_value, []).append(parent_id)
+        if self._has_table("collection_members"):
+            memberships = self.db.execute(
+                scope_cte
+                + "SELECT member.collection_entity_id,member.source_entity_id "
+                "FROM collection_members member JOIN scoped collection "
+                "ON collection.id=member.collection_entity_id JOIN scoped source "
+                "ON source.id=member.source_entity_id",
+                params,
+            )
+            for collection_id, source_id in memberships:
+                children.setdefault(collection_id, []).append(source_id)
+                parents.setdefault(source_id, []).append(collection_id)
+        return entities, children, parents
+
+    def _preload_state_relationships(self, user_id: str, root_ids: list[str]) -> None:
+        context = self._context(user_id)
+        if context is None:
+            return
+        aggregate_types = {"series", "season", "collection", "artist", "release"}
+        roots = []
+        for entity_id in dict.fromkeys(root_ids):
+            row = context.entity_rows.get(entity_id) or self._entity_row(entity_id)
+            if row is None:
+                continue
+            context.entity_rows[entity_id] = row
+            if (
+                row[3] in aggregate_types
+                and entity_id not in context.relationship_roots
+                and entity_id not in context.incomplete_relationship_roots
+            ):
+                roots.append(entity_id)
+        if not roots:
+            return
+        collection_roots = [
+            entity_id
+            for entity_id in roots
+            if context.entity_rows[entity_id][3] == "collection"
+        ]
+        root_values = ",".join("(?)" for _ in roots)
+        collection_recursive = (
+            " UNION SELECT member.source_entity_id FROM scoped collection "
+            "JOIN collection_members member ON member.collection_entity_id=collection.id "
+            "JOIN library_entities source ON source.id=member.source_entity_id "
+            "JOIN user_library_access access ON access.user_id=? AND access.library_id=source.library_id"
+            if collection_roots and self._has_table("collection_members")
+            else ""
+        )
+        recursive_sql = (
+            f"WITH RECURSIVE roots(id) AS (VALUES {root_values}), scoped(id) AS ("
+            "SELECT entity.id FROM roots JOIN library_entities entity ON entity.id=roots.id "
+            "JOIN user_library_access access ON access.user_id=? AND access.library_id=entity.library_id "
+            "UNION SELECT child.id FROM scoped parent JOIN library_entities child "
+            "ON child.parent_id=parent.id JOIN user_library_access access "
+            "ON access.user_id=? AND access.library_id=child.library_id"
+            f"{collection_recursive} LIMIT ? ) "
+        )
+        params: list[object] = [*roots, user_id, user_id]
+        if collection_recursive:
+            params.append(user_id)
+        params.append(HOME_STATE_RELATIONSHIP_SCAN_LIMIT + 1)
+        rows = self.db.execute(
+            recursive_sql
+            + "SELECT entity.id,entity.parent_id,entity.entity_type FROM scoped "
+            "JOIN library_entities entity ON entity.id=scoped.id",
+            params,
+        )
+        if len(rows) > HOME_STATE_RELATIONSHIP_SCAN_LIMIT:
+            context.incomplete_relationship_roots.update(roots)
+            return
+        context.relationship_roots.update(roots)
+        scoped_entity_ids = {row[0] for row in rows}
+        context.relationship_entities.update({row[0]: (row[1], row[2]) for row in rows})
+        for entity_id, (parent_id, _) in ((row[0], (row[1], row[2])) for row in rows):
+            if parent_id in scoped_entity_ids:
+                context.relationship_children.setdefault(parent_id, []).append(
+                    entity_id
+                )
+        if collection_recursive and context.relationship_entities:
+            scoped_ids = list(scoped_entity_ids)
+            for start in range(0, len(scoped_ids), 400):
+                batch = scoped_ids[start : start + 400]
+                placeholders = ",".join("?" for _ in batch)
+                memberships = self.db.execute(
+                    "SELECT collection_entity_id,source_entity_id FROM collection_members "
+                    f"WHERE collection_entity_id IN ({placeholders}) "
+                    f"AND source_entity_id IN ({placeholders})",
+                    [*batch, *batch],
+                )
+                for collection_id, source_id in memberships:
+                    context.relationship_children.setdefault(collection_id, []).append(
+                        source_id
+                    )
+        self._preload_projected_states(user_id, list(context.relationship_entities))
+
     def _relationship_graph_uncached(
         self, user_id: str
     ) -> tuple[
@@ -1206,6 +1367,10 @@ class Catalog:
         return values
 
     def _state_row(self, user_id: str, entity_id: str, cursor=None):
+        context = self._context(user_id)
+        if cursor is None and context and context.direct_states is not None:
+            if entity_id in context.direct_states:
+                return context.direct_states[entity_id]
         query = "SELECT favorite,played,play_count,position_seconds,duration_seconds,last_played_at FROM user_item_state WHERE user_id=? AND entity_id=?"
         rows = (
             cursor.execute(query, (user_id, entity_id)).fetchall()
@@ -1285,14 +1450,25 @@ class Catalog:
             direct["following"] = self._following_for_entity(user_id, entity_id)
             context.resolved_states[entity_id] = dict(direct)
             return direct
-        entities, children, _ = self._relationship_graph(user_id)
-        row = (
-            self._state_rows(user_id).get(entity_id)
-            if context
-            else self._state_row(user_id, entity_id)
-        )
+        row = self._state_row(user_id, entity_id)
+        if context and entity_id in context.incomplete_relationship_roots:
+            context.resolved_states[entity_id] = dict(self._direct_state(row))
+            return self._direct_state(row)
+        if context and entity_id in context.relationship_roots:
+            entities = context.relationship_entities
+            children = context.relationship_children
+        else:
+            entities, children, _ = self._relationship_graph_for_entity(
+                user_id,
+                entity_id,
+                max_entities=HOME_STATE_RELATIONSHIP_SCAN_LIMIT,
+            )
         direct = self._direct_state(row)
         direct["following"] = self._following_for_entity(user_id, entity_id)
+        if len(entities) > HOME_STATE_RELATIONSHIP_SCAN_LIMIT:
+            if context:
+                context.resolved_states[entity_id] = dict(direct)
+            return direct
         leaves = self._playable_descendants(entity_id, entities, children)
         if not leaves or (len(leaves) == 1 and leaves[0] == entity_id):
             if entities.get(entity_id, (None, ""))[1] in {
@@ -1308,14 +1484,10 @@ class Catalog:
             if context:
                 context.resolved_states[entity_id] = dict(direct)
             return direct
-        states = self._state_rows(user_id) if context else None
+        if context:
+            self._preload_projected_states(user_id, leaves)
         leaf_states = [
-            self._direct_state(
-                states.get(leaf_id)
-                if states is not None
-                else self._state_row(user_id, leaf_id)
-            )
-            for leaf_id in leaves
+            self._direct_state(self._state_row(user_id, leaf_id)) for leaf_id in leaves
         ]
         direct["played"] = bool(leaf_states) and all(
             state["played"] for state in leaf_states
@@ -1347,7 +1519,7 @@ class Catalog:
                 value["following"] = self._following_for_entity(user_id, entity_id)
                 context.resolved_states[entity_id] = dict(value)
                 return value
-            value = self._direct_state(self._state_rows(user_id).get(entity_id))
+            value = self._direct_state(self._state_row(user_id, entity_id))
             value["following"] = self._following_for_entity(user_id, entity_id)
             context.resolved_states[entity_id] = dict(value)
             return value
@@ -1361,108 +1533,79 @@ class Catalog:
             return
         missing = [
             entity_id
-            for entity_id in entity_ids
+            for entity_id in dict.fromkeys(entity_ids)
             if entity_id not in context.projected_states
+            and not (
+                context.direct_states is not None and entity_id in context.direct_states
+            )
         ]
         if not missing:
             return
-        placeholders = ",".join("?" for _ in missing)
-        if self._read_model_ready() and self._has_table("catalog_user_summary"):
-            rows = self.db.execute(
-                "SELECT e.id,COALESCE(s.favorite,0),COALESCE(s.played,0),COALESCE(s.play_count,0),"
-                "COALESCE(u.played_leaf_count,0),COALESCE(x.playable_leaf_count,0),"
-                "COALESCE(s.position_seconds,0),COALESCE(s.duration_seconds,0),s.last_played_at "
-                "FROM library_entities e JOIN catalog_entity_summary x ON x.entity_id=e.id "
-                "LEFT JOIN user_item_state s ON s.user_id=? AND s.entity_id=e.id "
-                "LEFT JOIN catalog_user_summary u ON u.user_id=? AND u.entity_id=e.id "
-                f"WHERE e.id IN ({placeholders})",
-                [user_id, user_id, *missing],
-            )
-            context.projected_states.update(
-                {
-                    row[0]: (
-                        row[1],
-                        bool(row[2])
-                        or (int(row[4]) == int(row[5]) and int(row[5]) > 0),
-                        row[3],
-                        row[4],
-                        max(0, int(row[5]) - int(row[4])),
-                        row[6],
-                        row[7],
-                        row[8],
-                    )
-                    for row in rows
-                }
-            )
-            missing = [
+        if context.direct_states is None:
+            context.direct_states = {}
+        for start in range(0, len(missing), 400):
+            batch = missing[start : start + 400]
+            batch_placeholders = ",".join("?" for _ in batch)
+            if self._read_model_ready() and self._has_table("catalog_user_summary"):
+                rows = self.db.execute(
+                    "SELECT e.id,COALESCE(s.favorite,0),COALESCE(s.played,0),COALESCE(s.play_count,0),"
+                    "COALESCE(u.played_leaf_count,0),COALESCE(x.playable_leaf_count,0),"
+                    "COALESCE(s.position_seconds,0),COALESCE(s.duration_seconds,0),s.last_played_at "
+                    "FROM library_entities e JOIN catalog_entity_summary x ON x.entity_id=e.id "
+                    "LEFT JOIN user_item_state s ON s.user_id=? AND s.entity_id=e.id "
+                    "LEFT JOIN catalog_user_summary u ON u.user_id=? AND u.entity_id=e.id "
+                    f"WHERE e.id IN ({batch_placeholders})",
+                    [user_id, user_id, *batch],
+                )
+                context.projected_states.update(
+                    {
+                        row[0]: (
+                            row[1],
+                            bool(row[2])
+                            or (int(row[4]) == int(row[5]) and int(row[5]) > 0),
+                            row[3],
+                            row[4],
+                            max(0, int(row[5]) - int(row[4])),
+                            row[6],
+                            row[7],
+                            row[8],
+                        )
+                        for row in rows
+                    }
+                )
+            remaining = [
                 entity_id
-                for entity_id in missing
+                for entity_id in batch
                 if entity_id not in context.projected_states
             ]
-            if not missing:
-                return
-        if not self._has_table("catalog_user_rollups"):
-            return
-        rows = self.db.execute(
-            f"SELECT entity_id,favorite,played,play_count,played_leaf_count,unplayed_leaf_count,position_seconds,duration_seconds,last_played_at FROM catalog_user_rollups WHERE user_id=? AND entity_id IN ({placeholders})",
-            [user_id, *missing],
-        )
-        context.projected_states.update({row[0]: row[1:] for row in rows})
-        if context.direct_states is None:
-            direct_states = self._state_rows(user_id)
-            if not direct_states:
-                missing = [
+            if not remaining:
+                continue
+            if self._has_table("catalog_user_rollups") and remaining:
+                remaining_placeholders = ",".join("?" for _ in remaining)
+                rows = self.db.execute(
+                    "SELECT entity_id,favorite,played,play_count,played_leaf_count,unplayed_leaf_count,position_seconds,duration_seconds,last_played_at "
+                    "FROM catalog_user_rollups "
+                    f"WHERE user_id=? AND entity_id IN ({remaining_placeholders})",
+                    [user_id, *remaining],
+                )
+                context.projected_states.update({row[0]: row[1:] for row in rows})
+                remaining = [
                     entity_id
-                    for entity_id in entity_ids
+                    for entity_id in remaining
                     if entity_id not in context.projected_states
                 ]
-                if missing:
-                    placeholders = ",".join("?" for _ in missing)
-                    allowed = self.allowed_libraries(user_id)
-                    if not allowed:
-                        return
-                    library_placeholders = ",".join("?" for _ in allowed)
-                    collection_union = ""
-                    collection_params: list[str] = []
-                    if self._has_table("collection_members"):
-                        collection_union = (
-                            " UNION SELECT tree.root_id, member.source_entity_id "
-                            "FROM entity_tree tree CROSS JOIN collection_members member "
-                            "JOIN library_entities source ON source.id=member.source_entity_id "
-                            "WHERE member.collection_entity_id=tree.entity_id "
-                            f"AND source.library_id IN ({library_placeholders})"
-                        )
-                        collection_params = sorted(allowed)
-                    rows = self.db.execute(
-                        "WITH RECURSIVE entity_tree(root_id,entity_id) AS ("
-                        f"SELECT id,id FROM library_entities WHERE id IN ({placeholders}) "
-                        f"AND library_id IN ({library_placeholders}) "
-                        "UNION SELECT tree.root_id,child.id FROM entity_tree tree "
-                        "CROSS JOIN library_entities child "
-                        "WHERE child.parent_id=tree.entity_id "
-                        f"AND child.library_id IN ({library_placeholders})"
-                        f"{collection_union}) "
-                        "SELECT tree.root_id,COUNT(*) FROM entity_tree tree "
-                        "JOIN library_entities entity ON entity.id=tree.entity_id "
-                        "WHERE entity.entity_type IN ('movie','episode','track','release') "
-                        "GROUP BY tree.root_id",
-                        [
-                            *missing,
-                            *sorted(allowed),
-                            *sorted(allowed),
-                            *collection_params,
-                        ],
-                    )
-                    context.empty_state_counts.update(
-                        {row[0]: int(row[1] or 0) for row in rows}
-                    )
-                    context.empty_state_counts.update(
-                        {
-                            entity_id: 0
-                            for entity_id in missing
-                            if entity_id not in context.empty_state_counts
-                        }
-                    )
+            if not remaining:
+                continue
+            remaining_placeholders = ",".join("?" for _ in remaining)
+            rows = self.db.execute(
+                "SELECT s.entity_id,s.favorite,s.played,s.play_count,s.position_seconds,s.duration_seconds,s.last_played_at "
+                "FROM user_item_state s "
+                f"WHERE s.user_id=? AND s.entity_id IN ({remaining_placeholders})",
+                [user_id, *remaining],
+            )
+            context.direct_states.update({row[0]: row[1:] for row in rows})
+            for entity_id in remaining:
+                context.direct_states.setdefault(entity_id, None)
 
     def _preload_projected_metadata(
         self, user_id: str, entity_ids: list[str], language: str
@@ -1532,6 +1675,7 @@ class Catalog:
             )
             context.entity_rows.update({row[0]: row for row in parent_rows})
             parent_ids.update(row[2] for row in parent_rows if row[2])
+        self._preload_state_relationships(user_id, [row[0] for row in rows])
         self._preload_projected_states(user_id, list(context.entity_rows))
         self._preload_projected_metadata(user_id, list(context.entity_rows), language)
         self._preload_provider_ids(list(context.entity_rows))
@@ -3329,6 +3473,10 @@ class Catalog:
             display_rows = candidate_rows
 
         def serialize_values():
+            context = self._context(user_id)
+            if context:
+                context.entity_rows.update({row[0]: row for row in display_rows})
+            self._preload_state_relationships(user_id, [row[0] for row in display_rows])
             self._preload_projected_states(user_id, [row[0] for row in display_rows])
             self._preload_projected_metadata(
                 user_id, [row[0] for row in display_rows], language
@@ -3600,7 +3748,8 @@ class Catalog:
         if not math.isfinite(position) or not math.isfinite(duration):
             raise HTTPException(400, "Invalid playback position.")
         if not self._watch_history_enabled(user_id):
-            result = self._state(user_id, entity_id)
+            result = self._direct_state(self._state_row(user_id, entity_id))
+            result["following"] = self._following_for_entity(user_id, entity_id)
             if self._entity_row(entity_id)[3] not in {"movie", "series", "artist"}:
                 result.pop("following", None)
             return result
@@ -3619,18 +3768,20 @@ class Catalog:
         if not playback_instance_id or len(playback_instance_id) > 200:
             raise HTTPException(400, "Invalid playbackInstanceId.")
         if not self._watch_history_enabled(user_id):
-            result = self._state(user_id, entity_id)
+            result = self._direct_state(self._state_row(user_id, entity_id))
             result.pop("following", None)
             return result
         if not self._has_table("user_play_events"):
             raise HTTPException(503, "Audio play history is not ready.")
 
-        entities, children, parents = self._relationship_graph(user_id)
-        ancestor_ids = self._walk_parents(entity_id, parents)
-        affected = [entity_id, *ancestor_ids]
         duration_seconds = self._audio_fields(entity_id)[2]
         now = _now()
         inserted = False
+        summary_ready = (
+            self._read_model_ready()
+            and self._has_table("catalog_user_summary")
+            and self._has_table("catalog_entity_summary")
+        )
         with self.db.transaction() as cursor:
             cursor.execute(
                 "INSERT OR IGNORE INTO user_play_events(user_id,entity_id,playback_instance_id,started_at) VALUES(?,?,?,?)",
@@ -3639,62 +3790,37 @@ class Catalog:
             changed_rows = cursor.execute("SELECT changes()").fetchone()
             inserted = bool(changed_rows and changed_rows[0])
             if inserted:
-                states = {
-                    affected_id: self._direct_state(
-                        self._state_row(user_id, affected_id, cursor)
-                    )
-                    for affected_id in affected
-                }
-                track_state = states[entity_id]
-                track_state.update(
-                    played=True,
-                    positionSeconds=0,
-                    durationSeconds=max(
-                        duration_seconds, track_state.get("durationSeconds", 0)
-                    ),
-                    lastPlayedAt=now,
+                track_state = self._direct_state(
+                    self._state_row(user_id, entity_id, cursor)
                 )
-                for ancestor_id in ancestor_ids:
-                    leaves = self._playable_descendants(ancestor_id, entities, children)
-                    if not leaves:
-                        continue
-                    leaf_states = []
-                    for leaf_id in leaves:
-                        leaf_states.append(
-                            states.get(leaf_id)
-                            or self._direct_state(
-                                self._state_row(user_id, leaf_id, cursor)
-                            )
-                        )
-                    states[ancestor_id]["played"] = bool(leaf_states) and all(
-                        value["played"] for value in leaf_states
-                    )
-                    states[ancestor_id]["positionSeconds"] = 0
-                for affected_id in dict.fromkeys(affected):
-                    state = states[affected_id]
-                    play_count = state["playCount"] + int(affected_id == entity_id)
-                    cursor.execute(
-                        "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,position_seconds,duration_seconds,last_played_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
-                        "ON CONFLICT(user_id,entity_id) DO UPDATE SET favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
-                        (
-                            user_id,
-                            affected_id,
-                            int(state["favorite"]),
-                            int(state["played"]),
-                            play_count,
-                            state["positionSeconds"],
-                            state["durationSeconds"],
-                            state.get("lastPlayedAt"),
-                            now,
-                        ),
+                was_played = track_state["played"]
+                cursor.execute(
+                    "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,"
+                    "position_seconds,duration_seconds,last_played_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,entity_id) DO UPDATE SET "
+                    "favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,"
+                    "position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,"
+                    "last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
+                    (
+                        user_id,
+                        entity_id,
+                        int(track_state["favorite"]),
+                        1,
+                        track_state["playCount"] + 1,
+                        0,
+                        max(duration_seconds, track_state["durationSeconds"]),
+                        now,
+                        now,
+                    ),
+                )
+                if summary_ready and not was_played:
+                    parent_ids = self._state_ancestor_ids(user_id, entity_id, cursor)
+                    self._apply_user_leaf_played_delta(
+                        cursor, user_id, entity_id, parent_ids, 1, now
                     )
         if inserted:
-            if self._has_table("catalog_user_summary"):
-                from app.catalog_read_model import CatalogReadModel
-
-                CatalogReadModel(self.db).refresh_user_entities(user_id, affected)
             self._invalidate_home_cache(user_id)
-        result = self._state(user_id, entity_id)
+        result = self._direct_state(self._state_row(user_id, entity_id))
         result.pop("following", None)
         return result
 
@@ -3731,8 +3857,217 @@ class Catalog:
                 )
         self._invalidate_home_cache(user_id)
 
+    def _state_ancestor_ids(
+        self, user_id: str, entity_id: str, cursor=None
+    ) -> list[str]:
+        collection_seed = ""
+        collection_recursive = ""
+        collection_params: list[str] = []
+        if self._has_table("collection_members"):
+            collection_seed = (
+                " UNION SELECT collection.id,collection.parent_id,collection.library_id "
+                "FROM collection_members member JOIN library_entities collection "
+                "ON collection.id=member.collection_entity_id "
+                "JOIN user_library_access grant_access ON grant_access.library_id=collection.library_id "
+                "AND grant_access.user_id=? WHERE member.source_entity_id=? "
+            )
+            collection_recursive = (
+                " UNION "
+                "SELECT collection.id,collection.parent_id,collection.library_id "
+                "FROM ancestors child JOIN collection_members member "
+                "ON member.source_entity_id=child.id JOIN library_entities collection "
+                "ON collection.id=member.collection_entity_id "
+                "JOIN user_library_access grant_access ON grant_access.library_id=collection.library_id "
+                "AND grant_access.user_id=?"
+            )
+            collection_params = [user_id, entity_id, user_id]
+        sql = (
+            "WITH RECURSIVE ancestors(id,parent_id,library_id) AS ("
+            "SELECT parent.id,parent.parent_id,parent.library_id FROM library_entities child "
+            "JOIN library_entities parent ON parent.id=child.parent_id "
+            "JOIN user_library_access grant_access ON grant_access.library_id=parent.library_id "
+            "AND grant_access.user_id=? WHERE child.id=? "
+            f"{collection_seed}"
+            "UNION "
+            "SELECT parent.id,parent.parent_id,parent.library_id FROM ancestors child "
+            "JOIN library_entities parent ON parent.id=child.parent_id "
+            "JOIN user_library_access grant_access ON grant_access.library_id=parent.library_id "
+            "AND grant_access.user_id=?"
+            f"{collection_recursive}) SELECT id FROM ancestors"
+        )
+        params = [
+            user_id,
+            entity_id,
+            *collection_params[:2],
+            user_id,
+            *collection_params[2:],
+        ]
+        rows = (
+            cursor.execute(sql, params).fetchall()
+            if cursor is not None
+            else self.db.execute(sql, params)
+        )
+        return [row[0] for row in rows]
+
+    def _apply_user_leaf_played_delta(
+        self,
+        cursor,
+        user_id: str,
+        entity_id: str,
+        parent_ids: list[str],
+        delta: int,
+        now: str,
+    ) -> None:
+        summary_ids = list(dict.fromkeys([entity_id, *parent_ids]))
+        cursor.executemany(
+            "INSERT INTO catalog_user_summary(user_id,entity_id,played_leaf_count,updated_at) "
+            "VALUES(?,?,?,?) ON CONFLICT(user_id,entity_id) DO UPDATE SET "
+            "played_leaf_count=MAX(0,catalog_user_summary.played_leaf_count+excluded.played_leaf_count),"
+            "updated_at=excluded.updated_at",
+            [(user_id, value, delta, now) for value in summary_ids],
+        )
+        if not parent_ids:
+            return
+        placeholders = ",".join("?" for _ in parent_ids)
+        totals = cursor.execute(
+            "SELECT total.entity_id,total.playable_leaf_count,"
+            "COALESCE(state.played_leaf_count,0) FROM catalog_entity_summary total "
+            "LEFT JOIN catalog_user_summary state ON state.user_id=? AND state.entity_id=total.entity_id "
+            f"WHERE total.entity_id IN ({placeholders})",
+            [user_id, *parent_ids],
+        ).fetchall()
+        for parent_id, playable_count, played_count in totals:
+            parent = self._direct_state(self._state_row(user_id, parent_id, cursor))
+            parent_played = int(playable_count or 0) > 0 and int(
+                played_count or 0
+            ) >= int(playable_count or 0)
+            cursor.execute(
+                "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,"
+                "position_seconds,duration_seconds,last_played_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,entity_id) DO UPDATE SET "
+                "favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,"
+                "position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,"
+                "last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
+                (
+                    user_id,
+                    parent_id,
+                    int(parent["favorite"]),
+                    int(parent_played),
+                    parent["playCount"] + int(parent_played and not parent["played"]),
+                    0,
+                    parent["durationSeconds"],
+                    now if parent_played else parent.get("lastPlayedAt"),
+                    now,
+                ),
+            )
+
+    def _update_without_explicit_played(
+        self,
+        user_id: str,
+        entity_id: str,
+        changes: dict,
+        forced_played: bool | None = None,
+    ) -> dict:
+        entity = self.require_entity(user_id, entity_id)
+        current = self._direct_state(self._state_row(user_id, entity_id))
+        has_progress = "positionSeconds" in changes or "durationSeconds" in changes
+        try:
+            position = float(changes.get("positionSeconds", current["positionSeconds"]))
+            duration = float(changes.get("durationSeconds", current["durationSeconds"]))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, "Invalid playback position.") from error
+        if not math.isfinite(position) or not math.isfinite(duration):
+            raise HTTPException(400, "Invalid playback position.")
+        position = max(0.0, position)
+        duration = max(0.0, duration)
+        favorite = bool(changes.get("favorite", current["favorite"]))
+        played = (
+            bool(forced_played)
+            if forced_played is not None
+            else (
+                bool(duration and position / duration >= 0.9)
+                if has_progress
+                else current["played"]
+            )
+        )
+        persisted_position = 0.0 if forced_played is False or played else position
+        now = _now()
+        timestamp = (
+            now
+            if forced_played is True
+            or (has_progress and (persisted_position or played))
+            else current.get("lastPlayedAt")
+        )
+        summary_ready = (
+            self._read_model_ready()
+            and self._has_table("catalog_user_summary")
+            and self._has_table("catalog_entity_summary")
+        )
+        changed_played = played != current["played"]
+        parent_ids: list[str] = []
+        with self.db.transaction() as cursor:
+            parent_ids = (
+                self._state_ancestor_ids(user_id, entity_id, cursor)
+                if changed_played and entity[3] in {"movie", "episode", "track"}
+                else []
+            )
+            previous_play_count = current["playCount"]
+            next_play_count = previous_play_count + int(
+                played and not current["played"]
+            )
+            cursor.execute(
+                "INSERT INTO user_item_state(user_id,entity_id,favorite,played,play_count,"
+                "position_seconds,duration_seconds,last_played_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,entity_id) DO UPDATE SET "
+                "favorite=excluded.favorite,played=excluded.played,play_count=excluded.play_count,"
+                "position_seconds=excluded.position_seconds,duration_seconds=excluded.duration_seconds,"
+                "last_played_at=excluded.last_played_at,updated_at=excluded.updated_at",
+                (
+                    user_id,
+                    entity_id,
+                    int(favorite),
+                    int(played),
+                    next_play_count,
+                    persisted_position,
+                    duration,
+                    timestamp,
+                    now,
+                ),
+            )
+            if (
+                changed_played
+                and entity[3] in {"movie", "episode", "track"}
+                and summary_ready
+            ):
+                self._apply_user_leaf_played_delta(
+                    cursor,
+                    user_id,
+                    entity_id,
+                    parent_ids,
+                    1 if played else -1,
+                    now,
+                )
+        self._invalidate_home_cache(user_id)
+        result = self._direct_state(self._state_row(user_id, entity_id))
+        if summary_ready:
+            summary = self.db.execute(
+                "SELECT total.playable_leaf_count,COALESCE(state.played_leaf_count,0) "
+                "FROM catalog_entity_summary total LEFT JOIN catalog_user_summary state "
+                "ON state.user_id=? AND state.entity_id=total.entity_id WHERE total.entity_id=?",
+                (user_id, entity_id),
+            )
+            if summary:
+                total, completed = map(int, summary[0])
+                if total > 0:
+                    result["played"] = completed >= total
+                    result["unplayedItemCount"] = max(0, total - completed)
+        result["following"] = self._following_for_entity(user_id, entity_id)
+        if entity[3] not in {"movie", "series", "artist"}:
+            result.pop("following", None)
+        return result
+
     def update_state(self, user_id: str, entity_id: str, changes: dict) -> dict:
-        self.require_entity(user_id, entity_id)
+        entity = self.require_entity(user_id, entity_id)
         if not isinstance(changes, dict):
             raise HTTPException(400, "Invalid item state.")
         following_change = changes.get("following")
@@ -3752,7 +4087,19 @@ class Catalog:
                 }:
                     result.pop("following", None)
                 return result
-        entities, children, parents = self._relationship_graph(user_id)
+        if "played" not in changes:
+            return self._update_without_explicit_played(user_id, entity_id, changes)
+        if entity[3] in {"movie", "episode", "track"} and (
+            self._read_model_ready()
+            and self._has_table("catalog_user_summary")
+            and self._has_table("catalog_entity_summary")
+        ):
+            return self._update_without_explicit_played(
+                user_id, entity_id, changes, forced_played=bool(changes["played"])
+            )
+        entities, children, parents = self._relationship_graph_for_entity(
+            user_id, entity_id
+        )
         current_row = self._state_row(user_id, entity_id)
         current = self._direct_state(current_row)
         try:
@@ -4214,73 +4561,87 @@ class Catalog:
     def _home_discovery_items(
         self, user_id: str, language: str, allowed: set[str]
     ) -> list[dict]:
-        placeholders = ",".join("?" for _ in allowed)
         context = self._context(user_id)
-        if self._read_model_ready():
-            select_rows = lambda: self.db.execute(
-                f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,s.added_sort_ns,s.last_added_sort_ns "
-                f"FROM catalog_entity_summary s JOIN library_entities e ON e.id=s.entity_id "
-                f"WHERE s.library_id IN ({placeholders}) AND s.entity_type IN ('movie','series') "
-                "ORDER BY CASE WHEN s.entity_type='series' THEN s.added_sort_ns ELSE s.last_added_sort_ns END DESC,s.entity_id LIMIT 36",
-                list(allowed),
-            )
-            rows = (
-                context.measure("home_discovery_sql", select_rows)
-                if context
-                else select_rows()
-            )
-            dates = {
-                row[0]: {
-                    "addedAt": _date_from_ns(row[10]) or row[8],
-                    "lastAddedAt": _date_from_ns(row[11]) or row[8],
-                }
-                for row in rows
-            }
-            return self._hydrate_rows(
-                user_id, [row[:10] for row in rows], language, dates
-            )
-        select_rows = lambda: self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id IN ({placeholders}) AND entity_type IN ('movie','series')",
-            list(allowed),
+        read_model_ready = self._read_model_ready() and self._has_table(
+            "catalog_entity_summary"
         )
-        rows = (
-            context.measure("home_discovery_sql", select_rows)
-            if context
-            else select_rows()
-        )
-        dates = self._date_values("", allowed, {row[0] for row in rows})
-        rows.sort(key=lambda row: row[0])
-        rows.sort(
-            key=lambda row: (
-                dates.get(row[0], {}).get(
-                    "addedAt" if row[3] == "series" else "lastAddedAt"
-                )
-                or row[8]
-                or ""
-            ),
-            reverse=True,
-        )
-        rows = rows[:36]
+        candidates: list[tuple[int | str, str, tuple, dict[str, str]]] = []
+        for library_id in sorted(allowed):
+            for entity_type in ("movie", "series"):
+                if read_model_ready:
+                    sort_column = (
+                        "added_sort_ns"
+                        if entity_type == "series"
+                        else "last_added_sort_ns"
+                    )
+
+                    def select_projected_rows():
+                        return self.db.execute(
+                            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+                            "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,"
+                            "s.added_sort_ns,s.last_added_sort_ns "
+                            "FROM catalog_entity_summary s JOIN library_entities e "
+                            "ON e.id=s.entity_id "
+                            "WHERE s.library_id=? AND s.entity_type=? AND s.parent_id IS NULL "
+                            f"ORDER BY s.{sort_column} DESC,s.entity_id LIMIT ?",
+                            (library_id, entity_type, HOME_DISCOVERY_CANDIDATE_LIMIT),
+                        )
+
+                    rows = (
+                        context.measure("home_discovery_sql", select_projected_rows)
+                        if context
+                        else select_projected_rows()
+                    )
+                    for row in rows:
+                        rank = row[10] if entity_type == "series" else row[11]
+                        candidates.append(
+                            (
+                                int(rank or 0),
+                                row[0],
+                                row[:10],
+                                {
+                                    "addedAt": _date_from_ns(row[10]) or row[8] or "",
+                                    "lastAddedAt": _date_from_ns(row[11])
+                                    or row[8]
+                                    or "",
+                                },
+                            )
+                        )
+                else:
+
+                    def select_fallback_rows():
+                        return self.db.execute(
+                            "SELECT id,library_id,parent_id,entity_type,relative_path,"
+                            "season_number,episode_number,episode_end_number,created_at,updated_at "
+                            "FROM library_entities WHERE library_id=? AND entity_type=? "
+                            "AND parent_id IS NULL ORDER BY created_at DESC,id LIMIT ?",
+                            (library_id, entity_type, HOME_DISCOVERY_CANDIDATE_LIMIT),
+                        )
+
+                    rows = (
+                        context.measure("home_discovery_sql", select_fallback_rows)
+                        if context
+                        else select_fallback_rows()
+                    )
+                    for row in rows:
+                        created_at = str(row[8] or "")
+                        candidates.append(
+                            (
+                                created_at,
+                                row[0],
+                                row,
+                                {"addedAt": created_at, "lastAddedAt": created_at},
+                            )
+                        )
+
+        candidates.sort(key=lambda value: value[1])
+        candidates.sort(key=lambda value: value[0], reverse=True)
+        selected = candidates[:HOME_DISCOVERY_CANDIDATE_LIMIT]
+        rows = [value[2] for value in selected]
+        dates = {value[1]: value[3] for value in selected}
         self._preload_projected_states(user_id, [row[0] for row in rows])
         self._preload_projected_metadata(user_id, [row[0] for row in rows], language)
-
-        def serialize_rows():
-            return [
-                self._serialize(
-                    user_id,
-                    row,
-                    self.metadata(user_id, row[0], language)["metadata"],
-                    dates=dates.get(row[0]),
-                    language=language,
-                )
-                for row in rows
-            ]
-
-        return (
-            context.measure("serialization", serialize_rows)
-            if context
-            else serialize_rows()
-        )
+        return self._hydrate_rows(user_id, rows, language, dates)
 
     @_catalog_read
     def home_featured(self, user_id: str, language: str) -> list[dict]:
@@ -4290,19 +4651,138 @@ class Catalog:
         return self._home_discovery_items(user_id, language, allowed)[:25]
 
     @_catalog_read
-    def home_continue_watching(self, user_id: str, language: str) -> list[dict]:
-        allowed = self.allowed_libraries(user_id)
-        if not allowed:
+    def home_recommendations(self, user_id: str, language: str) -> list[dict]:
+        """Return a grant-filtered recommendation row using bounded local history."""
+        if not self._watch_history_enabled(user_id) or not self._read_model_ready():
             return []
-        placeholders = ",".join("?" for _ in allowed)
+        if not all(
+            self._has_table(table)
+            for table in (
+                "catalog_item_genres",
+                "catalog_item_projection",
+                "catalog_entity_summary",
+            )
+        ):
+            return []
+
+        # The sample is indexed by user and activity time. A bounded sample keeps
+        # both profile construction and per-request work independent of history size.
+        activity = self.db.execute(
+            "WITH state_sample AS ("
+            " SELECT entity_id,last_played_at,updated_at FROM user_item_state"
+            " WHERE user_id=? AND last_played_at IS NOT NULL"
+            " ORDER BY COALESCE(last_played_at,updated_at) DESC,entity_id LIMIT ?"
+            "), recent AS ("
+            " SELECT e.id AS entity_id,"
+            " CASE WHEN e.entity_type='episode' THEN series.id ELSE e.id END AS profile_id,"
+            " ROW_NUMBER() OVER (ORDER BY COALESCE(sample.last_played_at,sample.updated_at) DESC,e.id) AS activity_rank"
+            " FROM state_sample sample"
+            " JOIN library_entities e ON e.id=sample.entity_id"
+            " JOIN user_library_access access ON access.user_id=? AND access.library_id=e.library_id"
+            " LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id"
+            " LEFT JOIN library_entities series ON series.id=season.parent_id"
+            " WHERE e.entity_type IN ('movie','episode')"
+            " ORDER BY COALESCE(sample.last_played_at,sample.updated_at) DESC,e.id LIMIT ?"
+            ") "
+            "SELECT genre.genre_key,SUM(?-recent.activity_rank) AS affinity"
+            " FROM recent JOIN catalog_item_genres genre"
+            " ON genre.entity_id=recent.profile_id AND genre.locale=?"
+            " GROUP BY genre.genre_key"
+            " ORDER BY affinity DESC,genre.genre_key ASC LIMIT ?",
+            (
+                user_id,
+                HOME_RECOMMENDATION_ACTIVITY_SAMPLE_LIMIT,
+                user_id,
+                HOME_RECOMMENDATION_HISTORY_LIMIT,
+                HOME_RECOMMENDATION_HISTORY_LIMIT + 1,
+                language,
+                HOME_RECOMMENDATION_GENRE_LIMIT,
+            ),
+        )
+        if not activity:
+            return []
+
+        affinities = {row[0]: int(row[1] or 0) for row in activity}
+        candidates: dict[str, tuple[tuple, int, float, str]] = {}
+        for genre_key, affinity in affinities.items():
+            for entity_type in ("movie", "series"):
+                rows = self.db.execute(
+                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+                    "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,"
+                    "p.rating_sort,p.title_sort "
+                    "FROM user_library_access access "
+                    "CROSS JOIN catalog_item_genres genre "
+                    "JOIN catalog_item_projection p ON p.entity_id=genre.entity_id AND p.locale=genre.locale "
+                    "JOIN library_entities e ON e.id=genre.entity_id "
+                    "WHERE access.user_id=? AND genre.library_id=access.library_id "
+                    "AND genre.locale=? AND genre.genre_key=? AND genre.entity_type=? "
+                    "AND e.parent_id IS NULL LIMIT ?",
+                    (
+                        user_id,
+                        language,
+                        genre_key,
+                        entity_type,
+                        HOME_RECOMMENDATION_CANDIDATES_PER_GENRE,
+                    ),
+                )
+                for row in rows:
+                    previous = candidates.get(row[0])
+                    affinity_score = affinity + (previous[1] if previous else 0)
+                    candidates[row[0]] = (
+                        row[:10],
+                        affinity_score,
+                        float(row[10] or 0),
+                        str(row[11] or row[4] or ""),
+                    )
+        if not candidates:
+            return []
+
+        # Hydrate state only for the bounded candidate batch; watched and
+        # currently-resumable entries already have dedicated Home rows.
+        candidate_ids = list(candidates)
+        excluded: set[str] = set()
+        for start in range(0, len(candidate_ids), 400):
+            batch = candidate_ids[start : start + 400]
+            placeholders = ",".join("?" for _ in batch)
+            excluded.update(
+                row[0]
+                for row in self.db.execute(
+                    f"SELECT entity_id FROM user_item_state WHERE user_id=? "
+                    f"AND entity_id IN ({placeholders}) "
+                    "AND (played=1 OR position_seconds>0)",
+                    [user_id, *batch],
+                )
+            )
+        ranked_ids = sorted(
+            (entity_id for entity_id in candidates if entity_id not in excluded),
+            key=lambda entity_id: (
+                -candidates[entity_id][1],
+                -candidates[entity_id][2],
+                candidates[entity_id][3].casefold(),
+                entity_id,
+            ),
+        )[:HOME_RECOMMENDATION_RESULT_LIMIT]
+        rows = [candidates[entity_id][0] for entity_id in ranked_ids]
+        if not rows:
+            return []
+        self._preload_projected_states(user_id, ranked_ids)
+        return self._hydrate_rows(user_id, rows, language)
+
+    @_catalog_read
+    def home_continue_watching(self, user_id: str, language: str) -> list[dict]:
         select_rows = lambda: self.db.execute(
-            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id "
-            f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
-            f"LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
-            f"LEFT JOIN library_entities series ON series.id=season.parent_id "
-            f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND e.entity_type IN ('movie','episode') AND s.played=0 AND s.duration_seconds>0 AND s.position_seconds>0 "
-            f"ORDER BY COALESCE(s.last_played_at,s.updated_at) DESC,s.entity_id LIMIT 18",
-            [user_id, *allowed],
+            "WITH recent AS ("
+            " SELECT entity_id,last_played_at,updated_at,position_seconds,duration_seconds "
+            " FROM user_item_state WHERE user_id=? AND played=0 "
+            " AND duration_seconds>0 AND position_seconds>0 "
+            " ORDER BY COALESCE(last_played_at,updated_at) DESC,entity_id LIMIT ?"
+            ") SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,series.id,s.last_played_at,s.updated_at "
+            "FROM recent s JOIN library_entities e ON e.id=s.entity_id "
+            "JOIN user_library_access access ON access.user_id=? AND access.library_id=e.library_id "
+            "LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
+            "LEFT JOIN library_entities series ON series.id=season.parent_id "
+            "WHERE e.entity_type IN ('movie','episode')",
+            [user_id, HOME_CONTINUE_STATE_SAMPLE_LIMIT, user_id],
         )
         context = self._context(user_id)
         rows = (
@@ -4310,6 +4790,9 @@ class Catalog:
             if context
             else select_rows()
         )
+        rows.sort(key=lambda row: row[0])
+        rows.sort(key=lambda row: row[11] or row[12] or "", reverse=True)
+        rows = rows[:18]
         ids = [row[0] for row in rows] + [row[10] for row in rows if row[10]]
         self._preload_projected_states(user_id, ids)
         self._preload_projected_metadata(user_id, ids, language)
@@ -4329,76 +4812,152 @@ class Catalog:
 
     @_catalog_read
     def home_next_up(self, user_id: str, language: str) -> list[dict]:
-        allowed = self.allowed_libraries(user_id)
-        if not allowed:
-            return []
-        placeholders = ",".join("?" for _ in allowed)
-
         def select_rows():
-            completed_series = self.db.execute(
-                f"SELECT DISTINCT series.id "
-                f"FROM user_item_state s "
-                f"JOIN library_entities e ON e.id=s.entity_id AND e.entity_type='episode' "
-                f"JOIN library_entities season ON season.id=e.parent_id "
-                f"JOIN library_entities series ON series.id=season.parent_id "
-                f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) "
-                "AND s.played=1",
-                [user_id, *allowed],
+            recent_completed = self.db.execute(
+                "WITH recent AS ("
+                " SELECT entity_id,last_played_at,updated_at FROM user_item_state "
+                " WHERE user_id=? AND played=1 "
+                " ORDER BY COALESCE(last_played_at,updated_at) DESC,entity_id LIMIT ?"
+                ") SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,"
+                " series.id AS series_id,COALESCE(recent.last_played_at,recent.updated_at,'') AS activity_at "
+                " FROM recent "
+                " JOIN library_entities e ON e.id=recent.entity_id AND e.entity_type='episode' "
+                " JOIN user_library_access access ON access.user_id=? AND access.library_id=e.library_id "
+                " JOIN library_entities season ON season.id=e.parent_id AND season.entity_type='season' "
+                " JOIN library_entities series ON series.id=season.parent_id AND series.entity_type='series' "
+                " ORDER BY COALESCE(recent.last_played_at,recent.updated_at,'') DESC,"
+                " COALESCE(e.season_number,-1) DESC,COALESCE(e.episode_end_number,e.episode_number,-1) DESC,"
+                " COALESCE(e.episode_number,-1) DESC,e.relative_path COLLATE NOCASE DESC,e.id DESC",
+                [user_id, HOME_NEXT_UP_STATE_SAMPLE_LIMIT, user_id],
             )
-            if not completed_series:
+            anchors = []
+            seen_series = set()
+            for row in recent_completed:
+                if row[10] in seen_series:
+                    continue
+                seen_series.add(row[10])
+                anchors.append(row)
+                if len(anchors) >= HOME_NEXT_UP_SERIES_LIMIT:
+                    break
+            if not anchors:
                 return []
-            series_placeholders = ",".join("?" for _ in completed_series)
+            published_exists = self._read_model_ready()
             published_join = (
-                "JOIN catalog_entity_summary published ON published.entity_id=e.id "
-                if self._read_model_ready()
+                "LEFT JOIN catalog_entity_summary published ON published.entity_id=candidate.id "
+                if published_exists
                 else ""
             )
-            return self.db.execute(
-                "WITH completed AS ("
-                " SELECT e.id,e.season_number,e.episode_number,e.episode_end_number,e.relative_path,series.id AS series_id,"
-                " COALESCE(s.last_played_at,s.updated_at,'') AS activity_at,"
-                " ROW_NUMBER() OVER (PARTITION BY series.id ORDER BY "
-                " COALESCE(s.last_played_at,s.updated_at,'') DESC,"
-                " COALESCE(e.season_number,-1) DESC,"
-                " COALESCE(e.episode_end_number,e.episode_number,-1) DESC,"
-                " COALESCE(e.episode_number,-1) DESC,e.relative_path COLLATE NOCASE DESC,e.id DESC"
-                " ) AS anchor_rank"
-                " FROM user_item_state s"
-                " JOIN library_entities e ON e.id=s.entity_id AND e.entity_type='episode'"
-                " JOIN library_entities season ON season.id=e.parent_id"
-                " JOIN library_entities series ON series.id=season.parent_id"
-                f" WHERE s.user_id=? AND e.library_id IN ({placeholders})"
-                f" AND series.id IN ({series_placeholders}) AND s.played=1"
-                "), anchors AS ("
-                " SELECT id,season_number,episode_number,episode_end_number,series_id,activity_at"
-                " FROM completed WHERE anchor_rank=1"
-                "), candidates AS ("
-                " SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,a.series_id,a.activity_at,"
-                " COALESCE(s.played,0) AS played,COALESCE(s.position_seconds,0) AS position_seconds,"
-                " ROW_NUMBER() OVER (PARTITION BY a.series_id ORDER BY "
-                " COALESCE(e.season_number,-1),COALESCE(e.episode_number,-1),e.relative_path COLLATE NOCASE,e.id"
-                " ) AS candidate_rank"
-                " FROM anchors a"
-                " JOIN library_entities e ON e.entity_type='episode'"
-                " JOIN library_entities season ON season.id=e.parent_id"
-                " JOIN library_entities series ON series.id=season.parent_id AND series.id=a.series_id"
-                f" {published_join}"
-                " LEFT JOIN user_item_state s ON s.entity_id=e.id AND s.user_id=?"
-                f" WHERE e.library_id IN ({placeholders}) AND COALESCE(s.played,0)=0"
-                " AND (COALESCE(e.season_number,-1)>COALESCE(a.season_number,-1)"
-                " OR (COALESCE(e.season_number,-1)=COALESCE(a.season_number,-1)"
-                " AND COALESCE(e.episode_number,-1)>COALESCE(a.episode_end_number,a.episode_number,-1)))"
-                " ) SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at,series_id,activity_at"
-                " FROM candidates WHERE candidate_rank=1 AND position_seconds<=0"
-                " ORDER BY activity_at DESC,series_id,id LIMIT 18",
-                [
-                    user_id,
-                    *allowed,
-                    *(row[0] for row in completed_series),
-                    user_id,
-                    *allowed,
-                ],
-            )
+            published_select = "published.entity_id" if published_exists else "NULL"
+            results = []
+            for anchor in anchors:
+                (
+                    _anchor_id,
+                    library_id,
+                    anchor_season_id,
+                    _entity_type,
+                    _relative_path,
+                    anchor_season_number,
+                    _episode_number,
+                    anchor_episode_end_number,
+                    _created_at,
+                    _updated_at,
+                    series_id,
+                    activity_at,
+                ) = anchor
+                season_limit = HOME_NEXT_UP_SEASON_LIMIT
+                if anchor_season_number is None:
+                    season_rows = self.db.execute(
+                        "SELECT id,season_number FROM library_entities "
+                        "WHERE parent_id=? AND library_id=? AND entity_type='season' AND season_number IS NULL "
+                        "ORDER BY (season_number IS NULL),season_number,relative_path COLLATE NOCASE,id LIMIT ?",
+                        [series_id, library_id, season_limit],
+                    )
+                    seasons = list(season_rows)
+                    if not any(row[0] == anchor_season_id for row in seasons):
+                        anchor_season = self.db.execute(
+                            "SELECT id,season_number FROM library_entities WHERE id=? AND library_id=? AND entity_type='season'",
+                            [anchor_season_id, library_id],
+                        )
+                        if anchor_season:
+                            seasons.insert(0, anchor_season[0])
+                            seasons = seasons[:season_limit]
+                    remaining_seasons = season_limit - len(seasons)
+                    if remaining_seasons > 0:
+                        seasons.extend(
+                            self.db.execute(
+                                "SELECT id,season_number FROM library_entities "
+                                "WHERE parent_id=? AND library_id=? AND entity_type='season' AND season_number IS NOT NULL "
+                                "ORDER BY (season_number IS NULL),season_number,relative_path COLLATE NOCASE,id LIMIT ?",
+                                [series_id, library_id, remaining_seasons],
+                            )
+                        )
+                else:
+                    seasons = self.db.execute(
+                        "SELECT id,season_number FROM library_entities "
+                        "WHERE parent_id=? AND library_id=? AND entity_type='season' AND (season_number IS NULL,season_number)>=(0,?) "
+                        "ORDER BY (season_number IS NULL),season_number,relative_path COLLATE NOCASE,id LIMIT ?",
+                        [series_id, library_id, anchor_season_number, season_limit],
+                    )
+                remaining_episodes = HOME_NEXT_UP_EPISODE_SCAN_LIMIT
+                for season_id, season_number in seasons:
+                    if remaining_episodes <= 0:
+                        break
+                    same_season = season_number == anchor_season_number
+                    episode_filter = (
+                        " AND e.episode_number IS NOT NULL "
+                        "AND (e.episode_number IS NULL,e.episode_number)>(0,?)"
+                        if same_season
+                        else ""
+                    )
+                    candidate_rows = self.db.execute(
+                        "SELECT candidate.id,candidate.library_id,candidate.parent_id,candidate.entity_type,candidate.relative_path,"
+                        "candidate.season_number,candidate.episode_number,candidate.episode_end_number,candidate.created_at,candidate.updated_at,"
+                        f"COALESCE(state.played,0),COALESCE(state.position_seconds,0),{published_select} "
+                        "FROM (SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,"
+                        "e.episode_end_number,e.created_at,e.updated_at FROM library_entities e "
+                        "WHERE e.parent_id=? AND e.library_id=? AND e.entity_type='episode'"
+                        f"{episode_filter} ORDER BY (e.episode_number IS NULL),e.episode_number,e.relative_path COLLATE NOCASE,e.id LIMIT ?) candidate "
+                        "LEFT JOIN user_item_state state ON state.user_id=? AND state.entity_id=candidate.id "
+                        f"{published_join}"
+                        "ORDER BY (candidate.episode_number IS NULL),candidate.episode_number,candidate.relative_path COLLATE NOCASE,candidate.id",
+                        [
+                            season_id,
+                            library_id,
+                            *(
+                                [
+                                    anchor_episode_end_number
+                                    if anchor_episode_end_number is not None
+                                    else _episode_number
+                                    if _episode_number is not None
+                                    else -1
+                                ]
+                                if same_season
+                                else []
+                            ),
+                            remaining_episodes,
+                            user_id,
+                        ],
+                    )
+                    remaining_episodes -= len(candidate_rows)
+                    blocked_by_partial = False
+                    for candidate in candidate_rows:
+                        if candidate[10]:
+                            continue
+                        if published_exists and candidate[12] is None:
+                            continue
+                        if candidate[11] > 0:
+                            blocked_by_partial = True
+                            break
+                        results.append((*candidate[:10], series_id, activity_at))
+                        break
+                    if blocked_by_partial or any(
+                        row[10] == series_id for row in results
+                    ):
+                        break
+            results.sort(key=lambda row: row[0])
+            results.sort(key=lambda row: row[10])
+            results.sort(key=lambda row: row[11], reverse=True)
+            return results[:18]
 
         context = self._context(user_id)
         rows = (
@@ -4438,14 +4997,16 @@ class Catalog:
         if not allowed:
             return empty
         placeholders = ",".join("?" for _ in allowed)
-        favorite_query = (
-            f"SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-            f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id WHERE s.user_id=? AND s.favorite=1 AND e.library_id IN ({placeholders})"
+        favorite_rows = self.db.execute(
+            "WITH favorite_sample AS ("
+            " SELECT entity_id FROM user_item_state WHERE user_id=? AND favorite=1 "
+            " ORDER BY updated_at DESC,entity_id LIMIT ?"
+            ") SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+            "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+            "FROM favorite_sample sample JOIN library_entities e ON e.id=sample.entity_id "
+            f"WHERE e.library_id IN ({placeholders})",
+            [user_id, HOME_DEGRADED_CANDIDATE_LIMIT, *sorted(allowed)],
         )
-        favorite_params = [user_id, *allowed]
-        if self._read_model_ready():
-            favorite_query += " ORDER BY e.relative_path COLLATE NOCASE,e.id LIMIT 18"
-        favorite_rows = self.db.execute(favorite_query, favorite_params)
         self._preload_projected_states(user_id, [row[0] for row in favorite_rows])
         self._preload_projected_metadata(
             user_id, [row[0] for row in favorite_rows], language
@@ -4468,10 +5029,11 @@ class Catalog:
             f"FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
             f"LEFT JOIN library_entities season ON e.entity_type='episode' AND season.id=e.parent_id "
             f"LEFT JOIN library_entities series ON series.id=season.parent_id "
-            f"WHERE s.user_id=? AND e.library_id IN ({placeholders}) AND e.entity_type IN ('movie','episode') "
+            f"WHERE s.user_id=? AND s.entity_id IN (SELECT entity_id FROM user_item_state WHERE user_id=? AND last_played_at IS NOT NULL ORDER BY COALESCE(last_played_at,updated_at) DESC,entity_id LIMIT {HOME_USER_STATE_SAMPLE_LIMIT}) "
+            f"AND e.library_id IN ({placeholders}) AND e.entity_type IN ('movie','episode') "
             f"AND s.last_played_at IS NOT NULL AND NOT (s.duration_seconds>0 AND s.position_seconds/s.duration_seconds>=0.02 AND s.position_seconds/s.duration_seconds<0.9) "
             f"ORDER BY s.last_played_at DESC,e.id LIMIT 18",
-            [user_id, *allowed],
+            [user_id, user_id, *allowed],
         )
         recent_ids = [row[0] for row in recent_rows] + [
             row[10] for row in recent_rows if row[10]
@@ -4501,14 +5063,16 @@ class Catalog:
         if music_allowed:
             music_placeholders = ",".join("?" for _ in music_allowed)
             favorite_music_rows = self.db.execute(
-                "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+                "WITH favorite_sample AS ("
+                " SELECT entity_id FROM user_item_state WHERE user_id=? AND favorite=1 "
+                " ORDER BY updated_at DESC,entity_id LIMIT ?"
+                ") SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
                 "e.season_number,e.episode_number,e.episode_end_number,e.created_at,"
                 "e.updated_at "
-                "FROM user_item_state s JOIN library_entities e ON e.id=s.entity_id "
-                f"WHERE s.user_id=? AND e.library_id IN ({music_placeholders}) "
-                "AND s.favorite=1 AND e.entity_type IN ('artist','release','track') "
-                "ORDER BY e.id",
-                [user_id, *sorted(music_allowed)],
+                "FROM favorite_sample sample JOIN library_entities e ON e.id=sample.entity_id "
+                f"WHERE e.library_id IN ({music_placeholders}) "
+                "AND e.entity_type IN ('artist','release','track')",
+                [user_id, HOME_DEGRADED_CANDIDATE_LIMIT, *sorted(music_allowed)],
             )
             if favorite_music_rows:
                 self._seed_hydration_rows(user_id, favorite_music_rows, language)
@@ -4583,12 +5147,15 @@ class Catalog:
                 (library_id, entity_type),
             )
         return self.db.execute(
-            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+            "WITH recent_files AS ("
+            " SELECT entity_id,modified_ns FROM media_files "
+            " WHERE role='media' ORDER BY modified_ns DESC,entity_id LIMIT ?"
+            ") SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
             "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-            "FROM media_files f JOIN library_entities e ON e.id=f.entity_id "
-            "WHERE f.role='media' AND e.library_id=? AND e.entity_type=? "
+            "FROM recent_files f JOIN library_entities e ON e.id=f.entity_id "
+            "WHERE e.library_id=? AND e.entity_type=? "
             "GROUP BY e.id ORDER BY MAX(f.modified_ns) DESC,e.id LIMIT 18",
-            (library_id, entity_type),
+            (HOME_RECENT_FILE_SAMPLE_LIMIT, library_id, entity_type),
         )
 
     @_catalog_read
@@ -4730,25 +5297,17 @@ class Catalog:
                 row[1]
                 for row in self.db.execute("PRAGMA table_info(catalog_item_projection)")
             }
-            rating_expression = (
-                "p.rating_sort"
-                if "rating_sort" in projection_columns
-                else "CAST(COALESCE(json_extract(p.payload, '$.communityRating'), 0) AS REAL)"
-            )
-            title_expression = (
-                "p.title_sort"
-                if "title_sort" in projection_columns
-                else "COALESCE(json_extract(p.payload, '$.title'), '')"
-            )
+            projection_ready = {"rating_sort", "title_sort"} <= projection_columns
+        if projection_ready:
             rows = self.db.execute(
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
                 "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                 "FROM catalog_item_projection p "
                 "JOIN library_entities e ON e.id=p.entity_id "
-                "WHERE p.locale=? AND e.library_id=? AND e.parent_id IS NULL "
-                "AND e.entity_type=? "
-                f"AND {rating_expression}>0 "
-                f"ORDER BY {rating_expression} DESC, {title_expression} COLLATE NOCASE ASC, e.id ASC "
+                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS NULL "
+                "AND p.entity_type=? "
+                "AND p.rating_sort>0 "
+                "ORDER BY p.rating_sort DESC,p.title_sort COLLATE NOCASE ASC,e.id ASC "
                 "LIMIT 18",
                 (language, library["id"], entity_type),
             )
@@ -4756,8 +5315,9 @@ class Catalog:
             rows = self.db.execute(
                 "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,"
                 "episode_number,episode_end_number,created_at,updated_at "
-                "FROM library_entities WHERE library_id=? AND parent_id IS NULL AND entity_type=?",
-                (library["id"], entity_type),
+                "FROM library_entities WHERE library_id=? AND parent_id IS NULL "
+                "AND entity_type=? ORDER BY created_at DESC,id LIMIT ?",
+                (library["id"], entity_type, HOME_DEGRADED_CANDIDATE_LIMIT),
             )
         if not rows:
             return None
@@ -4884,10 +5444,12 @@ class Catalog:
                 "recentlyPlayed": [],
                 "genreRows": [],
                 "audioRows": [],
+                "recommendations": [],
             }
         items = self._home_discovery_items(user_id, language, allowed)
         resume = self.home_continue_watching(user_id, language)
         next_up = self.home_next_up(user_id, language)
+        recommendations = self.home_recommendations(user_id, language)
         series_names: dict[str, str] = {}
         library_rows = []
         context = self._context(user_id)
@@ -4916,6 +5478,7 @@ class Catalog:
             "latestItems": items[:25],
             "continueWatching": resume,
             "nextUp": next_up[:18],
+            "recommendations": recommendations,
             "libraryRows": library_rows,
             **derived_rows,
         }

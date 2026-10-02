@@ -1230,6 +1230,16 @@ async def home(
             view,
             limit,
         )
+    if section == "recommendations":
+        return _catalog_response(
+            {
+                "recommendations": await run_foreground(
+                    catalog.home_recommendations, account["id"], preferred
+                )
+            },
+            view,
+            limit,
+        )
     if section == "derived":
         result = await run_foreground(catalog.home_derived, account["id"], preferred)
         return _catalog_response(result, view, limit)

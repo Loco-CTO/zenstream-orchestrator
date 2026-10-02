@@ -911,7 +911,7 @@ class CatalogTest(unittest.TestCase):
 
         def capture_query(query, params=None):
             nonlocal selected_query, selected_params
-            if "ORDER BY COALESCE(s.last_played_at,s.updated_at)" in query:
+            if "ORDER BY COALESCE(last_played_at,updated_at)" in query:
                 selected_query = query
                 selected_params = params
             return execute(query, params)
@@ -930,7 +930,7 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("TEMP B-TREE", plan_text)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
-    def test_large_list_preloads_graph_and_state_once(self, _languages):
+    def test_large_list_preloads_state_without_catalog_graph(self, _languages):
         user_id = self.account().create("large", "password-123")["id"]
         self.db.execute(
             "INSERT INTO user_library_access VALUES(?,?,?)", (user_id, "allowed", "now")
@@ -1019,8 +1019,8 @@ class CatalogTest(unittest.TestCase):
             self.db.execute = execute
 
         self.assertEqual(len(result["items"]), 40)
-        self.assertEqual(graph_calls, 1)
-        self.assertEqual(state_queries, 1)
+        self.assertEqual(graph_calls, 0)
+        self.assertLessEqual(state_queries, 3)
         self.assertLess(elapsed, 2.0)
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
@@ -1293,6 +1293,94 @@ class CatalogTest(unittest.TestCase):
             [item["id"] for item in aggregate["latestItems"][:2]],
             ["movie", "series"],
         )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_recommendations_use_recent_local_genres_and_library_grants(
+        self, _languages
+    ):
+        user_id = self.account().create("home-recommendations", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (user_id, "allowed", "now"),
+        )
+        self.seed_item()
+        for entity_id, library_id in (
+            ("drama-one", "allowed"),
+            ("drama-two", "allowed"),
+            ("hidden-drama", "hidden"),
+        ):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    library_id,
+                    None,
+                    "movie",
+                    entity_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "movie", 0, 1, 1, 0, 100, "2026-05-01", "2026-05-01"),
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection("
+            "entity_id TEXT,locale TEXT,rating_sort REAL,title_sort TEXT,payload TEXT,"
+            "PRIMARY KEY(entity_id,locale))"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_item_genres("
+            "entity_id TEXT,locale TEXT,library_id TEXT,entity_type TEXT,"
+            "genre_key TEXT,genre_name TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        for entity_id, library_id, title, rating in (
+            ("movie", "allowed", "Watched", 0),
+            ("drama-one", "allowed", "Drama One", 8.0),
+            ("drama-two", "allowed", "Drama Two", 7.0),
+            ("hidden-drama", "hidden", "Hidden", 10.0),
+        ):
+            self.db.execute(
+                "INSERT INTO catalog_item_projection VALUES(?,?,?,?,?)",
+                (entity_id, "en", rating, title.casefold(), "{}"),
+            )
+            self.db.execute(
+                "INSERT INTO catalog_item_genres VALUES(?,?,?,?,?,?)",
+                (entity_id, "en", library_id, "movie", "drama", "Drama"),
+            )
+        catalog = self.catalog()
+        catalog._hydrate_rows = lambda _user, rows, _language: [
+            {"id": row[0]} for row in rows
+        ]
+
+        result = catalog.home_recommendations(user_id, "en")
+
+        self.assertEqual([item["id"] for item in result], ["drama-one", "drama-two"])
+        self.assertNotIn("hidden-drama", {item["id"] for item in result})
+        self.assertNotIn("movie", {item["id"] for item in result})
+
+    def test_home_recommendations_do_not_use_history_when_disabled(self):
+        user_id = self.account().create("home-recommendations-off", "password-123")[
+            "id"
+        ]
+        self.db.execute(
+            "INSERT INTO account_preferences(user_id,watch_history_enabled) VALUES(?,0)",
+            (user_id,),
+        )
+
+        self.assertEqual(self.catalog().home_recommendations(user_id, "en"), [])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_newly_added_serializes_only_selected_items(self, _languages):
@@ -2568,6 +2656,27 @@ class CatalogTest(unittest.TestCase):
             [item["id"] for item in catalog.home_next_up(user_id, "en")],
             ["episode-11"],
         )
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (user_id, "episode-11", 0, 1, 1, 0, 100, "2026-01-05", "2026-01-05"),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "hidden-next-episode",
+                "hidden",
+                "season-1",
+                "episode",
+                "Example/Season 1/Hidden Episode 12",
+                1,
+                12,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.assertEqual(catalog.home_next_up(user_id, "en"), [])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_next_up_requires_published_candidate(self, _languages):

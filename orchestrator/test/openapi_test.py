@@ -85,6 +85,43 @@ class OpenApiContractTest(unittest.TestCase):
         for path in DOCUMENTATION_EXCLUDED_PATHS:
             self.assertNotIn(path, self.schema["paths"])
 
+    def test_home_and_detail_section_enums_match_their_operations(self):
+        expected = {
+            "/api/catalog/home": (
+                [
+                    "featured",
+                    "continueWatching",
+                    "nextUp",
+                    "recommendations",
+                    "derived",
+                    "library",
+                ],
+                "featured",
+            ),
+            "/api/catalog/items/{entity_id}/detail": (
+                ["header", "episodes", "similar", "credits"],
+                "header",
+            ),
+        }
+        for path, (expected_values, expected_example) in expected.items():
+            operation = self.schema["paths"][path]["get"]
+            section = next(
+                parameter
+                for parameter in operation["parameters"]
+                if parameter["name"] == "section"
+            )
+            self.assertEqual(section["example"], expected_example, path)
+            self.assertFalse(section["required"], path)
+            string_schema = next(
+                variant
+                for variant in section["schema"]["anyOf"]
+                if variant.get("type") == "string"
+            )
+            self.assertEqual(string_schema["enum"], expected_values, path)
+            self.assertIn(
+                {"type": "null"}, section["schema"]["anyOf"], path
+            )
+
     def test_refresh_attempt_id_is_documented_as_optional_uuid(self):
         operation = self.schema["paths"]["/api/auth/refresh"]["post"]
         request_schema = operation["requestBody"]["content"]["application/json"][

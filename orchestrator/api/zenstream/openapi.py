@@ -2585,13 +2585,40 @@ def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
                 "Provide page and pageSize together for one-based, grant-filtered track paging; omit both for the full playlist."
             )
         if name == "section":
-            parameter.setdefault("schema", {})["enum"] = [
-                "featured",
-                "continueWatching",
-                "nextUp",
-                "derived",
-                "library",
-            ]
+            section_values: list[str] | None = None
+            if path == "/api/catalog/home":
+                section_values = [
+                    "featured",
+                    "continueWatching",
+                    "nextUp",
+                    "recommendations",
+                    "derived",
+                    "library",
+                ]
+                parameter["description"] = (
+                    "Home section selector; omit it to request all Home sections."
+                )
+                parameter["example"] = "featured"
+            elif path == "/api/catalog/items/{entity_id}/detail":
+                section_values = ["header", "episodes", "similar", "credits"]
+                parameter["description"] = (
+                    "Item-detail section selector; omit it to request complete detail data."
+                )
+                parameter["example"] = "header"
+            if section_values is not None:
+                parameter_schema = parameter.setdefault("schema", {})
+                string_schema = next(
+                    (
+                        variant
+                        for variant in parameter_schema.get("anyOf", [])
+                        if variant.get("type") == "string"
+                    ),
+                    None,
+                )
+                if string_schema is not None:
+                    string_schema["enum"] = section_values
+                else:
+                    parameter_schema["enum"] = section_values
         if name == "sortOrder":
             parameter.setdefault("schema", {})["enum"] = ["ascending", "descending"]
         if name == "image_type":

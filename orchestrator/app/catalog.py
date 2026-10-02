@@ -1201,13 +1201,18 @@ class Catalog:
                 roots.append(entity_id)
         if not roots:
             return
+        collection_roots = [
+            entity_id
+            for entity_id in roots
+            if context.entity_rows[entity_id][3] == "collection"
+        ]
         root_values = ",".join("(?)" for _ in roots)
         collection_recursive = (
             " UNION SELECT member.source_entity_id FROM scoped collection "
             "JOIN collection_members member ON member.collection_entity_id=collection.id "
             "JOIN library_entities source ON source.id=member.source_entity_id "
             "JOIN user_library_access access ON access.user_id=? AND access.library_id=source.library_id"
-            if self._has_table("collection_members")
+            if collection_roots and self._has_table("collection_members")
             else ""
         )
         recursive_sql = (
@@ -1240,7 +1245,7 @@ class Catalog:
                 context.relationship_children.setdefault(parent_id, []).append(
                     entity_id
                 )
-        if self._has_table("collection_members") and context.relationship_entities:
+        if collection_recursive and context.relationship_entities:
             scoped_ids = list(scoped_entity_ids)
             for start in range(0, len(scoped_ids), 400):
                 batch = scoped_ids[start : start + 400]
@@ -1573,7 +1578,7 @@ class Catalog:
                 for entity_id in batch
                 if entity_id not in context.projected_states
             ]
-            if not remaining and not self._has_table("catalog_user_rollups"):
+            if not remaining:
                 continue
             if self._has_table("catalog_user_rollups") and remaining:
                 remaining_placeholders = ",".join("?" for _ in remaining)

@@ -441,6 +441,10 @@ class CatalogPage(DocsModel):
     sections: list[Any] = Field(default_factory=list)
 
 
+class CatalogHomeResponse(CatalogPage):
+    recommendations: list[CatalogItem] = Field(default_factory=list)
+
+
 class PlaylistCreateRequest(DocsModel):
     name: str = Field(examples=["Road Trip"])
     description: str | None = Field(default=None, examples=["Songs for the drive"])
@@ -1230,6 +1234,7 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     CatalogState,
     CatalogItem,
     CatalogPage,
+    CatalogHomeResponse,
     PlaylistCreateRequest,
     PlaylistUpdateRequest,
     PlaylistItemsRequest,
@@ -1430,8 +1435,11 @@ server's configured fallback chain.
 
 Catalog responses support `view=full` (the default rich representation) and
 `view=card` (a compact card projection). Home uses `section` values such as
-`featured`, `continueWatching`, `nextUp`, `derived`, and `library`; invalid
-values are rejected with a normal API error.
+`featured`, `continueWatching`, `nextUp`, `recommendations`, `derived`, and
+`library`; invalid values are rejected with a normal API error. The optional
+`recommendations` section returns at most 18 grant-filtered movie and series
+items based on local account watch history. It is empty when Watch History is
+disabled or there is no usable recommendation profile.
 
 ## Media, asynchronous work, and errors
 
@@ -1594,7 +1602,7 @@ _PARAMETER_DESCRIPTIONS = {
     "sortBy": "Server-supported sort field.",
     "sortOrder": "Sort direction; the default is `ascending`.",
     "view": "Catalog projection: `full` or compact `card`.",
-    "section": "Home/detail section selector.",
+    "section": "Home/detail section selector; Home includes recommendations.",
     "type": "Optional catalog type filter.",
     "invite": "Invitation code.",
     "url": "Legacy invitation header accepted by the registration flow.",
@@ -2209,7 +2217,7 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("GET", "/api/preferences/watch-history"): WatchHistoryPreferences,
     ("PATCH", "/api/preferences/watch-history"): WatchHistoryPreferences,
     ("GET", "/api/catalog/libraries"): CatalogLibrariesResponse,
-    ("GET", "/api/catalog/home"): CatalogPage,
+    ("GET", "/api/catalog/home"): CatalogHomeResponse,
     ("GET", "/api/catalog/items"): CatalogPage,
     ("GET", "/api/catalog/music/albums"): MusicAlbumPage,
     ("GET", "/api/catalog/music/albums/{release_id}"): MusicAlbumResponse,

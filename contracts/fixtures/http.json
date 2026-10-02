@@ -6113,6 +6113,252 @@
           ],
           "page": 1,
           "pageSize": 1,
+          "recommendations": [
+            {
+              "addedAt": "2026-09-29T12:00:00Z",
+              "albumId": "fixture-id",
+              "artistId": null,
+              "childIds": [
+                "x"
+              ],
+              "children": [
+                {}
+              ],
+              "collectionYearRange": "x",
+              "credits": [
+                {
+                  "character": "x",
+                  "department": "x",
+                  "id": "fixture-id",
+                  "image": {
+                    "blurHash": "x",
+                    "height": 1,
+                    "language": "x",
+                    "url": "https://example.invalid/fixture",
+                    "width": 1
+                  },
+                  "job": "x",
+                  "joinPhrase": "x",
+                  "name": "Fixture Item",
+                  "role": "x"
+                }
+              ],
+              "dateAdded": "x",
+              "discNumber": 1,
+              "durationSeconds": 1.25,
+              "episodeEndNumber": 1,
+              "episodeNumber": 1,
+              "id": "fixture-id",
+              "images": {
+                "fixtureKey": {
+                  "blurHash": "x",
+                  "height": 1,
+                  "language": "x",
+                  "url": "https://example.invalid/fixture",
+                  "width": 1
+                }
+              },
+              "lastAddedAt": "2026-09-29T12:00:00Z",
+              "libraryId": "fixture-id",
+              "metadata": {
+                "album": "Fixture Item",
+                "albumArtist": "x",
+                "albumId": "fixture-id",
+                "albumSecondaryTypes": [
+                  "x"
+                ],
+                "albumType": "x",
+                "artistId": null,
+                "artists": [
+                  {
+                    "character": "x",
+                    "department": "x",
+                    "id": "fixture-id",
+                    "image": {
+                      "blurHash": "x",
+                      "height": 1,
+                      "language": "x",
+                      "url": "https://example.invalid/fixture",
+                      "width": 1
+                    },
+                    "job": "x",
+                    "joinPhrase": "x",
+                    "name": "Fixture Item",
+                    "role": "x"
+                  }
+                ],
+                "communityRating": 1.25,
+                "contributingArtists": [
+                  {
+                    "character": "x",
+                    "department": "x",
+                    "id": "fixture-id",
+                    "image": {
+                      "blurHash": "x",
+                      "height": 1,
+                      "language": "x",
+                      "url": "https://example.invalid/fixture",
+                      "width": 1
+                    },
+                    "job": "x",
+                    "joinPhrase": "x",
+                    "name": "Fixture Item",
+                    "role": "x"
+                  }
+                ],
+                "credits": {
+                  "cast": [
+                    {
+                      "character": "x",
+                      "department": "x",
+                      "id": "fixture-id",
+                      "image": {
+                        "blurHash": "x",
+                        "height": 1,
+                        "language": "x",
+                        "url": "https://example.invalid/fixture",
+                        "width": 1
+                      },
+                      "job": "x",
+                      "joinPhrase": "x",
+                      "name": "Fixture Item",
+                      "role": "x"
+                    }
+                  ],
+                  "crew": [
+                    {
+                      "character": "x",
+                      "department": "x",
+                      "id": "fixture-id",
+                      "image": {
+                        "blurHash": "x",
+                        "height": 1,
+                        "language": "x",
+                        "url": "https://example.invalid/fixture",
+                        "width": 1
+                      },
+                      "job": "x",
+                      "joinPhrase": "x",
+                      "name": "Fixture Item",
+                      "role": "x"
+                    }
+                  ]
+                },
+                "date": "2026-09-29",
+                "description": "x",
+                "discNumber": 1,
+                "durationSeconds": 1.25,
+                "genres": [
+                  "x"
+                ],
+                "images": {
+                  "fixtureKey": {
+                    "blurHash": "x",
+                    "height": 1,
+                    "language": "x",
+                    "url": "https://example.invalid/fixture",
+                    "width": 1
+                  }
+                },
+                "label": "Fixture Item",
+                "officialRating": "x",
+                "originalTitle": "x",
+                "overview": "x",
+                "people": [
+                  {
+                    "character": "x",
+                    "department": "x",
+                    "id": "fixture-id",
+                    "image": {
+                      "blurHash": "x",
+                      "height": 1,
+                      "language": "x",
+                      "url": "https://example.invalid/fixture",
+                      "width": 1
+                    },
+                    "job": "x",
+                    "joinPhrase": "x",
+                    "name": "Fixture Item",
+                    "role": "x"
+                  }
+                ],
+                "releaseDate": "2026-09-29",
+                "runtimeMinutes": 1,
+                "show": "x",
+                "studios": [
+                  {}
+                ],
+                "tags": [
+                  "x"
+                ],
+                "title": "Fixture Item",
+                "trackNumber": 1,
+                "year": 1
+              },
+              "name": "Fixture Item",
+              "parentId": "fixture-id",
+              "seasonId": "fixture-id",
+              "seasonNumber": 1,
+              "seriesId": null,
+              "seriesName": "x",
+              "seriesPrimaryImage": {
+                "blurHash": "x",
+                "height": 1,
+                "language": "x",
+                "url": "https://example.invalid/fixture",
+                "width": 1
+              },
+              "seriesProductionYear": 1,
+              "state": {
+                "duration": 1.25,
+                "favorite": true,
+                "following": true,
+                "played": true,
+                "position": 1.25,
+                "progress": 1.25
+              },
+              "title": "Fixture Item",
+              "trackNumber": 1,
+              "type": "movie",
+              "updatedAt": "2026-09-29T12:00:00Z",
+              "userState": {
+                "durationSeconds": 1.25,
+                "favorite": true,
+                "following": true,
+                "lastPlayedAt": "2026-09-29T12:00:00Z",
+                "playCount": 1,
+                "played": true,
+                "playedPercentage": 1.25,
+                "positionSeconds": 1.25,
+                "unplayedItemCount": 1
+              },
+              "watchlistStatus": {
+                "episodeNumber": 1,
+                "kind": "upNext",
+                "nextEpisode": {
+                  "episodeNumber": 1,
+                  "id": "fixture-id",
+                  "libraryId": "fixture-id",
+                  "metadata": {
+                    "images": {
+                      "fixtureKey": {
+                        "blurHash": "x",
+                        "height": 1,
+                        "language": "x",
+                        "url": "https://example.invalid/fixture",
+                        "width": 1
+                      }
+                    },
+                    "title": "Fixture Item"
+                  },
+                  "name": "The Next Step",
+                  "seasonNumber": 1,
+                  "type": "episode"
+                },
+                "seasonNumber": 1
+              }
+            }
+          ],
           "sections": [
             {}
           ],
@@ -6120,7 +6366,7 @@
           "totalPages": 1
         },
         "contentType": "application/json",
-        "schemaRef": "#/components/schemas/CatalogPage",
+        "schemaRef": "#/components/schemas/CatalogHomeResponse",
         "status": 200
       }
     },

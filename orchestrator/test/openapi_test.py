@@ -118,9 +118,7 @@ class OpenApiContractTest(unittest.TestCase):
                 if variant.get("type") == "string"
             )
             self.assertEqual(string_schema["enum"], expected_values, path)
-            self.assertIn(
-                {"type": "null"}, section["schema"]["anyOf"], path
-            )
+            self.assertIn({"type": "null"}, section["schema"]["anyOf"], path)
 
     def test_refresh_attempt_id_is_documented_as_optional_uuid(self):
         operation = self.schema["paths"]["/api/auth/refresh"]["post"]

@@ -8,8 +8,8 @@ _ORCHESTRATOR_ROOT = str(Path(__file__).resolve().parents[1])
 if _ORCHESTRATOR_ROOT not in sys.path:
     sys.path.insert(0, _ORCHESTRATOR_ROOT)
 
-from app.app import app
 from api.zenstream.openapi import _annotate_section_parameter
+from app.app import app
 
 
 class OpenApiSectionContractTest(unittest.TestCase):

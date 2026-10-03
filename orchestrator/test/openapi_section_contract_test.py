@@ -9,13 +9,41 @@ if _ORCHESTRATOR_ROOT not in sys.path:
     sys.path.insert(0, _ORCHESTRATOR_ROOT)
 
 from app.app import app
+from api.zenstream.openapi import _annotate_section_parameter
 
 
 class OpenApiSectionContractTest(unittest.TestCase):
+    """Regression coverage for curated section query contracts."""
+
     @classmethod
     def setUpClass(cls):
+        """Build one schema for the section contract assertions."""
         app.openapi_schema = None
         cls.schema = app.openapi()
+
+    def test_section_annotation_adds_enum_to_plain_string_schema(self):
+        parameter = {"schema": {"type": "string"}}
+
+        _annotate_section_parameter(parameter, "/api/catalog/home")
+
+        self.assertEqual(
+            parameter["schema"]["enum"],
+            [
+                "featured",
+                "continueWatching",
+                "nextUp",
+                "recommendations",
+                "derived",
+                "library",
+            ],
+        )
+
+    def test_section_annotation_leaves_unregistered_paths_unchanged(self):
+        parameter = {"schema": {"type": "string"}}
+
+        _annotate_section_parameter(parameter, "/api/catalog/unknown")
+
+        self.assertEqual(parameter, {"schema": {"type": "string"}})
 
     def test_home_and_detail_section_enums_match_their_operations(self):
         """Document the valid section values and nullable shape for both operations."""

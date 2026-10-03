@@ -2586,6 +2586,7 @@ def _ensure_parameter(
 
 
 def _annotate_section_parameter(parameter: dict[str, Any], path: str) -> None:
+    """Apply an operation's section values and description to its parameter."""
     contract = _SECTION_CONTRACTS.get(path)
     if contract is None:
         return
@@ -2604,51 +2605,57 @@ def _annotate_section_parameter(parameter: dict[str, Any], path: str) -> None:
         parameter_schema["enum"] = values
 
 
+def _annotate_parameter(parameter: dict[str, Any], path: str) -> None:
+    """Apply shared descriptions, examples, and schema constraints."""
+    name = parameter.get("name", "")
+    if name in _PARAMETER_DESCRIPTIONS:
+        parameter["description"] = _PARAMETER_DESCRIPTIONS[name]
+    if name in _PARAMETER_EXAMPLES and "example" not in parameter:
+        parameter["example"] = _PARAMETER_EXAMPLES[name]
+    if name in {"TOKEN", "Password", "New-Password", "New_Password"}:
+        parameter["description"] = (
+            "Sensitive legacy administrator credential; never log this value."
+        )
+        parameter.setdefault("schema", {})["writeOnly"] = True
+    if name in {"Username", "New-Username", "New_Username"}:
+        parameter["description"] = (
+            "Legacy administrator identity header retained for dashboard compatibility."
+        )
+    if name == "view":
+        parameter.setdefault("schema", {})["enum"] = (
+            ["summary"]
+            if path.startswith("/api/account/playlists")
+            else ["full", "card"]
+        )
+    if name == "membershipSourceId":
+        parameter["description"] = (
+            "Track, album, or artist ID; isMember is true when every accessible source track is in a playlist."
+        )
+    if name in {"page", "pageSize"} and "playlists" in path:
+        parameter["description"] = (
+            "Provide page and pageSize together for one-based, grant-filtered track paging; omit both for the full playlist."
+        )
+    if name == "section":
+        _annotate_section_parameter(parameter, path)
+    enum_values = _PARAMETER_ENUMS.get(name)
+    if enum_values is not None:
+        parameter.setdefault("schema", {})["enum"] = list(enum_values)
+    if "description" not in parameter:
+        parameter["description"] = (
+            f"{name} value supplied in the {parameter.get('in', 'request')} component."
+        )
+    if (
+        "example" not in parameter
+        and name not in {"TOKEN", "Password", "New-Password", "New_Password"}
+        and parameter.get("schema", {}).get("default") is not None
+    ):
+        parameter["example"] = parameter["schema"]["default"]
+
+
 def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
+    """Annotate parameters, then add media capability parameters when needed."""
     for parameter in operation.get("parameters", []):
-        name = parameter.get("name", "")
-        if name in _PARAMETER_DESCRIPTIONS:
-            parameter["description"] = _PARAMETER_DESCRIPTIONS[name]
-        if name in _PARAMETER_EXAMPLES and "example" not in parameter:
-            parameter["example"] = _PARAMETER_EXAMPLES[name]
-        if name in {"TOKEN", "Password", "New-Password", "New_Password"}:
-            parameter["description"] = (
-                "Sensitive legacy administrator credential; never log this value."
-            )
-            parameter.setdefault("schema", {})["writeOnly"] = True
-        if name in {"Username", "New-Username", "New_Username"}:
-            parameter["description"] = (
-                "Legacy administrator identity header retained for dashboard compatibility."
-            )
-        if name == "view":
-            parameter.setdefault("schema", {})["enum"] = (
-                ["summary"]
-                if path.startswith("/api/account/playlists")
-                else ["full", "card"]
-            )
-        if name == "membershipSourceId":
-            parameter["description"] = (
-                "Track, album, or artist ID; isMember is true when every accessible source track is in a playlist."
-            )
-        if name in {"page", "pageSize"} and "playlists" in path:
-            parameter["description"] = (
-                "Provide page and pageSize together for one-based, grant-filtered track paging; omit both for the full playlist."
-            )
-        if name == "section":
-            _annotate_section_parameter(parameter, path)
-        enum_values = _PARAMETER_ENUMS.get(name)
-        if enum_values is not None:
-            parameter.setdefault("schema", {})["enum"] = list(enum_values)
-        if "description" not in parameter:
-            parameter["description"] = (
-                f"{name} value supplied in the {parameter.get('in', 'request')} component."
-            )
-        if (
-            "example" not in parameter
-            and name not in {"TOKEN", "Password", "New-Password", "New_Password"}
-            and parameter.get("schema", {}).get("default") is not None
-        ):
-            parameter["example"] = parameter["schema"]["default"]
+        _annotate_parameter(parameter, path)
     if (
         path.startswith("/api/playback/")
         or path.startswith("/api/catalog/items/")

@@ -304,7 +304,7 @@ class OpenApiContractTest(unittest.TestCase):
     def test_schema_references_resolve(self):
         """Ensure every schema reference used by the contract resolves."""
         schemas = self.schema["components"]["schemas"]
-        for value in _examples(self.schema):
+        for value in _walk(self.schema):
             if not isinstance(value, dict) or "$ref" not in value:
                 continue
             reference = value["$ref"]
@@ -507,5 +507,5 @@ class OpenApiContractTest(unittest.TestCase):
                 self.assertIsNone(pattern.search(value), value)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

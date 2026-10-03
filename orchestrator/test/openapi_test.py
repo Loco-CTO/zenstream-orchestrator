@@ -160,9 +160,9 @@ class OpenApiContractTest(unittest.TestCase):
         )
 
     def test_audio_play_start_documents_the_required_idempotency_key(self):
-        operation = self.schema["paths"][
-            "/api/catalog/items/{entity_id}/play-start"
-        ]["post"]
+        operation = self.schema["paths"]["/api/catalog/items/{entity_id}/play-start"][
+            "post"
+        ]
         request = operation["requestBody"]["content"]["application/json"]["schema"]
         self.assertEqual(request["$ref"], "#/components/schemas/PlayStartRequest")
 
@@ -171,9 +171,7 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertEqual(
             play_start["properties"]["playbackInstanceId"]["type"], "string"
         )
-        self.assertEqual(
-            play_start["properties"]["playbackInstanceId"]["minLength"], 1
-        )
+        self.assertEqual(play_start["properties"]["playbackInstanceId"]["minLength"], 1)
         self.assertEqual(
             play_start["properties"]["playbackInstanceId"]["maxLength"], 200
         )

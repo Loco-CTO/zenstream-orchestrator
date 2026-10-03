@@ -160,6 +160,7 @@ class OpenApiContractTest(unittest.TestCase):
         )
 
     def test_audio_play_start_documents_the_required_idempotency_key(self):
+        """Match the audio play-start request contract to the live clients."""
         operation = self.schema["paths"]["/api/catalog/items/{entity_id}/play-start"][
             "post"
         ]
@@ -244,9 +245,11 @@ class OpenApiContractTest(unittest.TestCase):
         lyrics = schemas["LyricsResponse"]["properties"]
         self.assertIn("trackId", lyrics)
         lyrics_schema = lyrics["lyrics"]
-        content_schema = next(
+        content_schemas = [
             value for value in lyrics_schema["anyOf"] if value.get("$ref")
-        )
+        ]
+        self.assertEqual(len(content_schemas), 1)
+        content_schema = content_schemas[0]
         lyrics_content = schemas[content_schema["$ref"].rsplit("/", 1)[-1]][
             "properties"
         ]

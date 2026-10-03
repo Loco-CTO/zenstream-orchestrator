@@ -86,6 +86,7 @@ class OpenApiContractTest(unittest.TestCase):
             self.assertNotIn(path, self.schema["paths"])
 
     def test_home_and_detail_section_enums_match_their_operations(self):
+        """Document the valid section values and nullable shape for both operations."""
         expected = {
             "/api/catalog/home": (
                 [
@@ -105,18 +106,22 @@ class OpenApiContractTest(unittest.TestCase):
         }
         for path, (expected_values, expected_example) in expected.items():
             operation = self.schema["paths"][path]["get"]
-            section = next(
+            section_parameters = [
                 parameter
                 for parameter in operation["parameters"]
                 if parameter["name"] == "section"
-            )
+            ]
+            self.assertEqual(len(section_parameters), 1, path)
+            section = section_parameters[0]
             self.assertEqual(section["example"], expected_example, path)
             self.assertFalse(section["required"], path)
-            string_schema = next(
+            string_schemas = [
                 variant
                 for variant in section["schema"]["anyOf"]
                 if variant.get("type") == "string"
-            )
+            ]
+            self.assertEqual(len(string_schemas), 1, path)
+            string_schema = string_schemas[0]
             self.assertEqual(string_schema["enum"], expected_values, path)
             self.assertIn({"type": "null"}, section["schema"]["anyOf"], path)
 

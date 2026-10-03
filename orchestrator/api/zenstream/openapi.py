@@ -2648,9 +2648,7 @@ def _annotate_parameter_example(parameter: dict[str, Any], name: str) -> None:
         parameter["example"] = parameter["schema"]["default"]
 
 
-def _annotate_parameter_schema(
-    parameter: dict[str, Any], name: str, path: str
-) -> None:
+def _annotate_parameter_schema(parameter: dict[str, Any], name: str, path: str) -> None:
     """Apply sensitive-field handling and known parameter enums."""
     if name in {"TOKEN", "Password", "New-Password", "New_Password"}:
         parameter.setdefault("schema", {})["writeOnly"] = True

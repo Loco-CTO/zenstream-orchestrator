@@ -7029,7 +7029,7 @@
             "page": 1,
             "pageSize": 40,
             "seasonId": "fixture-id",
-            "section": "featured",
+            "section": "header",
             "view": "full"
           }
         },

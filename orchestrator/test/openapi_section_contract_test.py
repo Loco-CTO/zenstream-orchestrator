@@ -22,6 +22,7 @@ class OpenApiSectionContractTest(unittest.TestCase):
         cls.schema = app.openapi()
 
     def test_section_annotation_adds_enum_to_plain_string_schema(self):
+        """Check the enum fallback for a plain string parameter schema."""
         parameter = {"schema": {"type": "string"}}
 
         _annotate_section_parameter(parameter, "/api/catalog/home")
@@ -39,6 +40,7 @@ class OpenApiSectionContractTest(unittest.TestCase):
         )
 
     def test_section_annotation_leaves_unregistered_paths_unchanged(self):
+        """Keep section parameters untouched for unregistered paths."""
         parameter = {"schema": {"type": "string"}}
 
         _annotate_section_parameter(parameter, "/api/catalog/unknown")

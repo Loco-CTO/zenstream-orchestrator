@@ -159,6 +159,25 @@ class OpenApiContractTest(unittest.TestCase):
             {"images", "credits", "artists", "contributingArtists"}.issubset(metadata)
         )
 
+    def test_audio_play_start_documents_the_required_idempotency_key(self):
+        operation = self.schema["paths"][
+            "/api/catalog/items/{entity_id}/play-start"
+        ]["post"]
+        request = operation["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request["$ref"], "#/components/schemas/PlayStartRequest")
+
+        play_start = self.schema["components"]["schemas"]["PlayStartRequest"]
+        self.assertEqual(play_start["required"], ["playbackInstanceId"])
+        self.assertEqual(
+            play_start["properties"]["playbackInstanceId"]["type"], "string"
+        )
+        self.assertEqual(
+            play_start["properties"]["playbackInstanceId"]["minLength"], 1
+        )
+        self.assertEqual(
+            play_start["properties"]["playbackInstanceId"]["maxLength"], 200
+        )
+
     def test_syncplay_group_schema_documents_the_live_websocket_payload(self):
         schemas = self.schema["components"]["schemas"]
         group = schemas["SyncplayGroup"]["properties"]

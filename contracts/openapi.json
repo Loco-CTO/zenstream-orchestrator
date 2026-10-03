@@ -6092,37 +6092,20 @@
       "PlayStartRequest": {
         "additionalProperties": true,
         "properties": {
-          "position": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
+          "playbackInstanceId": {
+            "description": "Client-generated id used to de-duplicate an audio play-start event.",
             "examples": [
-              0
+              "playback-instance-0001"
             ],
-            "title": "Position"
-          },
-          "sourceId": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "examples": [
-              "source-0001"
-            ],
-            "title": "Sourceid"
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Playbackinstanceid",
+            "type": "string"
           }
         },
+        "required": [
+          "playbackInstanceId"
+        ],
         "title": "PlayStartRequest",
         "type": "object"
       },
@@ -21769,7 +21752,7 @@
     },
     "/api/catalog/items/{entity_id}/play-start": {
       "post": {
-        "description": "Record a play start. Results are filtered by the authenticated user's library grants. Additional catalog fields may be added without a breaking change. Method: `POST`; path: `/api/catalog/items/{entity_id}/play-start`.",
+        "description": "Record an audio track play start. Results are filtered by the authenticated user's library grants. Additional catalog fields may be added without a breaking change. Method: `POST`; path: `/api/catalog/items/{entity_id}/play-start`.",
         "operationId": "post_api_catalog_items_by_entity_id_play_start",
         "parameters": [
           {
@@ -21788,8 +21771,7 @@
           "content": {
             "application/json": {
               "example": {
-                "position": 0,
-                "sourceId": "source-0001"
+                "playbackInstanceId": "playback-instance-0001"
               },
               "schema": {
                 "$ref": "#/components/schemas/PlayStartRequest"
@@ -21868,7 +21850,7 @@
             "UserSessionCookie": []
           }
         ],
-        "summary": "Record a play start",
+        "summary": "Record an audio track play start",
         "tags": [
           "Catalog"
         ]

@@ -7519,8 +7519,7 @@
         "body": {
           "contentType": "application/json",
           "value": {
-            "position": 1.25,
-            "sourceId": "fixture-id"
+            "playbackInstanceId": "fixture-id"
           }
         },
         "method": "POST",

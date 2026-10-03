@@ -599,8 +599,15 @@ class ProgressPatchRequest(DocsModel):
 
 
 class PlayStartRequest(DocsModel):
-    sourceId: str | None = Field(default=None, examples=["source-0001"])
-    position: float | None = Field(default=None, examples=[0])
+    playbackInstanceId: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        examples=["playback-instance-0001"],
+        description=(
+            "Client-generated id used to de-duplicate an audio play-start event."
+        ),
+    )
 
 
 class MusicTrack(DocsModel):
@@ -1783,7 +1790,9 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/catalog/items/{entity_id}/detail"): "Get item detail sections",
     ("PATCH", "/api/catalog/items/{entity_id}/state"): "Update item state",
     ("PATCH", "/api/catalog/items/{entity_id}/progress"): "Update item progress",
-    ("POST", "/api/catalog/items/{entity_id}/play-start"): "Record a play start",
+    ("POST", "/api/catalog/items/{entity_id}/play-start"): (
+        "Record an audio track play start"
+    ),
     ("DELETE", "/api/account/watch-history"): "Clear watch history",
     ("POST", "/api/playback/items/{entity_id}/negotiate"): "Negotiate playback",
     ("POST", "/api/playback/items/{entity_id}/access"): "Refresh playback access",
@@ -2408,7 +2417,7 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     WatchHistoryPreferences: {"enabled": True},
     CatalogStatePatchRequest: {"favorite": True, "played": False, "following": True},
     ProgressPatchRequest: {"position": 120.5, "duration": 3600.0},
-    PlayStartRequest: {"sourceId": "source-0001", "position": 0},
+    PlayStartRequest: {"playbackInstanceId": "playback-instance-0001"},
     PlaybackCapabilityRequest: {
         "sourceId": "source-0001",
         "playbackAccessMode": "lease-v1",

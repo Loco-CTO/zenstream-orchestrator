@@ -86,6 +86,7 @@ class OpenApiContractTest(unittest.TestCase):
             self.assertNotIn(path, self.schema["paths"])
 
     def test_refresh_attempt_id_is_documented_as_optional_uuid(self):
+        """Verify refresh documents its optional UUID request identifier."""
         operation = self.schema["paths"]["/api/auth/refresh"]["post"]
         request_schema = operation["requestBody"]["content"]["application/json"][
             "schema"
@@ -101,6 +102,7 @@ class OpenApiContractTest(unittest.TestCase):
         )
 
     def test_playlist_paging_membership_and_anchor_move_are_documented(self):
+        """Verify playlist reads document membership and paging behavior."""
         owned = self.schema["paths"]["/api/account/playlists/{playlist_id}"]["get"]
         shared = self.schema["paths"]["/api/shared/playlists/{share_token}"]["get"]
         for operation in (owned, shared):
@@ -129,6 +131,7 @@ class OpenApiContractTest(unittest.TestCase):
         )
 
     def test_catalog_item_schema_documents_the_live_client_payload_shape(self):
+        """Match catalog item response fields to the live client payload."""
         schemas = self.schema["components"]["schemas"]
         item_response = self.schema["paths"]["/api/catalog/items/{entity_id}"]["get"][
             "responses"
@@ -159,7 +162,26 @@ class OpenApiContractTest(unittest.TestCase):
             {"images", "credits", "artists", "contributingArtists"}.issubset(metadata)
         )
 
+    def test_audio_play_start_documents_the_required_idempotency_key(self):
+        """Match the audio play-start request contract to the live clients."""
+        operation = self.schema["paths"]["/api/catalog/items/{entity_id}/play-start"][
+            "post"
+        ]
+        request = operation["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request["$ref"], "#/components/schemas/PlayStartRequest")
+
+        play_start = self.schema["components"]["schemas"]["PlayStartRequest"]
+        self.assertEqual(play_start["required"], ["playbackInstanceId"])
+        self.assertEqual(
+            play_start["properties"]["playbackInstanceId"]["type"], "string"
+        )
+        self.assertEqual(play_start["properties"]["playbackInstanceId"]["minLength"], 1)
+        self.assertEqual(
+            play_start["properties"]["playbackInstanceId"]["maxLength"], 200
+        )
+
     def test_syncplay_group_schema_documents_the_live_websocket_payload(self):
+        """Keep the SyncPlay group schema aligned with its wire payload."""
         schemas = self.schema["components"]["schemas"]
         group = schemas["SyncplayGroup"]["properties"]
         self.assertTrue(
@@ -186,6 +208,7 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertTrue({"role", "readyGeneration"}.issubset(member))
 
     def test_shared_client_response_schemas_match_live_payload_names(self):
+        """Verify shared responses retain the field names clients consume."""
         schemas = self.schema["components"]["schemas"]
         notifications = schemas["NotificationPage"]["properties"]
         self.assertTrue({"items", "unreadCount", "nextCursor"}.issubset(notifications))
@@ -227,9 +250,11 @@ class OpenApiContractTest(unittest.TestCase):
         lyrics = schemas["LyricsResponse"]["properties"]
         self.assertIn("trackId", lyrics)
         lyrics_schema = lyrics["lyrics"]
-        content_schema = next(
+        content_schemas = [
             value for value in lyrics_schema["anyOf"] if value.get("$ref")
-        )
+        ]
+        self.assertEqual(len(content_schemas), 1)
+        content_schema = content_schemas[0]
         lyrics_content = schemas[content_schema["$ref"].rsplit("/", 1)[-1]][
             "properties"
         ]
@@ -238,6 +263,7 @@ class OpenApiContractTest(unittest.TestCase):
         )
 
     def test_operation_ids_are_explicit_stable_and_unique(self):
+        """Require explicit, stable, unique operation identifiers."""
         operation_ids = [
             operation["operationId"] for _, _, operation in self.operations
         ]
@@ -250,6 +276,7 @@ class OpenApiContractTest(unittest.TestCase):
             self.assertTrue(operation.get("description"), (method, path))
 
     def test_readiness_is_public_and_documents_database_failure(self):
+        """Document public readiness and database-failure responses."""
         operation = self.schema["paths"]["/health/ready"]["get"]
 
         self.assertEqual(operation["summary"], "Check database readiness")
@@ -262,6 +289,7 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertEqual(error_schema["$ref"], "#/components/schemas/ErrorResponse")
 
     def test_write_operations_have_documented_request_bodies(self):
+        """Require request-body schemas for documented write operations."""
         for path, method, operation in self.operations:
             if method not in {"POST", "PUT", "PATCH", "DELETE"}:
                 continue
@@ -274,8 +302,9 @@ class OpenApiContractTest(unittest.TestCase):
                 self.assertIn("schema", value, (method, path, media_type))
 
     def test_schema_references_resolve(self):
+        """Ensure every schema reference used by the contract resolves."""
         schemas = self.schema["components"]["schemas"]
-        for value in _examples(self.schema):
+        for value in _walk(self.schema):
             if not isinstance(value, dict) or "$ref" not in value:
                 continue
             reference = value["$ref"]
@@ -283,6 +312,7 @@ class OpenApiContractTest(unittest.TestCase):
             self.assertIn(reference.rsplit("/", 1)[-1], schemas, reference)
 
     def test_json_responses_have_reusable_schemas_or_explicit_empty_status(self):
+        """Require reusable schemas or explicit empty JSON response statuses."""
         for path, method, operation in self.operations:
             for status, response in operation["responses"].items():
                 if status == "204":
@@ -305,6 +335,7 @@ class OpenApiContractTest(unittest.TestCase):
                         )
 
     def test_auth_schemes_and_realtime_guidance_are_present(self):
+        """Document authentication schemes and realtime connection guidance."""
         schemes = self.schema["components"]["securitySchemes"]
         for name in (
             "UserBearerAuth",
@@ -345,6 +376,7 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertIn("/api/ws/syncplay", self.schema["info"]["description"])
 
     def test_media_contracts_and_pending_headers_are_documented(self):
+        """Document media response statuses and pending-resource headers."""
         stream = self.schema["paths"]["/api/playback/items/{entity_id}/stream"]
         self.assertIn("206", stream["get"]["responses"])
         self.assertIn("416", stream["get"]["responses"])
@@ -408,6 +440,7 @@ class OpenApiContractTest(unittest.TestCase):
         )
 
     def test_documented_success_statuses_match_known_mutations(self):
+        """Match documented success statuses to known mutations."""
         no_content = (
             ("POST", "/api/account/password"),
             ("POST", "/api/auth/logout"),
@@ -460,6 +493,7 @@ class OpenApiContractTest(unittest.TestCase):
     def test_examples_are_synthetic_and_have_no_absolute_paths_or_real_secret_shapes(
         self,
     ):
+        """Keep examples synthetic and free of local paths or secret shapes."""
         forbidden = (
             re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]"),
             re.compile(r"(?:^|/)(?:Users|home|var|tmp)(?:/|$)", re.IGNORECASE),
@@ -473,5 +507,5 @@ class OpenApiContractTest(unittest.TestCase):
                 self.assertIsNone(pattern.search(value), value)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

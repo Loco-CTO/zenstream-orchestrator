@@ -1,6 +1,6 @@
 # Breaking change exceptions
 
-All ten findings use oasdiff's `request-parameter-enum-value-removed` check and
+The ten existing findings use oasdiff's `request-parameter-enum-value-removed` check and
 correct the published contract without removing runtime-accepted inputs. Home
 still accepts all five listed values; its enum moved into the string branch of
 the nullable `anyOf`, which oasdiff reports as removals from the old top-level
@@ -19,6 +19,17 @@ GET /api/catalog/items/{entity_id}/detail removed the enum value `derived` from 
 GET /api/catalog/items/{entity_id}/detail removed the enum value `featured` from the `query` request parameter `section`
 GET /api/catalog/items/{entity_id}/detail removed the enum value `library` from the `query` request parameter `section`
 GET /api/catalog/items/{entity_id}/detail removed the enum value `nextUp` from the `query` request parameter `section`
+
+The play-start correction documents the handler's existing required idempotency
+key. The handler rejects requests without `playbackInstanceId`; the previous
+`position` and `sourceId` fields were copied from unrelated request schemas and
+are ignored by the play-start handler. These exact findings correct the
+published contract without changing runtime behavior. Remove them after this
+corrected snapshot becomes the comparison base.
+
+POST /api/catalog/items/{entity_id}/play-start added the new required request property `playbackInstanceId`
+POST /api/catalog/items/{entity_id}/play-start removed the request property `position`
+POST /api/catalog/items/{entity_id}/play-start removed the request property `sourceId`
 
 The CI gate currently fails on all `ERR` and `WARN` findings. If an exception
 is approved with an API change, document the exact HTTP method and path, the

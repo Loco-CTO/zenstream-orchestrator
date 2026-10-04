@@ -44,7 +44,6 @@ HOME_RECOMMENDATION_RESULT_LIMIT = 18
 HOME_USER_STATE_SAMPLE_LIMIT = 500
 HOME_CONTINUE_STATE_SAMPLE_LIMIT = 500
 HOME_NEXT_UP_STATE_SAMPLE_LIMIT = 5000
-HOME_NEXT_UP_SERIES_LIMIT = 36
 HOME_NEXT_UP_SEASON_LIMIT = 32
 HOME_NEXT_UP_EPISODE_SCAN_LIMIT = 128
 HOME_DEGRADED_CANDIDATE_LIMIT = 500
@@ -4813,151 +4812,146 @@ class Catalog:
     @_catalog_read
     def home_next_up(self, user_id: str, language: str) -> list[dict]:
         def select_rows():
-            recent_completed = self.db.execute(
-                "WITH recent AS ("
-                " SELECT entity_id,last_played_at,updated_at FROM user_item_state "
-                " WHERE user_id=? AND played=1 "
-                " ORDER BY COALESCE(last_played_at,updated_at) DESC,entity_id LIMIT ?"
-                ") SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,"
-                " series.id AS series_id,COALESCE(recent.last_played_at,recent.updated_at,'') AS activity_at "
-                " FROM recent "
-                " JOIN library_entities e ON e.id=recent.entity_id AND e.entity_type='episode' "
-                " JOIN user_library_access access ON access.user_id=? AND access.library_id=e.library_id "
-                " JOIN library_entities season ON season.id=e.parent_id AND season.entity_type='season' "
-                " JOIN library_entities series ON series.id=season.parent_id AND series.entity_type='series' "
-                " ORDER BY COALESCE(recent.last_played_at,recent.updated_at,'') DESC,"
-                " COALESCE(e.season_number,-1) DESC,COALESCE(e.episode_end_number,e.episode_number,-1) DESC,"
-                " COALESCE(e.episode_number,-1) DESC,e.relative_path COLLATE NOCASE DESC,e.id DESC",
-                [user_id, HOME_NEXT_UP_STATE_SAMPLE_LIMIT, user_id],
-            )
-            anchors = []
-            seen_series = set()
-            for row in recent_completed:
-                if row[10] in seen_series:
-                    continue
-                seen_series.add(row[10])
-                anchors.append(row)
-                if len(anchors) >= HOME_NEXT_UP_SERIES_LIMIT:
-                    break
-            if not anchors:
+            if not self.db.execute(
+                "SELECT 1 FROM user_item_state WHERE user_id=? AND played=1 LIMIT 1",
+                [user_id],
+            ):
                 return []
             published_exists = self._read_model_ready()
             published_join = (
-                "LEFT JOIN catalog_entity_summary published ON published.entity_id=candidate.id "
+                " LEFT JOIN catalog_entity_summary published ON "
+                "published.entity_id=candidate.id "
                 if published_exists
                 else ""
             )
-            published_select = "published.entity_id" if published_exists else "NULL"
-            results = []
-            for anchor in anchors:
-                (
-                    _anchor_id,
-                    library_id,
-                    anchor_season_id,
-                    _entity_type,
-                    _relative_path,
-                    anchor_season_number,
-                    _episode_number,
-                    anchor_episode_end_number,
-                    _created_at,
-                    _updated_at,
-                    series_id,
-                    activity_at,
-                ) = anchor
-                season_limit = HOME_NEXT_UP_SEASON_LIMIT
-                if anchor_season_number is None:
-                    season_rows = self.db.execute(
-                        "SELECT id,season_number FROM library_entities "
-                        "WHERE parent_id=? AND library_id=? AND entity_type='season' AND season_number IS NULL "
-                        "ORDER BY (season_number IS NULL),season_number,relative_path COLLATE NOCASE,id LIMIT ?",
-                        [series_id, library_id, season_limit],
-                    )
-                    seasons = list(season_rows)
-                    if not any(row[0] == anchor_season_id for row in seasons):
-                        anchor_season = self.db.execute(
-                            "SELECT id,season_number FROM library_entities WHERE id=? AND library_id=? AND entity_type='season'",
-                            [anchor_season_id, library_id],
-                        )
-                        if anchor_season:
-                            seasons.insert(0, anchor_season[0])
-                            seasons = seasons[:season_limit]
-                    remaining_seasons = season_limit - len(seasons)
-                    if remaining_seasons > 0:
-                        seasons.extend(
-                            self.db.execute(
-                                "SELECT id,season_number FROM library_entities "
-                                "WHERE parent_id=? AND library_id=? AND entity_type='season' AND season_number IS NOT NULL "
-                                "ORDER BY (season_number IS NULL),season_number,relative_path COLLATE NOCASE,id LIMIT ?",
-                                [series_id, library_id, remaining_seasons],
-                            )
-                        )
-                else:
-                    seasons = self.db.execute(
-                        "SELECT id,season_number FROM library_entities "
-                        "WHERE parent_id=? AND library_id=? AND entity_type='season' AND (season_number IS NULL,season_number)>=(0,?) "
-                        "ORDER BY (season_number IS NULL),season_number,relative_path COLLATE NOCASE,id LIMIT ?",
-                        [series_id, library_id, anchor_season_number, season_limit],
-                    )
-                remaining_episodes = HOME_NEXT_UP_EPISODE_SCAN_LIMIT
-                for season_id, season_number in seasons:
-                    if remaining_episodes <= 0:
-                        break
-                    same_season = season_number == anchor_season_number
-                    episode_filter = (
-                        " AND e.episode_number IS NOT NULL "
-                        "AND (e.episode_number IS NULL,e.episode_number)>(0,?)"
-                        if same_season
-                        else ""
-                    )
-                    candidate_rows = self.db.execute(
-                        "SELECT candidate.id,candidate.library_id,candidate.parent_id,candidate.entity_type,candidate.relative_path,"
-                        "candidate.season_number,candidate.episode_number,candidate.episode_end_number,candidate.created_at,candidate.updated_at,"
-                        f"COALESCE(state.played,0),COALESCE(state.position_seconds,0),{published_select} "
-                        "FROM (SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,"
-                        "e.episode_end_number,e.created_at,e.updated_at FROM library_entities e "
-                        "WHERE e.parent_id=? AND e.library_id=? AND e.entity_type='episode'"
-                        f"{episode_filter} ORDER BY (e.episode_number IS NULL),e.episode_number,e.relative_path COLLATE NOCASE,e.id LIMIT ?) candidate "
-                        "LEFT JOIN user_item_state state ON state.user_id=? AND state.entity_id=candidate.id "
-                        f"{published_join}"
-                        "ORDER BY (candidate.episode_number IS NULL),candidate.episode_number,candidate.relative_path COLLATE NOCASE,candidate.id",
-                        [
-                            season_id,
-                            library_id,
-                            *(
-                                [
-                                    anchor_episode_end_number
-                                    if anchor_episode_end_number is not None
-                                    else _episode_number
-                                    if _episode_number is not None
-                                    else -1
-                                ]
-                                if same_season
-                                else []
-                            ),
-                            remaining_episodes,
-                            user_id,
-                        ],
-                    )
-                    remaining_episodes -= len(candidate_rows)
-                    blocked_by_partial = False
-                    for candidate in candidate_rows:
-                        if candidate[10]:
-                            continue
-                        if published_exists and candidate[12] is None:
-                            continue
-                        if candidate[11] > 0:
-                            blocked_by_partial = True
-                            break
-                        results.append((*candidate[:10], series_id, activity_at))
-                        break
-                    if blocked_by_partial or any(
-                        row[10] == series_id for row in results
-                    ):
-                        break
-            results.sort(key=lambda row: row[0])
-            results.sort(key=lambda row: row[10])
-            results.sort(key=lambda row: row[11], reverse=True)
-            return results[:18]
+            published_filter = (
+                " AND published.entity_id IS NOT NULL " if published_exists else ""
+            )
+            # Prevent CTE flattening from duplicating the correlated candidate lookup.
+            return self.db.execute(
+                "WITH completed_episode_sample AS ("
+                " SELECT e.id AS anchor_id,e.library_id,"
+                "e.parent_id AS anchor_season_id,"
+                " e.season_number AS anchor_season_number,"
+                "e.episode_number AS anchor_episode_number,"
+                " e.episode_end_number AS anchor_episode_end_number,"
+                "e.relative_path AS anchor_path,"
+                " series.id AS series_id,"
+                " COALESCE(state.last_played_at,state.updated_at,'') AS activity_at "
+                " FROM user_item_state state "
+                " JOIN library_entities e ON e.id=state.entity_id AND "
+                "e.entity_type='episode' "
+                " JOIN user_library_access access ON access.user_id=state.user_id "
+                "  AND access.library_id=e.library_id "
+                " JOIN library_entities season ON season.id=e.parent_id "
+                "  AND season.library_id=e.library_id AND season.entity_type='season' "
+                " JOIN library_entities series ON series.id=season.parent_id "
+                "  AND series.library_id=e.library_id AND series.entity_type='series' "
+                " WHERE state.user_id=? AND state.played=1 "
+                " ORDER BY COALESCE(state.last_played_at,state.updated_at,'') DESC,"
+                " COALESCE(e.season_number,-1) DESC,"
+                " COALESCE(e.episode_end_number,e.episode_number,-1) DESC,"
+                " COALESCE(e.episode_number,-1) DESC,"
+                "e.relative_path COLLATE NOCASE DESC,e.id DESC "
+                " LIMIT ?"
+                "), ranked_anchors AS ("
+                " SELECT completed_episode_sample.*,"
+                " ROW_NUMBER() OVER (PARTITION BY series_id ORDER BY activity_at DESC,"
+                " COALESCE(anchor_season_number,-1) DESC,"
+                " COALESCE(anchor_episode_end_number,anchor_episode_number,-1) DESC,"
+                " COALESCE(anchor_episode_number,-1) DESC,"
+                "anchor_path COLLATE NOCASE DESC,"
+                " anchor_id DESC) AS anchor_rank "
+                " FROM completed_episode_sample"
+                "), anchors AS ("
+                " SELECT anchor_id,library_id,anchor_season_id,anchor_season_number,"
+                " anchor_episode_number,anchor_episode_end_number,"
+                "series_id,activity_at "
+                " FROM ranked_anchors WHERE anchor_rank=1"
+                "), ranked_candidate_seasons AS ("
+                " SELECT anchors.anchor_id,anchors.library_id,anchors.anchor_season_id,"
+                "  anchors.anchor_season_number,anchors.anchor_episode_number,"
+                "  anchors.anchor_episode_end_number,anchors.series_id,"
+                "anchors.activity_at,"
+                "  season.id AS candidate_season_id,"
+                "  season.season_number AS candidate_season_number,"
+                "  ROW_NUMBER() OVER (PARTITION BY anchors.series_id ORDER BY "
+                "   CASE WHEN season.id=anchors.anchor_season_id THEN 0 ELSE 1 END,"
+                "   CASE WHEN anchors.anchor_season_number IS NULL "
+                "    THEN (season.season_number IS NOT NULL) "
+                "    ELSE (season.season_number IS NULL) END,"
+                "   season.season_number,season.relative_path COLLATE NOCASE,season.id"
+                "  ) AS season_rank "
+                " FROM anchors JOIN library_entities season "
+                "  ON season.parent_id=anchors.series_id "
+                "   AND season.library_id=anchors.library_id AND "
+                "season.entity_type='season' "
+                " WHERE anchors.anchor_season_number IS NULL "
+                "OR season.season_number IS NULL "
+                "  OR season.season_number>=anchors.anchor_season_number"
+                "), candidate_seasons AS ("
+                " SELECT * FROM ranked_candidate_seasons WHERE season_rank<=?"
+                "), candidate_ids AS ("
+                " SELECT anchors.*,("
+                "  SELECT candidate.id FROM candidate_seasons season_choice "
+                "  JOIN library_entities candidate "
+                "   ON candidate.parent_id=season_choice.candidate_season_id "
+                "    AND candidate.library_id=season_choice.library_id "
+                "  JOIN user_library_access candidate_access "
+                "   ON candidate_access.user_id=? "
+                "    AND candidate_access.library_id=candidate.library_id "
+                "  LEFT JOIN user_item_state candidate_state "
+                "   ON candidate_state.user_id=? AND "
+                "candidate_state.entity_id=candidate.id "
+                f"{published_join} "
+                "  WHERE season_choice.anchor_id=anchors.anchor_id "
+                "   AND candidate.entity_type='episode' "
+                "   AND (season_choice.candidate_season_number "
+                "     IS NOT season_choice.anchor_season_number "
+                "    OR (candidate.episode_number IS NOT NULL AND "
+                "candidate.episode_number>"
+                "     COALESCE(season_choice.anchor_episode_end_number,"
+                "      season_choice.anchor_episode_number,-1))) "
+                "   AND COALESCE(candidate_state.played,0)=0 "
+                f"{published_filter}"
+                "  ORDER BY season_choice.season_rank,"
+                "(candidate.episode_number IS NULL),"
+                "   candidate.episode_number,candidate.relative_path COLLATE NOCASE,"
+                "candidate.id "
+                "  LIMIT ?"
+                " ) AS candidate_id FROM anchors"
+                " LIMIT -1"
+                "), eligible_candidates AS ("
+                " SELECT candidate.id,candidate.library_id,candidate.parent_id,"
+                "candidate.entity_type,"
+                " candidate.relative_path,candidate.season_number,"
+                "candidate.episode_number,"
+                " candidate.episode_end_number,candidate.created_at,"
+                "candidate.updated_at,"
+                " candidate_ids.series_id,candidate_ids.activity_at,"
+                " COALESCE(state.position_seconds,0) AS position_seconds "
+                " FROM candidate_ids JOIN library_entities candidate "
+                "  ON candidate.id=candidate_ids.candidate_id "
+                " LEFT JOIN user_item_state state ON state.user_id=? AND "
+                "state.entity_id=candidate.id "
+                " WHERE candidate_ids.candidate_id IS NOT NULL"
+                ") SELECT id,library_id,parent_id,entity_type,"
+                "relative_path,season_number,"
+                " episode_number,episode_end_number,created_at,updated_at,"
+                "series_id,activity_at "
+                " FROM eligible_candidates WHERE position_seconds<=0 "
+                " ORDER BY activity_at DESC,series_id,id LIMIT ?",
+                [
+                    user_id,
+                    HOME_NEXT_UP_STATE_SAMPLE_LIMIT,
+                    HOME_NEXT_UP_SEASON_LIMIT,
+                    user_id,
+                    user_id,
+                    HOME_NEXT_UP_EPISODE_SCAN_LIMIT,
+                    user_id,
+                    18,
+                ],
+            )
 
         context = self._context(user_id)
         rows = (

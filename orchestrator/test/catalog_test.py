@@ -259,6 +259,85 @@ class CatalogTest(unittest.TestCase):
             )
         return account["id"]
 
+    def add_series_episodes(
+        self, user_id, series_id, episode_numbers, library_id="allowed", grant=True
+    ):
+        season_id = f"{series_id}-season"
+        if grant:
+            self.db.execute(
+                "INSERT OR IGNORE INTO user_library_access VALUES(?,?,?)",
+                (user_id, library_id, "now"),
+            )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                series_id,
+                library_id,
+                None,
+                "series",
+                series_id,
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                season_id,
+                library_id,
+                series_id,
+                "season",
+                f"{series_id}/Season 1",
+                1,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        episode_ids = []
+        for number in episode_numbers:
+            episode_id = f"{series_id}-episode-{number}"
+            episode_ids.append(episode_id)
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    episode_id,
+                    library_id,
+                    season_id,
+                    "episode",
+                    f"{series_id}/Season 1/Episode {number}",
+                    1,
+                    number,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+        return episode_ids
+
+    def add_play_state(self, user_id, entity_id, activity_at, position=0, played=1):
+        self.db.execute(
+            "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                user_id,
+                entity_id,
+                0,
+                played,
+                int(bool(played)),
+                position,
+                100,
+                activity_at,
+                activity_at,
+            ),
+        )
+
     @staticmethod
     def patch_catalog_metadata(catalog):
         catalog.metadata = lambda _user_id, entity_id, _language: {
@@ -2698,6 +2777,186 @@ class CatalogTest(unittest.TestCase):
             [item["id"] for item in catalog.home_next_up(user_id, "en")],
             ["episode-2"],
         )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_next_up_finds_episode_21_after_episode_20(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "episode-20",
+                "allowed",
+                "season-1",
+                "episode",
+                "Example/Season 1/Episode 20",
+                1,
+                20,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "episode-21",
+                "allowed",
+                "season-1",
+                "episode",
+                "Example/Season 1/Episode 21",
+                1,
+                21,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        self.add_play_state(user_id, "episode-20", "2026-02-01")
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+
+        self.assertEqual(
+            [item["id"] for item in catalog.home_next_up(user_id, "en")],
+            ["episode-21"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_next_up_searches_past_more_than_36_empty_series(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        self.add_play_state(user_id, "episode-1", "2026-12-31T23:58:00")
+        for index in range(37):
+            episode_id = self.add_series_episodes(
+                user_id, f"empty-series-{index:02d}", [1]
+            )[0]
+            self.add_play_state(
+                user_id, episode_id, f"2026-12-31T23:59:{index:02d}"
+            )
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+
+        self.assertEqual(
+            [item["id"] for item in catalog.home_next_up(user_id, "en")],
+            ["episode-2"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_next_up_filters_inaccessible_and_non_episode_states_before_sample(
+        self, _languages
+    ):
+        user_id = self.seed_series_hierarchy()
+        self.db.execute(
+            "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "movie-state",
+                "allowed",
+                None,
+                "movie",
+                "Movie",
+                None,
+                None,
+                None,
+                None,
+                "2026",
+                "2026",
+            ),
+        )
+        hidden_episode = self.add_series_episodes(
+            user_id, "hidden-series", [1, 2], library_id="hidden", grant=False
+        )[0]
+        self.add_play_state(user_id, "movie-state", "2026-03-03")
+        self.add_play_state(user_id, hidden_episode, "2026-03-02")
+        self.add_play_state(user_id, "episode-1", "2026-03-01")
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+
+        with patch("app.catalog.HOME_NEXT_UP_STATE_SAMPLE_LIMIT", 1):
+            next_up = catalog.home_next_up(user_id, "en")
+
+        self.assertEqual([item["id"] for item in next_up], ["episode-2"])
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_next_up_filters_played_and_unpublished_before_candidate_limit(
+        self, _languages
+    ):
+        user_id = self.seed_series_hierarchy()
+        episode_ids = self.add_series_episodes(
+            user_id, "boundary-series", range(1, 131)
+        )
+        self.add_play_state(user_id, episode_ids[0], "2026-03-01")
+        for episode_id in episode_ids[1:65]:
+            self.add_play_state(user_id, episode_id, "2025-01-01")
+        self.db.execute(
+            "CREATE TABLE catalog_entity_summary(entity_id TEXT PRIMARY KEY)"
+        )
+        for episode_id in episode_ids[1:65] + [episode_ids[129]]:
+            self.db.execute(
+                "INSERT INTO catalog_entity_summary VALUES(?)", (episode_id,)
+            )
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+        catalog._read_model_ready = lambda: True
+
+        self.assertEqual(
+            [item["id"] for item in catalog.home_next_up(user_id, "en")],
+            [episode_ids[129]],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_next_up_orders_recent_results_with_stable_ties(self, _languages):
+        user_id = self.seed_series_hierarchy()
+        self.add_play_state(user_id, "episode-1", "2026-01-02")
+        for series_id in ("tie-z", "tie-a"):
+            episode_ids = self.add_series_episodes(user_id, series_id, [1, 2])
+            self.add_play_state(user_id, episode_ids[0], "2026-01-01")
+        newest_ids = self.add_series_episodes(user_id, "newest-series", [1, 2])
+        self.add_play_state(user_id, newest_ids[0], "2026-01-03")
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+
+        self.assertEqual(
+            [item["id"] for item in catalog.home_next_up(user_id, "en")],
+            [newest_ids[1], "episode-2", "tie-a-episode-2", "tie-z-episode-2"],
+        )
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_next_up_uses_one_query_and_caps_output_at_18(self, _languages):
+        user_id = self.account().create("next-up-query-count", "password-123")[
+            "id"
+        ]
+        episode_ids = []
+        for index in range(24):
+            first, second = self.add_series_episodes(
+                user_id, f"query-series-{index:02d}", [1, 2]
+            )
+            episode_ids.append(second)
+            self.add_play_state(
+                user_id, first, f"2026-04-{index + 1:02d}T00:00:00"
+            )
+        catalog = self.catalog()
+        catalog._read_model_ready = lambda: False
+        catalog.metadata = lambda _user_id, _entity_id, _language: {
+            "metadata": {}
+        }
+        catalog._home_series_name = lambda _user_id, _language, _series_id, _names: None
+        catalog._serialize = lambda _user_id, row, _metadata, **_kwargs: {
+            "id": row[0]
+        }
+
+        with patch.object(self.db, "execute", wraps=self.db.execute) as execute:
+            result = catalog.home_next_up(user_id, "en")
+
+        self.assertLessEqual(execute.call_count, 5)
+        self.assertEqual(
+            sum(
+                "WITH completed_episode_sample" in call.args[0]
+                for call in execute.call_args_list
+            ),
+            1,
+        )
+        self.assertEqual(len(result), 18)
+        self.assertEqual(result[0]["id"], episode_ids[-1])
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_continue_includes_sub_two_percent_progress_and_orders_latest(

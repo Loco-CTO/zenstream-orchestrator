@@ -4826,6 +4826,7 @@ class Catalog:
             published_filter = (
                 " AND published.entity_id IS NOT NULL " if published_exists else ""
             )
+            # Prevent CTE flattening from duplicating the correlated candidate lookup.
             return self.db.execute(
                 "WITH completed_episode_sample AS ("
                 " SELECT e.id AS anchor_id,e.library_id,e.parent_id AS anchor_season_id,"
@@ -4900,6 +4901,7 @@ class Catalog:
                 "   candidate.relative_path COLLATE NOCASE,candidate.id "
                 "  LIMIT ?"
                 " ) AS candidate_id FROM anchors"
+                " LIMIT -1"
                 "), eligible_candidates AS ("
                 " SELECT candidate.id,candidate.library_id,candidate.parent_id,candidate.entity_type,"
                 " candidate.relative_path,candidate.season_number,candidate.episode_number,"

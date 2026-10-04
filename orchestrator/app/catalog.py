@@ -4859,7 +4859,7 @@ class Catalog:
                 " SELECT anchor_id,library_id,anchor_season_id,anchor_season_number,"
                 " anchor_episode_number,anchor_episode_end_number,series_id,activity_at "
                 " FROM ranked_anchors WHERE anchor_rank=1"
-                "), candidate_ids AS MATERIALIZED ("
+                "), candidate_ids AS ("
                 " SELECT anchors.*,("
                 "  SELECT candidate.id FROM library_entities candidate "
                 "  JOIN library_entities candidate_season ON candidate_season.id=candidate.parent_id "

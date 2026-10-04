@@ -2830,9 +2830,7 @@ class CatalogTest(unittest.TestCase):
             episode_id = self.add_series_episodes(
                 user_id, f"empty-series-{index:02d}", [1]
             )[0]
-            self.add_play_state(
-                user_id, episode_id, f"2026-12-31T23:59:{index:02d}"
-            )
+            self.add_play_state(user_id, episode_id, f"2026-12-31T23:59:{index:02d}")
         catalog = self.catalog()
         self.patch_catalog_metadata(catalog)
 
@@ -2922,27 +2920,19 @@ class CatalogTest(unittest.TestCase):
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_next_up_uses_one_query_and_caps_output_at_18(self, _languages):
-        user_id = self.account().create("next-up-query-count", "password-123")[
-            "id"
-        ]
+        user_id = self.account().create("next-up-query-count", "password-123")["id"]
         episode_ids = []
         for index in range(24):
             first, second = self.add_series_episodes(
                 user_id, f"query-series-{index:02d}", [1, 2]
             )
             episode_ids.append(second)
-            self.add_play_state(
-                user_id, first, f"2026-04-{index + 1:02d}T00:00:00"
-            )
+            self.add_play_state(user_id, first, f"2026-04-{index + 1:02d}T00:00:00")
         catalog = self.catalog()
         catalog._read_model_ready = lambda: False
-        catalog.metadata = lambda _user_id, _entity_id, _language: {
-            "metadata": {}
-        }
+        catalog.metadata = lambda _user_id, _entity_id, _language: {"metadata": {}}
         catalog._home_series_name = lambda _user_id, _language, _series_id, _names: None
-        catalog._serialize = lambda _user_id, row, _metadata, **_kwargs: {
-            "id": row[0]
-        }
+        catalog._serialize = lambda _user_id, row, _metadata, **_kwargs: {"id": row[0]}
 
         with patch.object(self.db, "execute", wraps=self.db.execute) as execute:
             result = catalog.home_next_up(user_id, "en")

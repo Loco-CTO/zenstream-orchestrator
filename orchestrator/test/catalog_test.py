@@ -262,6 +262,7 @@ class CatalogTest(unittest.TestCase):
     def add_series_episodes(
         self, user_id, series_id, episode_numbers, library_id="allowed", grant=True
     ):
+        """Create a series, season, and episodes in the test catalog."""
         season_id = f"{series_id}-season"
         if grant:
             self.db.execute(
@@ -323,6 +324,7 @@ class CatalogTest(unittest.TestCase):
         return episode_ids
 
     def add_play_state(self, user_id, entity_id, activity_at, position=0, played=1):
+        """Insert a synthetic user item state for a test."""
         self.db.execute(
             "INSERT INTO user_item_state VALUES(?,?,?,?,?,?,?,?,?)",
             (
@@ -2780,6 +2782,7 @@ class CatalogTest(unittest.TestCase):
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_next_up_finds_episode_21_after_episode_20(self, _languages):
+        """Return episode 21 after episode 20 is marked played."""
         user_id = self.seed_series_hierarchy()
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -2824,6 +2827,7 @@ class CatalogTest(unittest.TestCase):
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_next_up_searches_past_more_than_36_empty_series(self, _languages):
+        """Keep eligible series visible past the former 36-series cutoff."""
         user_id = self.seed_series_hierarchy()
         self.add_play_state(user_id, "episode-1", "2026-12-31T23:58:00")
         for index in range(37):
@@ -2843,6 +2847,7 @@ class CatalogTest(unittest.TestCase):
     def test_home_next_up_filters_inaccessible_and_non_episode_states_before_sample(
         self, _languages
     ):
+        """Exclude inaccessible and non-episode history before sampling."""
         user_id = self.seed_series_hierarchy()
         self.db.execute(
             "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -2878,6 +2883,7 @@ class CatalogTest(unittest.TestCase):
     def test_home_next_up_filters_played_and_unpublished_before_candidate_limit(
         self, _languages
     ):
+        """Filter played and unpublished episodes before the candidate limit."""
         user_id = self.seed_series_hierarchy()
         episode_ids = self.add_series_episodes(
             user_id, "boundary-series", range(1, 131)
@@ -2903,6 +2909,7 @@ class CatalogTest(unittest.TestCase):
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_next_up_orders_recent_results_with_stable_ties(self, _languages):
+        """Order by completion time and resolve ties deterministically."""
         user_id = self.seed_series_hierarchy()
         self.add_play_state(user_id, "episode-1", "2026-01-02")
         for series_id in ("tie-z", "tie-a"):
@@ -2920,14 +2927,19 @@ class CatalogTest(unittest.TestCase):
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_next_up_uses_one_query_and_caps_output_at_18(self, _languages):
+        """Use one query and limit the result to 18 series."""
         user_id = self.account().create("next-up-query-count", "password-123")["id"]
         episode_ids = []
         for index in range(24):
-            first, second = self.add_series_episodes(
+            series_episode_ids = self.add_series_episodes(
                 user_id, f"query-series-{index:02d}", [1, 2]
             )
-            episode_ids.append(second)
-            self.add_play_state(user_id, first, f"2026-04-{index + 1:02d}T00:00:00")
+            episode_ids.append(series_episode_ids[1])
+            self.add_play_state(
+                user_id,
+                series_episode_ids[0],
+                f"2026-04-{index + 1:02d}T00:00:00",
+            )
         catalog = self.catalog()
         catalog._read_model_ready = lambda: False
         catalog.metadata = lambda _user_id, _entity_id, _language: {"metadata": {}}

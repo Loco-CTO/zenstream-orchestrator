@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import importlib
+import importlib.machinery
 import io
 import json
 import stat
@@ -717,7 +718,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             (release.directory / "dependencies").glob("*/site-packages")
         )
         native_module = ModuleType("test_managed_native_extension")
-        suffix = next(suffix for suffix in (".cp312-win_amd64.pyd", ".pyd") if suffix)
+        suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
         native_module.__file__ = str(
             dependency_root / "onnxruntime_genai" / f"onnxruntime_genai{suffix}"
         )

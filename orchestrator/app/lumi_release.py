@@ -54,11 +54,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import ModuleType
-from typing import Any, Callable, Mapping, Sequence
-
+from typing import Any
 
 LUMI_GITHUB_REPOSITORY = "Loco-CTO/zenstream-lumi"
 LUMI_GITHUB_API = f"https://api.github.com/repos/{LUMI_GITHUB_REPOSITORY}"
@@ -162,9 +162,7 @@ class RuntimeHost:
             abi_version = soabi.split("-", 1)[0].removeprefix("cp")
         else:
             abi_version = ""
-        expected_abi_version = re.compile(
-            rf"{major}{minor}(?:d|t|dt|td)?"
-        )
+        expected_abi_version = re.compile(rf"{major}{minor}(?:d|t|dt|td)?")
         if not expected_abi_version.fullmatch(abi_version):
             raise LumiReleaseCompatibilityError(
                 "the current CPython ABI cannot be identified"
@@ -292,6 +290,7 @@ class LoadedLumiRelease:
             raise LumiReleaseError("the Lumi release is disabled")
         result = self.service_factory.create_embedded_service(*args, **kwargs)
         if inspect.isawaitable(result):
+
             async def track_service() -> object:
                 if not self._enabled:
                     close_awaitable = getattr(result, "close", None)
@@ -416,7 +415,9 @@ class LumiReleaseManager:
         and runtime API compatibility by enable(tag).
         """
         if type(limit) is not int or not 1 <= limit <= 100:
-            raise LumiReleaseCompatibilityError("release listing limit must be from 1 to 100")
+            raise LumiReleaseCompatibilityError(
+                "release listing limit must be from 1 to 100"
+            )
         return await asyncio.to_thread(self._list_published_releases, limit)
 
     async def enable(self, tag: str) -> LoadedLumiRelease:
@@ -432,10 +433,14 @@ class LumiReleaseManager:
             )
         async with self._lock:
             if self._closing_release is not None:
-                raise LumiReleaseError("Lumi disable is still closing the active service")
+                raise LumiReleaseError(
+                    "Lumi disable is still closing the active service"
+                )
             if self._restart_required:
                 reason = self._disable_error or "a native Lumi extension remains loaded"
-                raise LumiReleaseError(f"restart Orchestrator before re-enabling Lumi: {reason}")
+                raise LumiReleaseError(
+                    f"restart Orchestrator before re-enabling Lumi: {reason}"
+                )
             if self._active is not None:
                 if self._active.tag == tag:
                     return self._active
@@ -500,8 +505,9 @@ class LumiReleaseManager:
             active._enabled = False
             close_failures = await active.close_services()
             dependency_directories = _dependency_directories(active.directory)
-            self._restart_required = self._restart_required or _has_loaded_native_extension(
-                dependency_directories
+            self._restart_required = (
+                self._restart_required
+                or _has_loaded_native_extension(dependency_directories)
             )
             unload_error: Exception | None = None
             try:
@@ -533,7 +539,9 @@ class LumiReleaseManager:
 
     def _prepare_release(self, tag: str) -> _PreparedRelease:
         runtime_host = self._host()
-        metadata_url = f"{LUMI_GITHUB_API}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+        metadata_url = (
+            f"{LUMI_GITHUB_API}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+        )
         response = self._fetcher(
             metadata_url,
             {
@@ -543,14 +551,16 @@ class LumiReleaseManager:
             },
             MAX_RELEASE_METADATA_BYTES,
         )
-        if _canonical_api_url(response.final_url) != _canonical_api_url(
-            metadata_url
-        ):
-            raise LumiReleaseError("GitHub release metadata came from an unexpected URL")
+        if _canonical_api_url(response.final_url) != _canonical_api_url(metadata_url):
+            raise LumiReleaseError(
+                "GitHub release metadata came from an unexpected URL"
+            )
         try:
             release = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise LumiReleaseError("GitHub returned invalid release metadata") from error
+            raise LumiReleaseError(
+                "GitHub returned invalid release metadata"
+            ) from error
         if not isinstance(release, dict):
             raise LumiReleaseError("GitHub returned invalid release metadata")
         self._validate_release_metadata(release, tag)
@@ -560,7 +570,9 @@ class LumiReleaseManager:
             raise LumiReleaseUnavailable(
                 f"release {tag} has no {LUMI_RELEASE_ASSET_NAME} asset"
             )
-        package_bytes = self._download_asset(tag, package_asset, MAX_RELEASE_ARCHIVE_BYTES)
+        package_bytes = self._download_asset(
+            tag, package_asset, MAX_RELEASE_ARCHIVE_BYTES
+        )
         manifest = _read_and_validate_manifest(
             package_bytes,
             tag=tag,
@@ -582,7 +594,9 @@ class LumiReleaseManager:
                 "the release does not provide a pinned onnxruntime-genai wheel for this host"
             )
         if len(matching_dependencies) > MAX_WHEELS:
-            raise LumiReleaseCompatibilityError("the release declares too many runtime wheels")
+            raise LumiReleaseCompatibilityError(
+                "the release declares too many runtime wheels"
+            )
 
         wheel_payloads: list[tuple[RuntimeDependency, bytes]] = []
         downloaded_bytes = len(package_bytes)
@@ -598,7 +612,9 @@ class LumiReleaseManager:
                     f"release metadata digest does not match the manifest for {dependency.asset}"
                 )
             if downloaded_bytes + asset.size > MAX_TOTAL_DOWNLOAD_BYTES:
-                raise LumiReleaseError("the release exceeds the total download size limit")
+                raise LumiReleaseError(
+                    "the release exceeds the total download size limit"
+                )
             wheel_bytes = self._download_asset(tag, asset, MAX_WHEEL_BYTES)
             downloaded_bytes += len(wheel_bytes)
             expanded_wheel_bytes += _validate_wheel_archive(wheel_bytes, dependency)
@@ -631,7 +647,9 @@ class LumiReleaseManager:
         try:
             releases = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise LumiReleaseError("GitHub returned an invalid release listing") from error
+            raise LumiReleaseError(
+                "GitHub returned an invalid release listing"
+            ) from error
         if not isinstance(releases, list):
             raise LumiReleaseError("GitHub returned an invalid release listing")
         candidates: list[LumiReleaseCandidate] = []
@@ -683,16 +701,21 @@ class LumiReleaseManager:
             raise LumiReleaseUnavailable("draft Lumi releases cannot be installed")
         if release.get("prerelease") is not False:
             raise LumiReleaseUnavailable("Lumi prereleases cannot be installed")
-        if not isinstance(release.get("published_at"), str) or not release[
-            "published_at"
-        ].strip():
+        if (
+            not isinstance(release.get("published_at"), str)
+            or not release["published_at"].strip()
+        ):
             raise LumiReleaseUnavailable("the Lumi release is not published")
         if release.get("html_url") != (
             f"https://github.com/{LUMI_GITHUB_REPOSITORY}/releases/tag/{tag}"
         ):
-            raise LumiReleaseError("GitHub release metadata has an unexpected repository origin")
+            raise LumiReleaseError(
+                "GitHub release metadata has an unexpected repository origin"
+            )
         if release.get("full_name") not in (None, LUMI_GITHUB_REPOSITORY):
-            raise LumiReleaseError("GitHub release metadata has an unexpected repository")
+            raise LumiReleaseError(
+                "GitHub release metadata has an unexpected repository"
+            )
 
     def _download_asset(self, tag: str, asset: _Asset, max_bytes: int) -> bytes:
         expected_url = (
@@ -707,7 +730,10 @@ class LumiReleaseManager:
             raise LumiReleaseError(f"release asset {asset.name} exceeds the size limit")
         response = self._fetcher(
             expected_url,
-            {"Accept": "application/octet-stream", "User-Agent": "ZenStream-Orchestrator"},
+            {
+                "Accept": "application/octet-stream",
+                "User-Agent": "ZenStream-Orchestrator",
+            },
             max_bytes,
         )
         _validate_download_url(response.final_url)
@@ -715,7 +741,9 @@ class LumiReleaseManager:
             raise LumiReleaseError(f"release asset {asset.name} has an unexpected size")
         actual_digest = hashlib.sha256(response.body).hexdigest()
         if actual_digest != asset.sha256:
-            raise LumiReleaseError(f"release asset {asset.name} failed its SHA-256 check")
+            raise LumiReleaseError(
+                f"release asset {asset.name} failed its SHA-256 check"
+            )
         return response.body
 
     def _install_prepared(self, prepared: _PreparedRelease) -> _InstallTransaction:
@@ -724,7 +752,9 @@ class LumiReleaseManager:
             hashlib.sha256(wheel_bytes).hexdigest()
             for _, wheel_bytes in prepared.wheels
         )
-        release_digest = hashlib.sha256("".join(digest_parts).encode("ascii")).hexdigest()
+        release_digest = hashlib.sha256(
+            "".join(digest_parts).encode("ascii")
+        ).hexdigest()
         release_root = _managed_release_root(self._managed_data_path)
         final_directory = release_root / f"{prepared.tag}-{release_digest[:16]}"
         staging = Path(
@@ -754,7 +784,9 @@ class LumiReleaseManager:
                 dependency_root.mkdir(parents=True, exist_ok=True)
                 _extract_wheel(wheel_bytes, dependency_root, dependency)
             if final_directory.exists():
-                previous = release_root / f".rollback-{final_directory.name}-{os.getpid()}"
+                previous = (
+                    release_root / f".rollback-{final_directory.name}-{os.getpid()}"
+                )
                 if previous.exists():
                     _remove_managed_path(previous)
                 os.replace(final_directory, previous)
@@ -776,7 +808,10 @@ class LumiReleaseManager:
         modules: ImportedLumiModules, manifest: LumiReleaseManifest
     ) -> None:
         plugin_api_version = getattr(modules.package, "LUMI_PLUGIN_API_VERSION", None)
-        if type(plugin_api_version) is not int or plugin_api_version != LUMI_PLUGIN_API_VERSION:
+        if (
+            type(plugin_api_version) is not int
+            or plugin_api_version != LUMI_PLUGIN_API_VERSION
+        ):
             raise LumiReleaseCompatibilityError(
                 "the Lumi package plugin API version is unsupported"
             )
@@ -793,11 +828,16 @@ class LumiReleaseManager:
             "OrtGenAIConfig",
             "VerifiedModelArtifact",
         )
-        if any(not callable(getattr(modules.runtime, name, None)) for name in required_runtime_symbols):
+        if any(
+            not callable(getattr(modules.runtime, name, None))
+            for name in required_runtime_symbols
+        ):
             raise LumiReleaseCompatibilityError(
                 "the Lumi package does not export the required runtime adapter symbols"
             )
-        if not callable(getattr(modules.service_factory, "create_embedded_service", None)):
+        if not callable(
+            getattr(modules.service_factory, "create_embedded_service", None)
+        ):
             raise LumiReleaseCompatibilityError(
                 "the Lumi package does not export create_embedded_service"
             )
@@ -806,7 +846,10 @@ class LumiReleaseManager:
     def _rollback_install(transaction: _InstallTransaction) -> None:
         if transaction.release_directory.exists():
             _remove_managed_path(transaction.release_directory, ignore_errors=True)
-        if transaction.previous_directory is not None and transaction.previous_directory.exists():
+        if (
+            transaction.previous_directory is not None
+            and transaction.previous_directory.exists()
+        ):
             os.replace(transaction.previous_directory, transaction.release_directory)
 
     @staticmethod
@@ -837,12 +880,16 @@ def _parse_release_assets(raw_assets: object) -> dict[str, _Asset]:
             raise LumiReleaseError("GitHub release metadata contains an invalid asset")
         name = raw_asset.get("name")
         if not isinstance(name, str) or not name or name in assets:
-            raise LumiReleaseError("GitHub release metadata contains duplicate or invalid asset names")
+            raise LumiReleaseError(
+                "GitHub release metadata contains duplicate or invalid asset names"
+            )
         size = raw_asset.get("size")
         digest = raw_asset.get("digest")
         download_url = raw_asset.get("browser_download_url")
         if type(size) is not int or size < 0:
-            raise LumiReleaseError(f"GitHub release asset {name} has invalid size metadata")
+            raise LumiReleaseError(
+                f"GitHub release asset {name} has invalid size metadata"
+            )
         sha256: str | None = None
         if isinstance(digest, str) and digest.startswith("sha256:"):
             candidate = digest.removeprefix("sha256:")
@@ -902,11 +949,15 @@ def _canonical_api_url(value: str) -> str:
             or not query[0][1].isdigit()
             or not 1 <= int(query[0][1]) <= 100
         ):
-            raise LumiReleaseError("GitHub release listing URL has invalid query parameters")
+            raise LumiReleaseError(
+                "GitHub release listing URL has invalid query parameters"
+            )
     elif parsed.path.startswith(tag_path):
         tag = parsed.path[len(tag_path) :]
         if not _TAG_RE.fullmatch(tag) or parsed.query:
-            raise LumiReleaseError("GitHub release metadata URL has invalid path parameters")
+            raise LumiReleaseError(
+                "GitHub release metadata URL has invalid path parameters"
+            )
     else:
         raise LumiReleaseError("GitHub API URL is outside the pinned release endpoints")
     return urllib.parse.urlunsplit(
@@ -953,15 +1004,21 @@ def _fetch_github_bytes(
                     if int(content_length) > max_bytes:
                         raise LumiReleaseError("GitHub response exceeds the size limit")
                 except ValueError as error:
-                    raise LumiReleaseError("GitHub returned invalid response size metadata") from error
+                    raise LumiReleaseError(
+                        "GitHub returned invalid response size metadata"
+                    ) from error
             body = response.read(max_bytes + 1)
             if len(body) > max_bytes:
                 raise LumiReleaseError("GitHub response exceeds the size limit")
             return HttpResponse(body, final_url, dict(response.headers.items()))
     except urllib.error.HTTPError as error:
         if error.code == 404:
-            raise LumiReleaseUnavailable("the selected Lumi release or asset does not exist") from error
-        raise LumiReleaseError(f"GitHub release request failed with HTTP {error.code}") from error
+            raise LumiReleaseUnavailable(
+                "the selected Lumi release or asset does not exist"
+            ) from error
+        raise LumiReleaseError(
+            f"GitHub release request failed with HTTP {error.code}"
+        ) from error
     except (OSError, urllib.error.URLError) as error:
         raise LumiReleaseError("GitHub release request failed") from error
 
@@ -984,7 +1041,9 @@ def _read_and_validate_manifest(
     except (zipfile.BadZipFile, OSError, RuntimeError) as error:
         if isinstance(error, LumiReleaseError):
             raise
-        raise LumiReleaseError("Lumi package asset is not a valid zip archive") from error
+        raise LumiReleaseError(
+            "Lumi package asset is not a valid zip archive"
+        ) from error
     try:
         raw = json.loads(manifest_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -994,19 +1053,29 @@ def _read_and_validate_manifest(
         or type(raw.get("schemaVersion")) is not int
         or raw.get("schemaVersion") != 1
     ):
-        raise LumiReleaseCompatibilityError("Lumi release manifest schema is unsupported")
+        raise LumiReleaseCompatibilityError(
+            "Lumi release manifest schema is unsupported"
+        )
     if raw.get("tag") != tag:
-        raise LumiReleaseError("Lumi release manifest tag does not match the selected release")
+        raise LumiReleaseError(
+            "Lumi release manifest tag does not match the selected release"
+        )
     api_version = raw.get("runtimeApiVersion")
     if type(api_version) is not int or api_version != LUMI_RUNTIME_API_VERSION:
-        raise LumiReleaseCompatibilityError("Lumi release runtime API version is unsupported")
-    minimum = _parse_version(raw.get("minimumOrchestratorVersion"), "minimum Orchestrator version")
+        raise LumiReleaseCompatibilityError(
+            "Lumi release runtime API version is unsupported"
+        )
+    minimum = _parse_version(
+        raw.get("minimumOrchestratorVersion"), "minimum Orchestrator version"
+    )
     maximum = _parse_version(
         raw.get("maximumOrchestratorVersionExclusive"),
         "maximum Orchestrator version",
     )
     if not minimum < maximum:
-        raise LumiReleaseCompatibilityError("Lumi release has an invalid Orchestrator version range")
+        raise LumiReleaseCompatibilityError(
+            "Lumi release has an invalid Orchestrator version range"
+        )
     if not minimum <= orchestrator_version < maximum:
         raise LumiReleaseCompatibilityError(
             "Lumi release is incompatible with this Orchestrator version"
@@ -1015,7 +1084,9 @@ def _read_and_validate_manifest(
     package_files = _parse_package_file_manifest(raw.get("files"))
     dependencies = _parse_runtime_dependencies(raw.get("runtimeDependencies"))
     if len(dependencies) > MAX_WHEELS:
-        raise LumiReleaseCompatibilityError("Lumi release declares too many runtime dependencies")
+        raise LumiReleaseCompatibilityError(
+            "Lumi release declares too many runtime dependencies"
+        )
     if not any(
         _normalize_distribution(item.distribution) == "onnxruntime-genai"
         for item in dependencies
@@ -1041,30 +1112,46 @@ def _read_and_validate_manifest(
 
 
 def _parse_package_file_manifest(raw_files: object) -> dict[str, tuple[int, str]]:
-    if not isinstance(raw_files, dict) or not raw_files or len(raw_files) > MAX_PACKAGE_FILES:
+    if (
+        not isinstance(raw_files, dict)
+        or not raw_files
+        or len(raw_files) > MAX_PACKAGE_FILES
+    ):
         raise LumiReleaseError("Lumi release manifest has an invalid package file list")
     result: dict[str, tuple[int, str]] = {}
     for relative, raw_entry in raw_files.items():
         _validate_relative_member(relative, package_only=True)
         if not isinstance(raw_entry, dict):
-            raise LumiReleaseError(f"Lumi file manifest entry for {relative} is invalid")
+            raise LumiReleaseError(
+                f"Lumi file manifest entry for {relative} is invalid"
+            )
         size = raw_entry.get("size")
         digest = raw_entry.get("sha256")
         if type(size) is not int or size < 0 or size > MAX_PACKAGE_FILE_BYTES:
-            raise LumiReleaseError(f"Lumi package file {relative} exceeds the size limit")
+            raise LumiReleaseError(
+                f"Lumi package file {relative} exceeds the size limit"
+            )
         if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
-            raise LumiReleaseError(f"Lumi package file {relative} has an invalid SHA-256")
+            raise LumiReleaseError(
+                f"Lumi package file {relative} has an invalid SHA-256"
+            )
         result[relative] = (size, digest)
     if "lumi/__init__.py" not in result or "lumi/runtime/__init__.py" not in result:
         raise LumiReleaseError("Lumi package does not contain its runtime entrypoint")
     return result
 
 
-def _parse_runtime_dependencies(raw_dependencies: object) -> tuple[RuntimeDependency, ...]:
+def _parse_runtime_dependencies(
+    raw_dependencies: object,
+) -> tuple[RuntimeDependency, ...]:
     if not isinstance(raw_dependencies, list) or not raw_dependencies:
-        raise LumiReleaseCompatibilityError("Lumi release has no pinned runtime wheel set")
+        raise LumiReleaseCompatibilityError(
+            "Lumi release has no pinned runtime wheel set"
+        )
     if len(raw_dependencies) > MAX_WHEELS:
-        raise LumiReleaseCompatibilityError("Lumi release declares too many runtime wheels")
+        raise LumiReleaseCompatibilityError(
+            "Lumi release declares too many runtime wheels"
+        )
     dependencies: list[RuntimeDependency] = []
     seen: set[tuple[str, str, str, str]] = set()
     for raw in raw_dependencies:
@@ -1181,11 +1268,20 @@ def _validate_package_archive_members(
         extra = sorted(set(infos) - expected)
         missing = sorted(expected - set(infos))
         details = "unexpected package files" if extra else "missing package files"
-        raise LumiReleaseError(f"Lumi release has {details}: {', '.join((extra or missing)[:5])}")
+        raise LumiReleaseError(
+            f"Lumi release has {details}: {', '.join((extra or missing)[:5])}"
+        )
 
 
-def _validate_relative_member(relative: object, *, package_only: bool = False) -> PurePosixPath:
-    if not isinstance(relative, str) or not relative or "\\" in relative or "\x00" in relative:
+def _validate_relative_member(
+    relative: object, *, package_only: bool = False
+) -> PurePosixPath:
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or "\\" in relative
+        or "\x00" in relative
+    ):
         raise LumiReleaseError("release archive contains an invalid file path")
     if relative.startswith("/") or ":" in relative:
         raise LumiReleaseError("release archive contains an absolute file path")
@@ -1201,10 +1297,14 @@ def _validate_relative_member(relative: object, *, package_only: bool = False) -
         if device_stem in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(
             r"(?:COM|LPT)[1-9]", device_stem
         ):
-            raise LumiReleaseError("release archive contains a reserved Windows file name")
+            raise LumiReleaseError(
+                "release archive contains a reserved Windows file name"
+            )
     path = PurePosixPath(relative)
     if package_only and (len(parts) < 2 or parts[0] != "lumi"):
-        raise LumiReleaseError("Lumi package files must be below the lumi/ package directory")
+        raise LumiReleaseError(
+            "Lumi package files must be below the lumi/ package directory"
+        )
     return path
 
 
@@ -1229,17 +1329,25 @@ def _validate_zip_entries(
         file_type = stat.S_IFMT(info.external_attr >> 16)
         allowed_types = (0, stat.S_IFDIR) if is_directory else (0, stat.S_IFREG)
         if file_type not in allowed_types:
-            raise LumiReleaseError("release archive contains a symbolic link or special file")
+            raise LumiReleaseError(
+                "release archive contains a symbolic link or special file"
+            )
         if is_directory:
             if info.file_size != 0:
-                raise LumiReleaseError("release archive contains an invalid directory entry")
+                raise LumiReleaseError(
+                    "release archive contains an invalid directory entry"
+                )
             continue
         if info.file_size < 0 or info.compress_size < 0:
             raise LumiReleaseError("release archive has an invalid entry size")
         if info.file_size and info.compress_size == 0:
-            raise LumiReleaseError("release archive contains a suspicious compressed entry")
+            raise LumiReleaseError(
+                "release archive contains a suspicious compressed entry"
+            )
         if info.compress_size and info.file_size / info.compress_size > 200:
-            raise LumiReleaseError("release archive compression ratio exceeds the limit")
+            raise LumiReleaseError(
+                "release archive compression ratio exceeds the limit"
+            )
         result[name] = info
     return result
 
@@ -1254,16 +1362,28 @@ def _extract_package_archive(
             infos = _validate_zip_entries(archive.infolist(), MAX_ARCHIVE_ENTRIES)
             _validate_package_archive_members(infos, manifest.package_files)
             total = 0
-            for relative, (expected_size, expected_digest) in manifest.package_files.items():
+            for relative, (
+                expected_size,
+                expected_digest,
+            ) in manifest.package_files.items():
                 info = infos[relative]
                 if info.file_size != expected_size:
-                    raise LumiReleaseError(f"Lumi package file {relative} has an unexpected size")
+                    raise LumiReleaseError(
+                        f"Lumi package file {relative} has an unexpected size"
+                    )
                 total += expected_size
                 if total > MAX_PACKAGE_BYTES:
-                    raise LumiReleaseError("Lumi package exceeds the expanded size limit")
+                    raise LumiReleaseError(
+                        "Lumi package exceeds the expanded size limit"
+                    )
                 payload = archive.read(info)
-                if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_digest:
-                    raise LumiReleaseError(f"Lumi package file {relative} failed its SHA-256 check")
+                if (
+                    len(payload) != expected_size
+                    or hashlib.sha256(payload).hexdigest() != expected_digest
+                ):
+                    raise LumiReleaseError(
+                        f"Lumi package file {relative} failed its SHA-256 check"
+                    )
                 destination = package_root.joinpath(*PurePosixPath(relative).parts)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(payload)
@@ -1275,9 +1395,7 @@ def _extract_package_archive(
         raise LumiReleaseError("Lumi package could not be safely extracted") from error
 
 
-def _validate_wheel_archive(
-    wheel_bytes: bytes, dependency: RuntimeDependency
-) -> int:
+def _validate_wheel_archive(wheel_bytes: bytes, dependency: RuntimeDependency) -> int:
     try:
         with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
             infos = _validate_zip_entries(wheel.infolist(), MAX_ARCHIVE_ENTRIES)
@@ -1285,7 +1403,9 @@ def _validate_wheel_archive(
                 name for name in infos if name.endswith(".dist-info/METADATA")
             ]
             if len(metadata_names) != 1:
-                raise LumiReleaseError("runtime wheel has no unique distribution METADATA")
+                raise LumiReleaseError(
+                    "runtime wheel has no unique distribution METADATA"
+                )
             if infos[metadata_names[0]].file_size > 64 * 1024:
                 raise LumiReleaseError("runtime wheel METADATA exceeds the size limit")
             metadata = wheel.read(metadata_names[0]).decode("utf-8", errors="strict")
@@ -1295,7 +1415,9 @@ def _validate_wheel_archive(
                 != _normalize_distribution(dependency.distribution)
                 or version_value != dependency.version
             ):
-                raise LumiReleaseError("runtime wheel METADATA does not match its pinned identity")
+                raise LumiReleaseError(
+                    "runtime wheel METADATA does not match its pinned identity"
+                )
             if _normalize_distribution(dependency.distribution) == "onnxruntime-genai":
                 native_suffix = (
                     ".pyd" if dependency.platform_tag.startswith("win_") else ".so"
@@ -1315,7 +1437,9 @@ def _validate_wheel_archive(
     except (zipfile.BadZipFile, OSError, UnicodeDecodeError, RuntimeError) as error:
         if isinstance(error, LumiReleaseError):
             raise
-        raise LumiReleaseError("runtime dependency is not a valid wheel archive") from error
+        raise LumiReleaseError(
+            "runtime dependency is not a valid wheel archive"
+        ) from error
 
 
 def _wheel_metadata_identity(metadata: str) -> tuple[str, str]:
@@ -1343,7 +1467,9 @@ def _extract_wheel(
                     raise LumiReleaseError("runtime wheel contains an oversized file")
                 expanded += info.file_size
                 if expanded > MAX_WHEEL_EXPANDED_BYTES:
-                    raise LumiReleaseError("runtime wheel exceeds the expanded size limit")
+                    raise LumiReleaseError(
+                        "runtime wheel exceeds the expanded size limit"
+                    )
                 relative = _wheel_install_path(name, dependency)
                 if relative is None:
                     continue
@@ -1354,10 +1480,14 @@ def _extract_wheel(
     except (zipfile.BadZipFile, OSError, RuntimeError) as error:
         if isinstance(error, LumiReleaseError):
             raise
-        raise LumiReleaseError("runtime dependency could not be safely extracted") from error
+        raise LumiReleaseError(
+            "runtime dependency could not be safely extracted"
+        ) from error
 
 
-def _wheel_install_path(name: str, dependency: RuntimeDependency) -> PurePosixPath | None:
+def _wheel_install_path(
+    name: str, dependency: RuntimeDependency
+) -> PurePosixPath | None:
     relative = _validate_relative_member(name)
     parts = relative.parts
     data_index = next(
@@ -1370,7 +1500,9 @@ def _wheel_install_path(name: str, dependency: RuntimeDependency) -> PurePosixPa
     )
     if data_index is not None:
         if len(parts) < 3 or parts[1] not in {"purelib", "platlib"}:
-            raise LumiReleaseError("runtime wheel contains unsupported data or script files")
+            raise LumiReleaseError(
+                "runtime wheel contains unsupported data or script files"
+            )
         parts = parts[2:]
         if not parts:
             raise LumiReleaseError("runtime wheel contains an invalid library path")
@@ -1382,7 +1514,9 @@ def _dependency_directories(release_directory: Path) -> tuple[Path, ...]:
     root = release_directory / "dependencies"
     if not root.is_dir():
         return ()
-    return tuple(sorted(path / "site-packages" for path in root.iterdir() if path.is_dir()))
+    return tuple(
+        sorted(path / "site-packages" for path in root.iterdir() if path.is_dir())
+    )
 
 
 def _managed_release_root(managed_data_path: Path) -> Path:
@@ -1390,18 +1524,26 @@ def _managed_release_root(managed_data_path: Path) -> Path:
     base.mkdir(parents=True, exist_ok=True)
     lumi_root = base / "lumi"
     if lumi_root.is_symlink() and not _is_relative_to(lumi_root.resolve(), base):
-        raise LumiReleaseError("managed Lumi path resolves outside the Orchestrator data root")
+        raise LumiReleaseError(
+            "managed Lumi path resolves outside the Orchestrator data root"
+        )
     lumi_root.mkdir(exist_ok=True)
     lumi_root = lumi_root.resolve()
     if not _is_relative_to(lumi_root, base):
-        raise LumiReleaseError("managed Lumi path resolves outside the Orchestrator data root")
+        raise LumiReleaseError(
+            "managed Lumi path resolves outside the Orchestrator data root"
+        )
     release_root = lumi_root / "releases"
     if release_root.is_symlink() and not _is_relative_to(release_root.resolve(), base):
-        raise LumiReleaseError("managed Lumi release path resolves outside the Orchestrator data root")
+        raise LumiReleaseError(
+            "managed Lumi release path resolves outside the Orchestrator data root"
+        )
     release_root.mkdir(exist_ok=True)
     release_root = release_root.resolve()
     if not _is_relative_to(release_root, base):
-        raise LumiReleaseError("managed Lumi release path resolves outside the Orchestrator data root")
+        raise LumiReleaseError(
+            "managed Lumi release path resolves outside the Orchestrator data root"
+        )
     return release_root
 
 
@@ -1426,9 +1568,15 @@ def _import_managed_lumi(
         existing = sys.modules.get("lumi")
         if existing is not None:
             existing_file = getattr(existing, "__file__", None)
-            if not existing_file or not _is_relative_to(Path(existing_file).resolve(), package_directory):
-                raise LumiReleaseError("another lumi package is already loaded in this process")
-        paths = [str(path.resolve()) for path in (*dependency_directories, package_directory)]
+            if not existing_file or not _is_relative_to(
+                Path(existing_file).resolve(), package_directory
+            ):
+                raise LumiReleaseError(
+                    "another lumi package is already loaded in this process"
+                )
+        paths = [
+            str(path.resolve()) for path in (*dependency_directories, package_directory)
+        ]
         for path in reversed(paths):
             if path not in sys.path:
                 sys.path.insert(0, path)
@@ -1461,7 +1609,9 @@ def _import_managed_lumi(
             raise
 
 
-def _unload_managed_lumi(package_directory: Path, dependency_directories: Sequence[Path]) -> None:
+def _unload_managed_lumi(
+    package_directory: Path, dependency_directories: Sequence[Path]
+) -> None:
     package_directory = package_directory.resolve()
     module_roots = tuple(
         path.resolve() for path in (*dependency_directories, package_directory)

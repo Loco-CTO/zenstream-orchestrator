@@ -13,10 +13,10 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.lumi_release import (
-    HttpResponse,
-    ImportedLumiModules,
     LUMI_GITHUB_API,
     LUMI_GITHUB_REPOSITORY,
+    HttpResponse,
+    ImportedLumiModules,
     LumiReleaseCompatibilityError,
     LumiReleaseError,
     LumiReleaseManager,
@@ -27,7 +27,6 @@ from app.lumi_release import (
     _matching_dependencies,
     _unload_managed_lumi,
 )
-
 
 TAG = "v1.2.3"
 ORCHESTRATOR_VERSION = "1.7.2"
@@ -59,8 +58,7 @@ def _make_wheel():
 def _make_package_archive(*, runtime_api_version=1, extra_member=None):
     package_sources = {
         "lumi/__init__.py": (
-            b'"""Lumi runtime package."""\n'
-            b"LUMI_PLUGIN_API_VERSION = 1\n"
+            b'"""Lumi runtime package."""\nLUMI_PLUGIN_API_VERSION = 1\n'
         ),
         "lumi/runtime/__init__.py": (
             b"LUMI_RUNTIME_API_VERSION = "
@@ -248,7 +246,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(_matching_dependencies((dependency,), host), (dependency,))
 
-    async def test_release_listing_returns_stable_candidates_without_downloading_assets(self):
+    async def test_release_listing_returns_stable_candidates_without_downloading_assets(
+        self,
+    ):
         github = FakeGitHub()
         manager = self._manager(github)
 
@@ -292,18 +292,24 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(release.tag, TAG)
         self.assertEqual(release.runtime_api_version, 1)
-        self.assertTrue(release.directory.is_relative_to(self.data_root / "lumi" / "releases"))
+        self.assertTrue(
+            release.directory.is_relative_to(self.data_root / "lumi" / "releases")
+        )
         self.assertEqual(github.requests[0], f"{LUMI_GITHUB_API}/releases/tags/{TAG}")
         self.assertNotIn("/releases/latest", " ".join(github.requests))
         service = release.create_embedded_service({"model": "test"})
-        dependency_root = next((release.directory / "dependencies").glob("*/site-packages"))
-        self.assertTrue((dependency_root / "onnxruntime_genai" / "__init__.py").is_file())
+        dependency_root = next(
+            (release.directory / "dependencies").glob("*/site-packages")
+        )
+        self.assertTrue(
+            (dependency_root / "onnxruntime_genai" / "__init__.py").is_file()
+        )
         self.assertIn(str(dependency_root.resolve()), sys.path)
         runtime_dependency = importlib.import_module("onnxruntime_genai")
         self.assertTrue(
-            Path(runtime_dependency.__file__).resolve().is_relative_to(
-                dependency_root.resolve()
-            )
+            Path(runtime_dependency.__file__)
+            .resolve()
+            .is_relative_to(dependency_root.resolve())
         )
         self.assertEqual(service.configuration, {"model": "test"})
 
@@ -329,7 +335,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
                 close_started.set()
                 await finish_close.wait()
 
-        release.service_factory.create_embedded_service = lambda *_args, **_kwargs: SlowService()
+        release.service_factory.create_embedded_service = lambda *_args, **_kwargs: (
+            SlowService()
+        )
         service = release.create_embedded_service()
         disable_task = asyncio.create_task(manager.disable())
         await close_started.wait()
@@ -380,7 +388,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(created_services[0].closed)
         self.assertIsNone(manager.active_release)
 
-    async def test_disable_closes_remaining_services_and_requires_restart_after_close_error(self):
+    async def test_disable_closes_remaining_services_and_requires_restart_after_close_error(
+        self,
+    ):
         github = FakeGitHub()
         manager = self._manager(github)
         release = await manager.enable(TAG)
@@ -428,14 +438,19 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(await manager.enable(TAG), first)
         with self.assertRaises(LumiReleaseError):
             await manager.enable("v1.2.4")
-        self.assertEqual(github.requests.count(f"{LUMI_GITHUB_API}/releases/tags/{TAG}"), 1)
+        self.assertEqual(
+            github.requests.count(f"{LUMI_GITHUB_API}/releases/tags/{TAG}"), 1
+        )
 
     async def test_invalid_or_unpublished_tags_are_not_looked_up(self):
         github = FakeGitHub()
         manager = self._manager(github)
 
         for tag in ("latest", "v1.2.3-rc.1", "1.2.3", "v1.2"):
-            with self.subTest(tag=tag), self.assertRaises(LumiReleaseCompatibilityError):
+            with (
+                self.subTest(tag=tag),
+                self.assertRaises(LumiReleaseCompatibilityError),
+            ):
                 await manager.enable(tag)
         self.assertEqual(github.requests, [])
 
@@ -471,7 +486,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(manager.active_release)
         self.assertFalse((self.data_root / "lumi" / "releases").exists())
 
-    async def test_unsupported_python_or_platform_is_rejected_before_wheel_download(self):
+    async def test_unsupported_python_or_platform_is_rejected_before_wheel_download(
+        self,
+    ):
         github = FakeGitHub()
         manager = self._manager(
             github,
@@ -488,14 +505,17 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_release_metadata_rejects_draft_and_prerelease(self):
         for github in (FakeGitHub(draft=True), FakeGitHub(prerelease=True)):
             manager = self._manager(github)
-            with self.subTest(metadata=github.metadata), self.assertRaises(
-                LumiReleaseUnavailable
+            with (
+                self.subTest(metadata=github.metadata),
+                self.assertRaises(LumiReleaseUnavailable),
             ):
                 await manager.enable(TAG)
             self.assertIsNone(manager.active_release)
         self.assertFalse((self.data_root / "lumi" / "releases").exists())
 
-    async def test_incompatible_orchestrator_version_is_rejected_before_wheel_download(self):
+    async def test_incompatible_orchestrator_version_is_rejected_before_wheel_download(
+        self,
+    ):
         github = FakeGitHub()
         manager = LumiReleaseManager(
             self.data_root,
@@ -549,7 +569,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.data_root / "lumi" / "releases").exists())
 
     async def test_release_metadata_must_come_from_the_pinned_api_endpoint(self):
-        github = FakeGitHub(metadata_final_url="https://attacker.invalid/releases/v1.2.3")
+        github = FakeGitHub(
+            metadata_final_url="https://attacker.invalid/releases/v1.2.3"
+        )
         manager = self._manager(github)
 
         with self.assertRaises(LumiReleaseError):
@@ -590,7 +612,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         original = contents["lumi/__init__.py"]
         contents["lumi/__init__.py"] = original.replace(b"runtime", b"Runtime")
         changed_archive = io.BytesIO()
-        with zipfile.ZipFile(changed_archive, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(
+            changed_archive, "w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
             for name, content in contents.items():
                 archive.writestr(name, content)
         github.package_bytes = changed_archive.getvalue()
@@ -658,7 +682,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list((self.data_root / "lumi" / "releases").iterdir()), [])
         self.assertIsNone(manager.active_release)
 
-    async def test_failed_reactivation_restores_previously_installed_version_directory(self):
+    async def test_failed_reactivation_restores_previously_installed_version_directory(
+        self,
+    ):
         github = FakeGitHub()
         should_fail = False
 
@@ -687,11 +713,11 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         github = FakeGitHub()
         manager = self._manager(github)
         release = await manager.enable(TAG)
-        dependency_root = next((release.directory / "dependencies").glob("*/site-packages"))
-        native_module = ModuleType("test_managed_native_extension")
-        suffix = next(
-            suffix for suffix in (".cp312-win_amd64.pyd", ".pyd") if suffix
+        dependency_root = next(
+            (release.directory / "dependencies").glob("*/site-packages")
         )
+        native_module = ModuleType("test_managed_native_extension")
+        suffix = next(suffix for suffix in (".cp312-win_amd64.pyd", ".pyd") if suffix)
         native_module.__file__ = str(
             dependency_root / "onnxruntime_genai" / f"onnxruntime_genai{suffix}"
         )

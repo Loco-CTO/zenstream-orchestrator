@@ -9,8 +9,8 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from types import ModuleType
-from unittest.mock import patch
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock, patch
 
 from app.lumi_release import (
     HttpResponse,
@@ -21,8 +21,11 @@ from app.lumi_release import (
     LumiReleaseError,
     LumiReleaseManager,
     LumiReleaseUnavailable,
+    RuntimeDependency,
     RuntimeHost,
     _import_managed_lumi,
+    _matching_dependencies,
+    _unload_managed_lumi,
 )
 
 
@@ -214,6 +217,37 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.managers.append(manager)
         return manager
 
+    def test_runtime_host_current_detects_linux_cpython_abi(self):
+        runtime_sys = SimpleNamespace(
+            implementation=SimpleNamespace(name="cpython"),
+            version_info=(3, 13, 0),
+            platform="linux",
+        )
+        with (
+            patch("app.lumi_release.sys", runtime_sys),
+            patch(
+                "app.lumi_release.sysconfig.get_config_var",
+                return_value="cpython-313-x86_64-linux-gnu",
+            ),
+            patch("app.lumi_release.platform.machine", return_value="x86_64"),
+            patch("app.lumi_release.platform.libc_ver", return_value=("glibc", "2.36")),
+        ):
+            host = RuntimeHost.current()
+
+        self.assertEqual(host.python_tag, "cp313")
+        self.assertEqual(host.abi_tag, "cp313")
+        self.assertIn("manylinux_2_17_x86_64", host.platform_tags)
+        dependency = RuntimeDependency(
+            "onnxruntime-genai",
+            "0.17.1",
+            "cp313",
+            "cp313",
+            "manylinux_2_17_x86_64",
+            "onnxruntime_genai-0.17.1-cp313-cp313-manylinux_2_17_x86_64.whl",
+            "0" * 64,
+        )
+        self.assertEqual(_matching_dependencies((dependency,), host), (dependency,))
+
     async def test_release_listing_returns_stable_candidates_without_downloading_assets(self):
         github = FakeGitHub()
         manager = self._manager(github)
@@ -345,6 +379,46 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(created_services), 1)
         self.assertTrue(created_services[0].closed)
         self.assertIsNone(manager.active_release)
+
+    async def test_disable_closes_remaining_services_and_requires_restart_after_close_error(self):
+        github = FakeGitHub()
+        manager = self._manager(github)
+        release = await manager.enable(TAG)
+        manager._unloader = Mock(wraps=_unload_managed_lumi)
+
+        class CloseService:
+            def __init__(self, *, fail):
+                self.fail = fail
+                self.close_attempted = False
+
+            def close(self):
+                self.close_attempted = True
+                if self.fail:
+                    raise RuntimeError("close failed")
+
+        closes_first = CloseService(fail=False)
+        closes_fails = CloseService(fail=True)
+        services = iter((closes_first, closes_fails))
+        release.service_factory.create_embedded_service = lambda: next(services)
+        release.create_embedded_service()
+        release.create_embedded_service()
+
+        with self.assertRaisesRegex(LumiReleaseError, "cleanup failed"):
+            await manager.disable()
+
+        self.assertTrue(closes_fails.close_attempted)
+        self.assertTrue(closes_first.close_attempted)
+        manager._unloader.assert_called_once()
+        self.assertIsNone(manager.active_release)
+        self.assertIsNone(manager._closing_release)
+        self.assertTrue(manager.restart_required)
+        self.assertEqual(
+            manager.disable_error,
+            "1 Lumi service close operation(s) failed",
+        )
+        self.assertNotIn("lumi", sys.modules)
+        with self.assertRaisesRegex(LumiReleaseError, "restart Orchestrator"):
+            await manager.enable(TAG)
 
     async def test_same_enabled_tag_is_idempotent_and_other_tag_requires_disable(self):
         github = FakeGitHub()

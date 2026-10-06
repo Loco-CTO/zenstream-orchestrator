@@ -156,11 +156,20 @@ class RuntimeHost:
         major, minor = sys.version_info[:2]
         python_tag = f"cp{major}{minor}"
         soabi = str(sysconfig.get_config_var("SOABI") or "")
-        abi_tag = soabi.split("-", 1)[0]
-        if not abi_tag.startswith("cp"):
+        if soabi.startswith("cpython-"):
+            abi_version = soabi.removeprefix("cpython-").split("-", 1)[0]
+        elif soabi.startswith("cp"):
+            abi_version = soabi.split("-", 1)[0].removeprefix("cp")
+        else:
+            abi_version = ""
+        expected_abi_version = re.compile(
+            rf"{major}{minor}(?:d|t|dt|td)?"
+        )
+        if not expected_abi_version.fullmatch(abi_version):
             raise LumiReleaseCompatibilityError(
                 "the current CPython ABI cannot be identified"
             )
+        abi_tag = f"cp{abi_version}"
         machine = platform.machine().lower()
         if machine in {"amd64", "x64"}:
             machine = "x86_64"
@@ -319,24 +328,30 @@ class LoadedLumiRelease:
         self._services.append(result)
         return result
 
-    async def close_services(self) -> None:
-        """Close each composed service before its package modules are unloaded."""
+    async def close_services(self) -> tuple[Exception, ...]:
+        """Attempt to close every composed service before unloading modules."""
         self._enabled = False
         pending_tasks = tuple(self._pending_service_tasks)
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
+        failures: list[Exception] = []
         while self._services:
-            service = self._services[-1]
+            service = self._services.pop()
             close = getattr(service, "close", None)
             if not callable(close):
-                raise LumiReleaseError(
-                    "a Lumi service does not expose the required close() method"
+                failures.append(
+                    LumiReleaseError(
+                        "a Lumi service does not expose the required close() method"
+                    )
                 )
-            result = close()
-            if inspect.isawaitable(result):
-                await result
-            self._services.pop()
-        self._enabled = False
+                continue
+            try:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as error:
+                failures.append(error)
+        return tuple(failures)
 
 
 class LumiReleaseManager:
@@ -370,6 +385,7 @@ class LumiReleaseManager:
         self._active: LoadedLumiRelease | None = None
         self._closing_release: LoadedLumiRelease | None = None
         self._restart_required = False
+        self._disable_error: str | None = None
         self._lock = asyncio.Lock()
 
     @property
@@ -379,8 +395,13 @@ class LumiReleaseManager:
 
     @property
     def restart_required(self) -> bool:
-        """Whether a loaded native wheel prevents safe in-process reactivation."""
+        """Whether cleanup requires an Orchestrator restart before reactivation."""
         return self._restart_required
+
+    @property
+    def disable_error(self) -> str | None:
+        """Safe recovery detail when disabling Lumi could not fully clean up."""
+        return self._disable_error
 
     def _host(self) -> RuntimeHost:
         return self._runtime_host or RuntimeHost.current()
@@ -413,9 +434,8 @@ class LumiReleaseManager:
             if self._closing_release is not None:
                 raise LumiReleaseError("Lumi disable is still closing the active service")
             if self._restart_required:
-                raise LumiReleaseError(
-                    "restart Orchestrator before re-enabling Lumi after loading its native wheel"
-                )
+                reason = self._disable_error or "a native Lumi extension remains loaded"
+                raise LumiReleaseError(f"restart Orchestrator before re-enabling Lumi: {reason}")
             if self._active is not None:
                 if self._active.tag == tag:
                     return self._active
@@ -476,18 +496,40 @@ class LumiReleaseManager:
                 return
             self._active = None
             self._closing_release = active
+            self._disable_error = None
             active._enabled = False
-            await active.close_services()
+            close_failures = await active.close_services()
             dependency_directories = _dependency_directories(active.directory)
             self._restart_required = self._restart_required or _has_loaded_native_extension(
                 dependency_directories
             )
-            await asyncio.to_thread(
-                self._unloader,
-                active.directory / "package",
-                dependency_directories,
-            )
-            self._closing_release = None
+            unload_error: Exception | None = None
+            try:
+                await asyncio.to_thread(
+                    self._unloader,
+                    active.directory / "package",
+                    dependency_directories,
+                )
+            except Exception as error:
+                unload_error = error
+            finally:
+                self._closing_release = None
+
+            if close_failures or unload_error is not None:
+                self._restart_required = True
+                recovery_reasons = []
+                if close_failures:
+                    recovery_reasons.append(
+                        f"{len(close_failures)} Lumi service close operation(s) failed"
+                    )
+                if unload_error is not None:
+                    recovery_reasons.append("Lumi module cleanup failed")
+                self._disable_error = "; ".join(recovery_reasons)
+                error = close_failures[0] if close_failures else unload_error
+                raise LumiReleaseError(
+                    "Lumi is disabled, but cleanup failed; restart Orchestrator "
+                    f"before enabling it again ({self._disable_error})"
+                ) from error
 
     def _prepare_release(self, tag: str) -> _PreparedRelease:
         runtime_host = self._host()

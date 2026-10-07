@@ -20,10 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from app.lumi_catalog import LumiCatalogAdapter
+from app.lumi_release import LumiReleaseCompatibilityError
 from app.paths import metadata_directory
 from version import __version__ as ORCHESTRATOR_VERSION
 
-logger = logging.getLogger("lumi")
+logger = logging.getLogger("zenstream.lumi")
 
 _STABLE_RELEASE_TAG = re.compile(r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
 _DEFAULT_LIMITS = {
@@ -157,7 +158,12 @@ class LumiHost:
             self._settings["enabled"] = False
             self._save_settings()
             self._state = "disabled" if self._disable_requested else "error"
-            self._error = None if self._disable_requested else type(error).__name__[:80]
+            if self._disable_requested:
+                self._error = None
+            elif isinstance(error, LumiReleaseCompatibilityError):
+                self._error = str(error)[:180]
+            else:
+                self._error = type(error).__name__[:80]
             if not self._disable_requested:
                 try:
                     await self.release_manager.disable()
@@ -1027,3 +1033,4 @@ def _safe_model_stage(stage: object) -> str:
 
 
 lumi_host = LumiHost()
+

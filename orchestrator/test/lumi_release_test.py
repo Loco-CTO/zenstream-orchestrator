@@ -26,6 +26,7 @@ from app.lumi_release import (
     RuntimeHost,
     _import_managed_lumi,
     _matching_dependencies,
+    _parse_runtime_dependencies,
     _unload_managed_lumi,
 )
 
@@ -311,6 +312,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.python_tag, "cp313")
         self.assertEqual(host.abi_tag, "cp313")
         self.assertIn("manylinux_2_17_x86_64", host.platform_tags)
+        self.assertIn("manylinux2014_x86_64", host.platform_tags)
         dependency = RuntimeDependency(
             "onnxruntime-genai",
             "0.17.1",
@@ -321,6 +323,118 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             "0" * 64,
         )
         self.assertEqual(_matching_dependencies((dependency,), host), (dependency,))
+
+    def test_runtime_manifest_accepts_all_release_target_wheels(self):
+        dependencies = []
+        target_platforms = (
+            "win_amd64",
+            "manylinux_2_17_x86_64.manylinux2014_x86_64",
+            "manylinux_2_17_aarch64.manylinux2014_aarch64",
+        )
+        for python_tag in ("cp312", "cp313"):
+            for platform_tag in target_platforms:
+                for distribution in ("numpy", "onnxruntime_genai", "protobuf"):
+                    asset = (
+                        f"{distribution}-1.0.0-{python_tag}-{python_tag}-"
+                        f"{platform_tag}.whl"
+                    )
+                    dependencies.append(
+                        {
+                            "distribution": distribution,
+                            "version": "1.0.0",
+                            "pythonTag": python_tag,
+                            "abiTag": python_tag,
+                            "platformTag": platform_tag,
+                            "asset": asset,
+                            "sha256": "0" * 64,
+                        }
+                    )
+        for index, (distribution, python_tag) in enumerate(
+            (
+                ("flatbuffers", "py2.py3"),
+                ("packaging", "py3"),
+                ("idna", "py3"),
+                ("protobuf-runtime", "py3"),
+                ("typing-extensions", "py3"),
+            )
+        ):
+            asset = f"{distribution}-{index + 1}.0.0-{python_tag}-none-any.whl"
+            dependencies.append(
+                {
+                    "distribution": distribution,
+                    "version": f"{index + 1}.0.0",
+                    "pythonTag": python_tag,
+                    "abiTag": "none",
+                    "platformTag": "any",
+                    "asset": asset,
+                    "sha256": "0" * 64,
+                }
+            )
+
+        parsed = _parse_runtime_dependencies(dependencies)
+
+        self.assertEqual(len(parsed), 23)
+
+    def test_runtime_dependency_matching_supports_abi3_and_compound_tags(self):
+        host = RuntimeHost(
+            "cp314",
+            "cp314",
+            (
+                "manylinux_2_28_aarch64",
+                "manylinux_2_17_aarch64",
+                "manylinux2014_aarch64",
+                "linux_aarch64",
+            ),
+        )
+        abi3_dependency = RuntimeDependency(
+            "protobuf",
+            "6.0.0",
+            "cp310",
+            "abi3",
+            "manylinux_2_17_aarch64.manylinux2014_aarch64",
+            "protobuf-6.0.0-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+            "0" * 64,
+        )
+        universal_dependency = RuntimeDependency(
+            "flatbuffers",
+            "25.0.0",
+            "py2.py3",
+            "none",
+            "any",
+            "flatbuffers-25.0.0-py2.py3-none-any.whl",
+            "1" * 64,
+        )
+        exact_dependency = RuntimeDependency(
+            "numpy",
+            "2.5.3",
+            "cp314",
+            "cp314",
+            "manylinux_2_17_aarch64.manylinux2014_aarch64",
+            "numpy-2.5.3-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+            "2" * 64,
+        )
+        unsupported_dependency = RuntimeDependency(
+            "numpy",
+            "2.5.3",
+            "cp314",
+            "cp314",
+            "win_amd64",
+            "numpy-2.5.3-cp314-cp314-win_amd64.whl",
+            "3" * 64,
+        )
+
+        self.assertEqual(
+            _matching_dependencies(
+                (
+                    abi3_dependency,
+                    universal_dependency,
+                    exact_dependency,
+                    unsupported_dependency,
+                ),
+                host,
+            ),
+            (abi3_dependency, universal_dependency, exact_dependency),
+        )
 
     async def test_release_listing_returns_stable_candidates_without_downloading_assets(
         self,
@@ -876,3 +990,4 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

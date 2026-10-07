@@ -123,10 +123,12 @@ const RUNTIME_LIMIT_FIELDS: {
 	},
 ];
 
+/** Narrows an unknown API value to a non-array object record. */
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Validates progress data and clamps its counters to non-negative values. */
 function normalizeProgress(value: unknown): InstallProgress | null {
 	if (
 		!isRecord(value) ||
@@ -145,6 +147,7 @@ function normalizeProgress(value: unknown): InstallProgress | null {
 	};
 }
 
+/** Parses the release installation state returned by the Orchestrator. */
 function normalizeIntegration(value: unknown): Integration | null {
 	if (
 		!isRecord(value) ||
@@ -170,6 +173,7 @@ function normalizeIntegration(value: unknown): Integration | null {
 	};
 }
 
+/** Parses one supported model and its local installation status. */
 function normalizeModel(value: unknown): LumiModel | null {
 	if (
 		!isRecord(value) ||
@@ -206,6 +210,7 @@ function normalizeModel(value: unknown): LumiModel | null {
 	};
 }
 
+/** Validates every integer in the server's model runtime limits. */
 function normalizeRuntimeLimits(value: unknown): RuntimeLimits | null {
 	if (!isRecord(value)) return null;
 	const keys = Object.keys(DEFAULT_RUNTIME_LIMITS) as (keyof RuntimeLimits)[];
@@ -224,6 +229,7 @@ function normalizeRuntimeLimits(value: unknown): RuntimeLimits | null {
 	return limits as RuntimeLimits;
 }
 
+/** Parses a model list, rejecting the whole payload if any entry is invalid. */
 function normalizeModels(value: unknown): LumiModel[] | null {
 	if (!Array.isArray(value)) return null;
 	const result = value.map(normalizeModel);
@@ -232,6 +238,7 @@ function normalizeModels(value: unknown): LumiModel[] | null {
 		: null;
 }
 
+/** Parses the integration status payload used by the dashboard. */
 function normalizeStatus(value: unknown): LumiStatus | null {
 	if (!isRecord(value)) return null;
 	const integration = normalizeIntegration(value.integration);
@@ -252,6 +259,7 @@ function normalizeStatus(value: unknown): LumiStatus | null {
 	};
 }
 
+/** Parses the installed model catalog and its admin-managed defaults. */
 function normalizeModelCatalog(value: unknown): ModelCatalog | null {
 	if (!isRecord(value)) return null;
 	const models = normalizeModels(value.models);
@@ -274,6 +282,7 @@ function normalizeModelCatalog(value: unknown): ModelCatalog | null {
 	};
 }
 
+/** Parses the stable Lumi releases offered for installation. */
 function normalizeReleases(value: unknown): Release[] | null {
 	if (!isRecord(value) || !Array.isArray(value.releases)) return null;
 	const releases: Release[] = [];
@@ -293,16 +302,19 @@ function normalizeReleases(value: unknown): Release[] | null {
 	return releases;
 }
 
+/** Removes control characters and caps untrusted server text for display. */
 function safeText(value: string) {
-	return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 500);
+	return value.replace(/\p{Cc}/gu, " ").slice(0, 500);
 }
 
+/** Extracts a safe server detail string or uses the supplied fallback. */
 function responseError(value: unknown, fallback: string) {
 	if (isRecord(value) && typeof value.detail === "string" && value.detail.trim())
 		return safeText(value.detail.trim());
 	return fallback;
 }
 
+/** Formats an optional model size using binary byte units. */
 function formatBytes(value: number | null) {
 	if (value === null) return "Size unavailable";
 	if (value === 0) return "0 B";
@@ -314,12 +326,14 @@ function formatBytes(value: number | null) {
 	return `${(value / 1024 ** exponent).toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
 }
 
+/** Converts a progress ratio or percentage into a bounded integer percent. */
 function progressPercent(value: number | null) {
 	if (value === null) return null;
 	const percent = value >= 0 && value <= 1 ? value * 100 : value;
 	return Math.round(Math.min(100, Math.max(0, percent)));
 }
 
+/** Formats a release date, falling back for missing or invalid values. */
 function formatReleaseDate(value: string | null) {
 	if (!value) return "Release date unavailable";
 	const date = new Date(value);
@@ -328,6 +342,7 @@ function formatReleaseDate(value: string | null) {
 		: date.toLocaleDateString();
 }
 
+/** Combines supported model metadata with current installation status. */
 function mergeModels(
 	statusModels: LumiModel[],
 	catalogModels: LumiModel[],
@@ -348,6 +363,7 @@ function mergeModels(
 	});
 }
 
+/** Renders release installation, local model management, and runtime settings. */
 export default function LumiSettingsPage() {
 	const [session, setSession] = useState<Session | null>(null);
 	const [integration, setIntegration] = useState<Integration | null>(null);
@@ -458,7 +474,13 @@ export default function LumiSettingsPage() {
 		const current = readSession();
 		if (current) {
 			setSession(current);
-			void load(current);
+			load(current).catch((cause) =>
+				setError(
+					cause instanceof Error && cause.message
+						? safeText(cause.message)
+						: "Could not connect to the Orchestrator.",
+				),
+			);
 		} else {
 			setLoading(false);
 		}
@@ -470,10 +492,19 @@ export default function LumiSettingsPage() {
 
 	useEffect(() => {
 		if (!session || !shouldPoll) return;
-		const timer = window.setInterval(() => void load(session, true), 1500);
+		const timer = window.setInterval(() => {
+			load(session, true).catch((cause) =>
+				setError(
+					cause instanceof Error && cause.message
+						? safeText(cause.message)
+						: "Could not connect to the Orchestrator.",
+				),
+			);
+		}, 1500);
 		return () => window.clearInterval(timer);
 	}, [load, session, shouldPoll]);
 
+	/** Enables or disables the explicitly selected Lumi release. */
 	async function updateIntegration(enabled: boolean) {
 		if (!session) return;
 		if (enabled && !selectedReleaseTag) {
@@ -516,6 +547,7 @@ export default function LumiSettingsPage() {
 		}
 	}
 
+	/** Toggles a model after checking its local installation constraints. */
 	async function updateModel(model: LumiModel, enabled: boolean) {
 		if (!session) return;
 		if (enabled && !model.installed) {
@@ -555,6 +587,7 @@ export default function LumiSettingsPage() {
 		}
 	}
 
+	/** Sets an installed model as the server-wide default. */
 	async function makeDefault(model: LumiModel) {
 		if (!session || !model.installed || model.downloading) return;
 		setModelAction({ id: model.id, kind: "default" });
@@ -586,6 +619,7 @@ export default function LumiSettingsPage() {
 		}
 	}
 
+	/** Starts installation of a supported model into host-managed storage. */
 	async function downloadModel(model: LumiModel) {
 		if (
 			!session ||
@@ -622,6 +656,7 @@ export default function LumiSettingsPage() {
 		}
 	}
 
+	/** Updates a runtime limit while marking the form as unsaved. */
 	function changeRuntimeLimit(key: keyof RuntimeLimits, rawValue: string) {
 		runtimeSettingsDirtyRef.current = true;
 		setRuntimeSettingsDirty(true);
@@ -633,6 +668,7 @@ export default function LumiSettingsPage() {
 		}));
 	}
 
+	/** Saves the default thinking mode and inference resource limits. */
 	async function saveRuntimeSettings() {
 		if (!session || !runtimeSettingsDirty) return;
 		setRuntimeSettingsBusy(true);
@@ -671,6 +707,7 @@ export default function LumiSettingsPage() {
 		}
 	}
 
+	/** Removes a downloaded model after explicit browser confirmation. */
 	async function deleteModel(model: LumiModel) {
 		if (!session || !model.installed || model.enabled || model.isDefault) return;
 		if (
@@ -1165,6 +1202,7 @@ export default function LumiSettingsPage() {
 	);
 }
 
+/** Displays bounded progress for an installation or model download. */
 function ProgressPanel({
 	title,
 	stage,

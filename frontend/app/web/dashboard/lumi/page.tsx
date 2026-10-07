@@ -775,7 +775,7 @@ export default function LumiSettingsPage() {
 			{loading || !session ? (
 				<DashboardAvailability loading={loading} />
 			) : (
-				<div className="mt-7 space-y-5">
+				<div className="mt-7 space-y-5" aria-busy={refreshing}>
 					<IntegrationPanel
 						integration={integration}
 						releases={releases}

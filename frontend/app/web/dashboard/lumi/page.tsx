@@ -262,9 +262,7 @@ function normalizeStatus(value: unknown): LumiStatus | null {
 		defaultModel: value.defaultModel ? safeText(value.defaultModel) : null,
 		defaultThinking: value.defaultThinking,
 		webSearchUrl:
-			typeof value.webSearchUrl === "string"
-				? safeText(value.webSearchUrl)
-				: null,
+			typeof value.webSearchUrl === "string" ? safeText(value.webSearchUrl) : null,
 	};
 }
 
@@ -542,7 +540,9 @@ export default function LumiSettingsPage() {
 			}
 			const status = normalizeStatus(value);
 			if (!status) {
-				throw new Error("The Lumi web research settings response was not recognized.");
+				throw new Error(
+					"The Lumi web research settings response was not recognized.",
+				);
 			}
 			webSearchSettingsDirtyRef.current = false;
 			setWebSearchSettingsDirty(false);

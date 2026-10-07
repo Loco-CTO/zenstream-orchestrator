@@ -218,9 +218,7 @@ class OpenApiContractTest(unittest.TestCase):
             "#/components/schemas/LumiWebSearchSettingsRequest",
         )
         self.assertIn("url", schemas["LumiWebSearchSettingsRequest"]["required"])
-        self.assertIn(
-            "webSearchUrl", schemas["LumiAdminStatusResponse"]["properties"]
-        )
+        self.assertIn("webSearchUrl", schemas["LumiAdminStatusResponse"]["properties"])
         turns = paths["/api/lumi/conversations/{conversation_id}/turns"]["post"]
         body_ref = turns["requestBody"]["content"]["application/json"]["schema"]["$ref"]
         self.assertEqual(body_ref, "#/components/schemas/LumiTurnRequest")

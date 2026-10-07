@@ -9029,6 +9029,230 @@
       }
     },
     {
+      "operationId": "get_api_lumi_conversations",
+      "request": {
+        "method": "GET",
+        "parameters": {},
+        "path": "/api/lumi/conversations",
+        "pathTemplate": "/api/lumi/conversations"
+      },
+      "response": {
+        "body": {
+          "conversations": [
+            {
+              "createdAt": "2026-09-29T12:00:00Z",
+              "id": "fixture-id",
+              "model": "x",
+              "thinking": true,
+              "title": "Fixture Item",
+              "updatedAt": "2026-09-29T12:00:00Z"
+            }
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/LumiConversationListResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_lumi_conversations_by_conversation_id",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "conversation_id": "fixture-id"
+          }
+        },
+        "path": "/api/lumi/conversations/fixture-id",
+        "pathTemplate": "/api/lumi/conversations/{conversation_id}"
+      },
+      "response": {
+        "body": {
+          "conversation": {
+            "createdAt": "2026-09-29T12:00:00Z",
+            "id": "fixture-id",
+            "model": "x",
+            "thinking": true,
+            "title": "Fixture Item",
+            "updatedAt": "2026-09-29T12:00:00Z"
+          },
+          "messages": [
+            {
+              "content": "x",
+              "createdAt": "2026-09-29T12:00:00Z",
+              "id": "fixture-id",
+              "references": [
+                {
+                  "id": "fixture-id",
+                  "title": "Fixture Item",
+                  "type": "series"
+                }
+              ],
+              "role": "user",
+              "sources": [
+                {
+                  "faviconUrl": "x",
+                  "title": "Fixture Item",
+                  "url": "https://example.invalid/fixture",
+                  "websiteName": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/LumiConversationDetailResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "patch_api_lumi_conversations_by_conversation_id_choice",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "model": "x",
+            "thinking": true
+          }
+        },
+        "method": "PATCH",
+        "parameters": {
+          "path": {
+            "conversation_id": "fixture-id"
+          }
+        },
+        "path": "/api/lumi/conversations/fixture-id/choice",
+        "pathTemplate": "/api/lumi/conversations/{conversation_id}/choice"
+      },
+      "response": {
+        "body": {
+          "createdAt": "2026-09-29T12:00:00Z",
+          "id": "fixture-id",
+          "model": "x",
+          "thinking": true,
+          "title": "Fixture Item",
+          "updatedAt": "2026-09-29T12:00:00Z"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/LumiConversationRecord",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "post_api_lumi_conversations_by_conversation_id_turns",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "message": "x",
+            "model": "x",
+            "thinking": true
+          }
+        },
+        "method": "POST",
+        "parameters": {
+          "path": {
+            "conversation_id": "fixture-id"
+          }
+        },
+        "path": "/api/lumi/conversations/fixture-id/turns",
+        "pathTemplate": "/api/lumi/conversations/{conversation_id}/turns"
+      },
+      "response": {
+        "body": {
+          "answer": {
+            "markdown": "x",
+            "references": [
+              {
+                "id": "fixture-id",
+                "title": "Fixture Item",
+                "type": "series"
+              }
+            ],
+            "sources": [
+              {
+                "faviconUrl": "x",
+                "title": "Fixture Item",
+                "url": "https://example.invalid/fixture",
+                "websiteName": "x"
+              }
+            ]
+          },
+          "conversation": {
+            "createdAt": "2026-09-29T12:00:00Z",
+            "id": "fixture-id",
+            "model": "x",
+            "thinking": true,
+            "title": "Fixture Item",
+            "updatedAt": "2026-09-29T12:00:00Z"
+          }
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/LumiTurnResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_lumi_models",
+      "request": {
+        "method": "GET",
+        "parameters": {},
+        "path": "/api/lumi/models",
+        "pathTemplate": "/api/lumi/models"
+      },
+      "response": {
+        "body": {
+          "defaultModel": "x",
+          "defaultThinking": true,
+          "models": [
+            {
+              "downloadError": "x",
+              "downloadProgress": 1.25,
+              "downloadStage": "x",
+              "downloading": true,
+              "enabled": true,
+              "id": "fixture-id",
+              "installed": true,
+              "isDefault": true,
+              "label": "Fixture Item",
+              "sizeBytes": 1,
+              "supportsThinking": true
+            }
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/LumiModelsResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "put_api_lumi_preferences_model",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "model": "x",
+            "thinking": true
+          }
+        },
+        "method": "PUT",
+        "parameters": {},
+        "path": "/api/lumi/preferences/model",
+        "pathTemplate": "/api/lumi/preferences/model"
+      },
+      "response": {
+        "body": {
+          "preference": {
+            "model": "x",
+            "thinking": true
+          }
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/LumiPreferenceResponse",
+        "status": 200
+      }
+    },
+    {
       "operationId": "get_api_metadata_languages",
       "request": {
         "method": "GET",

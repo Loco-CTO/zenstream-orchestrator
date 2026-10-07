@@ -180,6 +180,66 @@ class OpenApiContractTest(unittest.TestCase):
             play_start["properties"]["playbackInstanceId"]["maxLength"], 200
         )
 
+    def test_lumi_routes_document_user_scope_admin_boundary_and_chat_shapes(self):
+        """Keep Lumi chat account-scoped and integration changes admin-only."""
+        paths = self.schema["paths"]
+        user_paths = (
+            "/api/lumi/models",
+            "/api/lumi/conversations",
+            "/api/lumi/conversations/{conversation_id}",
+            "/api/lumi/conversations/{conversation_id}/turns",
+            "/api/lumi/conversations/{conversation_id}/choice",
+            "/api/lumi/preferences/model",
+        )
+        admin_paths = (
+            "/api/admin/lumi/status",
+            "/api/admin/lumi/releases",
+            "/api/admin/lumi/settings",
+            "/api/admin/lumi/models",
+            "/api/admin/lumi/models/settings",
+            "/api/admin/lumi/models/{model_id}",
+            "/api/admin/lumi/models/{model_id}/download",
+        )
+
+        for path in user_paths:
+            operation = next(iter(paths[path].values()))
+            self.assertEqual(operation["tags"], ["Lumi"], path)
+            self.assertIn({"UserBearerAuth": []}, operation["security"], path)
+        for path in admin_paths:
+            operation = next(iter(paths[path].values()))
+            self.assertEqual(operation["tags"], ["Admin · Lumi"], path)
+            self.assertIn({"AdminSessionCookie": []}, operation["security"], path)
+
+        schemas = self.schema["components"]["schemas"]
+        turns = paths["/api/lumi/conversations/{conversation_id}/turns"]["post"]
+        body_ref = turns["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+        self.assertEqual(body_ref, "#/components/schemas/LumiTurnRequest")
+        self.assertTrue(
+            {"message", "model", "thinking"}.issubset(
+                schemas["LumiTurnRequest"]["properties"]
+            )
+        )
+        answer = schemas["LumiAnswer"]["properties"]
+        self.assertTrue({"markdown", "references", "sources"}.issubset(answer))
+        self.assertEqual(
+            answer["references"]["items"]["$ref"],
+            "#/components/schemas/LumiEntityReference",
+        )
+        self.assertEqual(
+            answer["sources"]["items"]["$ref"],
+            "#/components/schemas/LumiSource",
+        )
+        runtime_settings = paths["/api/admin/lumi/models/settings"]["patch"]
+        self.assertEqual(
+            runtime_settings["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/LumiRuntimeSettingsRequest",
+        )
+        self.assertNotIn(
+            "/api/lumi/playback",
+            paths,
+            "Lumi must not expose a playback action route.",
+        )
+
     def test_syncplay_group_schema_documents_the_live_websocket_payload(self):
         """Keep the SyncPlay group schema aligned with its wire payload."""
         schemas = self.schema["components"]["schemas"]

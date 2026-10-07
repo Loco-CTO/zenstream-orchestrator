@@ -4704,6 +4704,923 @@
         "title": "LocalePatchRequest",
         "type": "object"
       },
+      "LumiAdminModelsResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "defaultModel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Defaultmodel"
+          },
+          "defaultThinking": {
+            "default": false,
+            "title": "Defaultthinking",
+            "type": "boolean"
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LumiRuntimeLimits"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "modelInstallAvailable": {
+            "default": false,
+            "title": "Modelinstallavailable",
+            "type": "boolean"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/LumiModel"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "title": "LumiAdminModelsResponse",
+        "type": "object"
+      },
+      "LumiAdminStatusResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "defaultModel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Defaultmodel"
+          },
+          "defaultThinking": {
+            "default": false,
+            "title": "Defaultthinking",
+            "type": "boolean"
+          },
+          "integration": {
+            "$ref": "#/components/schemas/LumiIntegrationStatus"
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LumiRuntimeLimits"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "modelInstallAvailable": {
+            "default": false,
+            "title": "Modelinstallavailable",
+            "type": "boolean"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/LumiModel"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "required": [
+          "integration"
+        ],
+        "title": "LumiAdminStatusResponse",
+        "type": "object"
+      },
+      "LumiAnswer": {
+        "additionalProperties": true,
+        "properties": {
+          "markdown": {
+            "title": "Markdown",
+            "type": "string"
+          },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/LumiEntityReference"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/LumiSource"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "markdown"
+        ],
+        "title": "LumiAnswer",
+        "type": "object"
+      },
+      "LumiConversationDetailResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/LumiConversationRecord"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/LumiMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          }
+        },
+        "required": [
+          "conversation"
+        ],
+        "title": "LumiConversationDetailResponse",
+        "type": "object"
+      },
+      "LumiConversationListResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "conversations": {
+            "items": {
+              "$ref": "#/components/schemas/LumiConversationRecord"
+            },
+            "title": "Conversations",
+            "type": "array"
+          }
+        },
+        "title": "LumiConversationListResponse",
+        "type": "object"
+      },
+      "LumiConversationRecord": {
+        "additionalProperties": true,
+        "properties": {
+          "createdAt": {
+            "title": "Createdat",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "thinking": {
+            "default": false,
+            "title": "Thinking",
+            "type": "boolean"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updatedAt": {
+            "title": "Updatedat",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "model",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "LumiConversationRecord",
+        "type": "object"
+      },
+      "LumiEntityReference": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "series",
+              "movie",
+              "season",
+              "episode",
+              "album",
+              "artist",
+              "track",
+              "collection",
+              "person"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "title"
+        ],
+        "title": "LumiEntityReference",
+        "type": "object"
+      },
+      "LumiIntegrationSettingsRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "releaseTag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Releasetag"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "LumiIntegrationSettingsRequest",
+        "type": "object"
+      },
+      "LumiIntegrationStatus": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "installed": {
+            "title": "Installed",
+            "type": "boolean"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LumiProgress"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "releaseTag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Releasetag"
+          },
+          "restartRequired": {
+            "default": false,
+            "title": "Restartrequired",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "disabled",
+              "installing",
+              "ready",
+              "error"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "installed",
+          "state"
+        ],
+        "title": "LumiIntegrationStatus",
+        "type": "object"
+      },
+      "LumiMessage": {
+        "additionalProperties": true,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "createdAt": {
+            "title": "Createdat",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/LumiEntityReference"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/LumiSource"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "content",
+          "createdAt"
+        ],
+        "title": "LumiMessage",
+        "type": "object"
+      },
+      "LumiModel": {
+        "additionalProperties": true,
+        "properties": {
+          "downloadError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Downloaderror"
+          },
+          "downloadProgress": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Downloadprogress"
+          },
+          "downloadStage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Downloadstage"
+          },
+          "downloading": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Downloading"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Enabled"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "installed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Installed"
+          },
+          "isDefault": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Isdefault"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "sizeBytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sizebytes"
+          },
+          "supportsThinking": {
+            "title": "Supportsthinking",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "supportsThinking"
+        ],
+        "title": "LumiModel",
+        "type": "object"
+      },
+      "LumiModelChoiceRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "thinking": {
+            "title": "Thinking",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model",
+          "thinking"
+        ],
+        "title": "LumiModelChoiceRequest",
+        "type": "object"
+      },
+      "LumiModelDeleteResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "removed"
+        ],
+        "title": "LumiModelDeleteResponse",
+        "type": "object"
+      },
+      "LumiModelSettingRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "isDefault": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Isdefault"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "LumiModelSettingRequest",
+        "type": "object"
+      },
+      "LumiModelsResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "defaultModel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Defaultmodel"
+          },
+          "defaultThinking": {
+            "default": false,
+            "title": "Defaultthinking",
+            "type": "boolean"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/LumiModel"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "title": "LumiModelsResponse",
+        "type": "object"
+      },
+      "LumiPreference": {
+        "additionalProperties": true,
+        "properties": {
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "thinking": {
+            "title": "Thinking",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model",
+          "thinking"
+        ],
+        "title": "LumiPreference",
+        "type": "object"
+      },
+      "LumiPreferenceResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "preference": {
+            "$ref": "#/components/schemas/LumiPreference"
+          }
+        },
+        "required": [
+          "preference"
+        ],
+        "title": "LumiPreferenceResponse",
+        "type": "object"
+      },
+      "LumiProgress": {
+        "additionalProperties": true,
+        "properties": {
+          "current": {
+            "title": "Current",
+            "type": "integer"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stage",
+          "current",
+          "total"
+        ],
+        "title": "LumiProgress",
+        "type": "object"
+      },
+      "LumiReleaseListResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "releases": {
+            "items": {
+              "$ref": "#/components/schemas/LumiReleaseOption"
+            },
+            "title": "Releases",
+            "type": "array"
+          }
+        },
+        "title": "LumiReleaseListResponse",
+        "type": "object"
+      },
+      "LumiReleaseOption": {
+        "additionalProperties": true,
+        "properties": {
+          "releasedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Releasedat"
+          },
+          "tag": {
+            "title": "Tag",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag"
+        ],
+        "title": "LumiReleaseOption",
+        "type": "object"
+      },
+      "LumiRuntimeLimits": {
+        "additionalProperties": true,
+        "properties": {
+          "idleUnloadSeconds": {
+            "title": "Idleunloadseconds",
+            "type": "integer"
+          },
+          "maxActiveConversations": {
+            "title": "Maxactiveconversations",
+            "type": "integer"
+          },
+          "maxConcurrentChats": {
+            "title": "Maxconcurrentchats",
+            "type": "integer"
+          },
+          "maxContextTokens": {
+            "title": "Maxcontexttokens",
+            "type": "integer"
+          },
+          "maxOutputTokens": {
+            "title": "Maxoutputtokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "idleUnloadSeconds",
+          "maxContextTokens",
+          "maxOutputTokens",
+          "maxConcurrentChats",
+          "maxActiveConversations"
+        ],
+        "title": "LumiRuntimeLimits",
+        "type": "object"
+      },
+      "LumiRuntimeLimitsUpdate": {
+        "additionalProperties": true,
+        "properties": {
+          "idleUnloadSeconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Idleunloadseconds"
+          },
+          "maxActiveConversations": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Maxactiveconversations"
+          },
+          "maxConcurrentChats": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Maxconcurrentchats"
+          },
+          "maxContextTokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Maxcontexttokens"
+          },
+          "maxOutputTokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Maxoutputtokens"
+          }
+        },
+        "title": "LumiRuntimeLimitsUpdate",
+        "type": "object"
+      },
+      "LumiRuntimeSettingsRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "defaultThinking": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Defaultthinking"
+          },
+          "limits": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LumiRuntimeLimitsUpdate"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "LumiRuntimeSettingsRequest",
+        "type": "object"
+      },
+      "LumiSource": {
+        "additionalProperties": true,
+        "properties": {
+          "faviconUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Faviconurl"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "websiteName": {
+            "title": "Websitename",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "websiteName",
+          "title"
+        ],
+        "title": "LumiSource",
+        "type": "object"
+      },
+      "LumiTurnRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "message": {
+            "maxLength": 6000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          },
+          "thinking": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Thinking"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "LumiTurnRequest",
+        "type": "object"
+      },
+      "LumiTurnResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "answer": {
+            "$ref": "#/components/schemas/LumiAnswer"
+          },
+          "conversation": {
+            "$ref": "#/components/schemas/LumiConversationRecord"
+          }
+        },
+        "required": [
+          "conversation",
+          "answer"
+        ],
+        "title": "LumiTurnResponse",
+        "type": "object"
+      },
       "LyricsLine": {
         "additionalProperties": true,
         "properties": {
@@ -16196,6 +17113,873 @@
         ]
       }
     },
+    "/api/admin/lumi/models": {
+      "get": {
+        "description": "List installed Qwen3.5 models. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `GET`; path: `/api/admin/lumi/models`.",
+        "operationId": "get_api_admin_lumi_models",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": "qwen3.5:2b",
+                  "defaultThinking": true,
+                  "limits": {
+                    "idleUnloadSeconds": 300,
+                    "maxActiveConversations": 128,
+                    "maxConcurrentChats": 1,
+                    "maxContextTokens": 8192,
+                    "maxOutputTokens": 2048
+                  },
+                  "modelInstallAvailable": true,
+                  "models": [
+                    {
+                      "enabled": true,
+                      "id": "qwen3.5:2b",
+                      "installed": true,
+                      "label": "Qwen3.5 2B",
+                      "supportsThinking": true
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiAdminModelsResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "List installed Qwen3.5 models",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
+    "/api/admin/lumi/models/settings": {
+      "patch": {
+        "description": "Configure Lumi model and runtime limits. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `PATCH`; path: `/api/admin/lumi/models/settings`.",
+        "operationId": "patch_api_admin_lumi_models_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "defaultThinking": true,
+                "limits": {
+                  "maxContextTokens": 8192,
+                  "maxOutputTokens": 2048
+                }
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiRuntimeSettingsRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": "qwen3.5:2b",
+                  "defaultThinking": true,
+                  "limits": {
+                    "idleUnloadSeconds": 300,
+                    "maxActiveConversations": 128,
+                    "maxConcurrentChats": 1,
+                    "maxContextTokens": 8192,
+                    "maxOutputTokens": 2048
+                  },
+                  "modelInstallAvailable": true,
+                  "models": [
+                    {
+                      "enabled": true,
+                      "id": "qwen3.5:2b",
+                      "installed": true,
+                      "label": "Qwen3.5 2B",
+                      "supportsThinking": true
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiAdminModelsResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Configure Lumi model and runtime limits",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
+    "/api/admin/lumi/models/{model_id}": {
+      "delete": {
+        "description": "Remove an installed Qwen3.5 model. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `DELETE`; path: `/api/admin/lumi/models/{model_id}`.",
+        "operationId": "delete_api_admin_lumi_models_by_model_id",
+        "parameters": [
+          {
+            "description": "model_id value supplied in the path component.",
+            "in": "path",
+            "name": "model_id",
+            "required": true,
+            "schema": {
+              "title": "Model Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "qwen3.5:2b",
+                  "removed": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiModelDeleteResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Remove an installed Qwen3.5 model",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      },
+      "patch": {
+        "description": "Configure an installed Qwen3.5 model. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `PATCH`; path: `/api/admin/lumi/models/{model_id}`.",
+        "operationId": "patch_api_admin_lumi_models_by_model_id",
+        "parameters": [
+          {
+            "description": "model_id value supplied in the path component.",
+            "in": "path",
+            "name": "model_id",
+            "required": true,
+            "schema": {
+              "title": "Model Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "enabled": true,
+                "isDefault": true
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiModelSettingRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": "qwen3.5:2b",
+                  "defaultThinking": true,
+                  "limits": {
+                    "idleUnloadSeconds": 300,
+                    "maxActiveConversations": 128,
+                    "maxConcurrentChats": 1,
+                    "maxContextTokens": 8192,
+                    "maxOutputTokens": 2048
+                  },
+                  "modelInstallAvailable": true,
+                  "models": [
+                    {
+                      "enabled": true,
+                      "id": "qwen3.5:2b",
+                      "installed": true,
+                      "label": "Qwen3.5 2B",
+                      "supportsThinking": true
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiAdminModelsResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Configure an installed Qwen3.5 model",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
+    "/api/admin/lumi/models/{model_id}/download": {
+      "post": {
+        "description": "Install a supported Qwen3.5 model. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `POST`; path: `/api/admin/lumi/models/{model_id}/download`.",
+        "operationId": "post_api_admin_lumi_models_by_model_id_download",
+        "parameters": [
+          {
+            "description": "model_id value supplied in the path component.",
+            "in": "path",
+            "name": "model_id",
+            "required": true,
+            "schema": {
+              "title": "Model Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": "qwen3.5:2b",
+                  "defaultThinking": true,
+                  "limits": {
+                    "idleUnloadSeconds": 300,
+                    "maxActiveConversations": 128,
+                    "maxConcurrentChats": 1,
+                    "maxContextTokens": 8192,
+                    "maxOutputTokens": 2048
+                  },
+                  "modelInstallAvailable": true,
+                  "models": [
+                    {
+                      "enabled": true,
+                      "id": "qwen3.5:2b",
+                      "installed": true,
+                      "label": "Qwen3.5 2B",
+                      "supportsThinking": true
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiAdminModelsResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Install a supported Qwen3.5 model",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
+    "/api/admin/lumi/releases": {
+      "get": {
+        "description": "List supported Lumi releases. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `GET`; path: `/api/admin/lumi/releases`.",
+        "operationId": "get_api_admin_lumi_releases",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "releases": [
+                    {
+                      "releasedAt": null,
+                      "tag": "v0.1.0"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiReleaseListResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "List supported Lumi releases",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
+    "/api/admin/lumi/settings": {
+      "put": {
+        "description": "Enable or disable the Lumi integration. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `PUT`; path: `/api/admin/lumi/settings`.",
+        "operationId": "put_api_admin_lumi_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "enabled": true,
+                "releaseTag": "v0.1.0"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiIntegrationSettingsRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": null,
+                  "defaultThinking": false,
+                  "integration": {
+                    "enabled": false,
+                    "error": null,
+                    "installed": false,
+                    "progress": null,
+                    "releaseTag": null,
+                    "restartRequired": false,
+                    "state": "disabled"
+                  },
+                  "limits": {
+                    "idleUnloadSeconds": 300,
+                    "maxActiveConversations": 128,
+                    "maxConcurrentChats": 1,
+                    "maxContextTokens": 8192,
+                    "maxOutputTokens": 2048
+                  },
+                  "modelInstallAvailable": false,
+                  "models": []
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiAdminStatusResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Enable or disable the Lumi integration",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
+    "/api/admin/lumi/status": {
+      "get": {
+        "description": "Get Lumi integration and model status. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `GET`; path: `/api/admin/lumi/status`.",
+        "operationId": "get_api_admin_lumi_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": null,
+                  "defaultThinking": false,
+                  "integration": {
+                    "enabled": false,
+                    "error": null,
+                    "installed": false,
+                    "progress": null,
+                    "releaseTag": null,
+                    "restartRequired": false,
+                    "state": "disabled"
+                  },
+                  "limits": {
+                    "idleUnloadSeconds": 300,
+                    "maxActiveConversations": 128,
+                    "maxConcurrentChats": 1,
+                    "maxContextTokens": 8192,
+                    "maxOutputTokens": 2048
+                  },
+                  "modelInstallAvailable": false,
+                  "models": []
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiAdminStatusResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Get Lumi integration and model status",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
     "/api/admin/metadata/languages": {
       "get": {
         "description": "Get metadata language settings. This administrator operation manages provider, locale, refresh, or calendar integration state. Method: `GET`; path: `/api/admin/metadata/languages`.",
@@ -23302,6 +25086,551 @@
         ]
       }
     },
+    "/api/lumi/conversations": {
+      "get": {
+        "description": "List the current user's Lumi conversations. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `GET`; path: `/api/lumi/conversations`.",
+        "operationId": "get_api_lumi_conversations",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "conversations": []
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiConversationListResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "List the current user's Lumi conversations",
+        "tags": [
+          "Lumi"
+        ]
+      }
+    },
+    "/api/lumi/conversations/{conversation_id}": {
+      "get": {
+        "description": "Get a Lumi conversation. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `GET`; path: `/api/lumi/conversations/{conversation_id}`.",
+        "operationId": "get_api_lumi_conversations_by_conversation_id",
+        "parameters": [
+          {
+            "description": "conversation_id value supplied in the path component.",
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "conversation": {
+                    "createdAt": "2026-01-01T12:00:00Z",
+                    "id": "conversation-0001",
+                    "model": "qwen3.5:2b",
+                    "thinking": true,
+                    "title": "What to watch next",
+                    "updatedAt": "2026-01-01T12:00:00Z"
+                  },
+                  "messages": []
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiConversationDetailResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get a Lumi conversation",
+        "tags": [
+          "Lumi"
+        ]
+      }
+    },
+    "/api/lumi/conversations/{conversation_id}/choice": {
+      "patch": {
+        "description": "Set a conversation's Lumi model. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `PATCH`; path: `/api/lumi/conversations/{conversation_id}/choice`.",
+        "operationId": "patch_api_lumi_conversations_by_conversation_id_choice",
+        "parameters": [
+          {
+            "description": "conversation_id value supplied in the path component.",
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "model": "qwen3.5:2b",
+                "thinking": true
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiModelChoiceRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LumiConversationRecord"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Set a conversation's Lumi model",
+        "tags": [
+          "Lumi"
+        ]
+      }
+    },
+    "/api/lumi/conversations/{conversation_id}/turns": {
+      "post": {
+        "description": "Send a Lumi chat turn. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `POST`; path: `/api/lumi/conversations/{conversation_id}/turns`.",
+        "operationId": "post_api_lumi_conversations_by_conversation_id_turns",
+        "parameters": [
+          {
+            "description": "conversation_id value supplied in the path component.",
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "message": "What should I watch after this?",
+                "model": "qwen3.5:2b",
+                "thinking": true
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiTurnRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "answer": {
+                    "markdown": "Here are a few options.",
+                    "references": [],
+                    "sources": []
+                  },
+                  "conversation": {
+                    "createdAt": "2026-01-01T12:00:00Z",
+                    "id": "conversation-0001",
+                    "model": "qwen3.5:2b",
+                    "thinking": true,
+                    "title": "What to watch next",
+                    "updatedAt": "2026-01-01T12:00:00Z"
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiTurnResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Send a Lumi chat turn",
+        "tags": [
+          "Lumi"
+        ]
+      }
+    },
+    "/api/lumi/models": {
+      "get": {
+        "description": "List models available to the current user. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `GET`; path: `/api/lumi/models`.",
+        "operationId": "get_api_lumi_models",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": "qwen3.5:2b",
+                  "defaultThinking": true,
+                  "models": [
+                    {
+                      "id": "qwen3.5:2b",
+                      "label": "Qwen3.5 2B",
+                      "supportsThinking": true
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiModelsResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "List models available to the current user",
+        "tags": [
+          "Lumi"
+        ]
+      }
+    },
+    "/api/lumi/preferences/model": {
+      "put": {
+        "description": "Set the current user's Lumi model preference. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `PUT`; path: `/api/lumi/preferences/model`.",
+        "operationId": "put_api_lumi_preferences_model",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "model": "qwen3.5:2b",
+                "thinking": true
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiModelChoiceRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "preference": {
+                    "model": "qwen3.5:2b",
+                    "thinking": true
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiPreferenceResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Set the current user's Lumi model preference",
+        "tags": [
+          "Lumi"
+        ]
+      }
+    },
     "/api/metadata/languages": {
       "get": {
         "description": "List metadata languages. Use this endpoint during client startup or registration. Method: `GET`; path: `/api/metadata/languages`.",
@@ -27699,6 +30028,10 @@
       "name": "Account & Preferences"
     },
     {
+      "description": "Account-scoped, read-only conversations with the optional local Lumi media assistant.",
+      "name": "Lumi"
+    },
+    {
       "description": "Grant-filtered movies, series, episodes, collections, search, artwork, and catalog state.",
       "name": "Catalog"
     },
@@ -27733,6 +30066,10 @@
     {
       "description": "Metadata providers, locale policy, refresh settings, and calendar integration settings.",
       "name": "Admin · Metadata & Integrations"
+    },
+    {
+      "description": "Explicit Lumi release installation, local Qwen3.5 model management, and bounded runtime settings.",
+      "name": "Admin · Lumi"
     },
     {
       "description": "Administrator playback capacity, devices, active sessions, trickplay, and intro/outro maintenance.",

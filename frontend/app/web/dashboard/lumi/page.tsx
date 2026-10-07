@@ -849,7 +849,9 @@ function ErrorNotice({ message }: { message: string }) {
 function DashboardAvailability({ loading }: { loading: boolean }) {
 	return (
 		<SurfaceCard className="mt-7 p-6 console-muted">
-			{loading ? "Loading Lumi integration status…" : "Sign in to manage the Lumi integration."}
+			{loading
+				? "Loading Lumi integration status…"
+				: "Sign in to manage the Lumi integration."}
 		</SurfaceCard>
 	);
 }
@@ -877,22 +879,27 @@ function IntegrationPanel(props: IntegrationPanelProps) {
 }
 
 /** Shows the installed version and current integration progress or error. */
-function IntegrationSummary({ integration }: { integration: Integration | null }) {
+function IntegrationSummary({
+	integration,
+}: {
+	integration: Integration | null;
+}) {
 	return (
 		<>
 			<div className="flex flex-wrap items-start justify-between gap-4">
 				<div>
 					<h2 className="text-lg font-bold">Integration</h2>
 					<p className="mt-2 text-sm leading-6 console-muted">
-						Lumi is installed from a supported release only after you select a
-						version and enable it. The selected package is loaded in-process.
+						Lumi is installed from a supported release only after you select a version
+						and enable it. The selected package is loaded in-process.
 					</p>
 				</div>
 				{integration && <IntegrationBadges integration={integration} />}
 			</div>
 			{integration?.releaseTag && (
 				<p className="text-sm text-white/70">
-					Selected release: <span className="font-semibold">{integration.releaseTag}</span>
+					Selected release:{" "}
+					<span className="font-semibold">{integration.releaseTag}</span>
 				</p>
 			)}
 			{integration?.state === "installing" && (
@@ -986,7 +993,9 @@ function IntegrationToggle({
 			<button
 				type="button"
 				onClick={() => onToggle(false)}
-				disabled={integrationBusy || integration.state === "installing" || hasDownload}
+				disabled={
+					integrationBusy || integration.state === "installing" || hasDownload
+				}
 				className="console-button rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
 			>
 				{integrationBusy ? "Disabling…" : "Disable Lumi"}
@@ -1007,7 +1016,10 @@ function IntegrationToggle({
 }
 
 /** Describes the next enable action or installation retry. */
-function integrationButtonLabel(integration: Integration | null, integrationBusy: boolean) {
+function integrationButtonLabel(
+	integration: Integration | null,
+	integrationBusy: boolean,
+) {
 	if (integrationBusy) return "Installing…";
 	if (integration?.state === "error") return "Retry installation";
 	if (integration?.installed) return "Enable Lumi";
@@ -1021,7 +1033,14 @@ function IntegrationActions({
 	hasDownload,
 	canEnable,
 	onIntegrationToggle,
-}: Pick<IntegrationPanelProps, "integration" | "integrationBusy" | "hasDownload" | "canEnable" | "onIntegrationToggle">) {
+}: Pick<
+	IntegrationPanelProps,
+	| "integration"
+	| "integrationBusy"
+	| "hasDownload"
+	| "canEnable"
+	| "onIntegrationToggle"
+>) {
 	return (
 		<div className="flex flex-wrap gap-2">
 			<IntegrationToggle
@@ -1100,18 +1119,23 @@ function ModelPanel({
 				<div>
 					<h2 className="text-lg font-bold">Model files and access</h2>
 					<p className="mt-2 text-sm leading-6 console-muted">
-						Enable downloaded models for chat users, set the default, or remove
-						local model files. Download size is shown for each model.
+						Enable downloaded models for chat users, set the default, or remove local
+						model files. Download size is shown for each model.
 					</p>
 				</div>
 				{defaultModel && (
 					<p className="text-xs console-muted">
-						Default: <span className="font-semibold text-white/75">{defaultModel}</span>
+						Default:{" "}
+						<span className="font-semibold text-white/75">{defaultModel}</span>
 						<span className="mx-1">·</span>Thinking {defaultThinking ? "on" : "off"}
 					</p>
 				)}
 			</div>
-			{modelsError && <p role="alert" className="text-sm text-amber-200">{modelsError}</p>}
+			{modelsError && (
+				<p role="alert" className="text-sm text-amber-200">
+					{modelsError}
+				</p>
+			)}
 			<ModelAvailability
 				integration={integration}
 				modelInstallAvailable={modelInstallAvailable}
@@ -1242,7 +1266,13 @@ function ModelRow({
 }
 
 /** Shows model metadata, installation state, and any download progress. */
-function ModelSummary({ model, progress }: { model: LumiModel; progress: number | null }) {
+function ModelSummary({
+	model,
+	progress,
+}: {
+	model: LumiModel;
+	progress: number | null;
+}) {
 	return (
 		<div className="min-w-0 flex-1">
 			<div className="flex flex-wrap items-center gap-2">
@@ -1268,7 +1298,9 @@ function ModelSummary({ model, progress }: { model: LumiModel; progress: number 
 				Download size: {formatBytes(model.sizeBytes)}
 				{model.supportsThinking && " · Supports thinking"}
 			</p>
-			{model.downloading && <ModelDownloadProgress model={model} progress={progress} />}
+			{model.downloading && (
+				<ModelDownloadProgress model={model} progress={progress} />
+			)}
 			{model.downloadError && !model.downloading && (
 				<p role="alert" className="mt-3 max-w-xl text-xs text-red-200">
 					{safeText(model.downloadError)}
@@ -1337,7 +1369,10 @@ function ModelActionButton({
 	if (!model.installed) {
 		if (!modelInstallAvailable) {
 			return (
-				<span className="text-xs console-muted" title="This release does not include installer assets">
+				<span
+					className="text-xs console-muted"
+					title="This release does not include installer assets"
+				>
 					Installer unavailable
 				</span>
 			);
@@ -1410,7 +1445,9 @@ function RuntimeSettingsPanel({
 					className="mt-0.5 h-4 w-4 accent-cyan-400"
 				/>
 				<span>
-					<span className="block text-sm font-semibold text-white">Enable thinking by default</span>
+					<span className="block text-sm font-semibold text-white">
+						Enable thinking by default
+					</span>
 					<span className="mt-1 block text-xs console-muted">
 						Users can still change thinking for each conversation when the selected
 						model supports it.
@@ -1440,7 +1477,8 @@ function RuntimeSettingsPanel({
 			</div>
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<p className="text-xs console-muted">
-					Changes are saved to this Orchestrator and do not call an external model API.
+					Changes are saved to this Orchestrator and do not call an external model
+					API.
 				</p>
 				<button
 					type="button"

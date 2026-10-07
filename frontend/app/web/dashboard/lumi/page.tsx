@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { IconDownload, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import {
+	ConfirmDialog,
 	PageHeader,
 	StatusMessage,
 	SurfaceCard,
@@ -379,6 +380,7 @@ export default function LumiSettingsPage() {
 	const [loading, setLoading] = useState(true);
 	const [integrationBusy, setIntegrationBusy] = useState(false);
 	const [modelAction, setModelAction] = useState<ModelAction>(null);
+	const [modelToDelete, setModelToDelete] = useState<LumiModel | null>(null);
 	const [error, setError] = useState("");
 	const [releaseError, setReleaseError] = useState("");
 	const [modelsError, setModelsError] = useState("");
@@ -474,13 +476,13 @@ export default function LumiSettingsPage() {
 		const current = readSession();
 		if (current) {
 			setSession(current);
-			load(current).catch((cause) =>
+			load(current).catch((cause) => {
 				setError(
 					cause instanceof Error && cause.message
 						? safeText(cause.message)
 						: "Could not connect to the Orchestrator.",
 				),
-			);
+			});
 		} else {
 			setLoading(false);
 		}
@@ -493,13 +495,13 @@ export default function LumiSettingsPage() {
 	useEffect(() => {
 		if (!session || !shouldPoll) return;
 		const timer = window.setInterval(() => {
-			load(session, true).catch((cause) =>
+			load(session, true).catch((cause) => {
 				setError(
 					cause instanceof Error && cause.message
 						? safeText(cause.message)
 						: "Could not connect to the Orchestrator.",
 				),
-			);
+			});
 		}, 1500);
 		return () => window.clearInterval(timer);
 	}, [load, session, shouldPoll]);
@@ -707,15 +709,9 @@ export default function LumiSettingsPage() {
 		}
 	}
 
-	/** Removes a downloaded model after explicit browser confirmation. */
+	/** Removes a downloaded model after confirmation in the dashboard dialog. */
 	async function deleteModel(model: LumiModel) {
 		if (!session || !model.installed || model.enabled || model.isDefault) return;
-		if (
-			!window.confirm(
-				`Delete the downloaded files for ${model.label}? You can download it again later.`,
-			)
-		)
-			return;
 		setModelAction({ id: model.id, kind: "delete" });
 		setError("");
 		setMessage("");
@@ -738,7 +734,13 @@ export default function LumiSettingsPage() {
 			);
 		} finally {
 			setModelAction(null);
+			setModelToDelete(null);
 		}
+	}
+
+	/** Confirms deletion through the accessible dashboard dialog. */
+	function confirmModelDeletion() {
+		if (modelToDelete) deleteModel(modelToDelete);
 	}
 
 	const refreshing = loading || integrationBusy || modelAction !== null;
@@ -759,7 +761,9 @@ export default function LumiSettingsPage() {
 				actions={
 					<button
 						type="button"
-						onClick={() => (session ? void load(session) : undefined)}
+						onClick={() => {
+							if (session) load(session);
+						}}
 						disabled={!session || refreshing}
 						className="console-button inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold disabled:opacity-40"
 					>
@@ -893,7 +897,7 @@ export default function LumiSettingsPage() {
 								{integration?.enabled ? (
 									<button
 										type="button"
-										onClick={() => void updateIntegration(false)}
+										onClick={() => updateIntegration(false)}
 										disabled={
 											integrationBusy || integration.state === "installing" || hasDownload
 										}
@@ -904,7 +908,7 @@ export default function LumiSettingsPage() {
 								) : (
 									<button
 										type="button"
-										onClick={() => void updateIntegration(true)}
+										onClick={() => updateIntegration(true)}
 										disabled={!canEnable || loading}
 										className="console-button-primary rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
 									>
@@ -1039,9 +1043,7 @@ export default function LumiSettingsPage() {
 																(!model.enabled && model.downloading) ||
 																(model.enabled && model.isDefault)
 															}
-															onChange={(event) =>
-																void updateModel(model, event.target.checked)
-															}
+															onChange={(event) => updateModel(model, event.target.checked)}
 															className="h-4 w-4 accent-cyan-400"
 														/>
 														<span>Enabled</span>
@@ -1049,7 +1051,7 @@ export default function LumiSettingsPage() {
 												)}
 												<button
 													type="button"
-													onClick={() => void makeDefault(model)}
+													onClick={() => makeDefault(model)}
 													disabled={
 														!integration?.enabled ||
 														!model.installed ||
@@ -1071,7 +1073,7 @@ export default function LumiSettingsPage() {
 													modelInstallAvailable ? (
 														<button
 															type="button"
-															onClick={() => void downloadModel(model)}
+															onClick={() => downloadModel(model)}
 															disabled={
 																!integration?.enabled ||
 																modelAction !== null ||
@@ -1095,7 +1097,7 @@ export default function LumiSettingsPage() {
 												) : (
 													<button
 														type="button"
-														onClick={() => void deleteModel(model)}
+														onClick={() => setModelToDelete(model)}
 														disabled={
 															!integration?.enabled ||
 															model.enabled ||
@@ -1186,7 +1188,7 @@ export default function LumiSettingsPage() {
 							</p>
 							<button
 								type="button"
-								onClick={() => void saveRuntimeSettings()}
+								onClick={saveRuntimeSettings}
 								disabled={
 									!runtimeSettingsDirty || runtimeSettingsBusy || loading || !session
 								}
@@ -1198,6 +1200,20 @@ export default function LumiSettingsPage() {
 					</SurfaceCard>
 				</div>
 			)}
+			<ConfirmDialog
+				open={modelToDelete !== null}
+				title="Delete model files?"
+				description={
+					modelToDelete
+						? `Delete the downloaded files for ${safeText(modelToDelete.label)}? You can download them again later.`
+						: ""
+				}
+				confirmLabel="Delete files"
+				destructive
+				busy={modelAction?.kind === "delete"}
+				onClose={() => setModelToDelete(null)}
+				onConfirm={confirmModelDeletion}
+			/>
 		</div>
 	);
 }

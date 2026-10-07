@@ -481,7 +481,7 @@ export default function LumiSettingsPage() {
 					cause instanceof Error && cause.message
 						? safeText(cause.message)
 						: "Could not connect to the Orchestrator.",
-				),
+				);
 			});
 		} else {
 			setLoading(false);
@@ -500,7 +500,7 @@ export default function LumiSettingsPage() {
 					cause instanceof Error && cause.message
 						? safeText(cause.message)
 						: "Could not connect to the Orchestrator.",
-				),
+				);
 			});
 		}, 1500);
 		return () => window.clearInterval(timer);

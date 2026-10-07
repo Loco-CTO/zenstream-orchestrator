@@ -282,6 +282,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.temporary_directory.cleanup()
 
     def test_signed_github_asset_redirects_accept_query_on_asset_cdn_hosts(self):
+        """Accept signed URLs only on the pinned GitHub asset CDN hosts."""
         for host in (
             "objects.githubusercontent.com",
             "release-assets.githubusercontent.com",
@@ -292,6 +293,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
                 )
 
     def test_release_asset_redirect_queries_remain_restricted(self):
+        """Reject signed queries on GitHub metadata and untrusted origins."""
         for url in (
             "https://github.com/Loco-CTO/zenstream-lumi/releases/download/"
             "v0.1.2/lumi-runtime.zip?token=unexpected",

@@ -60,7 +60,14 @@ def _make_wheel():
     return buffer.getvalue()
 
 
-def _make_installer_wheel(distribution, version, package, *, compressible_bytes=0):
+def _make_installer_wheel(
+    distribution,
+    version,
+    package,
+    *,
+    compressible_bytes=0,
+    nested_metadata=False,
+):
     buffer = io.BytesIO()
     wheel_distribution = distribution.replace("-", "_")
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -69,6 +76,11 @@ def _make_installer_wheel(distribution, version, package, *, compressible_bytes=
             f"{wheel_distribution}-{version}.dist-info/METADATA",
             f"Metadata-Version: 2.1\nName: {distribution}\nVersion: {version}\n",
         )
+        if nested_metadata:
+            archive.writestr(
+                f"{package}/vendor-1.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: vendor\nVersion: 1.0\n",
+            )
         if compressible_bytes:
             archive.writestr(
                 f"{package}/compressible-resource.bin",
@@ -630,6 +642,27 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             )
             installed_resource = Path(directory) / "torch" / "compressible-resource.bin"
             self.assertEqual(installed_resource.stat().st_size, resource.file_size)
+
+    def test_model_installer_wheel_ignores_nested_vendored_metadata(self):
+        wheel_bytes = _make_installer_wheel(
+            "torch",
+            "2.5.1",
+            "torch",
+            nested_metadata=True,
+        )
+        dependency = RuntimeDependency(
+            "torch",
+            "2.5.1",
+            "cp312",
+            "cp312",
+            "win_amd64",
+            "torch-2.5.1-cp312-cp312-win_amd64.whl",
+            _sha256(wheel_bytes),
+        )
+
+        expanded = _validate_wheel_archive(wheel_bytes, dependency, installer=True)
+
+        self.assertGreater(expanded, 0)
 
     async def test_model_installer_requires_a_complete_wheel_set_for_the_current_host(
         self,

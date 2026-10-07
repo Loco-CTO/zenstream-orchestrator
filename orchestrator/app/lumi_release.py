@@ -1726,11 +1726,13 @@ def _validate_wheel_archive(
                 ),
             )
             metadata_names = [
-                name for name in infos if name.endswith(".dist-info/METADATA")
+                name
+                for name in infos
+                if name.endswith(".dist-info/METADATA") and name.count("/") == 1
             ]
             if len(metadata_names) != 1:
                 raise LumiReleaseError(
-                    f"{kind} wheel has no unique distribution METADATA"
+                    f"{kind} wheel {dependency.asset} has no unique distribution METADATA"
                 )
             if infos[metadata_names[0]].file_size > 64 * 1024:
                 raise LumiReleaseError(f"{kind} wheel METADATA exceeds the size limit")

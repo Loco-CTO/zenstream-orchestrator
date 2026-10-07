@@ -28,6 +28,7 @@ from app.lumi_release import (
     _matching_dependencies,
     _parse_runtime_dependencies,
     _unload_managed_lumi,
+    _validate_download_url,
 )
 
 TAG = "v1.2.3"
@@ -279,6 +280,29 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             if manager.active_release is not None:
                 await manager.disable()
         self.temporary_directory.cleanup()
+
+    def test_signed_github_asset_redirects_accept_query_on_asset_cdn_hosts(self):
+        """Accept signed URLs only on the pinned GitHub asset CDN hosts."""
+        for host in (
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+        ):
+            with self.subTest(host=host):
+                _validate_download_url(
+                    f"https://{host}/release/lumi-runtime.zip?token=signed-value"
+                )
+
+    def test_release_asset_redirect_queries_remain_restricted(self):
+        """Reject signed queries on GitHub metadata and untrusted origins."""
+        for url in (
+            "https://github.com/Loco-CTO/zenstream-lumi/releases/download/"
+            "v0.1.2/lumi-runtime.zip?token=unexpected",
+            "https://api.github.com/repos/Loco-CTO/zenstream-lumi/releases?token=x",
+            "https://attacker.invalid/lumi-runtime.zip?token=x",
+            "https://release-assets.githubusercontent.com/release/file?token=x#fragment",
+        ):
+            with self.subTest(url=url), self.assertRaises(LumiReleaseError):
+                _validate_download_url(url)
 
     def _manager(self, github, *, importer=None, unloader=None, host=HOST):
         manager = LumiReleaseManager(

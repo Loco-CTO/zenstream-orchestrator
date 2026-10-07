@@ -98,12 +98,14 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9_.+-]+\.whl$")
 _IMPORT_LOCK = threading.RLock()
 _DLL_DIRECTORY_HANDLES: dict[str, tuple[object, ...]] = {}
+_GITHUB_ASSET_CDN_HOSTS = frozenset(
+    {"objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+)
 _ALLOWED_GITHUB_HOSTS = frozenset(
     {
         "api.github.com",
         "github.com",
-        "objects.githubusercontent.com",
-        "release-assets.githubusercontent.com",
+        *_GITHUB_ASSET_CDN_HOSTS,
     }
 )
 
@@ -1115,7 +1117,7 @@ def _parse_release_assets(raw_assets: object) -> dict[str, _Asset]:
     return assets
 
 
-def _canonical_https_url(value: str) -> str:
+def _canonical_https_url(value: str, *, allow_signed_asset_query: bool = False) -> str:
     try:
         parsed = urllib.parse.urlsplit(value)
         port = parsed.port
@@ -1128,12 +1130,24 @@ def _canonical_https_url(value: str) -> str:
         or parsed.username is not None
         or parsed.password is not None
         or port not in (None, 443)
-        or parsed.query
+        or (
+            parsed.query
+            and not (
+                allow_signed_asset_query
+                and parsed.hostname.lower() in _GITHUB_ASSET_CDN_HOSTS
+            )
+        )
         or parsed.fragment
     ):
         raise LumiReleaseError("a release URL is outside the pinned GitHub origin")
     return urllib.parse.urlunsplit(
-        ("https", parsed.netloc.lower(), parsed.path, "", "")
+        (
+            "https",
+            parsed.netloc.lower(),
+            parsed.path,
+            parsed.query if allow_signed_asset_query else "",
+            "",
+        )
     )
 
 
@@ -1180,7 +1194,7 @@ def _canonical_api_url(value: str) -> str:
 
 
 def _validate_download_url(value: str) -> None:
-    canonical = _canonical_https_url(value)
+    canonical = _canonical_https_url(value, allow_signed_asset_query=True)
     parsed = urllib.parse.urlsplit(canonical)
     if parsed.hostname == "api.github.com":
         raise LumiReleaseError("a release asset redirected to GitHub API metadata")

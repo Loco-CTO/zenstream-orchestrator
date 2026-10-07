@@ -27,8 +27,8 @@ from app.lumi_release import (
     _import_managed_lumi,
     _matching_dependencies,
     _parse_runtime_dependencies,
-    _validate_download_url,
     _unload_managed_lumi,
+    _validate_download_url,
 )
 
 TAG = "v1.2.3"

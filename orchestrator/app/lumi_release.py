@@ -1117,9 +1117,7 @@ def _parse_release_assets(raw_assets: object) -> dict[str, _Asset]:
     return assets
 
 
-def _canonical_https_url(
-    value: str, *, allow_signed_asset_query: bool = False
-) -> str:
+def _canonical_https_url(value: str, *, allow_signed_asset_query: bool = False) -> str:
     try:
         parsed = urllib.parse.urlsplit(value)
         port = parsed.port

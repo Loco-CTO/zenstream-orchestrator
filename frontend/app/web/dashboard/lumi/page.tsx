@@ -493,7 +493,7 @@ export default function LumiSettingsPage() {
 		integrationBusy || integration?.state === "installing" || hasDownload;
 
 	useEffect(() => {
-		if (!session || !shouldPoll) return;
+		if (!session || !shouldPoll) return undefined;
 		const timer = window.setInterval(() => {
 			load(session, true).catch((cause) => {
 				setError(
@@ -833,6 +833,7 @@ export default function LumiSettingsPage() {
 	);
 }
 
+/** Displays an accessible dashboard error message. */
 function ErrorNotice({ message }: { message: string }) {
 	return (
 		<p
@@ -844,12 +845,11 @@ function ErrorNotice({ message }: { message: string }) {
 	);
 }
 
+/** Shows loading or sign-in guidance for the Lumi settings page. */
 function DashboardAvailability({ loading }: { loading: boolean }) {
 	return (
 		<SurfaceCard className="mt-7 p-6 console-muted">
-			{loading
-				? "Loading Lumi integration status…"
-				: "Sign in to manage the Lumi integration."}
+			{loading ? "Loading Lumi integration status…" : "Sign in to manage the Lumi integration."}
 		</SurfaceCard>
 	);
 }
@@ -866,50 +866,33 @@ type IntegrationPanelProps = {
 	onIntegrationToggle: (enabled: boolean) => void;
 };
 
-function IntegrationPanel({
-	integration,
-	releases,
-	selectedReleaseTag,
-	releaseError,
-	integrationBusy,
-	hasDownload,
-	canEnable,
-	onReleaseChange,
-	onIntegrationToggle,
-}: IntegrationPanelProps) {
-	const installedReleaseMissing = Boolean(
-		integration?.releaseTag &&
-		!releases.some((release) => release.tag === integration.releaseTag),
-	);
-	const buttonLabel = integrationBusy
-		? "Installing…"
-		: integration?.state === "error"
-			? "Retry installation"
-			: integration?.installed
-				? "Enable Lumi"
-				: "Install and enable Lumi";
-	const releaseHint = releaseError
-		? releaseError
-		: releases.length === 0
-			? "No supported Lumi releases are currently available."
-			: "Choose a published stable release to install or enable.";
-
+/** Renders Lumi release selection, integration state, and enable controls. */
+function IntegrationPanel(props: IntegrationPanelProps) {
 	return (
 		<SurfaceCard className="space-y-5 p-6">
+			<IntegrationSummary integration={props.integration} />
+			<IntegrationControls {...props} />
+		</SurfaceCard>
+	);
+}
+
+/** Shows the installed version and current integration progress or error. */
+function IntegrationSummary({ integration }: { integration: Integration | null }) {
+	return (
+		<>
 			<div className="flex flex-wrap items-start justify-between gap-4">
 				<div>
 					<h2 className="text-lg font-bold">Integration</h2>
 					<p className="mt-2 text-sm leading-6 console-muted">
-						Lumi is installed from a supported release only after you select a version
-						and enable it. The selected package is loaded in-process.
+						Lumi is installed from a supported release only after you select a
+						version and enable it. The selected package is loaded in-process.
 					</p>
 				</div>
 				{integration && <IntegrationBadges integration={integration} />}
 			</div>
 			{integration?.releaseTag && (
 				<p className="text-sm text-white/70">
-					Selected release:{" "}
-					<span className="font-semibold">{integration.releaseTag}</span>
+					Selected release: <span className="font-semibold">{integration.releaseTag}</span>
 				</p>
 			)}
 			{integration?.state === "installing" && (
@@ -923,71 +906,146 @@ function IntegrationPanel({
 			{integration?.state === "error" && integration.error && (
 				<ErrorNotice message={safeText(integration.error)} />
 			)}
-			<div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-				<label className="block min-w-0">
-					<span className="text-sm font-semibold">Supported release</span>
-					<select
-						value={selectedReleaseTag}
-						onChange={(event) => onReleaseChange(event.target.value)}
-						disabled={
-							integration?.enabled ||
-							integration?.state === "installing" ||
-							integrationBusy ||
-							releases.length === 0
-						}
-						className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
-					>
-						<option value="">
-							{releases.length
-								? "Select a release"
-								: "No supported releases available"}
-						</option>
-						{installedReleaseMissing && integration?.releaseTag && (
-							<option value={integration.releaseTag}>
-								{integration.releaseTag} (currently installed)
-							</option>
-						)}
-						{releases.map((release) => (
-							<option key={release.tag} value={release.tag}>
-								{release.tag} · {formatReleaseDate(release.releasedAt)}
-							</option>
-						))}
-					</select>
-					<span
-						className={`mt-2 block text-xs ${releaseError ? "text-amber-200" : "console-muted"}`}
-						role={releaseError ? "alert" : undefined}
-					>
-						{releaseHint}
-					</span>
-				</label>
-				<div className="flex flex-wrap gap-2">
-					{integration?.enabled ? (
-						<button
-							type="button"
-							onClick={() => onIntegrationToggle(false)}
-							disabled={
-								integrationBusy || integration.state === "installing" || hasDownload
-							}
-							className="console-button rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
-						>
-							{integrationBusy ? "Disabling…" : "Disable Lumi"}
-						</button>
-					) : (
-						<button
-							type="button"
-							onClick={() => onIntegrationToggle(true)}
-							disabled={!canEnable}
-							className="console-button-primary rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
-						>
-							{buttonLabel}
-						</button>
-					)}
-				</div>
-			</div>
-		</SurfaceCard>
+		</>
 	);
 }
 
+/** Lets an administrator choose a supported stable Lumi release. */
+function ReleasePicker({
+	integration,
+	releases,
+	selectedReleaseTag,
+	releaseError,
+	integrationBusy,
+	onReleaseChange,
+}: IntegrationPanelProps) {
+	const installedReleaseMissing = Boolean(
+		integration?.releaseTag &&
+		!releases.some((release) => release.tag === integration.releaseTag),
+	);
+	const releaseHint = releaseError
+		? releaseError
+		: releases.length === 0
+			? "No supported Lumi releases are currently available."
+			: "Choose a published stable release to install or enable.";
+
+	return (
+		<label className="block min-w-0">
+			<span className="text-sm font-semibold">Supported release</span>
+			<select
+				value={selectedReleaseTag}
+				onChange={(event) => onReleaseChange(event.target.value)}
+				disabled={
+					integration?.enabled ||
+					integration?.state === "installing" ||
+					integrationBusy ||
+					releases.length === 0
+				}
+				className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
+			>
+				<option value="">
+					{releases.length ? "Select a release" : "No supported releases available"}
+				</option>
+				{installedReleaseMissing && integration?.releaseTag && (
+					<option value={integration.releaseTag}>
+						{integration.releaseTag} (currently installed)
+					</option>
+				)}
+				{releases.map((release) => (
+					<option key={release.tag} value={release.tag}>
+						{release.tag} · {formatReleaseDate(release.releasedAt)}
+					</option>
+				))}
+			</select>
+			<span
+				className={`mt-2 block text-xs ${releaseError ? "text-amber-200" : "console-muted"}`}
+				role={releaseError ? "alert" : undefined}
+			>
+				{releaseHint}
+			</span>
+		</label>
+	);
+}
+
+/** Provides the safe enable or disable action for the integration. */
+function IntegrationToggle({
+	integration,
+	integrationBusy,
+	hasDownload,
+	canEnable,
+	onToggle,
+}: {
+	integration: Integration | null;
+	integrationBusy: boolean;
+	hasDownload: boolean;
+	canEnable: boolean;
+	onToggle: (enabled: boolean) => void;
+}) {
+	if (integration?.enabled) {
+		return (
+			<button
+				type="button"
+				onClick={() => onToggle(false)}
+				disabled={integrationBusy || integration.state === "installing" || hasDownload}
+				className="console-button rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
+			>
+				{integrationBusy ? "Disabling…" : "Disable Lumi"}
+			</button>
+		);
+	}
+
+	return (
+		<button
+			type="button"
+			onClick={() => onToggle(true)}
+			disabled={!canEnable}
+			className="console-button-primary rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
+		>
+			{integrationButtonLabel(integration, integrationBusy)}
+		</button>
+	);
+}
+
+/** Describes the next enable action or installation retry. */
+function integrationButtonLabel(integration: Integration | null, integrationBusy: boolean) {
+	if (integrationBusy) return "Installing…";
+	if (integration?.state === "error") return "Retry installation";
+	if (integration?.installed) return "Enable Lumi";
+	return "Install and enable Lumi";
+}
+
+/** Displays the integration enable or disable control. */
+function IntegrationActions({
+	integration,
+	integrationBusy,
+	hasDownload,
+	canEnable,
+	onIntegrationToggle,
+}: Pick<IntegrationPanelProps, "integration" | "integrationBusy" | "hasDownload" | "canEnable" | "onIntegrationToggle">) {
+	return (
+		<div className="flex flex-wrap gap-2">
+			<IntegrationToggle
+				integration={integration}
+				integrationBusy={integrationBusy}
+				hasDownload={hasDownload}
+				canEnable={canEnable}
+				onToggle={onIntegrationToggle}
+			/>
+		</div>
+	);
+}
+
+/** Combines release selection and integration action controls. */
+function IntegrationControls(props: IntegrationPanelProps) {
+	return (
+		<div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+			<ReleasePicker {...props} />
+			<IntegrationActions {...props} />
+		</div>
+	);
+}
+
+/** Renders the integration status badges. */
 function IntegrationBadges({ integration }: { integration: Integration }) {
 	return (
 		<div className="flex flex-wrap gap-2 text-xs font-semibold">
@@ -1022,6 +1080,7 @@ type ModelPanelProps = {
 	onRequestDelete: (model: LumiModel) => void;
 };
 
+/** Lists supported model files and the controls that govern chat access. */
 function ModelPanel({
 	defaultModel,
 	defaultThinking,
@@ -1041,23 +1100,18 @@ function ModelPanel({
 				<div>
 					<h2 className="text-lg font-bold">Model files and access</h2>
 					<p className="mt-2 text-sm leading-6 console-muted">
-						Enable downloaded models for chat users, set the default, or remove local
-						model files. Download size is shown for each model.
+						Enable downloaded models for chat users, set the default, or remove
+						local model files. Download size is shown for each model.
 					</p>
 				</div>
 				{defaultModel && (
 					<p className="text-xs console-muted">
-						Default:{" "}
-						<span className="font-semibold text-white/75">{defaultModel}</span>
+						Default: <span className="font-semibold text-white/75">{defaultModel}</span>
 						<span className="mx-1">·</span>Thinking {defaultThinking ? "on" : "off"}
 					</p>
 				)}
 			</div>
-			{modelsError && (
-				<p role="alert" className="text-sm text-amber-200">
-					{modelsError}
-				</p>
-			)}
+			{modelsError && <p role="alert" className="text-sm text-amber-200">{modelsError}</p>}
 			<ModelAvailability
 				integration={integration}
 				modelInstallAvailable={modelInstallAvailable}
@@ -1085,6 +1139,7 @@ function ModelPanel({
 	);
 }
 
+/** Explains whether Lumi model installation and management are available. */
 function ModelAvailability({
 	integration,
 	modelInstallAvailable,
@@ -1117,6 +1172,7 @@ type ModelRowProps = {
 	onRequestDelete: (model: LumiModel) => void;
 };
 
+/** Renders one model's status and its enable, default, download, and delete actions. */
 function ModelRow({
 	model,
 	integrationEnabled,
@@ -1185,13 +1241,8 @@ function ModelRow({
 	);
 }
 
-function ModelSummary({
-	model,
-	progress,
-}: {
-	model: LumiModel;
-	progress: number | null;
-}) {
+/** Shows model metadata, installation state, and any download progress. */
+function ModelSummary({ model, progress }: { model: LumiModel; progress: number | null }) {
 	return (
 		<div className="min-w-0 flex-1">
 			<div className="flex flex-wrap items-center gap-2">
@@ -1217,9 +1268,7 @@ function ModelSummary({
 				Download size: {formatBytes(model.sizeBytes)}
 				{model.supportsThinking && " · Supports thinking"}
 			</p>
-			{model.downloading && (
-				<ModelDownloadProgress model={model} progress={progress} />
-			)}
+			{model.downloading && <ModelDownloadProgress model={model} progress={progress} />}
 			{model.downloadError && !model.downloading && (
 				<p role="alert" className="mt-3 max-w-xl text-xs text-red-200">
 					{safeText(model.downloadError)}
@@ -1229,6 +1278,7 @@ function ModelSummary({
 	);
 }
 
+/** Displays the progress bar for a supported model download. */
 function ModelDownloadProgress({
 	model,
 	progress,
@@ -1259,6 +1309,7 @@ function ModelDownloadProgress({
 	);
 }
 
+/** Selects the available action for an uninstalled or installed model. */
 function ModelActionButton({
 	model,
 	busy,
@@ -1286,10 +1337,7 @@ function ModelActionButton({
 	if (!model.installed) {
 		if (!modelInstallAvailable) {
 			return (
-				<span
-					className="text-xs console-muted"
-					title="This release does not include installer assets"
-				>
+				<span className="text-xs console-muted" title="This release does not include installer assets">
 					Installer unavailable
 				</span>
 			);
@@ -1334,6 +1382,7 @@ type RuntimeSettingsPanelProps = {
 	onSave: () => void;
 };
 
+/** Edits Lumi's default thinking mode and bounded runtime limits. */
 function RuntimeSettingsPanel({
 	defaultThinking,
 	runtimeSettingsBusy,
@@ -1361,9 +1410,7 @@ function RuntimeSettingsPanel({
 					className="mt-0.5 h-4 w-4 accent-cyan-400"
 				/>
 				<span>
-					<span className="block text-sm font-semibold text-white">
-						Enable thinking by default
-					</span>
+					<span className="block text-sm font-semibold text-white">Enable thinking by default</span>
 					<span className="mt-1 block text-xs console-muted">
 						Users can still change thinking for each conversation when the selected
 						model supports it.
@@ -1393,8 +1440,7 @@ function RuntimeSettingsPanel({
 			</div>
 			<div className="flex flex-wrap items-center justify-between gap-3">
 				<p className="text-xs console-muted">
-					Changes are saved to this Orchestrator and do not call an external model
-					API.
+					Changes are saved to this Orchestrator and do not call an external model API.
 				</p>
 				<button
 					type="button"

@@ -10,15 +10,16 @@ named lumi-runtime.zip. Its root has lumi-release.json and the package files
 listed in manifest.files. Each file entry is {"sha256": <64 lowercase hex>,
 "size": <integer>}. The manifest also declares tag, runtimeApiVersion,
 minimumOrchestratorVersion, maximumOrchestratorVersionExclusive, and
-runtimeDependencies. Each dependency is a separately published GitHub release
-wheel asset with distribution, version, pythonTag, abiTag, platformTag, asset,
-and sha256 fields. Every selected wheel must appear in the GitHub Release API
-asset list with the same SHA-256 digest. Lumi must publish the compatible
+runtimeDependencies. Each runtime dependency is a separately published GitHub
+release wheel asset with distribution, version, pythonTag, abiTag, platformTag,
+asset, and sha256 fields. Every selected wheel must appear in the GitHub Release
+API asset list with the same SHA-256 digest. Lumi must publish the compatible
 onnxruntime-genai wheel for each supported Python ABI and host platform; the
 wheel is extracted below the managed Lumi release directory and added to
-sys.path only while that release is active. It is never assumed to exist in
-Orchestrator's base environment and is never installed with an unpinned pip
-command.
+sys.path only while that release is active. Optional installerDependencies
+follow the same pinned wheel contract but are fetched only after an administrator
+explicitly requests a model download. Neither dependency group is installed
+with an unpinned pip command.
 
 The package contract exports lumi.LUMI_PLUGIN_API_VERSION,
 lumi.runtime.LUMI_RUNTIME_API_VERSION, the OrtGenAIChatRuntime,
@@ -79,6 +80,15 @@ MAX_WHEEL_FILE_BYTES = 128 * 1024 * 1024
 MAX_WHEEL_EXPANDED_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_WHEEL_EXPANDED_BYTES = 1024 * 1024 * 1024
 MAX_WHEELS = 16
+MAX_INSTALLER_WHEELS = 128
+MAX_INSTALLER_WHEEL_BYTES = 512 * 1024 * 1024
+MAX_INSTALLER_TOTAL_DOWNLOAD_BYTES = 1024 * 1024 * 1024
+MAX_INSTALLER_WHEEL_FILE_BYTES = 512 * 1024 * 1024
+MAX_INSTALLER_WHEEL_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
+MAX_INSTALLER_TOTAL_WHEEL_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
+_REQUIRED_INSTALLER_DISTRIBUTIONS = frozenset(
+    {"huggingface-hub", "onnx-ir", "torch", "transformers"}
+)
 
 _TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -233,6 +243,7 @@ class LumiReleaseManifest:
     maximum_orchestrator_version_exclusive: tuple[int, int, int]
     package_files: Mapping[str, tuple[int, str]]
     runtime_dependencies: tuple[RuntimeDependency, ...]
+    installer_dependencies: tuple[RuntimeDependency, ...]
     raw: Mapping[str, Any]
 
 
@@ -398,6 +409,18 @@ class LumiReleaseManager:
         return self._restart_required
 
     @property
+    def model_install_available(self) -> bool:
+        """Whether the active release publishes a complete installer set for this host."""
+        active = self._active
+        return bool(
+            active
+            and _matching_installer_dependencies(
+                active.manifest.installer_dependencies,
+                self._host(),
+            )
+        )
+
+    @property
     def disable_error(self) -> str | None:
         """Safe recovery detail when disabling Lumi could not fully clean up."""
         return self._disable_error
@@ -491,6 +514,41 @@ class LumiReleaseManager:
             )
             return self._active
 
+    async def install_model_dependencies(self) -> tuple[Path, ...]:
+        """Fetch and extract conversion wheels after an explicit model-install request.
+
+        These potentially large wheels are a separate release-manifest group. They are
+        never downloaded by enable(tag), and their import directories are not added to
+        the active Lumi runtime paths.
+        """
+
+        async with self._lock:
+            active = self._active
+            if active is None or self._closing_release is not None:
+                raise LumiReleaseError("enable Lumi before installing a model")
+            matching = _matching_installer_dependencies(
+                active.manifest.installer_dependencies,
+                self._host(),
+            )
+            if not matching:
+                raise LumiReleaseCompatibilityError(
+                    "the selected Lumi release has no complete model installer wheel set "
+                    "for this host"
+                )
+            from app.foreground import run_control
+
+            directories = await run_control(
+                self._install_installer_dependencies,
+                active.tag,
+                active.directory,
+                matching,
+            )
+            if not directories:
+                raise LumiReleaseCompatibilityError(
+                    "the selected Lumi release has no installer wheels for this host"
+                )
+            return directories
+
     async def disable(self) -> None:
         """Close services and block Lumi immediately before unloading imports."""
         async with self._lock:
@@ -504,7 +562,10 @@ class LumiReleaseManager:
             self._disable_error = None
             active._enabled = False
             close_failures = await active.close_services()
-            dependency_directories = _dependency_directories(active.directory)
+            dependency_directories = (
+                *_dependency_directories(active.directory),
+                *_installer_dependency_directories(active.directory),
+            )
             self._restart_required = (
                 self._restart_required
                 or _has_loaded_native_extension(dependency_directories)
@@ -630,6 +691,140 @@ class LumiReleaseManager:
             package_bytes,
             tuple(wheel_payloads),
         )
+
+    def _install_installer_dependencies(
+        self,
+        tag: str,
+        release_directory: Path,
+        dependencies: Sequence[RuntimeDependency],
+    ) -> tuple[Path, ...]:
+        runtime_host = self._host()
+        matching = _matching_installer_dependencies(dependencies, runtime_host)
+        if not matching:
+            raise LumiReleaseCompatibilityError(
+                "the release has no complete model installer wheel set for this host"
+            )
+        if len(matching) > MAX_INSTALLER_WHEELS:
+            raise LumiReleaseCompatibilityError(
+                "the release declares too many model installer wheels"
+            )
+        target = release_directory / "installer-dependencies"
+        if target.is_symlink() or os.path.ismount(target):
+            raise LumiReleaseError(
+                "managed Lumi installer dependencies use an unsafe path"
+            )
+        if _installer_dependencies_are_valid(target, tag, matching):
+            return _installer_dependency_directories(release_directory)
+
+        metadata_url = (
+            f"{LUMI_GITHUB_API}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+        )
+        response = self._fetcher(
+            metadata_url,
+            {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "ZenStream-Orchestrator",
+            },
+            MAX_RELEASE_METADATA_BYTES,
+        )
+        if _canonical_api_url(response.final_url) != _canonical_api_url(metadata_url):
+            raise LumiReleaseError(
+                "GitHub release metadata came from an unexpected URL"
+            )
+        try:
+            release = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise LumiReleaseError(
+                "GitHub returned invalid release metadata"
+            ) from error
+        if not isinstance(release, dict):
+            raise LumiReleaseError("GitHub returned invalid release metadata")
+        self._validate_release_metadata(release, tag)
+        assets = _parse_release_assets(release.get("assets"))
+        selected_assets: list[tuple[RuntimeDependency, _Asset]] = []
+        total_download_bytes = 0
+        for dependency in matching:
+            asset = assets.get(dependency.asset)
+            if asset is None:
+                raise LumiReleaseUnavailable(
+                    f"release {tag} is missing installer wheel asset {dependency.asset}"
+                )
+            if asset.sha256 != dependency.sha256:
+                raise LumiReleaseError(
+                    f"release metadata digest does not match the manifest for {dependency.asset}"
+                )
+            if asset.size > MAX_INSTALLER_WHEEL_BYTES:
+                raise LumiReleaseError(
+                    "a model installer wheel exceeds the download size limit"
+                )
+            total_download_bytes += asset.size
+            if total_download_bytes > MAX_INSTALLER_TOTAL_DOWNLOAD_BYTES:
+                raise LumiReleaseError(
+                    "model installer wheels exceed the total download size limit"
+                )
+            selected_assets.append((dependency, asset))
+
+        staging = Path(
+            tempfile.mkdtemp(prefix=".installer-staging-", dir=release_directory)
+        )
+        backup = release_directory / f".installer-rollback-{os.getpid()}"
+        wheelhouse = staging / "wheelhouse"
+        dependency_root = staging / "dependencies"
+        wheelhouse.mkdir()
+        expanded_bytes = 0
+        try:
+            for dependency, asset in selected_assets:
+                wheel_bytes = self._download_asset(
+                    tag,
+                    asset,
+                    MAX_INSTALLER_WHEEL_BYTES,
+                )
+                expanded_bytes += _validate_wheel_archive(
+                    wheel_bytes,
+                    dependency,
+                    installer=True,
+                )
+                if expanded_bytes > MAX_INSTALLER_TOTAL_WHEEL_EXPANDED_BYTES:
+                    raise LumiReleaseError(
+                        "model installer wheels exceed the total expanded size limit"
+                    )
+                (wheelhouse / dependency.asset).write_bytes(wheel_bytes)
+                destination = (
+                    dependency_root
+                    / f"{_normalize_distribution(dependency.distribution)}-{dependency.version}"
+                    / "site-packages"
+                )
+                destination.mkdir(parents=True, exist_ok=True)
+                _extract_wheel(
+                    wheel_bytes,
+                    destination,
+                    dependency,
+                    installer=True,
+                )
+            marker = _installer_dependency_manifest(tag, matching)
+            (staging / "lumi-installer-wheels.json").write_text(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+                newline="\n",
+            )
+            if backup.exists() or backup.is_symlink():
+                _remove_managed_path(backup)
+            if target.exists():
+                os.replace(target, backup)
+            try:
+                os.replace(staging, target)
+            except Exception:
+                if backup.exists():
+                    os.replace(backup, target)
+                raise
+            if backup.exists():
+                _remove_managed_path(backup, ignore_errors=True)
+        except Exception:
+            if staging.exists():
+                _remove_managed_path(staging, ignore_errors=True)
+            raise
+        return _installer_dependency_directories(release_directory)
 
     def _list_published_releases(self, limit: int) -> tuple[LumiReleaseCandidate, ...]:
         url = f"{LUMI_GITHUB_API}/releases?per_page={limit}"
@@ -871,6 +1066,14 @@ def _normalize_distribution(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _parse_release_assets(raw_assets: object) -> dict[str, _Asset]:
     if not isinstance(raw_assets, list):
         raise LumiReleaseError("GitHub release metadata has no asset list")
@@ -1083,6 +1286,9 @@ def _read_and_validate_manifest(
 
     package_files = _parse_package_file_manifest(raw.get("files"))
     dependencies = _parse_runtime_dependencies(raw.get("runtimeDependencies"))
+    installer_dependencies = _parse_installer_dependencies(
+        raw.get("installerDependencies", [])
+    )
     if len(dependencies) > MAX_WHEELS:
         raise LumiReleaseCompatibilityError(
             "Lumi release declares too many runtime dependencies"
@@ -1096,6 +1302,20 @@ def _read_and_validate_manifest(
         )
     _validate_package_archive_members(infos, package_files)
     _validate_dependency_wheel_names(dependencies)
+    _validate_dependency_wheel_names(installer_dependencies)
+    if {item.asset for item in dependencies} & {
+        item.asset for item in installer_dependencies
+    }:
+        raise LumiReleaseError("runtime and installer wheel asset names overlap")
+    if installer_dependencies:
+        installer_distributions = {
+            _normalize_distribution(item.distribution)
+            for item in installer_dependencies
+        }
+        if not _REQUIRED_INSTALLER_DISTRIBUTIONS.issubset(installer_distributions):
+            raise LumiReleaseCompatibilityError(
+                "Lumi model installer wheel set is incomplete"
+            )
     if not _matching_dependencies(dependencies, runtime_host):
         raise LumiReleaseCompatibilityError(
             "Lumi release does not publish wheels for this Python ABI and host"
@@ -1107,6 +1327,7 @@ def _read_and_validate_manifest(
         maximum,
         package_files,
         dependencies,
+        installer_dependencies,
         raw,
     )
 
@@ -1152,6 +1373,29 @@ def _parse_runtime_dependencies(
         raise LumiReleaseCompatibilityError(
             "Lumi release declares too many runtime wheels"
         )
+    return _parse_wheel_dependencies(raw_dependencies, kind="runtime")
+
+
+def _parse_installer_dependencies(
+    raw_dependencies: object,
+) -> tuple[RuntimeDependency, ...]:
+    if raw_dependencies == []:
+        return ()
+    if (
+        not isinstance(raw_dependencies, list)
+        or len(raw_dependencies) > MAX_INSTALLER_WHEELS
+    ):
+        raise LumiReleaseCompatibilityError(
+            "Lumi release declares too many installer wheels"
+        )
+    return _parse_wheel_dependencies(raw_dependencies, kind="installer")
+
+
+def _parse_wheel_dependencies(
+    raw_dependencies: list[object],
+    *,
+    kind: str,
+) -> tuple[RuntimeDependency, ...]:
     dependencies: list[RuntimeDependency] = []
     seen: set[tuple[str, str, str, str]] = set()
     for raw in raw_dependencies:
@@ -1171,8 +1415,10 @@ def _parse_runtime_dependencies(
         distribution, version, python_tag, abi_tag, platform_tag, asset, digest = values
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", distribution):
             raise LumiReleaseError("Lumi runtime wheel distribution name is invalid")
-        if _normalize_distribution(distribution) == "onnxruntime-genai" and (
-            python_tag == "py3" or abi_tag == "none" or platform_tag == "any"
+        if (
+            kind == "runtime"
+            and _normalize_distribution(distribution) == "onnxruntime-genai"
+            and (python_tag == "py3" or abi_tag == "none" or platform_tag == "any")
         ):
             raise LumiReleaseCompatibilityError(
                 "onnxruntime-genai must use a pinned host-specific binary wheel"
@@ -1258,6 +1504,18 @@ def _matching_dependencies(
             and dependency.platform_tag in host.platform_tags
         )
     )
+
+
+def _matching_installer_dependencies(
+    dependencies: Sequence[RuntimeDependency], host: RuntimeHost
+) -> tuple[RuntimeDependency, ...]:
+    matching = _matching_dependencies(dependencies, host)
+    distributions = {
+        _normalize_distribution(dependency.distribution) for dependency in matching
+    }
+    if not _REQUIRED_INSTALLER_DISTRIBUTIONS.issubset(distributions):
+        return ()
+    return matching
 
 
 def _validate_package_archive_members(
@@ -1395,7 +1653,16 @@ def _extract_package_archive(
         raise LumiReleaseError("Lumi package could not be safely extracted") from error
 
 
-def _validate_wheel_archive(wheel_bytes: bytes, dependency: RuntimeDependency) -> int:
+def _validate_wheel_archive(
+    wheel_bytes: bytes,
+    dependency: RuntimeDependency,
+    *,
+    installer: bool = False,
+) -> int:
+    kind = "model installer" if installer else "runtime"
+    expanded_limit = (
+        MAX_INSTALLER_WHEEL_EXPANDED_BYTES if installer else MAX_WHEEL_EXPANDED_BYTES
+    )
     try:
         with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
             infos = _validate_zip_entries(wheel.infolist(), MAX_ARCHIVE_ENTRIES)
@@ -1404,10 +1671,10 @@ def _validate_wheel_archive(wheel_bytes: bytes, dependency: RuntimeDependency) -
             ]
             if len(metadata_names) != 1:
                 raise LumiReleaseError(
-                    "runtime wheel has no unique distribution METADATA"
+                    f"{kind} wheel has no unique distribution METADATA"
                 )
             if infos[metadata_names[0]].file_size > 64 * 1024:
-                raise LumiReleaseError("runtime wheel METADATA exceeds the size limit")
+                raise LumiReleaseError(f"{kind} wheel METADATA exceeds the size limit")
             metadata = wheel.read(metadata_names[0]).decode("utf-8", errors="strict")
             name_value, version_value = _wheel_metadata_identity(metadata)
             if (
@@ -1416,7 +1683,7 @@ def _validate_wheel_archive(wheel_bytes: bytes, dependency: RuntimeDependency) -
                 or version_value != dependency.version
             ):
                 raise LumiReleaseError(
-                    "runtime wheel METADATA does not match its pinned identity"
+                    f"{kind} wheel METADATA does not match its pinned identity"
                 )
             if _normalize_distribution(dependency.distribution) == "onnxruntime-genai":
                 native_suffix = (
@@ -1431,14 +1698,14 @@ def _validate_wheel_archive(wheel_bytes: bytes, dependency: RuntimeDependency) -
                         "pinned onnxruntime-genai wheel has no host-native extension binary"
                     )
             expanded = sum(info.file_size for info in infos.values())
-            if expanded > MAX_WHEEL_EXPANDED_BYTES:
-                raise LumiReleaseError("runtime wheel exceeds the expanded size limit")
+            if expanded > expanded_limit:
+                raise LumiReleaseError(f"{kind} wheel exceeds the expanded size limit")
             return expanded
     except (zipfile.BadZipFile, OSError, UnicodeDecodeError, RuntimeError) as error:
         if isinstance(error, LumiReleaseError):
             raise
         raise LumiReleaseError(
-            "runtime dependency is not a valid wheel archive"
+            f"{kind} dependency is not a valid wheel archive"
         ) from error
 
 
@@ -1456,19 +1723,30 @@ def _wheel_metadata_identity(metadata: str) -> tuple[str, str]:
 
 
 def _extract_wheel(
-    wheel_bytes: bytes, destination_root: Path, dependency: RuntimeDependency
+    wheel_bytes: bytes,
+    destination_root: Path,
+    dependency: RuntimeDependency,
+    *,
+    installer: bool = False,
 ) -> None:
+    kind = "model installer" if installer else "runtime"
+    max_file_bytes = (
+        MAX_INSTALLER_WHEEL_FILE_BYTES if installer else MAX_WHEEL_FILE_BYTES
+    )
+    max_expanded_bytes = (
+        MAX_INSTALLER_WHEEL_EXPANDED_BYTES if installer else MAX_WHEEL_EXPANDED_BYTES
+    )
     try:
         with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
             infos = _validate_zip_entries(wheel.infolist(), MAX_ARCHIVE_ENTRIES)
             expanded = 0
             for name, info in infos.items():
-                if info.file_size > MAX_WHEEL_FILE_BYTES:
-                    raise LumiReleaseError("runtime wheel contains an oversized file")
+                if info.file_size > max_file_bytes:
+                    raise LumiReleaseError(f"{kind} wheel contains an oversized file")
                 expanded += info.file_size
-                if expanded > MAX_WHEEL_EXPANDED_BYTES:
+                if expanded > max_expanded_bytes:
                     raise LumiReleaseError(
-                        "runtime wheel exceeds the expanded size limit"
+                        f"{kind} wheel exceeds the expanded size limit"
                     )
                 relative = _wheel_install_path(name, dependency)
                 if relative is None:
@@ -1481,7 +1759,7 @@ def _extract_wheel(
         if isinstance(error, LumiReleaseError):
             raise
         raise LumiReleaseError(
-            "runtime dependency could not be safely extracted"
+            f"{kind} dependency could not be safely extracted"
         ) from error
 
 
@@ -1511,12 +1789,79 @@ def _wheel_install_path(
 
 
 def _dependency_directories(release_directory: Path) -> tuple[Path, ...]:
-    root = release_directory / "dependencies"
+    return _dependency_directories_from_root(release_directory / "dependencies")
+
+
+def _installer_dependency_directories(release_directory: Path) -> tuple[Path, ...]:
+    return _dependency_directories_from_root(
+        release_directory / "installer-dependencies" / "dependencies"
+    )
+
+
+def _dependency_directories_from_root(root: Path) -> tuple[Path, ...]:
     if not root.is_dir():
         return ()
     return tuple(
         sorted(path / "site-packages" for path in root.iterdir() if path.is_dir())
     )
+
+
+def _installer_dependency_manifest(
+    tag: str,
+    dependencies: Sequence[RuntimeDependency],
+) -> dict[str, Any]:
+    return {
+        "tag": tag,
+        "wheels": [
+            {"asset": dependency.asset, "sha256": dependency.sha256}
+            for dependency in dependencies
+        ],
+    }
+
+
+def _installer_dependencies_are_valid(
+    root: Path,
+    tag: str,
+    dependencies: Sequence[RuntimeDependency],
+) -> bool:
+    if root.is_symlink() or not root.is_dir():
+        return False
+    try:
+        marker = json.loads(
+            (root / "lumi-installer-wheels.json").read_text(encoding="utf-8")
+        )
+        expected = _installer_dependency_manifest(tag, dependencies)
+        if marker != expected:
+            return False
+        wheelhouse = root / "wheelhouse"
+        dependency_root = root / "dependencies"
+        if (
+            wheelhouse.is_symlink()
+            or not wheelhouse.is_dir()
+            or dependency_root.is_symlink()
+            or not dependency_root.is_dir()
+        ):
+            return False
+        for dependency in dependencies:
+            wheel = wheelhouse / dependency.asset
+            if wheel.is_symlink() or not wheel.is_file():
+                return False
+            if _sha256_file(wheel) != dependency.sha256:
+                return False
+            package_directory = (
+                dependency_root
+                / f"{_normalize_distribution(dependency.distribution)}-{dependency.version}"
+                / "site-packages"
+            )
+            if (
+                package_directory.parent.is_symlink()
+                or package_directory.is_symlink()
+                or not package_directory.is_dir()
+            ):
+                return False
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return True
 
 
 def _managed_release_root(managed_data_path: Path) -> Path:

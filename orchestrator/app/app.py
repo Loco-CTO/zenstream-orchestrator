@@ -17,6 +17,7 @@ from api.zenstream.client_routes import prune_rate_limit_events
 from api.zenstream.client_routes import router as client_router
 from api.zenstream.documentation_routes import router as documentation_router
 from api.zenstream.library_routes import router as library_router
+from api.zenstream.lumi_routes import router as lumi_router
 from api.zenstream.notification_routes import router as notification_router
 from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_openapi
 from app.artwork_variants import queue_selected, record_sweep_error
@@ -39,6 +40,7 @@ from app.foreground import shutdown as shutdown_foreground
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
 from app.logging_config import get_logger
+from app.lumi_host import lumi_host
 from app.metadata_services import asset_executor
 from app.models.account import Account
 from app.playback import PlaybackManager
@@ -78,6 +80,7 @@ async def lifespan(_app: FastAPI):
     load_config()
     _validate_secret_key(os.getenv("SECRET_KEY"))
     await asyncio.to_thread(CatalogReadModel().bootstrap)
+    await lumi_host.load_saved_integration()
     library_runtime.start()
     job_scheduler.start()
 
@@ -170,6 +173,7 @@ async def lifespan(_app: FastAPI):
         job_scheduler.stop()
         library_runtime.stop()
         stop_artwork_variants()
+        await lumi_host.shutdown()
         asset_executor.shutdown()
         await wait_for_shutdown(5)
         shutdown_foreground()
@@ -237,6 +241,7 @@ app.include_router(calendar_router)
 app.include_router(notification_router)
 app.include_router(library_router)
 app.include_router(application_router)
+app.include_router(lumi_router)
 app.include_router(documentation_router)
 
 install_openapi(app)

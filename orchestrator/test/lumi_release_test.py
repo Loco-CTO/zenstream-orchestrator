@@ -56,7 +56,58 @@ def _make_wheel():
     return buffer.getvalue()
 
 
-def _make_package_archive(*, runtime_api_version=1, extra_member=None):
+def _make_installer_wheel(distribution, version, package):
+    buffer = io.BytesIO()
+    wheel_distribution = distribution.replace("-", "_")
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{package}/__init__.py", b"__version__ = 'test'\n")
+        archive.writestr(
+            f"{wheel_distribution}-{version}.dist-info/METADATA",
+            f"Metadata-Version: 2.1\nName: {distribution}\nVersion: {version}\n",
+        )
+    return buffer.getvalue()
+
+
+def _make_installer_dependencies(*, torch_platform_tag="win_amd64"):
+    specifications = (
+        ("huggingface-hub", "0.30.0", "huggingface_hub", "py3", "none", "any"),
+        ("onnx-ir", "0.1.0", "onnx_ir", "py3", "none", "any"),
+        ("torch", "2.5.1", "torch", "cp312", "cp312", torch_platform_tag),
+        ("transformers", "4.48.0", "transformers", "py3", "none", "any"),
+    )
+    dependencies = []
+    payloads = {}
+    for (
+        distribution,
+        version,
+        package,
+        python_tag,
+        abi_tag,
+        platform_tag,
+    ) in specifications:
+        asset_distribution = distribution.replace("-", "_")
+        asset = (
+            f"{asset_distribution}-{version}-{python_tag}-{abi_tag}-{platform_tag}.whl"
+        )
+        content = _make_installer_wheel(distribution, version, package)
+        dependencies.append(
+            {
+                "distribution": distribution,
+                "version": version,
+                "pythonTag": python_tag,
+                "abiTag": abi_tag,
+                "platformTag": platform_tag,
+                "asset": asset,
+                "sha256": _sha256(content),
+            }
+        )
+        payloads[asset] = content
+    return dependencies, payloads
+
+
+def _make_package_archive(
+    *, runtime_api_version=1, extra_member=None, installer_dependencies=()
+):
     package_sources = {
         "lumi/__init__.py": (
             b'"""Lumi runtime package."""\nLUMI_PLUGIN_API_VERSION = 1\n'
@@ -106,6 +157,8 @@ def _make_package_archive(*, runtime_api_version=1, extra_member=None):
             }
         ],
     }
+    if installer_dependencies:
+        manifest["installerDependencies"] = installer_dependencies
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("lumi-release.json", json.dumps(manifest))
@@ -127,6 +180,8 @@ class FakeGitHub:
         runtime_api_version=1,
         extra_member=None,
         metadata_final_url=None,
+        with_installer_dependencies=False,
+        installer_torch_platform="win_amd64",
     ):
         self.requests = []
         self.metadata_final_url = metadata_final_url
@@ -141,10 +196,30 @@ class FakeGitHub:
             package_name: self.package_bytes,
             WHEEL_NAME: self.wheel_bytes,
         }
+        if with_installer_dependencies:
+            installer_dependencies, installer_payloads = _make_installer_dependencies(
+                torch_platform_tag=installer_torch_platform
+            )
+            self.package_bytes, self.wheel_bytes, self.manifest = _make_package_archive(
+                runtime_api_version=runtime_api_version,
+                extra_member=extra_member,
+                installer_dependencies=installer_dependencies,
+            )
+            self.installer_payloads = installer_payloads
+            self.payloads = {
+                package_name: self.package_bytes,
+                WHEEL_NAME: self.wheel_bytes,
+                **installer_payloads,
+            }
         assets = [
             self._asset(package_name, self.package_bytes, release_tag),
             self._asset(WHEEL_NAME, self.wheel_bytes, release_tag),
         ]
+        assets.extend(
+            self._asset(name, content, release_tag)
+            for name, content in self.payloads.items()
+            if name not in {package_name, WHEEL_NAME}
+        )
         assets = [asset for asset in assets if asset["name"] not in missing_assets]
         self.metadata = {
             "tag_name": release_tag,
@@ -323,6 +398,71 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("lumi", sys.modules)
         self.assertNotIn("onnxruntime_genai", sys.modules)
         self.assertTrue(release.directory.is_dir())
+
+    async def test_model_installer_wheels_download_only_after_explicit_request(self):
+        github = FakeGitHub(with_installer_dependencies=True)
+        manager = self._manager(github)
+        release = await manager.enable(TAG)
+        installer_assets = {
+            dependency["asset"]
+            for dependency in release.manifest.raw["installerDependencies"]
+        }
+
+        requested_assets = {
+            asset
+            for asset in installer_assets
+            if any(asset in request for request in github.requests)
+        }
+        self.assertEqual(requested_assets, set())
+        self.assertFalse((release.directory / "installer-dependencies").exists())
+
+        async def run_in_worker(function, *args):
+            return await asyncio.to_thread(function, *args)
+
+        with patch("app.foreground.run_control", side_effect=run_in_worker):
+            directories = await manager.install_model_dependencies()
+
+        installer_root = release.directory / "installer-dependencies"
+        self.assertEqual(len(directories), 4)
+        self.assertEqual(
+            {path.name for path in (installer_root / "wheelhouse").iterdir()},
+            installer_assets,
+        )
+        self.assertTrue(all(path.is_dir() for path in directories))
+        self.assertTrue((installer_root / "lumi-installer-wheels.json").is_file())
+        requested_assets = {
+            asset
+            for asset in installer_assets
+            if any(asset in request for request in github.requests)
+        }
+        self.assertEqual(requested_assets, installer_assets)
+
+    async def test_model_installer_requires_a_complete_wheel_set_for_the_current_host(
+        self,
+    ):
+        github = FakeGitHub(
+            with_installer_dependencies=True,
+            installer_torch_platform="linux_x86_64",
+        )
+        manager = self._manager(github)
+        await manager.enable(TAG)
+
+        self.assertFalse(manager.model_install_available)
+        installer_assets = {
+            dependency.asset
+            for dependency in manager.active_release.manifest.installer_dependencies
+        }
+        with self.assertRaisesRegex(
+            LumiReleaseCompatibilityError,
+            "complete model installer wheel set",
+        ):
+            await manager.install_model_dependencies()
+        requested_assets = {
+            asset
+            for asset in installer_assets
+            if any(asset in request for request in github.requests)
+        }
+        self.assertEqual(requested_assets, set())
 
     async def test_disable_blocks_new_service_calls_before_awaiting_close(self):
         github = FakeGitHub()

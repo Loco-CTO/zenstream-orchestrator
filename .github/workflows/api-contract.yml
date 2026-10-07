@@ -175,7 +175,7 @@ jobs:
         if: steps.android-contract-tests.outputs.ready == 'true'
         uses: actions/setup-java@v6
         with:
-          distribution: temurin
+          distribution: jetbrains
           java-version: "21"
 
       - name: Set up Android SDK

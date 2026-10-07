@@ -31,6 +31,177 @@ class FlexibleObject(DocsModel):
     """A deliberately open object used where providers add dynamic fields."""
 
 
+class LumiModel(DocsModel):
+    id: str
+    label: str
+    supportsThinking: bool
+    sizeBytes: int | None = None
+    installed: bool | None = None
+    enabled: bool | None = None
+    downloading: bool | None = None
+    downloadProgress: float | None = None
+    downloadStage: str | None = None
+    downloadError: str | None = None
+    isDefault: bool | None = None
+
+
+class LumiModelsResponse(DocsModel):
+    models: list[LumiModel] = Field(default_factory=list)
+    defaultModel: str | None = None
+    defaultThinking: bool = False
+
+
+class LumiRuntimeLimits(DocsModel):
+    idleUnloadSeconds: int
+    maxContextTokens: int
+    maxOutputTokens: int
+    maxConcurrentChats: int
+    maxActiveConversations: int
+
+
+class LumiRuntimeLimitsUpdate(DocsModel):
+    idleUnloadSeconds: int | None = None
+    maxContextTokens: int | None = None
+    maxOutputTokens: int | None = None
+    maxConcurrentChats: int | None = None
+    maxActiveConversations: int | None = None
+
+
+class LumiRuntimeSettingsRequest(DocsModel):
+    defaultThinking: bool | None = None
+    limits: LumiRuntimeLimitsUpdate | None = None
+
+
+class LumiAdminModelsResponse(LumiModelsResponse):
+    modelInstallAvailable: bool = False
+    limits: LumiRuntimeLimits | None = None
+
+
+class LumiConversationRecord(DocsModel):
+    id: str
+    title: str
+    model: str
+    thinking: bool = False
+    createdAt: str
+    updatedAt: str
+
+
+class LumiEntityReference(DocsModel):
+    type: Literal[
+        "series",
+        "movie",
+        "season",
+        "episode",
+        "album",
+        "artist",
+        "track",
+        "collection",
+        "person",
+    ]
+    id: str
+    title: str
+
+
+class LumiSource(DocsModel):
+    url: str
+    websiteName: str
+    title: str
+    faviconUrl: str | None = None
+
+
+class LumiMessage(DocsModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    createdAt: str
+    references: list[LumiEntityReference] = Field(default_factory=list)
+    sources: list[LumiSource] = Field(default_factory=list)
+
+
+class LumiConversationListResponse(DocsModel):
+    conversations: list[LumiConversationRecord] = Field(default_factory=list)
+
+
+class LumiConversationDetailResponse(DocsModel):
+    conversation: LumiConversationRecord
+    messages: list[LumiMessage] = Field(default_factory=list)
+
+
+class LumiTurnRequest(DocsModel):
+    message: str = Field(min_length=1, max_length=6000)
+    model: str | None = Field(default=None, max_length=200)
+    thinking: bool | None = None
+
+
+class LumiModelChoiceRequest(DocsModel):
+    model: str = Field(min_length=1, max_length=200)
+    thinking: bool
+
+
+class LumiAnswer(DocsModel):
+    markdown: str
+    references: list[LumiEntityReference] = Field(default_factory=list)
+    sources: list[LumiSource] = Field(default_factory=list)
+
+
+class LumiTurnResponse(DocsModel):
+    conversation: LumiConversationRecord
+    answer: LumiAnswer
+
+
+class LumiPreference(DocsModel):
+    model: str
+    thinking: bool
+
+
+class LumiPreferenceResponse(DocsModel):
+    preference: LumiPreference
+
+
+class LumiProgress(DocsModel):
+    stage: str
+    current: int
+    total: int
+
+
+class LumiIntegrationStatus(DocsModel):
+    enabled: bool
+    installed: bool
+    state: Literal["disabled", "installing", "ready", "error"]
+    releaseTag: str | None = None
+    restartRequired: bool = False
+    error: str | None = None
+    progress: LumiProgress | None = None
+
+
+class LumiAdminStatusResponse(LumiAdminModelsResponse):
+    integration: LumiIntegrationStatus
+
+
+class LumiReleaseOption(DocsModel):
+    tag: str
+    releasedAt: str | None = None
+
+
+class LumiReleaseListResponse(DocsModel):
+    releases: list[LumiReleaseOption] = Field(default_factory=list)
+
+
+class LumiIntegrationSettingsRequest(DocsModel):
+    enabled: bool
+    releaseTag: str | None = None
+
+
+class LumiModelSettingRequest(DocsModel):
+    enabled: bool
+    isDefault: bool | None = None
+
+
+class LumiModelDeleteResponse(DocsModel):
+    id: str
+    removed: bool
+
+
 class ErrorResponse(DocsModel):
     detail: Any = Field(
         default=None,
@@ -1343,6 +1514,32 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     SyncplayCommandRequest,
     SyncplayPresenceRequest,
     SyncplayParticipationRequest,
+    LumiModel,
+    LumiModelsResponse,
+    LumiRuntimeLimits,
+    LumiRuntimeLimitsUpdate,
+    LumiRuntimeSettingsRequest,
+    LumiAdminModelsResponse,
+    LumiConversationRecord,
+    LumiEntityReference,
+    LumiSource,
+    LumiMessage,
+    LumiConversationListResponse,
+    LumiConversationDetailResponse,
+    LumiTurnRequest,
+    LumiModelChoiceRequest,
+    LumiAnswer,
+    LumiTurnResponse,
+    LumiPreference,
+    LumiPreferenceResponse,
+    LumiProgress,
+    LumiIntegrationStatus,
+    LumiAdminStatusResponse,
+    LumiReleaseOption,
+    LumiReleaseListResponse,
+    LumiIntegrationSettingsRequest,
+    LumiModelSettingRequest,
+    LumiModelDeleteResponse,
     FlexibleObject,
 )
 
@@ -1359,6 +1556,10 @@ OPENAPI_TAGS = [
     {
         "name": "Account & Preferences",
         "description": "The authenticated user's account, avatar, locale, playback, and watch-history preferences.",
+    },
+    {
+        "name": "Lumi",
+        "description": "Account-scoped, read-only conversations with the optional local Lumi media assistant.",
     },
     {
         "name": "Catalog",
@@ -1395,6 +1596,10 @@ OPENAPI_TAGS = [
     {
         "name": "Admin · Metadata & Integrations",
         "description": "Metadata providers, locale policy, refresh settings, and calendar integration settings.",
+    },
+    {
+        "name": "Admin · Lumi",
+        "description": "Explicit Lumi release installation, local Qwen3.5 model management, and bounded runtime settings.",
     },
     {
         "name": "Admin · Playback & Maintenance",
@@ -1743,6 +1948,41 @@ _SUMMARY_OVERRIDES = {
     ("PATCH", "/api/preferences/playback"): "Set playback preferences",
     ("GET", "/api/preferences/watch-history"): "Get watch-history preferences",
     ("PATCH", "/api/preferences/watch-history"): "Set watch-history preferences",
+    ("GET", "/api/lumi/models"): "List models available to the current user",
+    ("GET", "/api/lumi/conversations"): "List the current user's Lumi conversations",
+    ("GET", "/api/lumi/conversations/{conversation_id}"): "Get a Lumi conversation",
+    (
+        "POST",
+        "/api/lumi/conversations/{conversation_id}/turns",
+    ): "Send a Lumi chat turn",
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}/choice",
+    ): "Set a conversation's Lumi model",
+    (
+        "PUT",
+        "/api/lumi/preferences/model",
+    ): "Set the current user's Lumi model preference",
+    ("GET", "/api/admin/lumi/status"): "Get Lumi integration and model status",
+    ("GET", "/api/admin/lumi/releases"): "List supported Lumi releases",
+    ("PUT", "/api/admin/lumi/settings"): "Enable or disable the Lumi integration",
+    ("GET", "/api/admin/lumi/models"): "List installed Qwen3.5 models",
+    (
+        "PATCH",
+        "/api/admin/lumi/models/settings",
+    ): "Configure Lumi model and runtime limits",
+    (
+        "PATCH",
+        "/api/admin/lumi/models/{model_id}",
+    ): "Configure an installed Qwen3.5 model",
+    (
+        "POST",
+        "/api/admin/lumi/models/{model_id}/download",
+    ): "Install a supported Qwen3.5 model",
+    (
+        "DELETE",
+        "/api/admin/lumi/models/{model_id}",
+    ): "Remove an installed Qwen3.5 model",
     ("GET", "/api/catalog/libraries"): "List accessible catalog libraries",
     ("GET", "/api/catalog/home"): "Get the home catalog sections",
     ("GET", "/api/catalog/items"): "List items in a library",
@@ -1958,6 +2198,8 @@ def _stable_operation_id(method: str, path: str) -> str:
 
 
 def _tag_for_path(path: str) -> str:
+    if path.startswith("/api/lumi/"):
+        return "Lumi"
     if path == "/" or path in {
         "/health/ready",
         "/api/version",
@@ -1990,6 +2232,8 @@ def _tag_for_path(path: str) -> str:
     if path.startswith("/api/syncplay/"):
         return "SyncPlay & Realtime"
     if path.startswith("/api/admin/"):
+        if path.startswith("/api/admin/lumi/"):
+            return "Admin · Lumi"
         if path.startswith("/api/admin/metadata/") or path.startswith(
             "/api/admin/calendar/"
         ):
@@ -2020,6 +2264,7 @@ def _description_for(tag: str, method: str, path: str, summary: str) -> str:
         "System & Client Bootstrap": "Use this endpoint during client startup or registration.",
         "Authentication": "This endpoint participates in regular-user authentication or capability-ticket issuance.",
         "Account & Preferences": "The response is scoped to the authenticated account and preserves the existing preference payload.",
+        "Lumi": "Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results.",
         "Catalog": "Results are filtered by the authenticated user's library grants. Additional catalog fields may be added without a breaking change.",
         "Music": "Music reads preserve the release, artist-credit, and track relationships needed by clients.",
         "Playback": "Playback state and media access remain bound to the authenticated account and selected playback source.",
@@ -2029,6 +2274,7 @@ def _description_for(tag: str, method: str, path: str, summary: str) -> str:
         "Admin · Identity & Access": "Administrator authentication is required; existing cookie and legacy-header clients remain supported.",
         "Admin · Libraries & Jobs": "This administrator operation exposes persisted library/job state without changing scheduler ownership or scan behavior.",
         "Admin · Metadata & Integrations": "This administrator operation manages provider, locale, refresh, or calendar integration state.",
+        "Admin · Lumi": "Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host.",
         "Admin · Playback & Maintenance": "This administrator operation controls playback capacity or bounded maintenance work.",
         "SyncPlay & Realtime": "SyncPlay mutations use the existing revision and participant rules; stale state is reported with the existing conflict shape.",
     }
@@ -2121,6 +2367,15 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/preferences/metadata-language"): MetadataLanguagePatchRequest,
     ("PATCH", "/api/preferences/playback"): PlaybackPreferences,
     ("PATCH", "/api/preferences/watch-history"): WatchHistoryPreferences,
+    ("POST", "/api/lumi/conversations/{conversation_id}/turns"): LumiTurnRequest,
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}/choice",
+    ): LumiModelChoiceRequest,
+    ("PUT", "/api/lumi/preferences/model"): LumiModelChoiceRequest,
+    ("PUT", "/api/admin/lumi/settings"): LumiIntegrationSettingsRequest,
+    ("PATCH", "/api/admin/lumi/models/settings"): LumiRuntimeSettingsRequest,
+    ("PATCH", "/api/admin/lumi/models/{model_id}"): LumiModelSettingRequest,
     ("PATCH", "/api/catalog/items/{entity_id}/state"): CatalogStatePatchRequest,
     ("POST", "/api/account/playlists"): PlaylistCreateRequest,
     ("PATCH", "/api/account/playlists/{playlist_id}"): PlaylistUpdateRequest,
@@ -2196,6 +2451,8 @@ _NO_REQUEST_BODY = frozenset(
         ("DELETE", "/api/notifications/{notification_id}"),
         ("POST", "/api/admin/login"),
         ("POST", "/api/admin/logout"),
+        ("POST", "/api/admin/lumi/models/{model_id}/download"),
+        ("DELETE", "/api/admin/lumi/models/{model_id}"),
         ("DELETE", "/api/admin/users/{user_id}"),
         ("DELETE", "/api/admin/libraries/{library_id}"),
         ("DELETE", "/api/admin/devices/{device_id}"),
@@ -2256,6 +2513,26 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/preferences/playback"): PlaybackPreferences,
     ("GET", "/api/preferences/watch-history"): WatchHistoryPreferences,
     ("PATCH", "/api/preferences/watch-history"): WatchHistoryPreferences,
+    ("GET", "/api/lumi/models"): LumiModelsResponse,
+    ("GET", "/api/lumi/conversations"): LumiConversationListResponse,
+    (
+        "GET",
+        "/api/lumi/conversations/{conversation_id}",
+    ): LumiConversationDetailResponse,
+    ("POST", "/api/lumi/conversations/{conversation_id}/turns"): LumiTurnResponse,
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}/choice",
+    ): LumiConversationRecord,
+    ("PUT", "/api/lumi/preferences/model"): LumiPreferenceResponse,
+    ("GET", "/api/admin/lumi/status"): LumiAdminStatusResponse,
+    ("GET", "/api/admin/lumi/releases"): LumiReleaseListResponse,
+    ("PUT", "/api/admin/lumi/settings"): LumiAdminStatusResponse,
+    ("GET", "/api/admin/lumi/models"): LumiAdminModelsResponse,
+    ("PATCH", "/api/admin/lumi/models/settings"): LumiAdminModelsResponse,
+    ("PATCH", "/api/admin/lumi/models/{model_id}"): LumiAdminModelsResponse,
+    ("POST", "/api/admin/lumi/models/{model_id}/download"): LumiAdminModelsResponse,
+    ("DELETE", "/api/admin/lumi/models/{model_id}"): LumiModelDeleteResponse,
     ("GET", "/api/catalog/libraries"): CatalogLibrariesResponse,
     ("GET", "/api/catalog/home"): CatalogHomeResponse,
     ("GET", "/api/catalog/items"): CatalogPage,
@@ -2415,6 +2692,18 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     MetadataLanguagePatchRequest: {"language": "en"},
     PlaybackPreferences: {"audioLanguage": "en", "subtitleLanguage": "off"},
     WatchHistoryPreferences: {"enabled": True},
+    LumiTurnRequest: {
+        "message": "What should I watch after this?",
+        "model": "qwen3.5:2b",
+        "thinking": True,
+    },
+    LumiModelChoiceRequest: {"model": "qwen3.5:2b", "thinking": True},
+    LumiIntegrationSettingsRequest: {"enabled": True, "releaseTag": "v0.1.0"},
+    LumiRuntimeSettingsRequest: {
+        "defaultThinking": True,
+        "limits": {"maxContextTokens": 8192, "maxOutputTokens": 2048},
+    },
+    LumiModelSettingRequest: {"enabled": True, "isDefault": True},
     CatalogStatePatchRequest: {"favorite": True, "played": False, "following": True},
     ProgressPatchRequest: {"position": 120.5, "duration": 3600.0},
     PlayStartRequest: {"playbackInstanceId": "playback-instance-0001"},
@@ -2469,6 +2758,86 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
 
 _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
     HealthResponse: {"status": "ok"},
+    LumiModelsResponse: {
+        "models": [
+            {"id": "qwen3.5:2b", "label": "Qwen3.5 2B", "supportsThinking": True}
+        ],
+        "defaultModel": "qwen3.5:2b",
+        "defaultThinking": True,
+    },
+    LumiConversationListResponse: {"conversations": []},
+    LumiConversationDetailResponse: {
+        "conversation": {
+            "id": "conversation-0001",
+            "title": "What to watch next",
+            "model": "qwen3.5:2b",
+            "thinking": True,
+            "createdAt": "2026-01-01T12:00:00Z",
+            "updatedAt": "2026-01-01T12:00:00Z",
+        },
+        "messages": [],
+    },
+    LumiTurnResponse: {
+        "conversation": {
+            "id": "conversation-0001",
+            "title": "What to watch next",
+            "model": "qwen3.5:2b",
+            "thinking": True,
+            "createdAt": "2026-01-01T12:00:00Z",
+            "updatedAt": "2026-01-01T12:00:00Z",
+        },
+        "answer": {
+            "markdown": "Here are a few options.",
+            "references": [],
+            "sources": [],
+        },
+    },
+    LumiPreferenceResponse: {"preference": {"model": "qwen3.5:2b", "thinking": True}},
+    LumiAdminModelsResponse: {
+        "models": [
+            {
+                "id": "qwen3.5:2b",
+                "label": "Qwen3.5 2B",
+                "supportsThinking": True,
+                "installed": True,
+                "enabled": True,
+            }
+        ],
+        "defaultModel": "qwen3.5:2b",
+        "defaultThinking": True,
+        "modelInstallAvailable": True,
+        "limits": {
+            "idleUnloadSeconds": 300,
+            "maxContextTokens": 8192,
+            "maxOutputTokens": 2048,
+            "maxConcurrentChats": 1,
+            "maxActiveConversations": 128,
+        },
+    },
+    LumiAdminStatusResponse: {
+        "integration": {
+            "enabled": False,
+            "installed": False,
+            "state": "disabled",
+            "releaseTag": None,
+            "restartRequired": False,
+            "error": None,
+            "progress": None,
+        },
+        "models": [],
+        "defaultModel": None,
+        "defaultThinking": False,
+        "modelInstallAvailable": False,
+        "limits": {
+            "idleUnloadSeconds": 300,
+            "maxContextTokens": 8192,
+            "maxOutputTokens": 2048,
+            "maxConcurrentChats": 1,
+            "maxActiveConversations": 128,
+        },
+    },
+    LumiReleaseListResponse: {"releases": [{"tag": "v0.1.0", "releasedAt": None}]},
+    LumiModelDeleteResponse: {"id": "qwen3.5:2b", "removed": True},
     SessionResponse: {
         "token": "session-example",
         "expiresIn": 604800,

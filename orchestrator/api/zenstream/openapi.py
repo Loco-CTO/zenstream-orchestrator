@@ -88,8 +88,15 @@ class LumiConversationRecord(DocsModel):
 
 class LumiEntityReference(DocsModel):
     type: Literal[
-        "series", "movie", "season", "episode", "album",
-        "artist", "track", "collection", "person",
+        "series",
+        "movie",
+        "season",
+        "episode",
+        "album",
+        "artist",
+        "track",
+        "collection",
+        "person",
     ]
     id: str
     title: str
@@ -1944,17 +1951,38 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/lumi/models"): "List models available to the current user",
     ("GET", "/api/lumi/conversations"): "List the current user's Lumi conversations",
     ("GET", "/api/lumi/conversations/{conversation_id}"): "Get a Lumi conversation",
-    ("POST", "/api/lumi/conversations/{conversation_id}/turns"): "Send a Lumi chat turn",
-    ("PATCH", "/api/lumi/conversations/{conversation_id}/choice"): "Set a conversation's Lumi model",
-    ("PUT", "/api/lumi/preferences/model"): "Set the current user's Lumi model preference",
+    (
+        "POST",
+        "/api/lumi/conversations/{conversation_id}/turns",
+    ): "Send a Lumi chat turn",
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}/choice",
+    ): "Set a conversation's Lumi model",
+    (
+        "PUT",
+        "/api/lumi/preferences/model",
+    ): "Set the current user's Lumi model preference",
     ("GET", "/api/admin/lumi/status"): "Get Lumi integration and model status",
     ("GET", "/api/admin/lumi/releases"): "List supported Lumi releases",
     ("PUT", "/api/admin/lumi/settings"): "Enable or disable the Lumi integration",
     ("GET", "/api/admin/lumi/models"): "List installed Qwen3.5 models",
-    ("PATCH", "/api/admin/lumi/models/settings"): "Configure Lumi model and runtime limits",
-    ("PATCH", "/api/admin/lumi/models/{model_id}"): "Configure an installed Qwen3.5 model",
-    ("POST", "/api/admin/lumi/models/{model_id}/download"): "Install a supported Qwen3.5 model",
-    ("DELETE", "/api/admin/lumi/models/{model_id}"): "Remove an installed Qwen3.5 model",
+    (
+        "PATCH",
+        "/api/admin/lumi/models/settings",
+    ): "Configure Lumi model and runtime limits",
+    (
+        "PATCH",
+        "/api/admin/lumi/models/{model_id}",
+    ): "Configure an installed Qwen3.5 model",
+    (
+        "POST",
+        "/api/admin/lumi/models/{model_id}/download",
+    ): "Install a supported Qwen3.5 model",
+    (
+        "DELETE",
+        "/api/admin/lumi/models/{model_id}",
+    ): "Remove an installed Qwen3.5 model",
     ("GET", "/api/catalog/libraries"): "List accessible catalog libraries",
     ("GET", "/api/catalog/home"): "Get the home catalog sections",
     ("GET", "/api/catalog/items"): "List items in a library",
@@ -2340,7 +2368,10 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/preferences/playback"): PlaybackPreferences,
     ("PATCH", "/api/preferences/watch-history"): WatchHistoryPreferences,
     ("POST", "/api/lumi/conversations/{conversation_id}/turns"): LumiTurnRequest,
-    ("PATCH", "/api/lumi/conversations/{conversation_id}/choice"): LumiModelChoiceRequest,
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}/choice",
+    ): LumiModelChoiceRequest,
     ("PUT", "/api/lumi/preferences/model"): LumiModelChoiceRequest,
     ("PUT", "/api/admin/lumi/settings"): LumiIntegrationSettingsRequest,
     ("PATCH", "/api/admin/lumi/models/settings"): LumiRuntimeSettingsRequest,
@@ -2484,9 +2515,15 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/preferences/watch-history"): WatchHistoryPreferences,
     ("GET", "/api/lumi/models"): LumiModelsResponse,
     ("GET", "/api/lumi/conversations"): LumiConversationListResponse,
-    ("GET", "/api/lumi/conversations/{conversation_id}"): LumiConversationDetailResponse,
+    (
+        "GET",
+        "/api/lumi/conversations/{conversation_id}",
+    ): LumiConversationDetailResponse,
     ("POST", "/api/lumi/conversations/{conversation_id}/turns"): LumiTurnResponse,
-    ("PATCH", "/api/lumi/conversations/{conversation_id}/choice"): LumiConversationRecord,
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}/choice",
+    ): LumiConversationRecord,
     ("PUT", "/api/lumi/preferences/model"): LumiPreferenceResponse,
     ("GET", "/api/admin/lumi/status"): LumiAdminStatusResponse,
     ("GET", "/api/admin/lumi/releases"): LumiReleaseListResponse,
@@ -2655,7 +2692,11 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     MetadataLanguagePatchRequest: {"language": "en"},
     PlaybackPreferences: {"audioLanguage": "en", "subtitleLanguage": "off"},
     WatchHistoryPreferences: {"enabled": True},
-    LumiTurnRequest: {"message": "What should I watch after this?", "model": "qwen3.5:2b", "thinking": True},
+    LumiTurnRequest: {
+        "message": "What should I watch after this?",
+        "model": "qwen3.5:2b",
+        "thinking": True,
+    },
     LumiModelChoiceRequest: {"model": "qwen3.5:2b", "thinking": True},
     LumiIntegrationSettingsRequest: {"enabled": True, "releaseTag": "v0.1.0"},
     LumiRuntimeSettingsRequest: {
@@ -2718,7 +2759,9 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
 _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
     HealthResponse: {"status": "ok"},
     LumiModelsResponse: {
-        "models": [{"id": "qwen3.5:2b", "label": "Qwen3.5 2B", "supportsThinking": True}],
+        "models": [
+            {"id": "qwen3.5:2b", "label": "Qwen3.5 2B", "supportsThinking": True}
+        ],
         "defaultModel": "qwen3.5:2b",
         "defaultThinking": True,
     },
@@ -2743,7 +2786,11 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
             "createdAt": "2026-01-01T12:00:00Z",
             "updatedAt": "2026-01-01T12:00:00Z",
         },
-        "answer": {"markdown": "Here are a few options.", "references": [], "sources": []},
+        "answer": {
+            "markdown": "Here are a few options.",
+            "references": [],
+            "sources": [],
+        },
     },
     LumiPreferenceResponse: {"preference": {"model": "qwen3.5:2b", "thinking": True}},
     LumiAdminModelsResponse: {

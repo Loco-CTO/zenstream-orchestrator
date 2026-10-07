@@ -437,7 +437,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(requested_assets, installer_assets)
 
-    async def test_model_installer_requires_a_complete_wheel_set_for_the_current_host(self):
+    async def test_model_installer_requires_a_complete_wheel_set_for_the_current_host(
+        self,
+    ):
         github = FakeGitHub(
             with_installer_dependencies=True,
             installer_torch_platform="linux_x86_64",

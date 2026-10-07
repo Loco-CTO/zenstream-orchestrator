@@ -231,7 +231,9 @@ class OpenApiContractTest(unittest.TestCase):
         )
         runtime_settings = paths["/api/admin/lumi/models/settings"]["patch"]
         self.assertEqual(
-            runtime_settings["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            runtime_settings["requestBody"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
             "#/components/schemas/LumiRuntimeSettingsRequest",
         )
         self.assertNotIn(

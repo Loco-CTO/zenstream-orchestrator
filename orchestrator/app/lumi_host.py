@@ -167,7 +167,9 @@ class LumiHost:
     async def disable(self) -> None:
         async with self._lock:
             if self._model_operation is not None and not self._model_operation.done():
-                raise LumiHostError("Wait for the current Lumi model installation to finish.")
+                raise LumiHostError(
+                    "Wait for the current Lumi model installation to finish."
+                )
             self._disable_requested = True
             self._settings["enabled"] = False
             self._state = "disabled"
@@ -283,7 +285,8 @@ class LumiHost:
                     "downloadStage": progress["stage"] if progress else None,
                     "downloadError": self._model_errors.get(model_id),
                     "supportsThinking": option["supportsThinking"],
-                    "isDefault": enabled and self._settings.get("defaultModel") == model_id,
+                    "isDefault": enabled
+                    and self._settings.get("defaultModel") == model_id,
                 }
             )
         default = self._settings.get("defaultModel")
@@ -327,9 +330,13 @@ class LumiHost:
             if self._loaded_release is None or not self._settings["enabled"]:
                 raise LumiHostError("Enable Lumi before changing model access.")
             if not self._is_supported_model(model_id):
-                raise LumiHostError("That Qwen3.5 model is not supported by the selected release.")
+                raise LumiHostError(
+                    "That Qwen3.5 model is not supported by the selected release."
+                )
             if self._model_operation is not None and not self._model_operation.done():
-                raise LumiHostError("Wait for the current Lumi model installation to finish.")
+                raise LumiHostError(
+                    "Wait for the current Lumi model installation to finish."
+                )
             if self._model_artifact(model_id) is None:
                 raise LumiHostError("Download the model before enabling it.")
             models = self._settings["models"]
@@ -340,7 +347,9 @@ class LumiHost:
                     raise LumiHostError("The default Lumi model must remain enabled.")
                 current_default = model_id
             if current_default == model_id and not enabled:
-                raise LumiHostError("Choose another default model before disabling this one.")
+                raise LumiHostError(
+                    "Choose another default model before disabling this one."
+                )
             enabled_others = any(
                 candidate != model_id
                 and item.get("enabled")
@@ -348,7 +357,9 @@ class LumiHost:
                 for candidate, item in models.items()
             )
             if not enabled and not enabled_others:
-                raise LumiHostError("At least one installed Lumi model must remain enabled.")
+                raise LumiHostError(
+                    "At least one installed Lumi model must remain enabled."
+                )
             previous = (record.get("enabled"), self._settings.get("defaultModel"))
             record["enabled"] = bool(enabled)
             self._settings["defaultModel"] = current_default
@@ -372,7 +383,9 @@ class LumiHost:
                 raise LumiHostError("The default thinking setting must be a boolean.")
             proposed_limits = dict(self._settings["limits"])
             if limits is not None:
-                if not isinstance(limits, Mapping) or set(limits) - set(_DEFAULT_LIMITS):
+                if not isinstance(limits, Mapping) or set(limits) - set(
+                    _DEFAULT_LIMITS
+                ):
                     raise LumiHostError("The Lumi runtime limits are invalid.")
                 bounds = {
                     "idleUnloadSeconds": (0, 86_400),
@@ -384,10 +397,17 @@ class LumiHost:
                 for key, value in limits.items():
                     minimum, maximum = bounds[key]
                     if type(value) is not int or not minimum <= value <= maximum:
-                        raise LumiHostError(f"The Lumi {key} limit is outside its supported range.")
+                        raise LumiHostError(
+                            f"The Lumi {key} limit is outside its supported range."
+                        )
                     proposed_limits[key] = value
-            if proposed_limits["maxOutputTokens"] + 256 >= proposed_limits["maxContextTokens"]:
-                raise LumiHostError("Max context must leave at least 256 tokens beyond max output.")
+            if (
+                proposed_limits["maxOutputTokens"] + 256
+                >= proposed_limits["maxContextTokens"]
+            ):
+                raise LumiHostError(
+                    "Max context must leave at least 256 tokens beyond max output."
+                )
             previous_thinking = self._settings["defaultThinking"]
             previous_limits = dict(self._settings["limits"])
             if default_thinking is not None:
@@ -409,11 +429,15 @@ class LumiHost:
             if not self._settings["enabled"] or self._loaded_release is None:
                 raise LumiHostError("Enable a Lumi release before downloading a model.")
             if not self._is_supported_model(model_id):
-                raise LumiHostError("That Qwen3.5 model is not supported by the selected release.")
+                raise LumiHostError(
+                    "That Qwen3.5 model is not supported by the selected release."
+                )
             if self._operation is not None and not self._operation.done():
                 raise LumiHostError("Wait for the Lumi release installation to finish.")
             if self._model_operation is not None and not self._model_operation.done():
-                raise LumiHostError("Another Lumi model installation is already running.")
+                raise LumiHostError(
+                    "Another Lumi model installation is already running."
+                )
             if self._model_artifact(model_id) is not None:
                 raise LumiHostError("That Lumi model is already installed.")
             self._model_install_id = model_id
@@ -435,7 +459,11 @@ class LumiHost:
             installer_paths = await self.release_manager.install_model_dependencies()
             self._set_model_progress(
                 model_id,
-                {"stage": "Downloading and converting model", "current": 100, "total": 10_000},
+                {
+                    "stage": "Downloading and converting model",
+                    "current": 100,
+                    "total": 10_000,
+                },
             )
             from app.foreground import run_control
 
@@ -510,11 +538,15 @@ class LumiHost:
     def _model_catalog(self, *, from_release: bool = False) -> list[dict[str, Any]]:
         loaded = self._loaded_release
         if from_release and loaded is None:
-            raise LumiHostError("Enable a Lumi release before reading its model catalog.")
+            raise LumiHostError(
+                "Enable a Lumi release before reading its model catalog."
+            )
         if loaded is not None:
             supported_models = getattr(loaded.package_module, "supported_models", None)
             if not callable(supported_models):
-                raise LumiHostError("The selected Lumi release does not expose a model catalog.")
+                raise LumiHostError(
+                    "The selected Lumi release does not expose a model catalog."
+                )
             options = supported_models()
             result = []
             seen: set[str] = set()
@@ -531,13 +563,17 @@ class LumiHost:
                     or len(label) > 80
                     or type(thinking) is not bool
                 ):
-                    raise LumiHostError("The selected Lumi release exposes an invalid model catalog.")
+                    raise LumiHostError(
+                        "The selected Lumi release exposes an invalid model catalog."
+                    )
                 seen.add(model_id)
                 result.append(
                     {"id": model_id, "label": label, "supportsThinking": thinking}
                 )
             if not result:
-                raise LumiHostError("The selected Lumi release has no supported Qwen3.5 models.")
+                raise LumiHostError(
+                    "The selected Lumi release has no supported Qwen3.5 models."
+                )
             return result
         stored = self._settings.get("modelCatalog")
         if not isinstance(stored, list):
@@ -566,19 +602,26 @@ class LumiHost:
         """Register an artifact only after a model installer verifies its manifest."""
 
         if not self._is_supported_model(model_id):
-            raise LumiHostError("That Qwen3.5 model is not supported by the selected release.")
-        if (
-            not isinstance(manifest_sha256, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
+            raise LumiHostError(
+                "That Qwen3.5 model is not supported by the selected release."
+            )
+        if not isinstance(manifest_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", manifest_sha256
         ):
             raise LumiHostError("The model manifest digest is invalid.")
         resolved = Path(directory).resolve()
-        if not resolved.is_dir() or not _is_relative_to(resolved, self.data_directory.resolve()):
-            raise LumiHostError("The model must be installed in Lumi's managed data directory.")
+        if not resolved.is_dir() or not _is_relative_to(
+            resolved, self.data_directory.resolve()
+        ):
+            raise LumiHostError(
+                "The model must be installed in Lumi's managed data directory."
+            )
         self._settings["models"][model_id] = {
             "directory": str(resolved),
             "manifestSha256": manifest_sha256,
-            "sizeBytes": size_bytes if type(size_bytes) is int and size_bytes >= 0 else None,
+            "sizeBytes": size_bytes
+            if type(size_bytes) is int and size_bytes >= 0
+            else None,
             "enabled": True,
         }
         if not self._settings.get("defaultModel"):
@@ -593,14 +636,20 @@ class LumiHost:
             if not self._settings["enabled"] or loaded is None:
                 raise LumiHostError("Enable Lumi before removing a model.")
             if not self._is_supported_model(model_id):
-                raise LumiHostError("That Qwen3.5 model is not supported by the selected release.")
+                raise LumiHostError(
+                    "That Qwen3.5 model is not supported by the selected release."
+                )
             if self._model_operation is not None and not self._model_operation.done():
-                raise LumiHostError("Wait for the current Lumi model installation to finish.")
+                raise LumiHostError(
+                    "Wait for the current Lumi model installation to finish."
+                )
             record = self._model_artifact(model_id)
             if record is None:
                 return False
             if record.get("enabled") or self._settings.get("defaultModel") == model_id:
-                raise LumiHostError("Disable the model and choose another default before removing it.")
+                raise LumiHostError(
+                    "Disable the model and choose another default before removing it."
+                )
             from app.foreground import run_control
 
             removed = await run_control(
@@ -718,7 +767,9 @@ class LumiHost:
             return None
         directory = record.get("directory")
         digest = record.get("manifestSha256")
-        if not isinstance(directory, str) or not re.fullmatch(r"[0-9a-f]{64}", str(digest)):
+        if not isinstance(directory, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", str(digest)
+        ):
             return None
         resolved = Path(directory).resolve()
         try:
@@ -750,7 +801,9 @@ class LumiHost:
         result = dict(defaults)
         result["enabled"] = payload.get("enabled") is True
         tag = payload.get("releaseTag")
-        result["releaseTag"] = tag if isinstance(tag, str) and _STABLE_RELEASE_TAG.fullmatch(tag) else None
+        result["releaseTag"] = (
+            tag if isinstance(tag, str) and _STABLE_RELEASE_TAG.fullmatch(tag) else None
+        )
         search_url = payload.get("webSearchUrl")
         result["webSearchUrl"] = search_url if isinstance(search_url, str) else None
         default_model = payload.get("defaultModel")
@@ -803,7 +856,9 @@ class LumiHost:
         )
         try:
             with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
-                json.dump(self._settings, stream, ensure_ascii=False, separators=(",", ":"))
+                json.dump(
+                    self._settings, stream, ensure_ascii=False, separators=(",", ":")
+                )
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_path, self.settings_path)
@@ -824,7 +879,11 @@ class LumiHost:
                 "restartRequired": self.restart_required,
                 "error": self._error,
                 "progress": (
-                    {"stage": "Downloading and verifying Lumi release", "current": 0, "total": 1}
+                    {
+                        "stage": "Downloading and verifying Lumi release",
+                        "current": 0,
+                        "total": 1,
+                    }
                     if installing
                     else None
                 ),
@@ -847,7 +906,9 @@ def _installer_context(package_module: Any, model_root: str | Path) -> tuple[Any
     installer_type = getattr(package_module, "Qwen35ModelInstaller", None)
     package_file = getattr(package_module, "__file__", None)
     if not callable(installer_type) or not isinstance(package_file, str):
-        raise LumiHostError("The selected Lumi release has no supported model installer.")
+        raise LumiHostError(
+            "The selected Lumi release has no supported model installer."
+        )
     package_directory = Path(package_file).resolve().parents[1]
     root = Path(model_root)
     if root.is_symlink() or os.path.ismount(root):
@@ -861,7 +922,9 @@ def _installer_context(package_module: Any, model_root: str | Path) -> tuple[Any
 def _installer_dependency_paths(package_module: Any, paths: Any) -> tuple[Path, ...]:
     package_file = getattr(package_module, "__file__", None)
     if not isinstance(package_file, str) or not isinstance(paths, (tuple, list)):
-        raise LumiHostError("The selected Lumi release has invalid installer dependencies.")
+        raise LumiHostError(
+            "The selected Lumi release has invalid installer dependencies."
+        )
     installer_root = Path(package_file).resolve().parents[2] / "installer-dependencies"
     checked: list[Path] = []
     for value in paths:
@@ -870,10 +933,14 @@ def _installer_dependency_paths(package_module: Any, paths: Any) -> tuple[Path, 
             raise LumiHostError("A Lumi installer dependency path is unsafe.")
         resolved = path.resolve()
         if not resolved.is_dir() or not _is_relative_to(resolved, installer_root):
-            raise LumiHostError("A Lumi installer dependency path is outside its release.")
+            raise LumiHostError(
+                "A Lumi installer dependency path is outside its release."
+            )
         checked.append(resolved)
     if not checked:
-        raise LumiHostError("The selected Lumi release has no installer dependencies for this host.")
+        raise LumiHostError(
+            "The selected Lumi release has no installer dependencies for this host."
+        )
     return tuple(checked)
 
 
@@ -887,7 +954,9 @@ def _install_qwen_model(
     """Run Lumi's pinned checkpoint download and conversion in the control lane."""
 
     installer_type, resolved_root = _installer_context(package_module, model_root)
-    dependency_directories = _installer_dependency_paths(package_module, dependency_paths)
+    dependency_directories = _installer_dependency_paths(
+        package_module, dependency_paths
+    )
     inserted_paths: list[str] = []
     dll_handles: list[Any] = []
     for path in reversed(tuple(str(value) for value in dependency_directories)):
@@ -900,7 +969,10 @@ def _install_qwen_model(
             dll_directories: set[Path] = set()
             for root in dependency_directories:
                 for candidate in root.rglob("*"):
-                    if candidate.is_file() and candidate.suffix.lower() in {".dll", ".pyd"}:
+                    if candidate.is_file() and candidate.suffix.lower() in {
+                        ".dll",
+                        ".pyd",
+                    }:
                         dll_directories.add(candidate.parent.resolve())
             dll_handles.extend(
                 add_dll_directory(str(path)) for path in sorted(dll_directories)
@@ -908,7 +980,9 @@ def _install_qwen_model(
         installer = installer_type(resolved_root)
         install = getattr(installer, "install_model", None)
         if not callable(install):
-            raise LumiHostError("The selected Lumi release has no supported model installer.")
+            raise LumiHostError(
+                "The selected Lumi release has no supported model installer."
+            )
         return install(model_id, progress=progress)
     finally:
         for path in inserted_paths:
@@ -922,12 +996,16 @@ def _install_qwen_model(
                 close()
 
 
-def _remove_qwen_model(package_module: Any, model_root: str | Path, model_id: str) -> bool:
+def _remove_qwen_model(
+    package_module: Any, model_root: str | Path, model_id: str
+) -> bool:
     installer_type, resolved_root = _installer_context(package_module, model_root)
     installer = installer_type(resolved_root)
     remove = getattr(installer, "remove_model", None)
     if not callable(remove):
-        raise LumiHostError("The selected Lumi release has no supported model removal API.")
+        raise LumiHostError(
+            "The selected Lumi release has no supported model removal API."
+        )
     return bool(remove(model_id))
 
 
@@ -941,7 +1019,11 @@ def _safe_model_stage(stage: object) -> str:
         "activating": "Activating model files",
         "complete": "Model installation complete",
     }
-    return labels.get(stage, "Preparing model installation") if isinstance(stage, str) else "Preparing model installation"
+    return (
+        labels.get(stage, "Preparing model installation")
+        if isinstance(stage, str)
+        else "Preparing model installation"
+    )
 
 
 lumi_host = LumiHost()

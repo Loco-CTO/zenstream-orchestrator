@@ -6,13 +6,14 @@ import json
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from api.zenstream.client_routes import catalog as catalog_service
-from api.zenstream.library_routes import authenticate_admin_request
 from app.client_auth import require_account
 from app.foreground import run_auth
 from app.lumi_host import LumiHostError, lumi_host
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+
+from api.zenstream.client_routes import catalog as catalog_service
+from api.zenstream.library_routes import authenticate_admin_request
 
 router = APIRouter()
 _MAX_BODY_BYTES = 64_000
@@ -115,7 +116,9 @@ def _raise_service_error(error: Exception) -> None:
     if name == "ConversationNotFound":
         raise HTTPException(404, "Conversation not found.") from error
     if name == "ModelConfigurationError":
-        raise HTTPException(409, "The selected model or thinking option is unavailable.") from error
+        raise HTTPException(
+            409, "The selected model or thinking option is unavailable."
+        ) from error
     if name == "LumiServiceBusy":
         raise HTTPException(429, "Lumi is busy. Try again shortly.") from error
     if isinstance(error, (ValueError, TypeError)):
@@ -146,7 +149,9 @@ async def lumi_conversation(request: Request, conversation_id: str):
     account = await _account(request)
     service = _service()
     try:
-        snapshot = await service.get_conversation_for_account(account["id"], conversation_id)
+        snapshot = await service.get_conversation_for_account(
+            account["id"], conversation_id
+        )
     except Exception as error:
         _raise_service_error(error)
     return _private_json(
@@ -257,7 +262,9 @@ async def admin_lumi_releases(request: Request):
     try:
         releases = await lumi_host.list_releases()
     except Exception as error:
-        raise HTTPException(503, "Published Lumi releases are temporarily unavailable.") from error
+        raise HTTPException(
+            503, "Published Lumi releases are temporarily unavailable."
+        ) from error
     return _private_json({"releases": releases})
 
 
@@ -294,7 +301,10 @@ async def update_admin_lumi_runtime_settings(request: Request):
     if (
         not payload
         or set(payload) - {"defaultThinking", "limits"}
-        or ("defaultThinking" in payload and type(payload["defaultThinking"]) is not bool)
+        or (
+            "defaultThinking" in payload
+            and type(payload["defaultThinking"]) is not bool
+        )
         or ("limits" in payload and not isinstance(payload["limits"], dict))
     ):
         raise HTTPException(400, "The Lumi runtime settings are invalid.")

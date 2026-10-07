@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,7 +73,9 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(releases, [{"tag": "v1.2.3", "releasedAt": None}])
 
-    async def test_release_download_starts_only_after_explicit_enable_and_can_disable(self):
+    async def test_release_download_starts_only_after_explicit_enable_and_can_disable(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             host = LumiHost(
                 data_directory=directory,
@@ -104,7 +106,9 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             settings_path = Path(directory) / "lumi" / "integration.json"
             settings_path.parent.mkdir(parents=True)
             settings_path.write_text(
-                json.dumps({"schemaVersion": 1, "enabled": True, "releaseTag": "v1.2.3"}),
+                json.dumps(
+                    {"schemaVersion": 1, "enabled": True, "releaseTag": "v1.2.3"}
+                ),
                 encoding="utf-8",
             )
             host = LumiHost(
@@ -193,7 +197,9 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             host = LumiHost(data_directory=directory, catalog=object())
-            with patch("app.lumi_host.importlib.import_module", side_effect=import_module):
+            with patch(
+                "app.lumi_host.importlib.import_module", side_effect=import_module
+            ):
                 registry = host._create_tool_registry(SimpleNamespace())
 
         self.assertEqual(len(registry), 6)

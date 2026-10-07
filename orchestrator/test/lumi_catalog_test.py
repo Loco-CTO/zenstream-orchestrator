@@ -98,7 +98,8 @@ class LumiCatalogAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.language_patcher.start()
         self.addCleanup(self.language_patcher.stop)
         self.language_normalizer_patcher = patch(
-            "app.lumi_catalog.normalize_metadata_locale", side_effect=lambda value: value
+            "app.lumi_catalog.normalize_metadata_locale",
+            side_effect=lambda value: value,
         )
         self.language_normalizer_patcher.start()
         self.addCleanup(self.language_normalizer_patcher.stop)
@@ -145,7 +146,9 @@ class LumiCatalogAdapterTests(unittest.IsolatedAsyncioTestCase):
             RuntimeError("private filesystem details")
         )
 
-        with self.assertRaisesRegex(CatalogUnavailable, "lookup is unavailable") as error:
+        with self.assertRaisesRegex(
+            CatalogUnavailable, "lookup is unavailable"
+        ) as error:
             await self.adapter.search(
                 self.context,
                 query="Frieren",

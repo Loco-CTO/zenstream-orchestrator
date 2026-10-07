@@ -566,8 +566,9 @@ class LumiReleaseManager:
                 *_dependency_directories(active.directory),
                 *_installer_dependency_directories(active.directory),
             )
-            self._restart_required = self._restart_required or _has_loaded_native_extension(
-                dependency_directories
+            self._restart_required = (
+                self._restart_required
+                or _has_loaded_native_extension(dependency_directories)
             )
             unload_error: Exception | None = None
             try:
@@ -709,11 +710,15 @@ class LumiReleaseManager:
             )
         target = release_directory / "installer-dependencies"
         if target.is_symlink() or os.path.ismount(target):
-            raise LumiReleaseError("managed Lumi installer dependencies use an unsafe path")
+            raise LumiReleaseError(
+                "managed Lumi installer dependencies use an unsafe path"
+            )
         if _installer_dependencies_are_valid(target, tag, matching):
             return _installer_dependency_directories(release_directory)
 
-        metadata_url = f"{LUMI_GITHUB_API}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+        metadata_url = (
+            f"{LUMI_GITHUB_API}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+        )
         response = self._fetcher(
             metadata_url,
             {
@@ -724,11 +729,15 @@ class LumiReleaseManager:
             MAX_RELEASE_METADATA_BYTES,
         )
         if _canonical_api_url(response.final_url) != _canonical_api_url(metadata_url):
-            raise LumiReleaseError("GitHub release metadata came from an unexpected URL")
+            raise LumiReleaseError(
+                "GitHub release metadata came from an unexpected URL"
+            )
         try:
             release = json.loads(response.body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise LumiReleaseError("GitHub returned invalid release metadata") from error
+            raise LumiReleaseError(
+                "GitHub returned invalid release metadata"
+            ) from error
         if not isinstance(release, dict):
             raise LumiReleaseError("GitHub returned invalid release metadata")
         self._validate_release_metadata(release, tag)
@@ -746,7 +755,9 @@ class LumiReleaseManager:
                     f"release metadata digest does not match the manifest for {dependency.asset}"
                 )
             if asset.size > MAX_INSTALLER_WHEEL_BYTES:
-                raise LumiReleaseError("a model installer wheel exceeds the download size limit")
+                raise LumiReleaseError(
+                    "a model installer wheel exceeds the download size limit"
+                )
             total_download_bytes += asset.size
             if total_download_bytes > MAX_INSTALLER_TOTAL_DOWNLOAD_BYTES:
                 raise LumiReleaseError(
@@ -1298,10 +1309,13 @@ def _read_and_validate_manifest(
         raise LumiReleaseError("runtime and installer wheel asset names overlap")
     if installer_dependencies:
         installer_distributions = {
-            _normalize_distribution(item.distribution) for item in installer_dependencies
+            _normalize_distribution(item.distribution)
+            for item in installer_dependencies
         }
         if not _REQUIRED_INSTALLER_DISTRIBUTIONS.issubset(installer_distributions):
-            raise LumiReleaseCompatibilityError("Lumi model installer wheel set is incomplete")
+            raise LumiReleaseCompatibilityError(
+                "Lumi model installer wheel set is incomplete"
+            )
     if not _matching_dependencies(dependencies, runtime_host):
         raise LumiReleaseCompatibilityError(
             "Lumi release does not publish wheels for this Python ABI and host"
@@ -1367,8 +1381,13 @@ def _parse_installer_dependencies(
 ) -> tuple[RuntimeDependency, ...]:
     if raw_dependencies == []:
         return ()
-    if not isinstance(raw_dependencies, list) or len(raw_dependencies) > MAX_INSTALLER_WHEELS:
-        raise LumiReleaseCompatibilityError("Lumi release declares too many installer wheels")
+    if (
+        not isinstance(raw_dependencies, list)
+        or len(raw_dependencies) > MAX_INSTALLER_WHEELS
+    ):
+        raise LumiReleaseCompatibilityError(
+            "Lumi release declares too many installer wheels"
+        )
     return _parse_wheel_dependencies(raw_dependencies, kind="installer")
 
 
@@ -1396,8 +1415,10 @@ def _parse_wheel_dependencies(
         distribution, version, python_tag, abi_tag, platform_tag, asset, digest = values
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", distribution):
             raise LumiReleaseError("Lumi runtime wheel distribution name is invalid")
-        if kind == "runtime" and _normalize_distribution(distribution) == "onnxruntime-genai" and (
-            python_tag == "py3" or abi_tag == "none" or platform_tag == "any"
+        if (
+            kind == "runtime"
+            and _normalize_distribution(distribution) == "onnxruntime-genai"
+            and (python_tag == "py3" or abi_tag == "none" or platform_tag == "any")
         ):
             raise LumiReleaseCompatibilityError(
                 "onnxruntime-genai must use a pinned host-specific binary wheel"
@@ -1649,7 +1670,9 @@ def _validate_wheel_archive(
                 name for name in infos if name.endswith(".dist-info/METADATA")
             ]
             if len(metadata_names) != 1:
-                raise LumiReleaseError(f"{kind} wheel has no unique distribution METADATA")
+                raise LumiReleaseError(
+                    f"{kind} wheel has no unique distribution METADATA"
+                )
             if infos[metadata_names[0]].file_size > 64 * 1024:
                 raise LumiReleaseError(f"{kind} wheel METADATA exceeds the size limit")
             metadata = wheel.read(metadata_names[0]).decode("utf-8", errors="strict")
@@ -1659,7 +1682,9 @@ def _validate_wheel_archive(
                 != _normalize_distribution(dependency.distribution)
                 or version_value != dependency.version
             ):
-                raise LumiReleaseError(f"{kind} wheel METADATA does not match its pinned identity")
+                raise LumiReleaseError(
+                    f"{kind} wheel METADATA does not match its pinned identity"
+                )
             if _normalize_distribution(dependency.distribution) == "onnxruntime-genai":
                 native_suffix = (
                     ".pyd" if dependency.platform_tag.startswith("win_") else ".so"
@@ -1679,7 +1704,9 @@ def _validate_wheel_archive(
     except (zipfile.BadZipFile, OSError, UnicodeDecodeError, RuntimeError) as error:
         if isinstance(error, LumiReleaseError):
             raise
-        raise LumiReleaseError(f"{kind} dependency is not a valid wheel archive") from error
+        raise LumiReleaseError(
+            f"{kind} dependency is not a valid wheel archive"
+        ) from error
 
 
 def _wheel_metadata_identity(metadata: str) -> tuple[str, str]:
@@ -1718,7 +1745,9 @@ def _extract_wheel(
                     raise LumiReleaseError(f"{kind} wheel contains an oversized file")
                 expanded += info.file_size
                 if expanded > max_expanded_bytes:
-                    raise LumiReleaseError(f"{kind} wheel exceeds the expanded size limit")
+                    raise LumiReleaseError(
+                        f"{kind} wheel exceeds the expanded size limit"
+                    )
                 relative = _wheel_install_path(name, dependency)
                 if relative is None:
                     continue
@@ -1729,7 +1758,9 @@ def _extract_wheel(
     except (zipfile.BadZipFile, OSError, RuntimeError) as error:
         if isinstance(error, LumiReleaseError):
             raise
-        raise LumiReleaseError(f"{kind} dependency could not be safely extracted") from error
+        raise LumiReleaseError(
+            f"{kind} dependency could not be safely extracted"
+        ) from error
 
 
 def _wheel_install_path(
@@ -1796,7 +1827,9 @@ def _installer_dependencies_are_valid(
     if root.is_symlink() or not root.is_dir():
         return False
     try:
-        marker = json.loads((root / "lumi-installer-wheels.json").read_text(encoding="utf-8"))
+        marker = json.loads(
+            (root / "lumi-installer-wheels.json").read_text(encoding="utf-8")
+        )
         expected = _installer_dependency_manifest(tag, dependencies)
         if marker != expected:
             return False

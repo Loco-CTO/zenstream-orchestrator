@@ -39,8 +39,8 @@ from app.foreground import (
 from app.foreground import shutdown as shutdown_foreground
 from app.jobs import scheduler as job_scheduler
 from app.library import runtime as library_runtime
-from app.lumi_host import lumi_host
 from app.logging_config import get_logger
+from app.lumi_host import lumi_host
 from app.metadata_services import asset_executor
 from app.models.account import Account
 from app.playback import PlaybackManager

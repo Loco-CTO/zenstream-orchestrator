@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
 from typing import Any
 
 from app.catalog import Catalog
@@ -48,7 +47,9 @@ class LumiCatalogAdapter:
                 language,
             )
         except Exception as error:
-            raise self._tool_error("The local catalog lookup is unavailable.") from error
+            raise self._tool_error(
+                "The local catalog lookup is unavailable."
+            ) from error
         raw_items = result.get("items") if isinstance(result, dict) else None
         items = _compact_items(raw_items, max(1, min(10, limit)))
         total = result.get("total", 0) if isinstance(result, dict) else 0
@@ -67,7 +68,9 @@ class LumiCatalogAdapter:
                 self._item_detail, self._catalog, user_id, entity_id, language
             )
         except Exception as error:
-            raise self._tool_error("The local catalog lookup is unavailable.") from error
+            raise self._tool_error(
+                "The local catalog lookup is unavailable."
+            ) from error
         if not isinstance(result, dict):
             return {"item": None, "backgroundItem": None, "seasons": []}
         return {
@@ -90,7 +93,9 @@ class LumiCatalogAdapter:
         try:
             result = await run_foreground(self._favorites, self._catalog, user_id)
         except Exception as error:
-            raise self._tool_error("The local favorites lookup is unavailable.") from error
+            raise self._tool_error(
+                "The local favorites lookup is unavailable."
+            ) from error
         raw_items = result.get("items") if isinstance(result, dict) else None
         items = _compact_items(raw_items, MAX_LUMI_FAVORITES)
         total = result.get("total", 0) if isinstance(result, dict) else 0
@@ -136,7 +141,9 @@ class LumiCatalogAdapter:
 
     def _favorites(self, catalog: Catalog, user_id: str) -> dict[str, Any]:
         locale = _effective_language(user_id, None)
-        return catalog.favorites(user_id, locale, 1, MAX_LUMI_FAVORITES, "title", "ascending")
+        return catalog.favorites(
+            user_id, locale, 1, MAX_LUMI_FAVORITES, "title", "ascending"
+        )
 
 
 def _context_user_id(context: Any) -> str:
@@ -197,9 +204,13 @@ def _compact_item(value: object) -> dict[str, Any] | None:
             compact[key] = text
     for key, maximum in (("communityRating", 10), ("runtimeMinutes", 100_000)):
         number = metadata.get(key)
-        if type(number) is int and 0 <= number <= maximum:
-            compact[key] = number
-        elif type(number) is float and math.isfinite(number) and 0 <= number <= maximum:
+        if (
+            type(number) is int
+            and 0 <= number <= maximum
+            or type(number) is float
+            and math.isfinite(number)
+            and 0 <= number <= maximum
+        ):
             compact[key] = number
     for key in ("genres", "artists", "tags"):
         values = metadata.get(key)

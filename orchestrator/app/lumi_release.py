@@ -175,6 +175,14 @@ class RuntimeHost:
             abi_version = soabi.split("-", 1)[0].removeprefix("cp")
         else:
             abi_version = ""
+        if not abi_version:
+            # Some embeddable CPython builds omit SOABI even though the
+            # interpreter exposes its stable implementation cache tag.
+            cache_tag = str(getattr(sys.implementation, "cache_tag", "") or "")
+            if cache_tag.startswith("cpython-"):
+                abi_version = cache_tag.removeprefix("cpython-")
+            elif cache_tag.startswith("cp"):
+                abi_version = cache_tag.removeprefix("cp")
         expected_abi_version = re.compile(rf"{major}{minor}(?:d|t|dt|td)?")
         if not expected_abi_version.fullmatch(abi_version):
             raise LumiReleaseCompatibilityError(

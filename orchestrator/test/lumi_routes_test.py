@@ -83,6 +83,71 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.exception.status_code, 503)
         self.assertNotIn("private.db", error.exception.detail)
 
+    async def test_admin_web_search_settings_configure_or_clear_the_optional_provider(
+        self,
+    ):
+        saved = {"url": None}
+
+        async def configure_web_search(url):
+            saved["url"] = url
+
+        host = SimpleNamespace(
+            configure_web_search=AsyncMock(side_effect=configure_web_search),
+            status=lambda: {"webSearchUrl": saved["url"]},
+        )
+        requests = (
+            ({"url": "http://search.test:8080"}, "http://search.test:8080"),
+            ({"url": None}, None),
+        )
+
+        with (
+            patch.object(
+                lumi_routes,
+                "_admin",
+                new=AsyncMock(return_value="administrator"),
+            ),
+            patch.object(lumi_routes, "lumi_host", host),
+        ):
+            for body, expected_url in requests:
+                request = SimpleNamespace(
+                    body=AsyncMock(return_value=json.dumps(body).encode())
+                )
+                response = await lumi_routes.update_admin_lumi_web_search_settings(
+                    request
+                )
+                payload = json.loads(response.body)
+                self.assertEqual(payload["webSearchUrl"], expected_url)
+                self.assertEqual(response.headers["cache-control"], "private, no-store")
+
+        self.assertEqual(host.configure_web_search.await_count, 2)
+
+    async def test_admin_web_search_settings_reject_invalid_payloads_and_urls(self):
+        host = SimpleNamespace(
+            configure_web_search=AsyncMock(side_effect=ValueError("invalid origin")),
+            status=lambda: {"webSearchUrl": None},
+        )
+        requests = (
+            (b'{"url": 7}', 400),
+            (b'{"url":"http://search.test","extra":true}', 400),
+            (b'{"url":"ftp://search.test"}', 400),
+        )
+
+        with (
+            patch.object(
+                lumi_routes,
+                "_admin",
+                new=AsyncMock(return_value="administrator"),
+            ),
+            patch.object(lumi_routes, "lumi_host", host),
+        ):
+            for body, expected_status in requests:
+                request = SimpleNamespace(body=AsyncMock(return_value=body))
+                with self.assertRaises(lumi_routes.HTTPException) as error:
+                    await lumi_routes.update_admin_lumi_web_search_settings(request)
+                self.assertEqual(error.exception.status_code, expected_status)
+
+        self.assertEqual(host.configure_web_search.await_count, 1)
+
 
 class BrokenLumiService:
     async def list_conversations_for_account(self, *_args, **_kwargs):

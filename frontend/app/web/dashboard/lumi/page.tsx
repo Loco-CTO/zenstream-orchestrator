@@ -55,6 +55,7 @@ type LumiStatus = {
 	models: LumiModel[];
 	defaultModel: string | null;
 	defaultThinking: boolean;
+	webSearchUrl: string | null;
 };
 
 type Release = { tag: string; releasedAt: string | null };
@@ -248,7 +249,10 @@ function normalizeStatus(value: unknown): LumiStatus | null {
 		!integration ||
 		!models ||
 		!(typeof value.defaultModel === "string" || value.defaultModel === null) ||
-		typeof value.defaultThinking !== "boolean"
+		typeof value.defaultThinking !== "boolean" ||
+		(value.webSearchUrl !== undefined &&
+			value.webSearchUrl !== null &&
+			typeof value.webSearchUrl !== "string")
 	) {
 		return null;
 	}
@@ -257,6 +261,10 @@ function normalizeStatus(value: unknown): LumiStatus | null {
 		models,
 		defaultModel: value.defaultModel ? safeText(value.defaultModel) : null,
 		defaultThinking: value.defaultThinking,
+		webSearchUrl:
+			typeof value.webSearchUrl === "string"
+				? safeText(value.webSearchUrl)
+				: null,
 	};
 }
 
@@ -369,6 +377,9 @@ export default function LumiSettingsPage() {
 	const [session, setSession] = useState<Session | null>(null);
 	const [integration, setIntegration] = useState<Integration | null>(null);
 	const [models, setModels] = useState<LumiModel[]>([]);
+	const [webSearchUrl, setWebSearchUrl] = useState("");
+	const [webSearchSettingsDirty, setWebSearchSettingsDirty] = useState(false);
+	const [webSearchBusy, setWebSearchBusy] = useState(false);
 	const [releases, setReleases] = useState<Release[]>([]);
 	const [defaultModel, setDefaultModel] = useState<string | null>(null);
 	const [defaultThinking, setDefaultThinking] = useState(false);
@@ -387,6 +398,7 @@ export default function LumiSettingsPage() {
 	const [message, setMessage] = useState("");
 	const requestInFlight = useRef(false);
 	const runtimeSettingsDirtyRef = useRef(false);
+	const webSearchSettingsDirtyRef = useRef(false);
 
 	const load = useCallback(async (current: Session, silent = false) => {
 		if (requestInFlight.current) return;
@@ -423,6 +435,10 @@ export default function LumiSettingsPage() {
 				? modelCatalog.defaultModel
 				: status.defaultModel;
 			setIntegration(status.integration);
+			if (!webSearchSettingsDirtyRef.current) {
+				setWebSearchUrl(status.webSearchUrl ?? "");
+				setWebSearchSettingsDirty(false);
+			}
 			setModels(
 				mergeModels(status.models, modelCatalog?.models ?? [], nextDefaultModel),
 			);
@@ -505,6 +521,47 @@ export default function LumiSettingsPage() {
 		}, 1500);
 		return () => window.clearInterval(timer);
 	}, [load, session, shouldPoll]);
+
+	/** Saves or clears the optional SearXNG endpoint without changing model settings. */
+	async function saveWebResearchSettings() {
+		if (!session) return;
+		setWebSearchBusy(true);
+		setError("");
+		setMessage("");
+		try {
+			const response = await adminFetch("/api/admin/lumi/web-search", session, {
+				method: "PATCH",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ url: webSearchUrl.trim() || null }),
+			});
+			const value = await response.json().catch(() => null);
+			if (!response.ok) {
+				throw new Error(
+					responseError(value, "Could not save Lumi web research settings."),
+				);
+			}
+			const status = normalizeStatus(value);
+			if (!status) {
+				throw new Error("The Lumi web research settings response was not recognized.");
+			}
+			webSearchSettingsDirtyRef.current = false;
+			setWebSearchSettingsDirty(false);
+			setWebSearchUrl(status.webSearchUrl ?? "");
+			setMessage(
+				status.webSearchUrl
+					? "Optional web research is configured."
+					: "External web search is disabled.",
+			);
+		} catch (cause) {
+			setError(
+				cause instanceof Error && cause.message
+					? safeText(cause.message)
+					: "Could not connect to the Orchestrator.",
+			);
+		} finally {
+			setWebSearchBusy(false);
+		}
+	}
 
 	/** Enables or disables the explicitly selected Lumi release. */
 	async function updateIntegration(enabled: boolean) {
@@ -743,7 +800,8 @@ export default function LumiSettingsPage() {
 		if (modelToDelete) deleteModel(modelToDelete);
 	}
 
-	const refreshing = loading || integrationBusy || modelAction !== null;
+	const refreshing =
+		loading || integrationBusy || webSearchBusy || modelAction !== null;
 	const canEnable = Boolean(
 		session &&
 		integration &&
@@ -786,6 +844,17 @@ export default function LumiSettingsPage() {
 						canEnable={canEnable}
 						onReleaseChange={setSelectedReleaseTag}
 						onIntegrationToggle={updateIntegration}
+					/>
+					<WebResearchPanel
+						url={webSearchUrl}
+						busy={webSearchBusy}
+						dirty={webSearchSettingsDirty}
+						onUrlChange={(url) => {
+							webSearchSettingsDirtyRef.current = true;
+							setWebSearchSettingsDirty(true);
+							setWebSearchUrl(url);
+						}}
+						onSave={saveWebResearchSettings}
 					/>
 					<ModelPanel
 						defaultModel={defaultModel}
@@ -1404,6 +1473,76 @@ function ModelActionButton({
 			<IconTrash size={15} />
 			{busy && modelAction?.kind === "delete" ? "Deleting…" : "Delete files"}
 		</button>
+	);
+}
+
+type WebResearchPanelProps = {
+	url: string;
+	busy: boolean;
+	dirty: boolean;
+	onUrlChange: (url: string) => void;
+	onSave: () => void;
+};
+
+/** Configures optional web research independently from the local model runtime. */
+function WebResearchPanel({
+	url,
+	busy,
+	dirty,
+	onUrlChange,
+	onSave,
+}: WebResearchPanelProps) {
+	const configured = Boolean(url.trim());
+	return (
+		<SurfaceCard className="space-y-5 p-6">
+			<div className="flex flex-wrap items-start justify-between gap-4">
+				<div>
+					<h2 className="text-lg font-bold">Optional web research</h2>
+					<p className="mt-2 max-w-3xl text-sm leading-6 console-muted">
+						Configure a SearXNG origin only when you want fresh external research.
+						Local Qwen3.5 inference runs inside the Orchestrator and does not require
+						a model API URL. Leave this blank to disable web search.
+					</p>
+				</div>
+				<span
+					className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${configured ? "bg-emerald-950/60 text-emerald-200" : "bg-white/5 text-white/50"}`}
+				>
+					{configured ? "Configured" : "Not configured"}
+				</span>
+			</div>
+			<label className="block max-w-2xl">
+				<span className="text-sm font-semibold">SearXNG origin</span>
+				<input
+					type="url"
+					maxLength={2048}
+					value={url}
+					disabled={busy}
+					onChange={(event) => onUrlChange(event.target.value)}
+					placeholder="http://searxng:8080"
+					spellCheck={false}
+					className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
+				/>
+				<span className="mt-1 block text-xs console-muted">
+					Enter an HTTP(S) origin only. Paths, credentials, queries, and fragments
+					are not accepted.
+				</span>
+			</label>
+			<div className="flex flex-wrap items-center justify-between gap-3">
+				<p className="text-xs console-muted">
+					This setting is stored by this Orchestrator and is independent of model
+					selection and installation.
+				</p>
+				<button
+					type="button"
+					onClick={onSave}
+					disabled={!dirty || busy}
+					aria-busy={busy}
+					className="console-button-primary rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
+				>
+					{busy ? "Saving…" : "Save web research settings"}
+				</button>
+			</div>
+		</SurfaceCard>
 	);
 }
 

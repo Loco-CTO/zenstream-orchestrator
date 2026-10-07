@@ -176,6 +176,13 @@ class LumiIntegrationStatus(DocsModel):
 
 class LumiAdminStatusResponse(LumiAdminModelsResponse):
     integration: LumiIntegrationStatus
+    webSearchUrl: str | None = Field(
+        default=None,
+        description=(
+            "Optional SearXNG origin for fresh web research. This setting is separate "
+            "from the embedded local model runtime."
+        ),
+    )
 
 
 class LumiReleaseOption(DocsModel):
@@ -190,6 +197,17 @@ class LumiReleaseListResponse(DocsModel):
 class LumiIntegrationSettingsRequest(DocsModel):
     enabled: bool
     releaseTag: str | None = None
+
+
+class LumiWebSearchSettingsRequest(DocsModel):
+    url: str | None = Field(
+        max_length=2_048,
+        description=(
+            "Optional HTTP(S) SearXNG origin for external research. Null disables "
+            "web search; local Qwen3.5 inference does not require a model API URL."
+        ),
+        examples=["http://searxng:8080"],
+    )
 
 
 class LumiModelSettingRequest(DocsModel):
@@ -1538,6 +1556,7 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     LumiReleaseOption,
     LumiReleaseListResponse,
     LumiIntegrationSettingsRequest,
+    LumiWebSearchSettingsRequest,
     LumiModelSettingRequest,
     LumiModelDeleteResponse,
     FlexibleObject,
@@ -1966,6 +1985,7 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/admin/lumi/status"): "Get Lumi integration and model status",
     ("GET", "/api/admin/lumi/releases"): "List supported Lumi releases",
     ("PUT", "/api/admin/lumi/settings"): "Enable or disable the Lumi integration",
+    ("PATCH", "/api/admin/lumi/web-search"): "Configure optional Lumi web research",
     ("GET", "/api/admin/lumi/models"): "List installed Qwen3.5 models",
     (
         "PATCH",
@@ -2374,6 +2394,7 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ): LumiModelChoiceRequest,
     ("PUT", "/api/lumi/preferences/model"): LumiModelChoiceRequest,
     ("PUT", "/api/admin/lumi/settings"): LumiIntegrationSettingsRequest,
+    ("PATCH", "/api/admin/lumi/web-search"): LumiWebSearchSettingsRequest,
     ("PATCH", "/api/admin/lumi/models/settings"): LumiRuntimeSettingsRequest,
     ("PATCH", "/api/admin/lumi/models/{model_id}"): LumiModelSettingRequest,
     ("PATCH", "/api/catalog/items/{entity_id}/state"): CatalogStatePatchRequest,
@@ -2528,6 +2549,7 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("GET", "/api/admin/lumi/status"): LumiAdminStatusResponse,
     ("GET", "/api/admin/lumi/releases"): LumiReleaseListResponse,
     ("PUT", "/api/admin/lumi/settings"): LumiAdminStatusResponse,
+    ("PATCH", "/api/admin/lumi/web-search"): LumiAdminStatusResponse,
     ("GET", "/api/admin/lumi/models"): LumiAdminModelsResponse,
     ("PATCH", "/api/admin/lumi/models/settings"): LumiAdminModelsResponse,
     ("PATCH", "/api/admin/lumi/models/{model_id}"): LumiAdminModelsResponse,
@@ -2699,6 +2721,7 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     },
     LumiModelChoiceRequest: {"model": "qwen3.5:2b", "thinking": True},
     LumiIntegrationSettingsRequest: {"enabled": True, "releaseTag": "v0.1.0"},
+    LumiWebSearchSettingsRequest: {"url": "http://searxng:8080"},
     LumiRuntimeSettingsRequest: {
         "defaultThinking": True,
         "limits": {"maxContextTokens": 8192, "maxOutputTokens": 2048},

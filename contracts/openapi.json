@@ -4796,6 +4796,19 @@
             },
             "title": "Models",
             "type": "array"
+          },
+          "webSearchUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional SearXNG origin for fresh web research. This setting is separate from the embedded local model runtime.",
+            "title": "Websearchurl"
           }
         },
         "required": [
@@ -5619,6 +5632,32 @@
           "answer"
         ],
         "title": "LumiTurnResponse",
+        "type": "object"
+      },
+      "LumiWebSearchSettingsRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional HTTP(S) SearXNG origin for external research. Null disables web search; local Qwen3.5 inference does not require a model API URL.",
+            "examples": [
+              "http://searxng:8080"
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "LumiWebSearchSettingsRequest",
         "type": "object"
       },
       "LyricsLine": {
@@ -17975,6 +18014,122 @@
           }
         ],
         "summary": "Get Lumi integration and model status",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
+    "/api/admin/lumi/web-search": {
+      "patch": {
+        "description": "Configure optional Lumi web research. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `PATCH`; path: `/api/admin/lumi/web-search`.",
+        "operationId": "patch_api_admin_lumi_web_search",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "url": "http://searxng:8080"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiWebSearchSettingsRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": null,
+                  "defaultThinking": false,
+                  "integration": {
+                    "enabled": false,
+                    "error": null,
+                    "installed": false,
+                    "progress": null,
+                    "releaseTag": null,
+                    "restartRequired": false,
+                    "state": "disabled"
+                  },
+                  "limits": {
+                    "idleUnloadSeconds": 300,
+                    "maxActiveConversations": 128,
+                    "maxConcurrentChats": 1,
+                    "maxContextTokens": 8192,
+                    "maxOutputTokens": 2048
+                  },
+                  "modelInstallAvailable": false,
+                  "models": []
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiAdminStatusResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Configure optional Lumi web research",
         "tags": [
           "Admin · Lumi"
         ]

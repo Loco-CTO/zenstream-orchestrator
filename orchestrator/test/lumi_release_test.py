@@ -324,6 +324,23 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(_matching_dependencies((dependency,), host), (dependency,))
 
+    def test_runtime_host_current_uses_cache_tag_when_soabi_is_missing(self):
+        runtime_sys = SimpleNamespace(
+            implementation=SimpleNamespace(name="cpython", cache_tag="cpython-312"),
+            version_info=(3, 12, 14),
+            platform="win32",
+        )
+        with (
+            patch("app.lumi_release.sys", runtime_sys),
+            patch("app.lumi_release.sysconfig.get_config_var", return_value=None),
+            patch("app.lumi_release.platform.machine", return_value="AMD64"),
+        ):
+            host = RuntimeHost.current()
+
+        self.assertEqual(host.python_tag, "cp312")
+        self.assertEqual(host.abi_tag, "cp312")
+        self.assertEqual(host.platform_tags, ("win_amd64",))
+
     def test_runtime_manifest_accepts_all_release_target_wheels(self):
         dependencies = []
         target_platforms = (

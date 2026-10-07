@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from app.lumi_host import LumiHost, LumiHostError
+from app.lumi_release import LumiReleaseCompatibilityError
 
 
 class FakeReleaseManager:
@@ -137,7 +138,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
                 release_manager_factory=BrokenReleaseManager,
             )
             await host.enable("v1.2.3")
-            with self.assertLogs("lumi", level="ERROR"):
+            with self.assertLogs("zenstream.lumi", level="ERROR"):
                 await host._operation
 
         status = host.status()["integration"]
@@ -145,6 +146,29 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["enabled"])
         self.assertEqual(status["error"], "OSError")
         self.assertNotIn("private package path", str(status))
+
+    async def test_release_compatibility_error_is_reported_with_safe_details(self):
+        class IncompatibleReleaseManager(FakeReleaseManager):
+            async def enable(self, _tag: str):
+                raise LumiReleaseCompatibilityError(
+                    "Lumi release declares too many runtime wheels"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(
+                data_directory=directory,
+                release_manager_factory=IncompatibleReleaseManager,
+            )
+            await host.enable("v1.2.3")
+            with self.assertLogs("zenstream.lumi", level="ERROR"):
+                await host._operation
+
+        status = host.status()["integration"]
+        self.assertEqual(status["state"], "error")
+        self.assertFalse(status["enabled"])
+        self.assertEqual(
+            status["error"], "Lumi release declares too many runtime wheels"
+        )
 
     async def test_disable_gates_chat_before_a_pending_install_finishes(self):
         release_ready = asyncio.Event()

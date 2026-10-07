@@ -79,6 +79,9 @@ MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 MAX_WHEEL_FILE_BYTES = 128 * 1024 * 1024
 MAX_WHEEL_EXPANDED_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_WHEEL_EXPANDED_BYTES = 1024 * 1024 * 1024
+# A release manifest contains wheels for every supported host. Keep this separate
+# from MAX_WHEELS, which limits the subset installed for one host.
+MAX_RUNTIME_DEPENDENCIES = 128
 MAX_WHEELS = 16
 MAX_INSTALLER_WHEELS = 128
 MAX_INSTALLER_WHEEL_BYTES = 512 * 1024 * 1024
@@ -206,8 +209,8 @@ def _linux_wheel_platform_tags(machine: str) -> tuple[str, ...]:
         if major >= 2 and minor >= 17:
             for supported_minor in range(minor, 16, -1):
                 tags.append(f"manylinux_2_{supported_minor}_{machine}")
-            if machine == "x86_64":
-                tags.append("manylinux2014_x86_64")
+            if machine in {"x86_64", "aarch64"}:
+                tags.append(f"manylinux2014_{machine}")
         tags.append(f"linux_{machine}")
     elif libc_name.lower() == "musl":
         try:
@@ -1289,7 +1292,7 @@ def _read_and_validate_manifest(
     installer_dependencies = _parse_installer_dependencies(
         raw.get("installerDependencies", [])
     )
-    if len(dependencies) > MAX_WHEELS:
+    if len(dependencies) > MAX_RUNTIME_DEPENDENCIES:
         raise LumiReleaseCompatibilityError(
             "Lumi release declares too many runtime dependencies"
         )
@@ -1369,7 +1372,7 @@ def _parse_runtime_dependencies(
         raise LumiReleaseCompatibilityError(
             "Lumi release has no pinned runtime wheel set"
         )
-    if len(raw_dependencies) > MAX_WHEELS:
+    if len(raw_dependencies) > MAX_RUNTIME_DEPENDENCIES:
         raise LumiReleaseCompatibilityError(
             "Lumi release declares too many runtime wheels"
         )
@@ -1427,8 +1430,8 @@ def _parse_wheel_dependencies(
             raise LumiReleaseError("Lumi runtime wheel asset name is invalid")
         if not re.fullmatch(r"[A-Za-z0-9_.+-]+", version):
             raise LumiReleaseError("Lumi runtime wheel version is invalid")
-        if not re.fullmatch(r"[A-Za-z0-9_]+", python_tag) or not re.fullmatch(
-            r"[A-Za-z0-9_]+", abi_tag
+        if not re.fullmatch(r"[A-Za-z0-9_.]+", python_tag) or not re.fullmatch(
+            r"[A-Za-z0-9_.]+", abi_tag
         ):
             raise LumiReleaseError("Lumi runtime wheel Python or ABI tag is invalid")
         if not re.fullmatch(r"[A-Za-z0-9_.]+", platform_tag):
@@ -1490,20 +1493,40 @@ def _validate_dependency_wheel_names(dependencies: Sequence[RuntimeDependency]) 
 def _matching_dependencies(
     dependencies: Sequence[RuntimeDependency], host: RuntimeHost
 ) -> tuple[RuntimeDependency, ...]:
-    return tuple(
-        dependency
-        for dependency in dependencies
-        if (
-            dependency.python_tag == "py3"
-            and dependency.abi_tag == "none"
-            and dependency.platform_tag == "any"
+    def matches_host(dependency: RuntimeDependency) -> bool:
+        python_tags = dependency.python_tag.split(".")
+        abi_tags = dependency.abi_tag.split(".")
+        platform_tags = dependency.platform_tag.split(".")
+        platform_matches = "any" in platform_tags or any(
+            tag in host.platform_tags for tag in platform_tags
         )
-        or (
-            dependency.python_tag == host.python_tag
-            and dependency.abi_tag == host.abi_tag
-            and dependency.platform_tag in host.platform_tags
-        )
-    )
+        if not platform_matches:
+            return False
+
+        host_minor = _cpython_minor(host.python_tag)
+        for python_tag in python_tags:
+            for abi_tag in abi_tags:
+                if python_tag == host.python_tag and abi_tag == host.abi_tag:
+                    return True
+                if python_tag == "py3" and abi_tag == "none" and host_minor is not None:
+                    return True
+                wheel_minor = _cpython_minor(python_tag)
+                if (
+                    abi_tag == "abi3"
+                    and wheel_minor is not None
+                    and host_minor is not None
+                    and wheel_minor <= host_minor
+                    and host.abi_tag == host.python_tag
+                ):
+                    return True
+        return False
+
+    return tuple(dependency for dependency in dependencies if matches_host(dependency))
+
+
+def _cpython_minor(python_tag: str) -> int | None:
+    match = re.fullmatch(r"cp3(\d+)", python_tag)
+    return int(match.group(1)) if match else None
 
 
 def _matching_installer_dependencies(

@@ -1,28 +1,3 @@
-Author: Loco-CTO <61045140+Loco-CTO@users.noreply.github.com>
-Date:   Wed Oct 7 13:10:09 2026 +0100
-
-    refactor: simplify lumi dashboard panels
-
-C:/Users/mrhom/Documents/VSCode/zenstream/zenstream-orchestrator                                                 f9008e4 [main]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/chore-playback-refresh-diagnostics   f48ca97 [chore-playback-refresh-diagnostics]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/docs-home-detail-section-openapi     9969418 [docs-home-detail-section-openapi]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-admin-lumi-ui                   fa82708 [feat-admin-lumi-ui]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-bounded-home-recommendations    683db07 [feat-bounded-home-recommendations]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-admin-controls             6d22339 [feat-lumi-admin-controls]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-admin-controls-main        2e21819 [feat-lumi-admin-controls-main]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-embedded-runtime           a9d9a4d [feat-lumi-embedded-runtime]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-inprocess-runtime          62fbd8e [feat-lumi-inprocess-runtime]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-orchestrator-gateway       d5c0ef1 [feat-lumi-orchestrator-gateway]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-orchestrator-gateway-main  57e3c24 [feat-lumi-orchestrator-gateway-main]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-release-installer          32d5977 [feat-lumi-release-installer]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-audio-play-start-contract        d17253f [fix-audio-play-start-contract]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-contract-snapshot-version        e1e0fa3 [fix-contract-snapshot-version]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-dashboard-lan-hmr                18aaab9 [fix-dashboard-lan-hmr]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-home-detail-query-count          3f0beaa [fix-home-detail-query-count]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-home-next-up-coverage            32fe839 [fix-home-next-up-coverage]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-lumi-release-recovery            24729b9 [fix-lumi-release-recovery]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-seamless-playback-leases         e752058 [fix-playback-migration-heads]
-C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-syncplay-recovery                4ff0d3e [fix-syncplay-recovery]
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";

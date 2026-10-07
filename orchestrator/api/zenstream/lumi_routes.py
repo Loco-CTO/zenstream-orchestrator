@@ -268,6 +268,26 @@ async def admin_lumi_releases(request: Request):
     return _private_json({"releases": releases})
 
 
+@router.patch("/api/admin/lumi/web-search")
+async def update_admin_lumi_web_search_settings(request: Request):
+    await _admin(request)
+    payload = await _object_body(request)
+    if set(payload) != {"url"} or (
+        payload["url"] is not None and not isinstance(payload["url"], str)
+    ):
+        raise HTTPException(400, "The Lumi web search settings are invalid.")
+    search_url = payload["url"]
+    if isinstance(search_url, str) and not search_url.strip():
+        search_url = None
+    try:
+        await lumi_host.configure_web_search(search_url)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except LumiHostError as error:
+        raise HTTPException(409, str(error)) from error
+    return _private_json(lumi_host.status())
+
+
 @router.put("/api/admin/lumi/settings")
 async def update_admin_lumi_settings(request: Request):
     await _admin(request)

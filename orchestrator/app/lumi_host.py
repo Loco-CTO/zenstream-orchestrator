@@ -18,6 +18,7 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.lumi_catalog import LumiCatalogAdapter
 from app.paths import metadata_directory
@@ -33,6 +34,43 @@ _DEFAULT_LIMITS = {
     "maxConcurrentChats": 1,
     "maxActiveConversations": 128,
 }
+
+
+def _normalize_web_search_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 2_048
+        or value != value.strip()
+        or any(char.isspace() for char in value)
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise ValueError(
+            "Enter an HTTP(S) SearXNG origin without credentials, paths, queries, or fragments."
+        )
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        _ = parts.port
+    except ValueError as error:
+        raise ValueError(
+            "Enter an HTTP(S) SearXNG origin without credentials, paths, queries, or fragments."
+        ) from error
+    if (
+        parts.scheme not in {"http", "https"}
+        or not hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path not in {"", "/"}
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError(
+            "Enter an HTTP(S) SearXNG origin without credentials, paths, queries, or fragments."
+        )
+    return value.rstrip("/")
 
 
 class LumiHostError(RuntimeError):
@@ -251,11 +289,26 @@ class LumiHost:
         value = self._settings.get("webSearchUrl")
         return value if isinstance(value, str) else None
 
-    def configure_web_search(self, url: str | None) -> None:
-        if url is not None and (not isinstance(url, str) or len(url) > 2_048):
-            raise LumiHostError("The web search endpoint is invalid.")
-        self._settings["webSearchUrl"] = url
-        self._save_settings()
+    async def configure_web_search(self, url: str | None) -> None:
+        normalized_url = _normalize_web_search_url(url)
+        async with self._lock:
+            previous_url = self._settings.get("webSearchUrl")
+            if normalized_url == previous_url:
+                return
+            self._settings["webSearchUrl"] = normalized_url
+            try:
+                self._save_settings()
+                if self._loaded_release is not None and self._state != "installing":
+                    await self._rebuild_service()
+            except Exception as error:
+                self._settings["webSearchUrl"] = previous_url
+                try:
+                    self._save_settings()
+                except Exception:
+                    logger.exception("Could not restore Lumi web search settings")
+                raise LumiHostError(
+                    "The web search settings could not be applied."
+                ) from error
 
     def model_settings(self) -> dict[str, Any]:
         configured = self._settings["models"]
@@ -805,7 +858,10 @@ class LumiHost:
             tag if isinstance(tag, str) and _STABLE_RELEASE_TAG.fullmatch(tag) else None
         )
         search_url = payload.get("webSearchUrl")
-        result["webSearchUrl"] = search_url if isinstance(search_url, str) else None
+        try:
+            result["webSearchUrl"] = _normalize_web_search_url(search_url)
+        except ValueError:
+            result["webSearchUrl"] = None
         default_model = payload.get("defaultModel")
         result["defaultModel"] = (
             default_model
@@ -871,6 +927,7 @@ class LumiHost:
     def status(self) -> dict[str, Any]:
         installing = self._state == "installing"
         return {
+            "webSearchUrl": self.web_search_url,
             "integration": {
                 "enabled": bool(self._settings["enabled"]),
                 "installed": self._loaded_release is not None,

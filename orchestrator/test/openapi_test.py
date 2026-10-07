@@ -195,6 +195,7 @@ class OpenApiContractTest(unittest.TestCase):
             "/api/admin/lumi/status",
             "/api/admin/lumi/releases",
             "/api/admin/lumi/settings",
+            "/api/admin/lumi/web-search",
             "/api/admin/lumi/models",
             "/api/admin/lumi/models/settings",
             "/api/admin/lumi/models/{model_id}",
@@ -211,6 +212,13 @@ class OpenApiContractTest(unittest.TestCase):
             self.assertIn({"AdminSessionCookie": []}, operation["security"], path)
 
         schemas = self.schema["components"]["schemas"]
+        web_search = paths["/api/admin/lumi/web-search"]["patch"]
+        self.assertEqual(
+            web_search["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/LumiWebSearchSettingsRequest",
+        )
+        self.assertIn("url", schemas["LumiWebSearchSettingsRequest"]["required"])
+        self.assertIn("webSearchUrl", schemas["LumiAdminStatusResponse"]["properties"])
         turns = paths["/api/lumi/conversations/{conversation_id}/turns"]["post"]
         body_ref = turns["requestBody"]["content"]["application/json"]["schema"]["$ref"]
         self.assertEqual(body_ref, "#/components/schemas/LumiTurnRequest")

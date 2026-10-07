@@ -205,7 +205,9 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(registry), 6)
         self.assertNotIn("lumi.web_research", imported)
 
-    def test_web_research_tools_are_added_only_when_a_search_url_is_configured(self):
+    async def test_web_research_tools_are_added_only_when_a_search_url_is_configured(
+        self,
+    ):
         fake_tool = lambda *_args, **_kwargs: object()
         search_tool = object()
         open_tool = object()
@@ -229,7 +231,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             host = LumiHost(data_directory=directory, catalog=object())
-            host.configure_web_search("http://search.test:8080")
+            await host.configure_web_search("http://search.test:8080")
             with patch(
                 "app.lumi_host.importlib.import_module",
                 side_effect=lambda name: modules[name],
@@ -241,6 +243,55 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             searxng_url="http://search.test:8080"
         )
         web_module.build_web_research_tools.assert_called_once_with("search-config")
+
+    async def test_web_search_setting_persists_as_an_optional_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+            await host.configure_web_search("https://search.test:8080/")
+
+            restored_host = LumiHost(data_directory=directory)
+            self.assertEqual(
+                restored_host.status()["webSearchUrl"], "https://search.test:8080"
+            )
+            await restored_host.configure_web_search(None)
+
+        self.assertIsNone(restored_host.status()["webSearchUrl"])
+
+    async def test_web_search_setting_rejects_non_origin_urls(self):
+        invalid_urls = (
+            "ftp://search.test",
+            "http://user:secret@search.test",
+            "http://search.test/path",
+            "http://search.test?query=private",
+            "http://search.test#fragment",
+            "http://search.test:99999",
+            "http://search .test",
+            " http://search.test",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+            for url in invalid_urls:
+                with self.subTest(url=url):
+                    with self.assertRaises(ValueError):
+                        await host.configure_web_search(url)
+            self.assertIsNone(host.status()["webSearchUrl"])
+
+    async def test_web_search_setting_rebuilds_active_service_and_rolls_back_failure(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+            host._loaded_release = object()
+            host._state = "ready"
+            host._rebuild_service = AsyncMock()
+            await host.configure_web_search("http://search.test:8080")
+            host._rebuild_service.assert_awaited_once()
+
+            host._rebuild_service = AsyncMock(side_effect=RuntimeError("private path"))
+            with self.assertRaises(LumiHostError):
+                await host.configure_web_search("https://search.test:8080")
+
+        self.assertEqual(host.web_search_url, "http://search.test:8080")
 
 
 if __name__ == "__main__":

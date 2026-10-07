@@ -1,3 +1,28 @@
+Author: Loco-CTO <61045140+Loco-CTO@users.noreply.github.com>
+Date:   Wed Oct 7 13:10:09 2026 +0100
+
+    refactor: simplify lumi dashboard panels
+
+C:/Users/mrhom/Documents/VSCode/zenstream/zenstream-orchestrator                                                 f9008e4 [main]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/chore-playback-refresh-diagnostics   f48ca97 [chore-playback-refresh-diagnostics]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/docs-home-detail-section-openapi     9969418 [docs-home-detail-section-openapi]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-admin-lumi-ui                   fa82708 [feat-admin-lumi-ui]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-bounded-home-recommendations    683db07 [feat-bounded-home-recommendations]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-admin-controls             6d22339 [feat-lumi-admin-controls]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-admin-controls-main        2e21819 [feat-lumi-admin-controls-main]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-embedded-runtime           a9d9a4d [feat-lumi-embedded-runtime]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-inprocess-runtime          62fbd8e [feat-lumi-inprocess-runtime]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-orchestrator-gateway       d5c0ef1 [feat-lumi-orchestrator-gateway]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-orchestrator-gateway-main  57e3c24 [feat-lumi-orchestrator-gateway-main]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/feat-lumi-release-installer          32d5977 [feat-lumi-release-installer]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-audio-play-start-contract        d17253f [fix-audio-play-start-contract]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-contract-snapshot-version        e1e0fa3 [fix-contract-snapshot-version]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-dashboard-lan-hmr                18aaab9 [fix-dashboard-lan-hmr]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-home-detail-query-count          3f0beaa [fix-home-detail-query-count]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-home-next-up-coverage            32fe839 [fix-home-next-up-coverage]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-lumi-release-recovery            24729b9 [fix-lumi-release-recovery]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-seamless-playback-leases         e752058 [fix-playback-migration-heads]
+C:/Users/mrhom/Documents/VSCode/zenstream/.worktrees/zenstream-orchestrator/fix-syncplay-recovery                4ff0d3e [fix-syncplay-recovery]
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -761,9 +786,7 @@ export default function LumiSettingsPage() {
 				actions={
 					<button
 						type="button"
-						onClick={() => {
-							if (session) load(session);
-						}}
+						onClick={() => session && load(session)}
 						disabled={!session || refreshing}
 						className="console-button inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold disabled:opacity-40"
 					>
@@ -773,431 +796,48 @@ export default function LumiSettingsPage() {
 				}
 			/>
 			{message && <StatusMessage>{message}</StatusMessage>}
-			{error && (
-				<p
-					role="alert"
-					className="mt-5 rounded-lg border border-red-900/70 bg-red-950/30 px-4 py-3 text-sm text-red-200"
-				>
-					{error}
-				</p>
-			)}
-			{loading ? (
-				<SurfaceCard className="mt-7 p-6 console-muted">
-					Loading Lumi integration status…
-				</SurfaceCard>
-			) : !session ? (
-				<SurfaceCard className="mt-7 p-6 console-muted">
-					Sign in to manage the Lumi integration.
-				</SurfaceCard>
+			{error && <ErrorNotice message={error} />}
+			{loading || !session ? (
+				<DashboardAvailability loading={loading} />
 			) : (
 				<div className="mt-7 space-y-5">
-					<SurfaceCard className="space-y-5 p-6">
-						<div className="flex flex-wrap items-start justify-between gap-4">
-							<div>
-								<h2 className="text-lg font-bold">Integration</h2>
-								<p className="mt-2 text-sm leading-6 console-muted">
-									Lumi is installed from a supported release only after you select a
-									version and enable it. The selected package is loaded in-process.
-								</p>
-							</div>
-							{integration && (
-								<div className="flex flex-wrap gap-2 text-xs font-semibold">
-									<span
-										className={`rounded-full px-3 py-1 ${integration.enabled ? "bg-emerald-950/60 text-emerald-300" : "bg-white/5 text-white/55"}`}
-									>
-										{integration.enabled ? "Enabled" : "Disabled"}
-									</span>
-									<span className="rounded-full bg-white/5 px-3 py-1 capitalize text-white/55">
-										{integration.state}
-									</span>
-									<span
-										className={`rounded-full px-3 py-1 ${integration.installed ? "bg-cyan-950/50 text-cyan-200" : "bg-white/5 text-white/55"}`}
-									>
-										{integration.installed
-											? "Package installed"
-											: "Package not installed"}
-									</span>
-								</div>
-							)}
-						</div>
-
-						{integration?.releaseTag && (
-							<p className="text-sm text-white/70">
-								Selected release:{" "}
-								<span className="font-semibold">{integration.releaseTag}</span>
-							</p>
-						)}
-
-						{integration?.state === "installing" && (
-							<ProgressPanel
-								title="Installing Lumi"
-								stage={integration.progress?.stage || "Preparing release"}
-								current={integration.progress?.current ?? null}
-								total={integration.progress?.total ?? null}
-							/>
-						)}
-
-						{integration?.state === "error" && integration.error && (
-							<p
-								role="alert"
-								className="rounded-lg border border-red-900/60 bg-red-950/25 px-4 py-3 text-sm text-red-200"
-							>
-								{safeText(integration.error)}
-							</p>
-						)}
-
-						<div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-							<label className="block min-w-0">
-								<span className="text-sm font-semibold">Supported release</span>
-								<select
-									value={selectedReleaseTag}
-									onChange={(event) => setSelectedReleaseTag(event.target.value)}
-									disabled={
-										integration?.enabled ||
-										integration?.state === "installing" ||
-										integrationBusy ||
-										releases.length === 0
-									}
-									className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
-								>
-									<option value="">
-										{releases.length
-											? "Select a release"
-											: "No supported releases available"}
-									</option>
-									{integration?.releaseTag &&
-										!releases.some(
-											(release) => release.tag === integration.releaseTag,
-										) && (
-											<option value={integration.releaseTag}>
-												{integration.releaseTag} (currently installed)
-											</option>
-										)}
-									{releases.map((release) => (
-										<option key={release.tag} value={release.tag}>
-											{release.tag} · {formatReleaseDate(release.releasedAt)}
-										</option>
-									))}
-								</select>
-								{releaseError ? (
-									<span className="mt-2 block text-xs text-amber-200" role="alert">
-										{releaseError}
-									</span>
-								) : releases.length === 0 ? (
-									<span className="mt-2 block text-xs console-muted">
-										No supported Lumi releases are currently available.
-									</span>
-								) : (
-									<span className="mt-2 block text-xs console-muted">
-										Choose a published stable release to install or enable.
-									</span>
-								)}
-							</label>
-							<div className="flex flex-wrap gap-2">
-								{integration?.enabled ? (
-									<button
-										type="button"
-										onClick={() => updateIntegration(false)}
-										disabled={
-											integrationBusy || integration.state === "installing" || hasDownload
-										}
-										className="console-button rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
-									>
-										{integrationBusy ? "Disabling…" : "Disable Lumi"}
-									</button>
-								) : (
-									<button
-										type="button"
-										onClick={() => updateIntegration(true)}
-										disabled={!canEnable || loading}
-										className="console-button-primary rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
-									>
-										{integrationBusy
-											? "Installing…"
-											: integration?.state === "error"
-												? "Retry installation"
-												: integration?.installed
-													? "Enable Lumi"
-													: "Install and enable Lumi"}
-									</button>
-								)}
-							</div>
-						</div>
-					</SurfaceCard>
-
-					<SurfaceCard className="space-y-5 p-6">
-						<div className="flex flex-wrap items-start justify-between gap-3">
-							<div>
-								<h2 className="text-lg font-bold">Model files and access</h2>
-								<p className="mt-2 text-sm leading-6 console-muted">
-									Enable downloaded models for chat users, set the default, or remove
-									local model files. Download size is shown for each model.
-								</p>
-							</div>
-							{defaultModel && (
-								<p className="text-xs console-muted">
-									Default:{" "}
-									<span className="font-semibold text-white/75">{defaultModel}</span>
-									<span className="mx-1">·</span>
-									Thinking {defaultThinking ? "on" : "off"}
-								</p>
-							)}
-						</div>
-						{modelsError && (
-							<p role="alert" className="text-sm text-amber-200">
-								{modelsError}
-							</p>
-						)}
-						{!integration?.installed && (
-							<p className="rounded-lg border border-white/10 bg-white/[0.025] px-4 py-3 text-sm console-muted">
-								Install a Lumi release before managing model files.
-							</p>
-						)}
-						{integration?.installed && (
-							<p className="rounded-lg border border-white/10 bg-white/[0.025] px-4 py-3 text-sm console-muted">
-								{!integration.enabled
-									? "Enable the Lumi integration before managing model files."
-									: !modelInstallAvailable
-										? "This release has no model installer assets. Install a supported release that includes them to download Qwen3.5 models."
-										: "Model files are installed locally by Lumi. The Orchestrator does not use a model API URL."}
-							</p>
-						)}
-						{models.length === 0 ? (
-							<p className="text-sm console-muted">
-								No models are currently available.
-							</p>
-						) : (
-							<ul className="divide-y divide-white/5">
-								{models.map((model) => {
-									const busy = modelAction?.id === model.id;
-									const progress = progressPercent(model.downloadProgress);
-									const mayDisable = model.enabled && !model.isDefault;
-									return (
-										<li
-											key={model.id}
-											className="flex flex-col gap-4 py-5 first:pt-0 last:pb-0 xl:flex-row xl:items-center xl:justify-between"
-										>
-											<div className="min-w-0 flex-1">
-												<div className="flex flex-wrap items-center gap-2">
-													<h3 className="text-sm font-semibold text-white">{model.label}</h3>
-													{model.isDefault && (
-														<span className="rounded-full bg-violet-950/70 px-2.5 py-1 text-[11px] font-semibold text-violet-200">
-															Default
-														</span>
-													)}
-													<span
-														className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${model.installed ? "bg-emerald-950/60 text-emerald-200" : "bg-white/5 text-white/50"}`}
-													>
-														{model.installed ? "Installed" : "Not installed"}
-													</span>
-													{model.enabled && (
-														<span className="rounded-full bg-cyan-950/60 px-2.5 py-1 text-[11px] font-semibold text-cyan-200">
-															Enabled for chat
-														</span>
-													)}
-												</div>
-												<p className="mt-1 break-all text-xs console-muted">{model.id}</p>
-												<p className="mt-1 text-xs console-muted">
-													Download size: {formatBytes(model.sizeBytes)}
-													{model.supportsThinking && " · Supports thinking"}
-												</p>
-												{model.downloading && (
-													<div className="mt-3 max-w-xl">
-														<div className="mb-1 flex justify-between text-xs console-muted">
-															<span>{model.downloadStage || "Downloading model"}</span>
-															<span>{progress === null ? "In progress" : `${progress}%`}</span>
-														</div>
-														<div
-															role="progressbar"
-															aria-label={`${model.label} download progress`}
-															aria-valuemin={0}
-															aria-valuemax={100}
-															aria-valuenow={progress ?? undefined}
-															className="h-1.5 overflow-hidden rounded-full bg-white/10"
-														>
-															<div
-																className={`h-full rounded-full bg-cyan-400 ${progress === null ? "w-1/3 animate-pulse" : ""}`}
-																style={
-																	progress === null ? undefined : { width: `${progress}%` }
-																}
-															/>
-														</div>
-													</div>
-												)}
-												{model.downloadError && !model.downloading && (
-													<p role="alert" className="mt-3 max-w-xl text-xs text-red-200">
-														{safeText(model.downloadError)}
-													</p>
-												)}
-											</div>
-											<div className="flex flex-wrap items-center gap-3 xl:justify-end">
-												{model.installed && (
-													<label className="flex items-center gap-2 text-xs text-white/75">
-														<input
-															type="checkbox"
-															checked={model.enabled}
-															disabled={
-																!integration?.enabled ||
-																busy ||
-																modelAction !== null ||
-																(!model.enabled && model.downloading) ||
-																(model.enabled && model.isDefault)
-															}
-															onChange={(event) => updateModel(model, event.target.checked)}
-															className="h-4 w-4 accent-cyan-400"
-														/>
-														<span>Enabled</span>
-													</label>
-												)}
-												<button
-													type="button"
-													onClick={() => makeDefault(model)}
-													disabled={
-														!integration?.enabled ||
-														!model.installed ||
-														model.isDefault ||
-														model.downloading ||
-														modelAction !== null
-													}
-													className="console-button rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-40"
-												>
-													{busy && modelAction?.kind === "default"
-														? "Saving…"
-														: "Make default"}
-												</button>
-												{model.downloading ? (
-													<span className="inline-flex items-center gap-2 text-xs text-cyan-200">
-														<IconDownload size={15} /> Downloading…
-													</span>
-												) : !model.installed ? (
-													modelInstallAvailable ? (
-														<button
-															type="button"
-															onClick={() => downloadModel(model)}
-															disabled={
-																!integration?.enabled ||
-																modelAction !== null ||
-																!modelInstallAvailable
-															}
-															className="console-button inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-40"
-														>
-															<IconDownload size={15} />
-															{busy && modelAction?.kind === "download"
-																? "Starting…"
-																: "Download model"}
-														</button>
-													) : (
-														<span
-															className="text-xs console-muted"
-															title="This release does not include installer assets"
-														>
-															Installer unavailable
-														</span>
-													)
-												) : (
-													<button
-														type="button"
-														onClick={() => setModelToDelete(model)}
-														disabled={
-															!integration?.enabled ||
-															model.enabled ||
-															model.isDefault ||
-															model.downloading ||
-															modelAction !== null
-														}
-														className="console-button inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold text-red-200 disabled:opacity-40"
-													>
-														<IconTrash size={15} />
-														{busy && modelAction?.kind === "delete"
-															? "Deleting…"
-															: "Delete files"}
-													</button>
-												)}
-												{model.enabled && model.isDefault && (
-													<span className="text-[11px] console-muted">
-														Choose another default before disabling or deleting.
-													</span>
-												)}
-											</div>
-										</li>
-									);
-								})}
-							</ul>
-						)}
-					</SurfaceCard>
-
-					<SurfaceCard className="space-y-5 p-6">
-						<div>
-							<h2 className="text-lg font-bold">
-								Default behavior and runtime limits
-							</h2>
-							<p className="mt-2 text-sm leading-6 console-muted">
-								These server-wide settings apply to new conversations and bound
-								Lumi&apos;s local inference workload.
-							</p>
-						</div>
-						<label className="flex items-start gap-3 rounded-xl border border-white/10 bg-white/[0.025] p-4">
-							<input
-								type="checkbox"
-								checked={defaultThinking}
-								disabled={runtimeSettingsBusy}
-								onChange={(event) => {
-									runtimeSettingsDirtyRef.current = true;
-									setRuntimeSettingsDirty(true);
-									setDefaultThinking(event.target.checked);
-								}}
-								className="mt-0.5 h-4 w-4 accent-cyan-400"
-							/>
-							<span>
-								<span className="block text-sm font-semibold text-white">
-									Enable thinking by default
-								</span>
-								<span className="mt-1 block text-xs console-muted">
-									Users can still change thinking for each conversation when the selected
-									model supports it.
-								</span>
-							</span>
-						</label>
-						<div className="grid gap-4 sm:grid-cols-2">
-							{RUNTIME_LIMIT_FIELDS.map((field) => (
-								<label key={field.key} className="block">
-									<span className="text-sm font-semibold">{field.label}</span>
-									<input
-										type="number"
-										min={field.minimum}
-										max={field.maximum}
-										step={1}
-										value={runtimeLimits[field.key]}
-										disabled={runtimeSettingsBusy}
-										onChange={(event) =>
-											changeRuntimeLimit(field.key, event.target.value)
-										}
-										className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
-									/>
-									<span className="mt-1 block text-xs console-muted">
-										{field.help} Range: {field.minimum.toLocaleString()}–
-										{field.maximum.toLocaleString()}.
-									</span>
-								</label>
-							))}
-						</div>
-						<div className="flex flex-wrap items-center justify-between gap-3">
-							<p className="text-xs console-muted">
-								Changes are saved to this Orchestrator and do not call an external model
-								API.
-							</p>
-							<button
-								type="button"
-								onClick={saveRuntimeSettings}
-								disabled={
-									!runtimeSettingsDirty || runtimeSettingsBusy || loading || !session
-								}
-								className="console-button-primary rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
-							>
-								{runtimeSettingsBusy ? "Saving…" : "Save runtime settings"}
-							</button>
-						</div>
-					</SurfaceCard>
+					<IntegrationPanel
+						integration={integration}
+						releases={releases}
+						selectedReleaseTag={selectedReleaseTag}
+						releaseError={releaseError}
+						integrationBusy={integrationBusy}
+						hasDownload={hasDownload}
+						canEnable={canEnable}
+						onReleaseChange={setSelectedReleaseTag}
+						onIntegrationToggle={updateIntegration}
+					/>
+					<ModelPanel
+						defaultModel={defaultModel}
+						defaultThinking={defaultThinking}
+						modelsError={modelsError}
+						integration={integration}
+						modelInstallAvailable={modelInstallAvailable}
+						models={models}
+						modelAction={modelAction}
+						onUpdateModel={updateModel}
+						onMakeDefault={makeDefault}
+						onDownloadModel={downloadModel}
+						onRequestDelete={setModelToDelete}
+					/>
+					<RuntimeSettingsPanel
+						defaultThinking={defaultThinking}
+						runtimeSettingsBusy={runtimeSettingsBusy}
+						runtimeSettingsDirty={runtimeSettingsDirty}
+						runtimeLimits={runtimeLimits}
+						onThinkingChange={(enabled) => {
+							runtimeSettingsDirtyRef.current = true;
+							setRuntimeSettingsDirty(true);
+							setDefaultThinking(enabled);
+						}}
+						onLimitChange={changeRuntimeLimit}
+						onSave={saveRuntimeSettings}
+					/>
 				</div>
 			)}
 			<ConfirmDialog
@@ -1215,6 +855,556 @@ export default function LumiSettingsPage() {
 				onConfirm={confirmModelDeletion}
 			/>
 		</div>
+	);
+}
+
+function ErrorNotice({ message }: { message: string }) {
+	return (
+		<p
+			role="alert"
+			className="mt-5 rounded-lg border border-red-900/70 bg-red-950/30 px-4 py-3 text-sm text-red-200"
+		>
+			{message}
+		</p>
+	);
+}
+
+function DashboardAvailability({ loading }: { loading: boolean }) {
+	return (
+		<SurfaceCard className="mt-7 p-6 console-muted">
+			{loading ? "Loading Lumi integration status…" : "Sign in to manage the Lumi integration."}
+		</SurfaceCard>
+	);
+}
+
+type IntegrationPanelProps = {
+	integration: Integration | null;
+	releases: Release[];
+	selectedReleaseTag: string;
+	releaseError: string;
+	integrationBusy: boolean;
+	hasDownload: boolean;
+	canEnable: boolean;
+	onReleaseChange: (tag: string) => void;
+	onIntegrationToggle: (enabled: boolean) => void;
+};
+
+function IntegrationPanel({
+	integration,
+	releases,
+	selectedReleaseTag,
+	releaseError,
+	integrationBusy,
+	hasDownload,
+	canEnable,
+	onReleaseChange,
+	onIntegrationToggle,
+}: IntegrationPanelProps) {
+	const installedReleaseMissing = Boolean(
+		integration?.releaseTag &&
+		!releases.some((release) => release.tag === integration.releaseTag),
+	);
+	const buttonLabel = integrationBusy
+		? "Installing…"
+		: integration?.state === "error"
+			? "Retry installation"
+			: integration?.installed
+				? "Enable Lumi"
+				: "Install and enable Lumi";
+	const releaseHint = releaseError
+		? releaseError
+		: releases.length === 0
+			? "No supported Lumi releases are currently available."
+			: "Choose a published stable release to install or enable.";
+
+	return (
+		<SurfaceCard className="space-y-5 p-6">
+			<div className="flex flex-wrap items-start justify-between gap-4">
+				<div>
+					<h2 className="text-lg font-bold">Integration</h2>
+					<p className="mt-2 text-sm leading-6 console-muted">
+						Lumi is installed from a supported release only after you select a
+						version and enable it. The selected package is loaded in-process.
+					</p>
+				</div>
+				{integration && <IntegrationBadges integration={integration} />}
+			</div>
+			{integration?.releaseTag && (
+				<p className="text-sm text-white/70">
+					Selected release: <span className="font-semibold">{integration.releaseTag}</span>
+				</p>
+			)}
+			{integration?.state === "installing" && (
+				<ProgressPanel
+					title="Installing Lumi"
+					stage={integration.progress?.stage || "Preparing release"}
+					current={integration.progress?.current ?? null}
+					total={integration.progress?.total ?? null}
+				/>
+			)}
+			{integration?.state === "error" && integration.error && (
+				<ErrorNotice message={safeText(integration.error)} />
+			)}
+			<div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+				<label className="block min-w-0">
+					<span className="text-sm font-semibold">Supported release</span>
+					<select
+						value={selectedReleaseTag}
+						onChange={(event) => onReleaseChange(event.target.value)}
+						disabled={
+							integration?.enabled ||
+							integration?.state === "installing" ||
+							integrationBusy ||
+							releases.length === 0
+						}
+						className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
+					>
+						<option value="">
+							{releases.length ? "Select a release" : "No supported releases available"}
+						</option>
+						{installedReleaseMissing && integration?.releaseTag && (
+							<option value={integration.releaseTag}>
+								{integration.releaseTag} (currently installed)
+							</option>
+						)}
+						{releases.map((release) => (
+							<option key={release.tag} value={release.tag}>
+								{release.tag} · {formatReleaseDate(release.releasedAt)}
+							</option>
+						))}
+					</select>
+					<span
+						className={`mt-2 block text-xs ${releaseError ? "text-amber-200" : "console-muted"}`}
+						role={releaseError ? "alert" : undefined}
+					>
+						{releaseHint}
+					</span>
+				</label>
+				<div className="flex flex-wrap gap-2">
+					{integration?.enabled ? (
+						<button
+							type="button"
+							onClick={() => onIntegrationToggle(false)}
+							disabled={integrationBusy || integration.state === "installing" || hasDownload}
+							className="console-button rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
+						>
+							{integrationBusy ? "Disabling…" : "Disable Lumi"}
+						</button>
+					) : (
+						<button
+							type="button"
+							onClick={() => onIntegrationToggle(true)}
+							disabled={!canEnable}
+							className="console-button-primary rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
+						>
+							{buttonLabel}
+						</button>
+					)}
+				</div>
+			</div>
+		</SurfaceCard>
+	);
+}
+
+function IntegrationBadges({ integration }: { integration: Integration }) {
+	return (
+		<div className="flex flex-wrap gap-2 text-xs font-semibold">
+			<span
+				className={`rounded-full px-3 py-1 ${integration.enabled ? "bg-emerald-950/60 text-emerald-300" : "bg-white/5 text-white/55"}`}
+			>
+				{integration.enabled ? "Enabled" : "Disabled"}
+			</span>
+			<span className="rounded-full bg-white/5 px-3 py-1 capitalize text-white/55">
+				{integration.state}
+			</span>
+			<span
+				className={`rounded-full px-3 py-1 ${integration.installed ? "bg-cyan-950/50 text-cyan-200" : "bg-white/5 text-white/55"}`}
+			>
+				{integration.installed ? "Package installed" : "Package not installed"}
+			</span>
+		</div>
+	);
+}
+
+type ModelPanelProps = {
+	defaultModel: string | null;
+	defaultThinking: boolean;
+	modelsError: string;
+	integration: Integration | null;
+	modelInstallAvailable: boolean;
+	models: LumiModel[];
+	modelAction: ModelAction;
+	onUpdateModel: (model: LumiModel, enabled: boolean) => void;
+	onMakeDefault: (model: LumiModel) => void;
+	onDownloadModel: (model: LumiModel) => void;
+	onRequestDelete: (model: LumiModel) => void;
+};
+
+function ModelPanel({
+	defaultModel,
+	defaultThinking,
+	modelsError,
+	integration,
+	modelInstallAvailable,
+	models,
+	modelAction,
+	onUpdateModel,
+	onMakeDefault,
+	onDownloadModel,
+	onRequestDelete,
+}: ModelPanelProps) {
+	return (
+		<SurfaceCard className="space-y-5 p-6">
+			<div className="flex flex-wrap items-start justify-between gap-3">
+				<div>
+					<h2 className="text-lg font-bold">Model files and access</h2>
+					<p className="mt-2 text-sm leading-6 console-muted">
+						Enable downloaded models for chat users, set the default, or remove
+						local model files. Download size is shown for each model.
+					</p>
+				</div>
+				{defaultModel && (
+					<p className="text-xs console-muted">
+						Default: <span className="font-semibold text-white/75">{defaultModel}</span>
+						<span className="mx-1">·</span>Thinking {defaultThinking ? "on" : "off"}
+					</p>
+				)}
+			</div>
+			{modelsError && <p role="alert" className="text-sm text-amber-200">{modelsError}</p>}
+			<ModelAvailability
+				integration={integration}
+				modelInstallAvailable={modelInstallAvailable}
+			/>
+			{models.length === 0 ? (
+				<p className="text-sm console-muted">No models are currently available.</p>
+			) : (
+				<ul className="divide-y divide-white/5">
+					{models.map((model) => (
+						<ModelRow
+							key={model.id}
+							model={model}
+							integrationEnabled={integration?.enabled === true}
+							modelInstallAvailable={modelInstallAvailable}
+							modelAction={modelAction}
+							onUpdateModel={onUpdateModel}
+							onMakeDefault={onMakeDefault}
+							onDownloadModel={onDownloadModel}
+							onRequestDelete={onRequestDelete}
+						/>
+					))}
+				</ul>
+			)}
+		</SurfaceCard>
+	);
+}
+
+function ModelAvailability({
+	integration,
+	modelInstallAvailable,
+}: {
+	integration: Integration | null;
+	modelInstallAvailable: boolean;
+}) {
+	const status = !integration?.installed
+		? "Install a Lumi release before managing model files."
+		: !integration.enabled
+			? "Enable the Lumi integration before managing model files."
+			: !modelInstallAvailable
+				? "This release has no model installer assets. Install a supported release that includes them to download Qwen3.5 models."
+				: "Model files are installed locally by Lumi. The Orchestrator does not use a model API URL.";
+	return (
+		<p className="rounded-lg border border-white/10 bg-white/[0.025] px-4 py-3 text-sm console-muted">
+			{status}
+		</p>
+	);
+}
+
+type ModelRowProps = {
+	model: LumiModel;
+	integrationEnabled: boolean;
+	modelInstallAvailable: boolean;
+	modelAction: ModelAction;
+	onUpdateModel: (model: LumiModel, enabled: boolean) => void;
+	onMakeDefault: (model: LumiModel) => void;
+	onDownloadModel: (model: LumiModel) => void;
+	onRequestDelete: (model: LumiModel) => void;
+};
+
+function ModelRow({
+	model,
+	integrationEnabled,
+	modelInstallAvailable,
+	modelAction,
+	onUpdateModel,
+	onMakeDefault,
+	onDownloadModel,
+	onRequestDelete,
+}: ModelRowProps) {
+	const busy = modelAction?.id === model.id;
+	const progress = progressPercent(model.downloadProgress);
+	const defaultModelNeedsReplacement = model.enabled && model.isDefault;
+	return (
+		<li className="flex flex-col gap-4 py-5 first:pt-0 last:pb-0 xl:flex-row xl:items-center xl:justify-between">
+			<ModelSummary model={model} progress={progress} />
+			<div className="flex flex-wrap items-center gap-3 xl:justify-end">
+				{model.installed && (
+					<label className="flex items-center gap-2 text-xs text-white/75">
+						<input
+							type="checkbox"
+							checked={model.enabled}
+							disabled={
+								!integrationEnabled ||
+								busy ||
+								modelAction !== null ||
+								(!model.enabled && model.downloading) ||
+								(model.enabled && model.isDefault)
+							}
+							onChange={(event) => onUpdateModel(model, event.target.checked)}
+							className="h-4 w-4 accent-cyan-400"
+						/>
+						<span>Enabled</span>
+					</label>
+				)}
+				<button
+					type="button"
+					onClick={() => onMakeDefault(model)}
+					disabled={
+						!integrationEnabled ||
+						!model.installed ||
+						model.isDefault ||
+						model.downloading ||
+						modelAction !== null
+					}
+					className="console-button rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-40"
+				>
+					{busy && modelAction?.kind === "default" ? "Saving…" : "Make default"}
+				</button>
+				<ModelActionButton
+					model={model}
+					busy={busy}
+					modelAction={modelAction}
+					integrationEnabled={integrationEnabled}
+					modelInstallAvailable={modelInstallAvailable}
+					onDownload={() => onDownloadModel(model)}
+					onDelete={() => onRequestDelete(model)}
+				/>
+				{defaultModelNeedsReplacement && (
+					<span className="text-[11px] console-muted">
+						Choose another default before disabling or deleting.
+					</span>
+				)}
+			</div>
+		</li>
+	);
+}
+
+function ModelSummary({ model, progress }: { model: LumiModel; progress: number | null }) {
+	return (
+		<div className="min-w-0 flex-1">
+			<div className="flex flex-wrap items-center gap-2">
+				<h3 className="text-sm font-semibold text-white">{model.label}</h3>
+				{model.isDefault && (
+					<span className="rounded-full bg-violet-950/70 px-2.5 py-1 text-[11px] font-semibold text-violet-200">
+						Default
+					</span>
+				)}
+				<span
+					className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${model.installed ? "bg-emerald-950/60 text-emerald-200" : "bg-white/5 text-white/50"}`}
+				>
+					{model.installed ? "Installed" : "Not installed"}
+				</span>
+				{model.enabled && (
+					<span className="rounded-full bg-cyan-950/60 px-2.5 py-1 text-[11px] font-semibold text-cyan-200">
+						Enabled for chat
+					</span>
+				)}
+			</div>
+			<p className="mt-1 break-all text-xs console-muted">{model.id}</p>
+			<p className="mt-1 text-xs console-muted">
+				Download size: {formatBytes(model.sizeBytes)}
+				{model.supportsThinking && " · Supports thinking"}
+			</p>
+			{model.downloading && <ModelDownloadProgress model={model} progress={progress} />}
+			{model.downloadError && !model.downloading && (
+				<p role="alert" className="mt-3 max-w-xl text-xs text-red-200">
+					{safeText(model.downloadError)}
+				</p>
+			)}
+		</div>
+	);
+}
+
+function ModelDownloadProgress({
+	model,
+	progress,
+}: {
+	model: LumiModel;
+	progress: number | null;
+}) {
+	return (
+		<div className="mt-3 max-w-xl">
+			<div className="mb-1 flex justify-between text-xs console-muted">
+				<span>{model.downloadStage || "Downloading model"}</span>
+				<span>{progress === null ? "In progress" : `${progress}%`}</span>
+			</div>
+			<div
+				role="progressbar"
+				aria-label={`${model.label} download progress`}
+				aria-valuemin={0}
+				aria-valuemax={100}
+				aria-valuenow={progress ?? undefined}
+				className="h-1.5 overflow-hidden rounded-full bg-white/10"
+			>
+				<div
+					className={`h-full rounded-full bg-cyan-400 ${progress === null ? "w-1/3 animate-pulse" : ""}`}
+					style={progress === null ? undefined : { width: `${progress}%` }}
+				/>
+			</div>
+		</div>
+	);
+}
+
+function ModelActionButton({
+	model,
+	busy,
+	modelAction,
+	integrationEnabled,
+	modelInstallAvailable,
+	onDownload,
+	onDelete,
+}: {
+	model: LumiModel;
+	busy: boolean;
+	modelAction: ModelAction;
+	integrationEnabled: boolean;
+	modelInstallAvailable: boolean;
+	onDownload: () => void;
+	onDelete: () => void;
+}) {
+	if (model.downloading) {
+		return (
+			<span className="inline-flex items-center gap-2 text-xs text-cyan-200">
+				<IconDownload size={15} /> Downloading…
+			</span>
+		);
+	}
+	if (!model.installed) {
+		if (!modelInstallAvailable) {
+			return (
+				<span className="text-xs console-muted" title="This release does not include installer assets">
+					Installer unavailable
+				</span>
+			);
+		}
+		return (
+			<button
+				type="button"
+				onClick={onDownload}
+				disabled={!integrationEnabled || modelAction !== null}
+				className="console-button inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-40"
+			>
+				<IconDownload size={15} />
+				{busy && modelAction?.kind === "download" ? "Starting…" : "Download model"}
+			</button>
+		);
+	}
+	return (
+		<button
+			type="button"
+			onClick={onDelete}
+			disabled={
+				!integrationEnabled ||
+				model.enabled ||
+				model.isDefault ||
+				modelAction !== null
+			}
+			className="console-button inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-semibold text-red-200 disabled:opacity-40"
+		>
+			<IconTrash size={15} />
+			{busy && modelAction?.kind === "delete" ? "Deleting…" : "Delete files"}
+		</button>
+	);
+}
+
+type RuntimeSettingsPanelProps = {
+	defaultThinking: boolean;
+	runtimeSettingsBusy: boolean;
+	runtimeSettingsDirty: boolean;
+	runtimeLimits: RuntimeLimits;
+	onThinkingChange: (enabled: boolean) => void;
+	onLimitChange: (key: keyof RuntimeLimits, value: string) => void;
+	onSave: () => void;
+};
+
+function RuntimeSettingsPanel({
+	defaultThinking,
+	runtimeSettingsBusy,
+	runtimeSettingsDirty,
+	runtimeLimits,
+	onThinkingChange,
+	onLimitChange,
+	onSave,
+}: RuntimeSettingsPanelProps) {
+	return (
+		<SurfaceCard className="space-y-5 p-6">
+			<div>
+				<h2 className="text-lg font-bold">Default behavior and runtime limits</h2>
+				<p className="mt-2 text-sm leading-6 console-muted">
+					These server-wide settings apply to new conversations and bound Lumi&apos;s
+					local inference workload.
+				</p>
+			</div>
+			<label className="flex items-start gap-3 rounded-xl border border-white/10 bg-white/[0.025] p-4">
+				<input
+					type="checkbox"
+					checked={defaultThinking}
+					disabled={runtimeSettingsBusy}
+					onChange={(event) => onThinkingChange(event.target.checked)}
+					className="mt-0.5 h-4 w-4 accent-cyan-400"
+				/>
+				<span>
+					<span className="block text-sm font-semibold text-white">Enable thinking by default</span>
+					<span className="mt-1 block text-xs console-muted">
+						Users can still change thinking for each conversation when the selected
+						model supports it.
+					</span>
+				</span>
+			</label>
+			<div className="grid gap-4 sm:grid-cols-2">
+				{RUNTIME_LIMIT_FIELDS.map((field) => (
+					<label key={field.key} className="block">
+						<span className="text-sm font-semibold">{field.label}</span>
+						<input
+							type="number"
+							min={field.minimum}
+							max={field.maximum}
+							step={1}
+							value={runtimeLimits[field.key]}
+							disabled={runtimeSettingsBusy}
+							onChange={(event) => onLimitChange(field.key, event.target.value)}
+							className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
+						/>
+						<span className="mt-1 block text-xs console-muted">
+							{field.help} Range: {field.minimum.toLocaleString()}–
+							{field.maximum.toLocaleString()}.
+						</span>
+					</label>
+				))}
+			</div>
+			<div className="flex flex-wrap items-center justify-between gap-3">
+				<p className="text-xs console-muted">
+					Changes are saved to this Orchestrator and do not call an external model API.
+				</p>
+				<button
+					type="button"
+					onClick={onSave}
+					disabled={!runtimeSettingsDirty || runtimeSettingsBusy}
+					className="console-button-primary rounded-xl px-4 py-2.5 text-sm font-semibold disabled:opacity-40"
+				>
+					{runtimeSettingsBusy ? "Saving…" : "Save runtime settings"}
+				</button>
+			</div>
+		</SurfaceCard>
 	);
 }
 

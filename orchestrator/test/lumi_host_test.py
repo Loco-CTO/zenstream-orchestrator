@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import tempfile
 import unittest
@@ -296,6 +297,186 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(host.status()["integration"]["enabled"])
 
             await host.disable()
+
+    async def test_saved_model_must_pass_installer_verification_before_activation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_id = "qwen3.5:2b"
+            model_directory = root / "metadata" / "lumi" / "models" / "qwen3.5-2b"
+            model_directory.mkdir(parents=True)
+            manifest_bytes = b'{"model":"qwen3.5:2b"}'
+            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            (model_directory / "lumi-model-manifest.json").write_bytes(manifest_bytes)
+            (model_directory / "Qwen35.gguf").write_bytes(b"verified-test-model")
+            package_directory = root / "release" / "site-packages" / "lumi"
+            model_option = SimpleNamespace(
+                model_id=model_id,
+                installed=False,
+                directory=None,
+                manifest_sha256=None,
+                size_bytes=0,
+            )
+
+            class Installer:
+                def __init__(self, _root):
+                    pass
+
+                def list_models(self):
+                    return (model_option,)
+
+                def remove_model(self, _model_id):
+                    return True
+
+            package_module = SimpleNamespace(
+                __file__=str(package_directory / "__init__.py"),
+                Qwen35ModelInstaller=Installer,
+                supported_models=lambda: (
+                    SimpleNamespace(
+                        model_id=model_id,
+                        label="Qwen3.5 2B",
+                        supports_thinking=True,
+                    ),
+                ),
+            )
+
+            class PersistedReleaseManager(FakeReleaseManager):
+                def loaded_release(self, tag):
+                    return SimpleNamespace(
+                        tag=tag,
+                        package_module=package_module,
+                        manifest=SimpleNamespace(installer_dependencies=()),
+                    )
+
+            settings_path = root / "metadata" / "lumi" / "integration.json"
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "enabled": True,
+                        "releaseTag": "v1.2.3",
+                        "defaultModel": model_id,
+                        "models": {
+                            model_id: {
+                                "directory": str(model_directory.resolve()),
+                                "manifestSha256": manifest_sha256,
+                                "sizeBytes": 20,
+                                "enabled": True,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            host = LumiHost(
+                data_directory=root / "metadata",
+                release_manager_factory=PersistedReleaseManager,
+            )
+            host._rebuild_service = AsyncMock()
+
+            await host.load_saved_integration()
+            await host._operation
+
+            self.assertTrue(host.status()["integration"]["enabled"])
+            model_status = host.model_settings()["models"][0]
+            self.assertTrue(model_status["installed"])
+            self.assertFalse(model_status["enabled"])
+            self.assertIn("integrity", model_status["downloadError"])
+            self.assertEqual(host.public_models()["models"], [])
+            saved = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertFalse(saved["models"][model_id]["enabled"])
+
+    async def test_modified_model_files_stop_being_selectable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_id = "qwen3.5:2b"
+            model_directory = root / "metadata" / "lumi" / "models" / "qwen3.5-2b"
+            model_directory.mkdir(parents=True)
+            manifest_bytes = b'{"model":"qwen3.5:2b"}'
+            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            (model_directory / "lumi-model-manifest.json").write_bytes(manifest_bytes)
+            model_file = model_directory / "Qwen35.gguf"
+            model_file.write_bytes(b"verified-test-model")
+            package_directory = root / "release" / "site-packages" / "lumi"
+            model_option = SimpleNamespace(
+                model_id=model_id,
+                installed=True,
+                directory=str(model_directory.resolve()),
+                manifest_sha256=manifest_sha256,
+                size_bytes=20,
+            )
+
+            class Installer:
+                def __init__(self, _root):
+                    pass
+
+                def list_models(self):
+                    return (model_option,)
+
+                def remove_model(self, _model_id):
+                    return True
+
+            package_module = SimpleNamespace(
+                __file__=str(package_directory / "__init__.py"),
+                Qwen35ModelInstaller=Installer,
+                supported_models=lambda: (
+                    SimpleNamespace(
+                        model_id=model_id,
+                        label="Qwen3.5 2B",
+                        supports_thinking=True,
+                    ),
+                ),
+            )
+
+            class PersistedReleaseManager(FakeReleaseManager):
+                def loaded_release(self, tag):
+                    return SimpleNamespace(
+                        tag=tag,
+                        package_module=package_module,
+                        manifest=SimpleNamespace(installer_dependencies=()),
+                    )
+
+            settings_path = root / "metadata" / "lumi" / "integration.json"
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "enabled": True,
+                        "releaseTag": "v1.2.3",
+                        "defaultModel": model_id,
+                        "models": {
+                            model_id: {
+                                "directory": str(model_directory.resolve()),
+                                "manifestSha256": manifest_sha256,
+                                "sizeBytes": 20,
+                                "enabled": True,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            host = LumiHost(
+                data_directory=root / "metadata",
+                release_manager_factory=PersistedReleaseManager,
+            )
+            host._rebuild_service = AsyncMock()
+
+            await host.load_saved_integration()
+            await host._operation
+            self.assertTrue(host.model_settings()["models"][0]["installed"])
+
+            model_file.write_bytes(b"corrupt-test-model")
+
+            models = host.model_settings()["models"]
+            self.assertTrue(models[0]["installed"])
+            self.assertFalse(models[0]["enabled"])
+            self.assertIn("integrity", models[0]["downloadError"])
+            self.assertIsNone(host._settings["defaultModel"])
+            self.assertEqual(host.public_models()["models"], [])
+            self.assertTrue(await host.remove_model(model_id))
+            self.assertNotIn(model_id, host._settings["models"])
 
     async def test_install_failure_is_reported_without_enabling_the_integration(self):
         class BrokenReleaseManager(FakeReleaseManager):

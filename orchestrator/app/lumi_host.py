@@ -8,11 +8,13 @@ integration; this module never imports Lumi at Orchestrator startup by itself.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import logging
 import os
 import re
+import stat
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -38,6 +40,9 @@ _DEFAULT_LIMITS = {
     "maxConcurrentChats": 1,
     "maxActiveConversations": 128,
 }
+_MODEL_INTEGRITY_ERROR = (
+    "Model files failed integrity verification. Delete and reinstall this model."
+)
 
 
 def _create_runtime_adapter(runtime_module, artifacts, limits, backend):
@@ -95,6 +100,7 @@ class LumiHost:
         self._model_install_id: str | None = None
         self._model_progress: dict[str, Any] | None = None
         self._model_errors: dict[str, str] = {}
+        self._verified_model_artifacts: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._disable_requested = False
         self._settings = self._read_settings()
@@ -168,6 +174,9 @@ class LumiHost:
                 return
             self._loaded_release = loaded
             self._refresh_model_catalog()
+            await self._verify_saved_model_artifacts(loaded.package_module)
+            if self._disable_requested:
+                return
             self._settings["enabled"] = True
             self._settings["releaseTag"] = loaded.tag
             self._save_settings()
@@ -256,6 +265,7 @@ class LumiHost:
             self._state = "disabled"
             self._error = None
             self._save_settings()
+            self._verified_model_artifacts.clear()
 
     async def load_saved_integration(self) -> None:
         """Restore only a previously enabled release; a clean install stays dormant."""
@@ -327,8 +337,14 @@ class LumiHost:
         for option in self._model_catalog():
             model_id = option["id"]
             record = configured.get(model_id, {})
-            installed = self._model_artifact(model_id) is not None
-            enabled = bool(installed and record.get("enabled", False))
+            artifact = self._model_artifact(model_id)
+            installed = artifact is not None or self._managed_model_directory(
+                model_id, record
+            ) is not None
+            enabled = bool(artifact is not None and record.get("enabled", False))
+            download_error = self._model_errors.get(model_id)
+            if installed and artifact is None and download_error is None:
+                download_error = _MODEL_INTEGRITY_ERROR
             is_downloading = self._model_install_id == model_id and (
                 self._model_operation is not None and not self._model_operation.done()
             )
@@ -347,7 +363,7 @@ class LumiHost:
                         else None
                     ),
                     "downloadStage": progress["stage"] if progress else None,
-                    "downloadError": self._model_errors.get(model_id),
+                    "downloadError": download_error,
                     "supportsThinking": option["supportsThinking"],
                     "isDefault": enabled
                     and self._settings.get("defaultModel") == model_id,
@@ -680,6 +696,9 @@ class LumiHost:
             raise LumiHostError(
                 "The model must be installed in Lumi's managed data directory."
             )
+        fingerprint = _model_artifact_fingerprint(resolved, manifest_sha256)
+        if fingerprint is None:
+            raise LumiHostError("The installed Lumi model failed its integrity check.")
         self._settings["models"][model_id] = {
             "directory": str(resolved),
             "manifestSha256": manifest_sha256,
@@ -688,6 +707,12 @@ class LumiHost:
             else None,
             "enabled": True,
         }
+        self._verified_model_artifacts[model_id] = {
+            "directory": str(resolved),
+            "manifestSha256": manifest_sha256,
+            "fingerprint": fingerprint,
+        }
+        self._model_errors.pop(model_id, None)
         if not self._settings.get("defaultModel"):
             self._settings["defaultModel"] = model_id
         self._save_settings()
@@ -708,9 +733,16 @@ class LumiHost:
                     "Wait for the current Lumi model installation to finish."
                 )
             record = self._model_artifact(model_id)
-            if record is None:
+            configured_record = self._settings["models"].get(model_id)
+            if not isinstance(configured_record, dict):
                 return False
-            if record.get("enabled") or self._settings.get("defaultModel") == model_id:
+            if record is None and self._managed_model_directory(
+                model_id, configured_record
+            ) is None:
+                return False
+            if configured_record.get("enabled") or self._settings.get(
+                "defaultModel"
+            ) == model_id:
                 raise LumiHostError(
                     "Disable the model and choose another default before removing it."
                 )
@@ -724,7 +756,11 @@ class LumiHost:
             )
             if removed:
                 self._settings["models"].pop(model_id, None)
+                self._verified_model_artifacts.pop(model_id, None)
+                self._model_errors.pop(model_id, None)
                 self._save_settings()
+            else:
+                self._model_errors[model_id] = _MODEL_INTEGRITY_ERROR
             return removed
 
     async def _rebuild_service(self) -> None:
@@ -843,7 +879,151 @@ class LumiHost:
             return None
         if not resolved.is_dir():
             return None
+        if self._settings.get("enabled") and self._loaded_release is not None:
+            verified = self._verified_model_artifacts.get(model_id)
+            if (
+                verified is None
+                or verified.get("directory") != str(resolved)
+                or verified.get("manifestSha256") != digest
+            ):
+                self._invalidate_model_artifact(model_id)
+                return None
+            fingerprint = _model_artifact_fingerprint(Path(directory), digest)
+            if fingerprint is None or fingerprint != verified.get("fingerprint"):
+                self._invalidate_model_artifact(model_id)
+                return None
         return record
+
+    def _managed_model_directory(
+        self, model_id: str, record: object
+    ) -> Path | None:
+        """Return an existing fixed model directory that the admin can recover."""
+
+        if not isinstance(record, dict) or not isinstance(record.get("directory"), str):
+            return None
+        model_root = self.data_directory / "models"
+        candidate = Path(record["directory"])
+        if (
+            candidate.name.casefold() != model_id.replace(":", "-").casefold()
+            or candidate.is_symlink()
+            or _is_junction(candidate)
+            or not candidate.is_dir()
+            or model_root.is_symlink()
+            or _is_junction(model_root)
+            or not model_root.is_dir()
+        ):
+            return None
+        try:
+            resolved_root = model_root.resolve()
+            resolved = candidate.resolve(strict=True)
+            if resolved.parent != resolved_root or not resolved.is_dir():
+                return None
+        except (OSError, RuntimeError):
+            return None
+        return candidate
+
+    def _invalidate_model_artifact(self, model_id: str) -> None:
+        """Disable a changed artifact and move the default to another verified model."""
+
+        self._verified_model_artifacts.pop(model_id, None)
+        self._model_errors[model_id] = _MODEL_INTEGRITY_ERROR
+        record = self._settings["models"].get(model_id)
+        changed = False
+        if isinstance(record, dict) and record.get("enabled"):
+            record["enabled"] = False
+            changed = True
+        if self._settings.get("defaultModel") == model_id:
+            replacement = next(
+                (
+                    candidate
+                    for candidate, candidate_record in self._settings["models"].items()
+                    if candidate != model_id
+                    and isinstance(candidate_record, dict)
+                    and candidate_record.get("enabled")
+                    and self._model_artifact(candidate) is not None
+                ),
+                None,
+            )
+            self._settings["defaultModel"] = replacement
+            changed = True
+        if changed:
+            self._save_settings()
+
+    async def _verify_saved_model_artifacts(self, package_module: Any) -> None:
+        """Re-hash persisted model files before they can be enabled after restart."""
+
+        records = self._settings["models"]
+        self._verified_model_artifacts.clear()
+        if not any(isinstance(record, dict) for record in records.values()):
+            return
+        from app.foreground import run_control
+
+        verified_options = await run_control(
+            _verify_qwen_model_artifacts,
+            package_module,
+            self.data_directory / "models",
+        )
+        verified: dict[str, dict[str, Any]] = {}
+        for model_id, record in records.items():
+            if not isinstance(record, dict):
+                continue
+            option = verified_options.get(model_id)
+            directory = record.get("directory")
+            digest = record.get("manifestSha256")
+            if (
+                option is None
+                or not isinstance(directory, str)
+                or not isinstance(digest, str)
+                or option.get("directory") != str(Path(directory).resolve())
+                or option.get("manifestSha256") != digest
+            ):
+                continue
+            fingerprint = _model_artifact_fingerprint(Path(directory), digest)
+            if fingerprint is None:
+                continue
+            verified[model_id] = {
+                "directory": option["directory"],
+                "manifestSha256": digest,
+                "fingerprint": fingerprint,
+            }
+        self._verified_model_artifacts = verified
+
+        settings_changed = False
+        for model_id, record in records.items():
+            if model_id in verified:
+                self._model_errors.pop(model_id, None)
+                continue
+            if self._managed_model_directory(model_id, record) is not None:
+                self._model_errors[model_id] = _MODEL_INTEGRITY_ERROR
+            else:
+                self._model_errors.pop(model_id, None)
+            if isinstance(record, dict) and record.get("enabled"):
+                record["enabled"] = False
+                settings_changed = True
+        default_model = self._settings.get("defaultModel")
+        default_record = (
+            records.get(default_model) if isinstance(default_model, str) else None
+        )
+        if (
+            default_model not in verified
+            or not isinstance(default_record, dict)
+            or not default_record.get("enabled")
+        ):
+            replacement = next(
+                (
+                    model_id
+                    for model_id, record in records.items()
+                    if model_id in verified
+                    and isinstance(record, dict)
+                    and record.get("enabled")
+                ),
+                None,
+            )
+            if replacement != default_model:
+                self._settings["defaultModel"] = replacement
+                settings_changed = True
+        if settings_changed:
+            self._save_settings()
 
     def _read_settings(self) -> dict[str, Any]:
         defaults = {
@@ -974,6 +1154,11 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def _is_junction(path: Path) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction and is_junction())
+
+
 def _installer_context(package_module: Any, model_root: str | Path) -> tuple[Any, Path]:
     """Resolve Lumi's installer and keep its model directory outside package files."""
 
@@ -991,6 +1176,115 @@ def _installer_context(package_module: Any, model_root: str | Path) -> tuple[Any
     if _is_relative_to(resolved_root, package_directory):
         raise LumiHostError("Qwen3.5 model files must stay outside the Lumi package.")
     return installer_type, resolved_root
+
+
+def _verify_qwen_model_artifacts(
+    package_module: Any, model_root: str | Path
+) -> dict[str, dict[str, Any]]:
+    """Hash installed Qwen3.5 artifacts and return only verified model records."""
+
+    installer_type, resolved_root = _installer_context(package_module, model_root)
+    installer = installer_type(resolved_root)
+    list_models = getattr(installer, "list_models", None)
+    if not callable(list_models):
+        raise LumiHostError("The selected Lumi release cannot verify installed models.")
+    options = list_models()
+    if not isinstance(options, (tuple, list)):
+        raise LumiHostError("The selected Lumi release returned invalid model status.")
+    verified: dict[str, dict[str, Any]] = {}
+    for option in options:
+        model_id = getattr(option, "model_id", None)
+        directory = getattr(option, "directory", None)
+        digest = getattr(option, "manifest_sha256", None)
+        if (
+            not isinstance(model_id, str)
+            or getattr(option, "installed", False) is not True
+            or not isinstance(directory, str)
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            continue
+        resolved_directory = Path(directory).resolve()
+        if not _is_relative_to(resolved_directory, resolved_root):
+            continue
+        fingerprint = _model_artifact_fingerprint(resolved_directory, digest)
+        if fingerprint is None:
+            continue
+        verified[model_id] = {
+            "directory": str(resolved_directory),
+            "manifestSha256": digest,
+            "fingerprint": fingerprint,
+        }
+    return verified
+
+
+def _model_artifact_fingerprint(
+    directory: Path, manifest_sha256: str
+) -> tuple[Any, ...] | None:
+    """Return a cheap file-identity snapshot for a previously hashed GGUF."""
+
+    candidate = Path(directory)
+    if candidate.is_symlink() or _is_junction(candidate):
+        return None
+    try:
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_dir():
+            return None
+        manifest_path = resolved / "lumi-model-manifest.json"
+        if manifest_path.is_symlink() or _is_junction(manifest_path):
+            return None
+        manifest_stat = manifest_path.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(manifest_stat.st_mode)
+            or manifest_stat.st_nlink != 1
+        ):
+            return None
+        manifest_bytes = manifest_path.read_bytes()
+        if hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha256:
+            return None
+        with os.scandir(resolved) as iterator:
+            entries = list(iterator)
+        if len(entries) != 2:
+            return None
+        fingerprints = []
+        names: set[str] = set()
+        for entry in entries:
+            path = resolved / entry.name
+            if entry.is_symlink() or _is_junction(path):
+                return None
+            file_stat = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                return None
+            if entry.name == "lumi-model-manifest.json":
+                if file_stat.st_size != len(manifest_bytes):
+                    return None
+            elif not entry.name.casefold().endswith(".gguf"):
+                return None
+            names.add(entry.name)
+            fingerprints.append(
+                (
+                    entry.name,
+                    file_stat.st_dev,
+                    file_stat.st_ino,
+                    file_stat.st_mode,
+                    file_stat.st_nlink,
+                    file_stat.st_size,
+                    file_stat.st_mtime_ns,
+                    file_stat.st_ctime_ns,
+                )
+            )
+        if "lumi-model-manifest.json" not in names or len(names) != 2:
+            return None
+        directory_stat = resolved.stat(follow_symlinks=False)
+        return (
+            directory_stat.st_dev,
+            directory_stat.st_ino,
+            directory_stat.st_mtime_ns,
+            directory_stat.st_ctime_ns,
+            tuple(sorted(fingerprints)),
+        )
+    except OSError:
+        return None
 
 
 def _installer_dependency_paths(package_module: Any, paths: Any) -> tuple[Path, ...]:

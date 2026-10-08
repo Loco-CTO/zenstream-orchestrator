@@ -22,6 +22,7 @@ from typing import Any
 from app.lumi_catalog import LumiCatalogAdapter
 from app.lumi_release import (
     LumiReleaseCompatibilityError,
+    LumiReleaseError,
     _runtime_backend_distribution,
 )
 from app.paths import metadata_directory
@@ -228,6 +229,33 @@ class LumiHost:
             self._save_settings()
         if manager is not None:
             await manager.disable()
+
+    async def remove_installation(self) -> None:
+        """Remove Lumi release code while keeping conversations and model files."""
+        try:
+            await self.disable()
+        except LumiHostError:
+            raise
+        except LumiReleaseError as error:
+            raise LumiHostError(str(error)) from error
+        manager = self.release_manager
+        remove_releases = getattr(manager, "remove_installed_releases", None)
+        if callable(remove_releases):
+            try:
+                await remove_releases()
+            except LumiReleaseError as error:
+                raise LumiHostError(str(error)) from error
+            except OSError as error:
+                logger.warning("Lumi runtime removal failed", exc_info=True)
+                raise LumiHostError(
+                    "Lumi runtime files could not be removed from managed storage."
+                ) from error
+        async with self._lock:
+            self._settings["enabled"] = False
+            self._settings["releaseTag"] = None
+            self._state = "disabled"
+            self._error = None
+            self._save_settings()
 
     async def load_saved_integration(self) -> None:
         """Restore only a previously enabled release; a clean install stays dormant."""
@@ -905,12 +933,21 @@ class LumiHost:
 
     def status(self) -> dict[str, Any]:
         installing = self._state == "installing"
+        release_tag = self._settings.get("releaseTag")
+        installed = False
+        if isinstance(release_tag, str) and _STABLE_RELEASE_TAG.fullmatch(release_tag):
+            has_installed_release = getattr(
+                self.release_manager, "has_installed_release", None
+            )
+            if callable(has_installed_release):
+                installed = bool(has_installed_release(release_tag))
         return {
             "integration": {
                 "enabled": bool(self._settings["enabled"]),
-                "installed": self._loaded_release is not None,
+                "installed": installed,
+                "loaded": self._loaded_release is not None,
                 "state": self._state,
-                "releaseTag": self._settings.get("releaseTag"),
+                "releaseTag": release_tag,
                 "restartRequired": self.restart_required,
                 "error": self._error,
                 "progress": (

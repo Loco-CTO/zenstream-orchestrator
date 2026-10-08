@@ -167,6 +167,7 @@ class LumiProgress(DocsModel):
 class LumiIntegrationStatus(DocsModel):
     enabled: bool
     installed: bool
+    loaded: bool
     state: Literal["disabled", "installing", "ready", "error"]
     releaseTag: str | None = None
     restartRequired: bool = False
@@ -1966,6 +1967,9 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/admin/lumi/status"): "Get Lumi integration and model status",
     ("GET", "/api/admin/lumi/releases"): "List supported Lumi releases",
     ("PUT", "/api/admin/lumi/settings"): "Enable or disable the Lumi integration",
+    ("DELETE", "/api/admin/lumi/installation"): (
+        "Remove Lumi runtime files while keeping conversations and models"
+    ),
     ("GET", "/api/admin/lumi/models"): "List installed Qwen3.5 models",
     (
         "PATCH",
@@ -2528,6 +2532,7 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("GET", "/api/admin/lumi/status"): LumiAdminStatusResponse,
     ("GET", "/api/admin/lumi/releases"): LumiReleaseListResponse,
     ("PUT", "/api/admin/lumi/settings"): LumiAdminStatusResponse,
+    ("DELETE", "/api/admin/lumi/installation"): LumiAdminStatusResponse,
     ("GET", "/api/admin/lumi/models"): LumiAdminModelsResponse,
     ("PATCH", "/api/admin/lumi/models/settings"): LumiAdminModelsResponse,
     ("PATCH", "/api/admin/lumi/models/{model_id}"): LumiAdminModelsResponse,
@@ -2818,6 +2823,7 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
         "integration": {
             "enabled": False,
             "installed": False,
+            "loaded": False,
             "state": "disabled",
             "releaseTag": None,
             "restartRequired": False,

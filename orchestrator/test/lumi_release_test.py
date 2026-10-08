@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 from app.lumi_release import (
     LUMI_GITHUB_API,
     LUMI_GITHUB_REPOSITORY,
+    MAX_RELEASE_LIST_PAGE_SIZE,
     RELEASE_LIST_CACHE_TTL_SECONDS,
     HttpResponse,
     ImportedLumiModules,
@@ -26,7 +27,6 @@ from app.lumi_release import (
     LumiReleaseManager,
     LumiReleaseRequestError,
     LumiReleaseUnavailable,
-    MAX_RELEASE_LIST_PAGE_SIZE,
     RuntimeDependency,
     RuntimeHost,
     _extract_wheel,
@@ -43,8 +43,7 @@ from app.lumi_release import (
 
 def _release_list_url(page: int) -> str:
     return (
-        f"{LUMI_GITHUB_API}/releases?per_page={MAX_RELEASE_LIST_PAGE_SIZE}"
-        f"&page={page}"
+        f"{LUMI_GITHUB_API}/releases?per_page={MAX_RELEASE_LIST_PAGE_SIZE}&page={page}"
     )
 
 

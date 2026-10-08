@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,8 @@ from app.lumi_host import (
     LumiHostError,
     _create_agent_limits,
     _create_runtime_adapter,
+    _install_qwen_model,
+    _supports_model_download_cancellation,
 )
 from app.lumi_release import LumiReleaseCompatibilityError
 
@@ -68,6 +71,197 @@ class FakeReleaseManager:
 
 
 class LumiHostTests(unittest.IsolatedAsyncioTestCase):
+    def test_download_cancellation_is_only_enabled_for_compatible_releases(self):
+        class CancellableInstaller:
+            def install_model(
+                self, _model_id, *, progress=None, cancel_event=None
+            ):
+                return None
+
+        class LegacyInstaller:
+            def install_model(self, _model_id, *, progress=None):
+                return None
+
+        class GenericKeywordInstaller:
+            def install_model(self, _model_id, **_kwargs):
+                return None
+
+        self.assertTrue(
+            _supports_model_download_cancellation(
+                SimpleNamespace(Qwen35ModelInstaller=CancellableInstaller)
+            )
+        )
+        self.assertFalse(
+            _supports_model_download_cancellation(
+                SimpleNamespace(Qwen35ModelInstaller=LegacyInstaller)
+            )
+        )
+        self.assertFalse(
+            _supports_model_download_cancellation(
+                SimpleNamespace(Qwen35ModelInstaller=GenericKeywordInstaller)
+            )
+        )
+        self.assertFalse(_supports_model_download_cancellation(SimpleNamespace()))
+
+    class PendingOperation:
+        def done(self):
+            return False
+
+        def cancel(self):
+            return None
+
+    def test_install_adapter_forwards_cancellation_to_supported_installer(self):
+        captured = {}
+
+        class CancellableInstaller:
+            def __init__(self, _model_root):
+                pass
+
+            def install_model(
+                self, model_id, *, progress=None, cancel_event=None
+            ):
+                captured.update(
+                    model_id=model_id,
+                    progress=progress,
+                    cancel_event=cancel_event,
+                )
+                return "artifact"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package_file = root / "site-packages" / "lumi" / "__init__.py"
+            package_file.parent.mkdir(parents=True)
+            package_file.touch()
+            dependency = root / "installer-dependencies" / "native"
+            dependency.mkdir(parents=True)
+            cancellation = threading.Event()
+            progress = object()
+            package_module = SimpleNamespace(
+                __file__=str(package_file),
+                Qwen35ModelInstaller=CancellableInstaller,
+            )
+
+            result = _install_qwen_model(
+                package_module,
+                root / "models",
+                "qwen3.5:2b",
+                (dependency,),
+                progress,
+                cancellation,
+            )
+
+        self.assertEqual(result, "artifact")
+        self.assertEqual(captured["model_id"], "qwen3.5:2b")
+        self.assertIs(captured["progress"], progress)
+        self.assertIs(captured["cancel_event"], cancellation)
+
+    async def test_model_download_cancel_is_cooperative_and_visible_in_status(self):
+        class CancellableInstaller:
+            def install_model(
+                self, _model_id, *, progress=None, cancel_event=None
+            ):
+                return None
+
+        model = SimpleNamespace(
+            model_id="qwen3.5:2b",
+            label="Qwen3.5 2B",
+            supports_thinking=True,
+        )
+        package_module = SimpleNamespace(
+            supported_models=lambda: (model,),
+            Qwen35ModelInstaller=CancellableInstaller,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+            host._loaded_release = SimpleNamespace(package_module=package_module)
+            host._release_manager = SimpleNamespace(model_install_available=False)
+            host._model_install_id = model.model_id
+            host._model_operation = self.PendingOperation()
+            host._model_cancel_event = threading.Event()
+            host._model_progress = {"stage": "Downloading", "current": 5, "total": 10}
+
+            result = await host.cancel_model_install(model.model_id)
+            status = host.model_settings()["models"][0]
+
+            self.assertEqual(
+                result,
+                {"id": model.model_id, "cancellationRequested": True},
+            )
+            self.assertTrue(host._model_cancel_event.is_set())
+            self.assertTrue(status["downloadCancelRequested"])
+            self.assertFalse(status["downloadCancelAvailable"])
+            self.assertEqual(status["downloadStage"], "Stopping model download")
+            host._model_operation.cancel()
+
+    async def test_model_download_cancel_rejects_releases_without_support(self):
+        class LegacyInstaller:
+            def install_model(self, _model_id, *, progress=None):
+                return None
+
+        model = SimpleNamespace(
+            model_id="qwen3.5:2b",
+            label="Qwen3.5 2B",
+            supports_thinking=True,
+        )
+        package_module = SimpleNamespace(
+            supported_models=lambda: (model,),
+            Qwen35ModelInstaller=LegacyInstaller,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+            host._loaded_release = SimpleNamespace(package_module=package_module)
+            host._release_manager = SimpleNamespace(model_install_available=False)
+            host._model_install_id = model.model_id
+            host._model_operation = self.PendingOperation()
+            host._model_cancel_event = threading.Event()
+            host._model_progress = {"stage": "Downloading", "current": 5, "total": 10}
+
+            with self.assertRaisesRegex(LumiHostError, "cannot cancel"):
+                await host.cancel_model_install(model.model_id)
+            self.assertFalse(host._model_cancel_event.is_set())
+            host._model_operation.cancel()
+
+    async def test_model_cancel_event_reaches_installer_dependency_preparation(self):
+        class CancellableInstaller:
+            def install_model(
+                self, _model_id, *, progress=None, cancel_event=None
+            ):
+                return None
+
+        model = SimpleNamespace(
+            model_id="qwen3.5:2b",
+            label="Qwen3.5 2B",
+            supports_thinking=True,
+        )
+        package_module = SimpleNamespace(
+            supported_models=lambda: (model,),
+            Qwen35ModelInstaller=CancellableInstaller,
+        )
+        cancellation = threading.Event()
+
+        class CancellingReleaseManager:
+            received_event = None
+
+            async def install_model_dependencies(self, *, cancel_event=None):
+                self.received_event = cancel_event
+                cancel_event.set()
+                raise RuntimeError("cancelled while preparing installer")
+
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+            manager = CancellingReleaseManager()
+            host._release_manager = manager
+            host._loaded_release = SimpleNamespace(package_module=package_module)
+            host._model_install_id = model.model_id
+            host._model_cancel_event = cancellation
+
+            await host._install_model(model.model_id)
+
+        self.assertIs(manager.received_event, cancellation)
+        self.assertTrue(cancellation.is_set())
+        self.assertEqual(host._model_cancelled_id, model.model_id)
+        self.assertNotIn(model.model_id, host._model_errors)
+
     def test_runtime_adapter_prefers_llama_cpp_and_preserves_settings(self):
         class Config:
             def __init__(self, **values):
@@ -99,8 +293,50 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
                 "idle_unload_seconds": 300,
                 "max_context_tokens": 8192,
                 "max_output_tokens": 2048,
+                "acceleration_mode": "automatic",
             },
         )
+
+    def test_legacy_runtime_falls_back_to_cpu_for_gpu_modes(self):
+        class LegacyConfig:
+            def __init__(
+                self,
+                model_artifacts,
+                idle_unload_seconds,
+                max_context_tokens,
+                max_output_tokens,
+            ):
+                self.model_artifacts = model_artifacts
+
+        class Runtime:
+            def __init__(self, configuration):
+                self.configuration = configuration
+
+        module = SimpleNamespace(LlamaCppConfig=LegacyConfig, LlamaCppChatRuntime=Runtime)
+        runtime = _create_runtime_adapter(
+            module,
+            {},
+            {
+                "idleUnloadSeconds": 300,
+                "maxContextTokens": 8192,
+                "maxOutputTokens": 2048,
+            },
+            "llama-cpp-python",
+            "automatic",
+        )
+        self.assertIsInstance(runtime, Runtime)
+        gpu_preferred = _create_runtime_adapter(
+            module,
+            {},
+            {
+                "idleUnloadSeconds": 300,
+                "maxContextTokens": 8192,
+                "maxOutputTokens": 2048,
+            },
+            "llama-cpp-python",
+            "gpu_preferred",
+        )
+        self.assertIsInstance(gpu_preferred, Runtime)
 
     def test_runtime_adapter_rejects_releases_without_a_local_backend(self):
         with self.assertRaisesRegex(LumiHostError, "local runtime"):
@@ -195,6 +431,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
                 }
             }
             host._settings["defaultModel"] = "qwen3.5:2b"
+            host._settings["gpuMode"] = "gpu_preferred"
             host._settings["limits"].update(
                 {"maxContextTokens": 16_384, "maxOutputTokens": 4_096}
             )
@@ -223,6 +460,52 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             {"context_size": 16_384, "output_tokens": 4_096},
         )
         service.start.assert_awaited_once()
+        self.assertEqual(host._runtime.configuration.values["acceleration_mode"], "gpu_preferred")
+
+    async def test_gpu_mode_persists_across_host_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_host = LumiHost(data_directory=directory)
+            await first_host.update_runtime_settings(gpu_mode="cpu_only")
+
+            restarted_host = LumiHost(data_directory=directory)
+
+        self.assertEqual(restarted_host.model_settings()["gpuMode"], "cpu_only")
+        self.assertEqual(
+            restarted_host.model_settings()["gpuAcceleration"]["mode"], "cpu_only"
+        )
+
+    async def test_gpu_status_is_sanitized_for_admin_response(self):
+        class Config:
+            def __init__(self, **_values):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+            host._loaded_release = SimpleNamespace(
+                runtime_module=SimpleNamespace(LlamaCppConfig=Config),
+                package_module=SimpleNamespace(supported_models=lambda: ()),
+            )
+            host._model_catalog = Mock(return_value=[])
+            host._runtime = SimpleNamespace(
+                acceleration_status=lambda: {
+                    "state": "cpu_fallback",
+                    "selectedBackend": "cpu",
+                    "selectedDevice": "Local GPU",
+                    "offloadedLayers": 0,
+                    "totalLayers": 32,
+                    "fallbackReason": "Failed to load C:\\private\\driver.dll",
+                }
+            )
+
+            gpu_status = host.model_settings()["gpuAcceleration"]
+
+        self.assertEqual(gpu_status["state"], "cpu_fallback")
+        self.assertEqual(gpu_status["selectedBackend"], "cpu")
+        self.assertEqual(gpu_status["offloadedLayers"], 0)
+        self.assertEqual(
+            gpu_status["fallbackReason"],
+            "GPU acceleration failed; using the CPU fallback.",
+        )
 
     async def test_runtime_settings_reject_active_conversation_limit_above_service_cap(
         self,

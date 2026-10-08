@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import re
 import stat
 import sys
 import tempfile
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,7 @@ _DEFAULT_LIMITS = {
     "maxConcurrentChats": 1,
     "maxActiveConversations": 128,
 }
+_GPU_MODES = {"automatic", "cpu_only", "gpu_preferred"}
 _MODEL_INTEGRITY_ERROR = (
     "Model files failed integrity verification. Delete and reinstall this model."
 )
@@ -67,7 +70,38 @@ def _release_summaries(values: Any) -> list[dict[str, str | None]]:
     return releases
 
 
-def _create_runtime_adapter(runtime_module, artifacts, limits, backend):
+def _runtime_supports_acceleration(runtime_module: Any) -> bool:
+    """Return whether the selected Lumi package accepts an acceleration mode."""
+    config_type = getattr(runtime_module, "LlamaCppConfig", None)
+    if not callable(config_type):
+        return False
+    try:
+        parameters = inspect.signature(config_type).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "acceleration_mode"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _supports_model_download_cancellation(package_module: Any) -> bool:
+    """Return whether the selected Lumi release accepts cooperative cancellation."""
+    installer_type = getattr(package_module, "Qwen35ModelInstaller", None)
+    install = getattr(installer_type, "install_model", None)
+    if not callable(install):
+        return False
+    try:
+        parameters = inspect.signature(install).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.name == "cancel_event" for parameter in parameters)
+
+
+def _create_runtime_adapter(
+    runtime_module, artifacts, limits, backend, acceleration_mode="automatic"
+):
     """Build the embedded runtime adapter declared by the active release."""
     adapters = {
         "llama-cpp-python": ("LlamaCppConfig", "LlamaCppChatRuntime"),
@@ -84,12 +118,18 @@ def _create_runtime_adapter(runtime_module, artifacts, limits, backend):
         raise LumiHostError(
             "The selected Lumi release does not expose its declared local runtime."
         )
-    configuration = config_type(
+    supports_acceleration = _runtime_supports_acceleration(runtime_module)
+    if not isinstance(acceleration_mode, str) or acceleration_mode not in _GPU_MODES:
+        raise LumiHostError("The Lumi GPU acceleration mode is invalid.")
+    config_values = dict(
         model_artifacts=artifacts,
         idle_unload_seconds=limits["idleUnloadSeconds"],
         max_context_tokens=limits["maxContextTokens"],
         max_output_tokens=limits["maxOutputTokens"],
     )
+    if supports_acceleration:
+        config_values["acceleration_mode"] = acceleration_mode
+    configuration = config_type(**config_values)
     return runtime_type(configuration)
 
 
@@ -130,6 +170,8 @@ class LumiHost:
         self._operation: asyncio.Task | None = None
         self._model_operation: asyncio.Task | None = None
         self._model_install_id: str | None = None
+        self._model_cancel_event: threading.Event | None = None
+        self._model_cancelled_id: str | None = None
         self._model_progress: dict[str, Any] | None = None
         self._model_errors: dict[str, str] = {}
         self._verified_model_artifacts: dict[str, dict[str, Any]] = {}
@@ -304,6 +346,8 @@ class LumiHost:
     async def shutdown(self) -> None:
         model_operation = self._model_operation
         if model_operation is not None and not model_operation.done():
+            if self._model_cancel_event is not None:
+                self._model_cancel_event.set()
             try:
                 await asyncio.wait_for(asyncio.shield(model_operation), timeout=5)
             except TimeoutError:
@@ -368,6 +412,11 @@ class LumiHost:
                 self._model_operation is not None and not self._model_operation.done()
             )
             progress = self._model_progress if is_downloading else None
+            cancel_requested = bool(
+                is_downloading
+                and self._model_cancel_event is not None
+                and self._model_cancel_event.is_set()
+            )
             models.append(
                 {
                     "id": model_id,
@@ -383,6 +432,15 @@ class LumiHost:
                     ),
                     "downloadStage": progress["stage"] if progress else None,
                     "downloadError": download_error,
+                    "downloadCancelAvailable": (
+                        is_downloading
+                        and not cancel_requested
+                        and progress is not None
+                        and progress["current"] < progress["total"]
+                        and self._model_download_cancellation_supported()
+                    ),
+                    "downloadCancelRequested": cancel_requested,
+                    "downloadCancelled": self._model_cancelled_id == model_id,
                     "supportsThinking": option["supportsThinking"],
                     "isDefault": enabled
                     and self._settings.get("defaultModel") == model_id,
@@ -395,12 +453,21 @@ class LumiHost:
             "models": models,
             "defaultModel": default,
             "defaultThinking": bool(self._settings.get("defaultThinking", False)),
+            "gpuMode": self._settings.get("gpuMode", "automatic"),
+            "gpuAcceleration": self._gpu_acceleration_status(),
             "limits": dict(self._settings["limits"]),
             "modelInstallAvailable": bool(
                 self._loaded_release
                 and getattr(self.release_manager, "model_install_available", False)
             ),
         }
+
+    def _model_download_cancellation_supported(self) -> bool:
+        loaded = self._loaded_release
+        return bool(
+            loaded is not None
+            and _supports_model_download_cancellation(loaded.package_module)
+        )
 
     def public_models(self) -> dict[str, Any]:
         settings = self.model_settings()
@@ -476,10 +543,15 @@ class LumiHost:
         *,
         default_thinking: bool | None = None,
         limits: Mapping[str, object] | None = None,
+        gpu_mode: str | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
             if default_thinking is not None and type(default_thinking) is not bool:
                 raise LumiHostError("The default thinking setting must be a boolean.")
+            if gpu_mode is not None and (
+                not isinstance(gpu_mode, str) or gpu_mode not in _GPU_MODES
+            ):
+                raise LumiHostError("The Lumi GPU acceleration mode is invalid.")
             proposed_limits = dict(self._settings["limits"])
             if limits is not None:
                 if not isinstance(limits, Mapping) or set(limits) - set(
@@ -509,9 +581,12 @@ class LumiHost:
                 )
             previous_thinking = self._settings["defaultThinking"]
             previous_limits = dict(self._settings["limits"])
+            previous_gpu_mode = self._settings["gpuMode"]
             if default_thinking is not None:
                 self._settings["defaultThinking"] = default_thinking
             self._settings["limits"] = proposed_limits
+            if gpu_mode is not None:
+                self._settings["gpuMode"] = gpu_mode
             self._save_settings()
             try:
                 if self._loaded_release is not None:
@@ -519,6 +594,7 @@ class LumiHost:
             except Exception:
                 self._settings["defaultThinking"] = previous_thinking
                 self._settings["limits"] = previous_limits
+                self._settings["gpuMode"] = previous_gpu_mode
                 self._save_settings()
                 raise
             return self.model_settings()
@@ -540,6 +616,8 @@ class LumiHost:
             if self._model_artifact(model_id) is not None:
                 raise LumiHostError("That Lumi model is already installed.")
             self._model_install_id = model_id
+            self._model_cancel_event = threading.Event()
+            self._model_cancelled_id = None
             self._model_progress = {
                 "stage": "Preparing model installer",
                 "current": 0,
@@ -548,14 +626,48 @@ class LumiHost:
             self._model_errors.pop(model_id, None)
             self._model_operation = asyncio.create_task(self._install_model(model_id))
 
+    async def cancel_model_install(self, model_id: str) -> dict[str, Any]:
+        async with self._lock:
+            operation = self._model_operation
+            cancellation = self._model_cancel_event
+            if (
+                self._model_install_id != model_id
+                or operation is None
+                or operation.done()
+                or cancellation is None
+            ):
+                raise LumiHostError("There is no active download for that Lumi model.")
+            if not self._model_download_cancellation_supported():
+                raise LumiHostError(
+                    "The selected Lumi release cannot cancel model downloads."
+                )
+            if self._model_progress is not None and (
+                self._model_progress["current"] >= self._model_progress["total"]
+            ):
+                raise LumiHostError("The Lumi model installation is already finishing.")
+            cancellation.set()
+            if self._model_progress is not None:
+                self._model_progress = {
+                    **self._model_progress,
+                    "stage": "Stopping model download",
+                }
+            return {"id": model_id, "cancellationRequested": True}
+
     async def _install_model(self, model_id: str) -> None:
         previous_models: dict[str, Any] | None = None
         previous_default: str | None = None
+        cancellation = self._model_cancel_event
         try:
             loaded = self._loaded_release
             if loaded is None:
                 raise LumiHostError("Enable a Lumi release before downloading a model.")
-            installer_paths = await self.release_manager.install_model_dependencies()
+            if cancellation is not None and cancellation.is_set():
+                raise LumiHostError("The Lumi model download was cancelled.")
+            installer_paths = await self.release_manager.install_model_dependencies(
+                cancel_event=cancellation
+            )
+            if cancellation is not None and cancellation.is_set():
+                raise LumiHostError("The Lumi model download was cancelled.")
             self._set_model_progress(
                 model_id,
                 {
@@ -586,7 +698,16 @@ class LumiHost:
                 model_id,
                 installer_paths,
                 report_progress,
+                cancellation,
             )
+            if cancellation is not None and cancellation.is_set():
+                await run_control(
+                    _remove_qwen_model,
+                    loaded.package_module,
+                    self.data_directory / "models",
+                    model_id,
+                )
+                raise LumiHostError("The Lumi model download was cancelled.")
             previous_models = dict(self._settings["models"])
             previous_default = self._settings.get("defaultModel")
             self.register_model_artifact(
@@ -602,11 +723,16 @@ class LumiHost:
                 self._settings["models"] = previous_models
                 self._settings["defaultModel"] = previous_default
                 self._save_settings()
-            logger.exception("Lumi model installation failed")
-            self._model_errors[model_id] = type(error).__name__[:80]
+            if cancellation is not None and cancellation.is_set():
+                self._model_cancelled_id = model_id
+                self._model_errors.pop(model_id, None)
+            else:
+                logger.exception("Lumi model installation failed")
+                self._model_errors[model_id] = type(error).__name__[:80]
         finally:
             self._model_install_id = None
             self._model_progress = None
+            self._model_cancel_event = None
 
     def _set_model_progress(self, model_id: str, progress: Mapping[str, Any]) -> None:
         if self._model_install_id != model_id:
@@ -817,6 +943,7 @@ class LumiHost:
             artifacts,
             limits,
             _runtime_backend_distribution(loaded.manifest.runtime_dependencies),
+            self._settings.get("gpuMode", "automatic"),
         )
 
         model_module = importlib.import_module("lumi.model_catalog")
@@ -1055,6 +1182,7 @@ class LumiHost:
             "webSearchUrl": None,
             "defaultModel": None,
             "defaultThinking": False,
+            "gpuMode": "automatic",
             "modelCatalog": [],
             "limits": dict(_DEFAULT_LIMITS),
             "models": {},
@@ -1080,6 +1208,12 @@ class LumiHost:
             else None
         )
         result["defaultThinking"] = payload.get("defaultThinking") is True
+        gpu_mode = payload.get("gpuMode")
+        result["gpuMode"] = (
+            gpu_mode
+            if isinstance(gpu_mode, str) and gpu_mode in _GPU_MODES
+            else "automatic"
+        )
         catalog = payload.get("modelCatalog")
         if isinstance(catalog, list):
             result["modelCatalog"] = [
@@ -1166,6 +1300,82 @@ class LumiHost:
             },
             **self.model_settings(),
         }
+
+    def _gpu_acceleration_status(self) -> dict[str, Any]:
+        mode = self._settings.get("gpuMode", "automatic")
+        release_loaded = self._loaded_release is not None
+        runtime_module = getattr(self._loaded_release, "runtime_module", None)
+        supported = bool(
+            runtime_module is not None and _runtime_supports_acceleration(runtime_module)
+        )
+        status: dict[str, Any] = {
+            "mode": mode,
+            "supported": supported,
+            "state": "not_installed" if not release_loaded else "not_loaded",
+            "selectedBackend": None,
+            "selectedDevice": None,
+            "offloadedLayers": 0,
+            "totalLayers": None,
+            "fallbackReason": None,
+        }
+        if release_loaded and not supported:
+            status.update(
+                state="unsupported",
+                selectedBackend="cpu",
+                fallbackReason=(
+                    "The installed Lumi release does not support GPU acceleration."
+                ),
+            )
+        acceleration_status = getattr(self._runtime, "acceleration_status", None)
+        if not callable(acceleration_status):
+            return status
+        try:
+            runtime_status = acceleration_status()
+        except Exception:
+            logger.warning("Could not read Lumi acceleration status", exc_info=True)
+            status.update(
+                state="unavailable",
+                fallbackReason="GPU acceleration status is temporarily unavailable.",
+            )
+            return status
+        if not isinstance(runtime_status, Mapping):
+            return status
+        allowed_states = {
+            "ready",
+            "cpu",
+            "fallback",
+            "cpu_fallback",
+            "initializing",
+            "not_loaded",
+            "unavailable",
+            "error",
+        }
+        runtime_state = runtime_status.get("state")
+        if isinstance(runtime_state, str) and runtime_state in allowed_states:
+            status["state"] = runtime_state
+        backend = runtime_status.get("selectedBackend")
+        if isinstance(backend, str) and backend in {
+            "cpu",
+            "cuda",
+            "vulkan",
+            "hip",
+            "metal",
+        }:
+            status["selectedBackend"] = backend
+        device = runtime_status.get("selectedDevice")
+        if isinstance(device, str):
+            status["selectedDevice"] = " ".join(device.split())[:120]
+        for key in ("offloadedLayers", "totalLayers"):
+            value = runtime_status.get(key)
+            if type(value) is int and value >= 0:
+                status[key] = value
+        reason = runtime_status.get("fallbackReason")
+        if isinstance(reason, str) and reason.strip():
+            reason = " ".join(reason.split())[:240]
+            if re.search(r"(?:[A-Za-z]:[\\/]|\\\\|/(?:home|Users|var|tmp)/)", reason):
+                reason = "GPU acceleration failed; using the CPU fallback."
+            status["fallbackReason"] = reason
+        return status
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -1337,6 +1547,7 @@ def _install_qwen_model(
     model_id: str,
     dependency_paths: Any,
     progress: Any,
+    cancellation: threading.Event | None = None,
 ) -> Any:
     """Run Lumi's pinned checkpoint download and conversion in the control lane."""
 
@@ -1370,7 +1581,12 @@ def _install_qwen_model(
             raise LumiHostError(
                 "The selected Lumi release has no supported model installer."
             )
-        return install(model_id, progress=progress)
+        install_kwargs = {"progress": progress}
+        if cancellation is not None and _supports_model_download_cancellation(
+            package_module
+        ):
+            install_kwargs["cancel_event"] = cancellation
+        return install(model_id, **install_kwargs)
     finally:
         for path in inserted_paths:
             try:

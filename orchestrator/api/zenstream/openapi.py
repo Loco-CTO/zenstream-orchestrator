@@ -42,6 +42,9 @@ class LumiModel(DocsModel):
     downloadProgress: float | None = None
     downloadStage: str | None = None
     downloadError: str | None = None
+    downloadCancelAvailable: bool | None = None
+    downloadCancelRequested: bool | None = None
+    downloadCancelled: bool | None = None
     isDefault: bool | None = None
 
 
@@ -70,11 +73,25 @@ class LumiRuntimeLimitsUpdate(DocsModel):
 class LumiRuntimeSettingsRequest(DocsModel):
     defaultThinking: bool | None = None
     limits: LumiRuntimeLimitsUpdate | None = None
+    gpuMode: Literal["automatic", "cpu_only", "gpu_preferred"] | None = None
+
+
+class LumiGpuAcceleration(DocsModel):
+    mode: Literal["automatic", "cpu_only", "gpu_preferred"] = "automatic"
+    supported: bool = False
+    state: str = "not_installed"
+    selectedBackend: Literal["cpu", "cuda", "vulkan", "hip", "metal"] | None = None
+    selectedDevice: str | None = None
+    offloadedLayers: int = 0
+    totalLayers: int | None = None
+    fallbackReason: str | None = None
 
 
 class LumiAdminModelsResponse(LumiModelsResponse):
     modelInstallAvailable: bool = False
     limits: LumiRuntimeLimits | None = None
+    gpuMode: Literal["automatic", "cpu_only", "gpu_preferred"] = "automatic"
+    gpuAcceleration: LumiGpuAcceleration = Field(default_factory=LumiGpuAcceleration)
 
 
 class LumiConversationRecord(DocsModel):
@@ -1957,6 +1974,10 @@ _SUMMARY_OVERRIDES = {
         "/api/lumi/conversations/{conversation_id}/turns",
     ): "Send a Lumi chat turn",
     (
+        "POST",
+        "/api/lumi/conversations/{conversation_id}/turns/stream",
+    ): "Stream visible Lumi response text",
+    (
         "PATCH",
         "/api/lumi/conversations/{conversation_id}/choice",
     ): "Set a conversation's Lumi model",
@@ -1983,6 +2004,10 @@ _SUMMARY_OVERRIDES = {
         "POST",
         "/api/admin/lumi/models/{model_id}/download",
     ): "Install a supported Qwen3.5 model",
+    (
+        "POST",
+        "/api/admin/lumi/models/{model_id}/cancel",
+    ): "Cancel a supported Qwen3.5 model download",
     (
         "DELETE",
         "/api/admin/lumi/models/{model_id}",
@@ -2373,6 +2398,10 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/preferences/watch-history"): WatchHistoryPreferences,
     ("POST", "/api/lumi/conversations/{conversation_id}/turns"): LumiTurnRequest,
     (
+        "POST",
+        "/api/lumi/conversations/{conversation_id}/turns/stream",
+    ): LumiTurnRequest,
+    (
         "PATCH",
         "/api/lumi/conversations/{conversation_id}/choice",
     ): LumiModelChoiceRequest,
@@ -2456,6 +2485,7 @@ _NO_REQUEST_BODY = frozenset(
         ("POST", "/api/admin/login"),
         ("POST", "/api/admin/logout"),
         ("POST", "/api/admin/lumi/models/{model_id}/download"),
+        ("POST", "/api/admin/lumi/models/{model_id}/cancel"),
         ("DELETE", "/api/admin/lumi/models/{model_id}"),
         ("DELETE", "/api/admin/users/{user_id}"),
         ("DELETE", "/api/admin/libraries/{library_id}"),
@@ -2525,6 +2555,10 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ): LumiConversationDetailResponse,
     ("POST", "/api/lumi/conversations/{conversation_id}/turns"): LumiTurnResponse,
     (
+        "POST",
+        "/api/lumi/conversations/{conversation_id}/turns/stream",
+    ): LumiTurnResponse,
+    (
         "PATCH",
         "/api/lumi/conversations/{conversation_id}/choice",
     ): LumiConversationRecord,
@@ -2537,6 +2571,7 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/admin/lumi/models/settings"): LumiAdminModelsResponse,
     ("PATCH", "/api/admin/lumi/models/{model_id}"): LumiAdminModelsResponse,
     ("POST", "/api/admin/lumi/models/{model_id}/download"): LumiAdminModelsResponse,
+    ("POST", "/api/admin/lumi/models/{model_id}/cancel"): LumiAdminModelsResponse,
     ("DELETE", "/api/admin/lumi/models/{model_id}"): LumiModelDeleteResponse,
     ("GET", "/api/catalog/libraries"): CatalogLibrariesResponse,
     ("GET", "/api/catalog/home"): CatalogHomeResponse,
@@ -2707,6 +2742,7 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     LumiRuntimeSettingsRequest: {
         "defaultThinking": True,
         "limits": {"maxContextTokens": 8192, "maxOutputTokens": 2048},
+        "gpuMode": "automatic",
     },
     LumiModelSettingRequest: {"enabled": True, "isDefault": True},
     CatalogStatePatchRequest: {"favorite": True, "played": False, "following": True},
@@ -2811,6 +2847,17 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
         "defaultModel": "qwen3.5:2b",
         "defaultThinking": True,
         "modelInstallAvailable": True,
+        "gpuMode": "automatic",
+        "gpuAcceleration": {
+            "mode": "automatic",
+            "supported": True,
+            "state": "ready",
+            "selectedBackend": "cuda",
+            "selectedDevice": "NVIDIA GPU",
+            "offloadedLayers": 18,
+            "totalLayers": 32,
+            "fallbackReason": None,
+        },
         "limits": {
             "idleUnloadSeconds": 300,
             "maxContextTokens": 8192,
@@ -2834,6 +2881,17 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
         "defaultModel": None,
         "defaultThinking": False,
         "modelInstallAvailable": False,
+        "gpuMode": "automatic",
+        "gpuAcceleration": {
+            "mode": "automatic",
+            "supported": False,
+            "state": "not_installed",
+            "selectedBackend": None,
+            "selectedDevice": None,
+            "offloadedLayers": 0,
+            "totalLayers": None,
+            "fallbackReason": None,
+        },
         "limits": {
             "idleUnloadSeconds": 300,
             "maxContextTokens": 8192,
@@ -3206,6 +3264,40 @@ def _response_for(path: str, method: str) -> dict[str, Any]:
         return {"200": _binary_response(("text/vtt",), "WebVTT subtitle content.")}
     if path.endswith(".mp3"):
         return {"200": _binary_response(("audio/mpeg",), "MP3 intro/outro preview.")}
+    if (
+        method == "POST"
+        and path == "/api/lumi/conversations/{conversation_id}/turns/stream"
+    ):
+        return {
+            "200": {
+                "description": (
+                    "Server-sent events with visible text deltas, reset events with safe "
+                    "reason codes when partial text is discarded, and one final "
+                    "conversation and answer payload. Tool calls and internal reasoning "
+                    "are omitted."
+                ),
+                "content": {
+                    "text/event-stream": {
+                        "schema": {"type": "string"},
+                        "example": (
+                            'event: delta\ndata: {"text":"Hello"}\n\n'
+                            'event: reset\ndata: {"reason":"cpu_fallback"}\n\n'
+                            'event: complete\ndata: {"conversation":{},"answer":{"markdown":"Hello","references":[],"sources":[]}}\n\n'
+                        ),
+                    }
+                },
+                "headers": {
+                    "Cache-Control": {
+                        "schema": {"type": "string"},
+                        "example": "private, no-store, no-transform",
+                    },
+                    "X-Accel-Buffering": {
+                        "schema": {"type": "string"},
+                        "example": "no",
+                    },
+                },
+            }
+        }
     if (method, path) in _NO_CONTENT_RESPONSES:
         return {
             "204": _empty_response("The operation completed without a response body.")
@@ -3344,6 +3436,11 @@ def _error_statuses(path: str, method: str) -> tuple[int, ...]:
         return (403,)
     if path.endswith("/stream") and method in {"GET", "HEAD"}:
         return (401, 403, 404)
+    if (
+        path == "/api/lumi/conversations/{conversation_id}/turns/stream"
+        and method == "POST"
+    ):
+        return (400, 401, 403, 404, 409, 413, 429, 503)
     if path.endswith(".vtt") or path.endswith(".mp3"):
         return (401, 403, 404, 422, 503)
     if (

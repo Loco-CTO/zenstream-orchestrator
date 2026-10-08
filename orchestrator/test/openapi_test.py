@@ -188,6 +188,7 @@ class OpenApiContractTest(unittest.TestCase):
             "/api/lumi/conversations",
             "/api/lumi/conversations/{conversation_id}",
             "/api/lumi/conversations/{conversation_id}/turns",
+            "/api/lumi/conversations/{conversation_id}/turns/stream",
             "/api/lumi/conversations/{conversation_id}/choice",
             "/api/lumi/preferences/model",
         )
@@ -200,6 +201,7 @@ class OpenApiContractTest(unittest.TestCase):
             "/api/admin/lumi/models/settings",
             "/api/admin/lumi/models/{model_id}",
             "/api/admin/lumi/models/{model_id}/download",
+            "/api/admin/lumi/models/{model_id}/cancel",
         )
 
         for path in user_paths:

@@ -9193,6 +9193,32 @@
       }
     },
     {
+      "operationId": "post_api_lumi_conversations_by_conversation_id_turns_stream",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "message": "x",
+            "model": "x",
+            "thinking": true
+          }
+        },
+        "method": "POST",
+        "parameters": {
+          "path": {
+            "conversation_id": "fixture-id"
+          }
+        },
+        "path": "/api/lumi/conversations/fixture-id/turns/stream",
+        "pathTemplate": "/api/lumi/conversations/{conversation_id}/turns/stream"
+      },
+      "response": {
+        "body": "x",
+        "contentType": "text/event-stream",
+        "status": 200
+      }
+    },
+    {
       "operationId": "get_api_lumi_models",
       "request": {
         "method": "GET",
@@ -9206,6 +9232,9 @@
           "defaultThinking": true,
           "models": [
             {
+              "downloadCancelAvailable": true,
+              "downloadCancelRequested": true,
+              "downloadCancelled": true,
               "downloadError": "x",
               "downloadProgress": 1.25,
               "downloadStage": "x",

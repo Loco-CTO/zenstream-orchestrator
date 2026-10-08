@@ -4724,6 +4724,19 @@
             "title": "Defaultthinking",
             "type": "boolean"
           },
+          "gpuAcceleration": {
+            "$ref": "#/components/schemas/LumiGpuAcceleration"
+          },
+          "gpuMode": {
+            "default": "automatic",
+            "enum": [
+              "automatic",
+              "cpu_only",
+              "gpu_preferred"
+            ],
+            "title": "Gpumode",
+            "type": "string"
+          },
           "limits": {
             "anyOf": [
               {
@@ -4770,6 +4783,19 @@
             "default": false,
             "title": "Defaultthinking",
             "type": "boolean"
+          },
+          "gpuAcceleration": {
+            "$ref": "#/components/schemas/LumiGpuAcceleration"
+          },
+          "gpuMode": {
+            "default": "automatic",
+            "enum": [
+              "automatic",
+              "cpu_only",
+              "gpu_preferred"
+            ],
+            "title": "Gpumode",
+            "type": "string"
           },
           "integration": {
             "$ref": "#/components/schemas/LumiIntegrationStatus"
@@ -4940,6 +4966,93 @@
         "title": "LumiEntityReference",
         "type": "object"
       },
+      "LumiGpuAcceleration": {
+        "additionalProperties": true,
+        "properties": {
+          "fallbackReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fallbackreason"
+          },
+          "mode": {
+            "default": "automatic",
+            "enum": [
+              "automatic",
+              "cpu_only",
+              "gpu_preferred"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "offloadedLayers": {
+            "default": 0,
+            "title": "Offloadedlayers",
+            "type": "integer"
+          },
+          "selectedBackend": {
+            "anyOf": [
+              {
+                "enum": [
+                  "cpu",
+                  "cuda",
+                  "vulkan",
+                  "hip",
+                  "metal"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Selectedbackend"
+          },
+          "selectedDevice": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Selecteddevice"
+          },
+          "state": {
+            "default": "not_installed",
+            "title": "State",
+            "type": "string"
+          },
+          "supported": {
+            "default": false,
+            "title": "Supported",
+            "type": "boolean"
+          },
+          "totalLayers": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Totallayers"
+          }
+        },
+        "title": "LumiGpuAcceleration",
+        "type": "object"
+      },
       "LumiIntegrationSettingsRequest": {
         "additionalProperties": true,
         "properties": {
@@ -5091,6 +5204,42 @@
       "LumiModel": {
         "additionalProperties": true,
         "properties": {
+          "downloadCancelAvailable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Downloadcancelavailable"
+          },
+          "downloadCancelRequested": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Downloadcancelrequested"
+          },
+          "downloadCancelled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Downloadcancelled"
+          },
           "downloadError": {
             "anyOf": [
               {
@@ -5516,6 +5665,23 @@
             ],
             "default": null,
             "title": "Defaultthinking"
+          },
+          "gpuMode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "automatic",
+                  "cpu_only",
+                  "gpu_preferred"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Gpumode"
           },
           "limits": {
             "anyOf": [
@@ -17139,6 +17305,17 @@
                 "example": {
                   "defaultModel": null,
                   "defaultThinking": false,
+                  "gpuAcceleration": {
+                    "fallbackReason": null,
+                    "mode": "automatic",
+                    "offloadedLayers": 0,
+                    "selectedBackend": null,
+                    "selectedDevice": null,
+                    "state": "not_installed",
+                    "supported": false,
+                    "totalLayers": null
+                  },
+                  "gpuMode": "automatic",
                   "integration": {
                     "enabled": false,
                     "error": null,
@@ -17243,6 +17420,17 @@
                 "example": {
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
+                  "gpuAcceleration": {
+                    "fallbackReason": null,
+                    "mode": "automatic",
+                    "offloadedLayers": 18,
+                    "selectedBackend": "cuda",
+                    "selectedDevice": "NVIDIA GPU",
+                    "state": "ready",
+                    "supported": true,
+                    "totalLayers": 32
+                  },
+                  "gpuMode": "automatic",
                   "limits": {
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
@@ -17343,6 +17531,7 @@
             "application/json": {
               "example": {
                 "defaultThinking": true,
+                "gpuMode": "automatic",
                 "limits": {
                   "maxContextTokens": 8192,
                   "maxOutputTokens": 2048
@@ -17362,6 +17551,17 @@
                 "example": {
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
+                  "gpuAcceleration": {
+                    "fallbackReason": null,
+                    "mode": "automatic",
+                    "offloadedLayers": 18,
+                    "selectedBackend": "cuda",
+                    "selectedDevice": "NVIDIA GPU",
+                    "state": "ready",
+                    "supported": true,
+                    "totalLayers": 32
+                  },
+                  "gpuMode": "automatic",
                   "limits": {
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
@@ -17585,6 +17785,17 @@
                 "example": {
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
+                  "gpuAcceleration": {
+                    "fallbackReason": null,
+                    "mode": "automatic",
+                    "offloadedLayers": 18,
+                    "selectedBackend": "cuda",
+                    "selectedDevice": "NVIDIA GPU",
+                    "state": "ready",
+                    "supported": true,
+                    "totalLayers": 32
+                  },
+                  "gpuMode": "automatic",
                   "limits": {
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
@@ -17676,6 +17887,131 @@
         ]
       }
     },
+    "/api/admin/lumi/models/{model_id}/cancel": {
+      "post": {
+        "description": "Cancel a supported Qwen3.5 model download. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `POST`; path: `/api/admin/lumi/models/{model_id}/cancel`.",
+        "operationId": "post_api_admin_lumi_models_by_model_id_cancel",
+        "parameters": [
+          {
+            "description": "model_id value supplied in the path component.",
+            "in": "path",
+            "name": "model_id",
+            "required": true,
+            "schema": {
+              "title": "Model Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "defaultModel": "qwen3.5:2b",
+                  "defaultThinking": true,
+                  "gpuAcceleration": {
+                    "fallbackReason": null,
+                    "mode": "automatic",
+                    "offloadedLayers": 18,
+                    "selectedBackend": "cuda",
+                    "selectedDevice": "NVIDIA GPU",
+                    "state": "ready",
+                    "supported": true,
+                    "totalLayers": 32
+                  },
+                  "gpuMode": "automatic",
+                  "limits": {
+                    "idleUnloadSeconds": 300,
+                    "maxActiveConversations": 128,
+                    "maxConcurrentChats": 1,
+                    "maxContextTokens": 8192,
+                    "maxOutputTokens": 2048
+                  },
+                  "modelInstallAvailable": true,
+                  "models": [
+                    {
+                      "enabled": true,
+                      "id": "qwen3.5:2b",
+                      "installed": true,
+                      "label": "Qwen3.5 2B",
+                      "supportsThinking": true
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiAdminModelsResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Cancel a supported Qwen3.5 model download",
+        "tags": [
+          "Admin · Lumi"
+        ]
+      }
+    },
     "/api/admin/lumi/models/{model_id}/download": {
       "post": {
         "description": "Install a supported Qwen3.5 model. Administrator authentication is required. Release installation is explicit; model assets and inference remain local to the Orchestrator host. Method: `POST`; path: `/api/admin/lumi/models/{model_id}/download`.",
@@ -17699,6 +18035,17 @@
                 "example": {
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
+                  "gpuAcceleration": {
+                    "fallbackReason": null,
+                    "mode": "automatic",
+                    "offloadedLayers": 18,
+                    "selectedBackend": "cuda",
+                    "selectedDevice": "NVIDIA GPU",
+                    "state": "ready",
+                    "supported": true,
+                    "totalLayers": 32
+                  },
+                  "gpuMode": "automatic",
                   "limits": {
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
@@ -17904,6 +18251,17 @@
                 "example": {
                   "defaultModel": null,
                   "defaultThinking": false,
+                  "gpuAcceleration": {
+                    "fallbackReason": null,
+                    "mode": "automatic",
+                    "offloadedLayers": 0,
+                    "selectedBackend": null,
+                    "selectedDevice": null,
+                    "state": "not_installed",
+                    "supported": false,
+                    "totalLayers": null
+                  },
+                  "gpuMode": "automatic",
                   "integration": {
                     "enabled": false,
                     "error": null,
@@ -18008,6 +18366,17 @@
                 "example": {
                   "defaultModel": null,
                   "defaultThinking": false,
+                  "gpuAcceleration": {
+                    "fallbackReason": null,
+                    "mode": "automatic",
+                    "offloadedLayers": 0,
+                    "selectedBackend": null,
+                    "selectedDevice": null,
+                    "state": "not_installed",
+                    "supported": false,
+                    "totalLayers": null
+                  },
+                  "gpuMode": "automatic",
                   "integration": {
                     "enabled": false,
                     "error": null,
@@ -25576,6 +25945,158 @@
           }
         ],
         "summary": "Send a Lumi chat turn",
+        "tags": [
+          "Lumi"
+        ]
+      }
+    },
+    "/api/lumi/conversations/{conversation_id}/turns/stream": {
+      "post": {
+        "description": "Stream visible Lumi response text. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `POST`; path: `/api/lumi/conversations/{conversation_id}/turns/stream`.",
+        "operationId": "post_api_lumi_conversations_by_conversation_id_turns_stream",
+        "parameters": [
+          {
+            "description": "conversation_id value supplied in the path component.",
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "message": "What should I watch after this?",
+                "model": "qwen3.5:2b",
+                "thinking": true
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiTurnRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "example": "event: delta\ndata: {\"text\":\"Hello\"}\n\nevent: reset\ndata: {\"reason\":\"cpu_fallback\"}\n\nevent: complete\ndata: {\"conversation\":{},\"answer\":{\"markdown\":\"Hello\",\"references\":[],\"sources\":[]}}\n\n",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server-sent events with visible text deltas, reset events with safe reason codes when partial text is discarded, and one final conversation and answer payload. Tool calls and internal reasoning are omitted.",
+            "headers": {
+              "Cache-Control": {
+                "example": "private, no-store, no-transform",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Accel-Buffering": {
+                "example": "no",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request body is too large."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request rate limit has been exceeded."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The required service or media tool is unavailable."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Stream visible Lumi response text",
         "tags": [
           "Lumi"
         ]

@@ -28,9 +28,11 @@ from app.lumi_release import (
     RuntimeDependency,
     RuntimeHost,
     _extract_wheel,
+    _InstallTransaction,
     _import_managed_lumi,
     _matching_dependencies,
     _parse_runtime_dependencies,
+    _replace_managed_directory,
     _unload_managed_lumi,
     _validate_download_url,
     _validate_wheel_archive,
@@ -398,6 +400,79 @@ class FakeLlamaCppGitHub(FakeGitHub):
         self.metadata_bytes = json.dumps(self.metadata).encode("utf-8")
 
 
+class ManagedReleaseFilesystemTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.data_root = Path(self.temporary_directory.name) / "managed-data"
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def test_commit_install_removes_previous_release_directory(self):
+        release_directory = self.data_root / "lumi" / "releases" / TAG
+        previous_directory = release_directory.with_name(f"{TAG}.previous")
+        release_directory.mkdir(parents=True)
+        previous_directory.mkdir()
+        (previous_directory / "old.txt").write_text("old", encoding="utf-8")
+
+        LumiReleaseManager._commit_install(
+            _InstallTransaction(release_directory, previous_directory)
+        )
+
+        self.assertTrue(release_directory.is_dir())
+        self.assertFalse(previous_directory.exists())
+
+    def test_managed_directory_replace_retries_transient_permission_error(self):
+        source = self.data_root / "staged"
+        destination = self.data_root / "active"
+        source.mkdir(parents=True)
+        (source / "marker.txt").write_text("ready", encoding="utf-8")
+        original_replace = os.replace
+        attempts = 0
+
+        def replace_after_transient_error(source_path, destination_path):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError(5, "directory is temporarily locked")
+            return original_replace(source_path, destination_path)
+
+        with (
+            patch(
+                "app.lumi_release.os.replace",
+                side_effect=replace_after_transient_error,
+            ),
+            patch("app.lumi_release.time.sleep") as sleep_mock,
+            patch("app.lumi_release._DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS", (0.0,)),
+        ):
+            _replace_managed_directory(source, destination)
+
+        self.assertEqual(attempts, 2)
+        sleep_mock.assert_called_once_with(0.0)
+        self.assertTrue((destination / "marker.txt").is_file())
+
+    def test_managed_directory_replace_stops_after_retry_limit(self):
+        source = self.data_root / "staged"
+        destination = self.data_root / "active"
+        source.mkdir(parents=True)
+        with (
+            patch(
+                "app.lumi_release.os.replace",
+                side_effect=PermissionError(5, "directory remains locked"),
+            ) as replace_mock,
+            patch("app.lumi_release.time.sleep") as sleep_mock,
+            patch(
+                "app.lumi_release._DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS",
+                (0.0,),
+            ),
+        ):
+            with self.assertRaises(PermissionError):
+                _replace_managed_directory(source, destination)
+
+        self.assertEqual(replace_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(0.0)
+
+
 class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -725,20 +800,15 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_release_activation_does_not_require_directory_rename(self):
         github = FakeGitHub()
         manager = self._manager(github)
-        original_replace = os.replace
-        activation_attempts = 0
-
-        def reject_directory_rename(source, destination):
-            nonlocal activation_attempts
-            if Path(source).is_dir():
-                activation_attempts += 1
-                raise PermissionError(5, "directory activation is unavailable")
-            return original_replace(source, destination)
-
-        with patch("app.lumi_release.os.replace", side_effect=reject_directory_rename):
+        with patch("app.lumi_release.os.replace", wraps=os.replace) as replace_mock:
             release = await manager.enable(TAG)
 
-        self.assertEqual(activation_attempts, 0)
+        self.assertTrue(
+            all(
+                not Path(call.args[0]).is_dir()
+                for call in replace_mock.call_args_list
+            )
+        )
         self.assertTrue(release.directory.is_dir())
         self.assertTrue(manager.has_installed_release(TAG))
         self.assertFalse(

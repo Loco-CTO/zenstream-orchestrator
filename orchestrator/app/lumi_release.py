@@ -73,6 +73,7 @@ LUMI_PLUGIN_API_VERSION = 1
 LUMI_RUNTIME_API_VERSION = 1
 
 MAX_RELEASE_METADATA_BYTES = 1024 * 1024
+MAX_RELEASE_LIST_PAGE_SIZE = 5
 MAX_RELEASE_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_RELEASE_INSTALL_MARKER_BYTES = 64 * 1024
 MAX_RELEASE_LIST_CACHE_BYTES = 128 * 1024
@@ -1248,66 +1249,79 @@ class LumiReleaseManager:
                 _remove_managed_path(temporary_path, ignore_errors=True)
 
     def _fetch_published_releases(self, limit: int) -> tuple[LumiReleaseCandidate, ...]:
-        url = f"{LUMI_GITHUB_API}/releases?per_page={limit}"
-        response = self._fetcher(
-            url,
-            {
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "ZenStream-Orchestrator",
-            },
-            MAX_RELEASE_METADATA_BYTES,
-        )
-        if _canonical_api_url(response.final_url) != _canonical_api_url(url):
-            raise LumiReleaseError("GitHub release listing came from an unexpected URL")
-        try:
-            releases = json.loads(response.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise LumiReleaseError(
-                "GitHub returned an invalid release listing"
-            ) from error
-        if not isinstance(releases, list):
-            raise LumiReleaseError("GitHub returned an invalid release listing")
+        page_size = min(limit, MAX_RELEASE_LIST_PAGE_SIZE)
         candidates: list[LumiReleaseCandidate] = []
-        for release in releases[:limit]:
-            if not isinstance(release, dict):
-                continue
-            tag = release.get("tag_name")
-            if not isinstance(tag, str) or not _TAG_RE.fullmatch(tag):
-                continue
-            try:
-                self._validate_release_metadata(release, tag)
-                assets = _parse_release_assets(release.get("assets"))
-            except LumiReleaseError:
-                continue
-            package_asset = assets.get(LUMI_RELEASE_ASSET_NAME)
-            if (
-                package_asset is None
-                or package_asset.sha256 is None
-                or package_asset.size <= 0
-                or package_asset.size > MAX_RELEASE_ARCHIVE_BYTES
-            ):
-                continue
-            expected_url = (
-                f"https://github.com/{LUMI_GITHUB_REPOSITORY}/releases/download/"
-                f"{urllib.parse.quote(tag, safe='')}/"
-                f"{urllib.parse.quote(LUMI_RELEASE_ASSET_NAME, safe='')}"
+        fetched_count = 0
+        page = 1
+        while fetched_count < limit:
+            url = f"{LUMI_GITHUB_API}/releases?per_page={page_size}&page={page}"
+            response = self._fetcher(
+                url,
+                {
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    "User-Agent": "ZenStream-Orchestrator",
+                },
+                MAX_RELEASE_METADATA_BYTES,
             )
-            try:
-                if _canonical_https_url(package_asset.download_url) != expected_url:
-                    continue
-            except LumiReleaseError:
-                continue
-            name = release.get("name")
-            published_at = release.get("published_at")
-            candidates.append(
-                LumiReleaseCandidate(
-                    tag,
-                    name[:256] if isinstance(name, str) and name else tag,
-                    published_at,
-                    package_asset.sha256,
+            if _canonical_api_url(response.final_url) != _canonical_api_url(url):
+                raise LumiReleaseError(
+                    "GitHub release listing came from an unexpected URL"
                 )
-            )
+            try:
+                releases = json.loads(response.body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise LumiReleaseError(
+                    "GitHub returned an invalid release listing"
+                ) from error
+            if not isinstance(releases, list):
+                raise LumiReleaseError("GitHub returned an invalid release listing")
+            if not releases:
+                break
+            page_releases = releases[: min(page_size, limit - fetched_count)]
+            fetched_count += len(page_releases)
+            for release in page_releases:
+                if not isinstance(release, dict):
+                    continue
+                tag = release.get("tag_name")
+                if not isinstance(tag, str) or not _TAG_RE.fullmatch(tag):
+                    continue
+                try:
+                    self._validate_release_metadata(release, tag)
+                    assets = _parse_release_assets(release.get("assets"))
+                except LumiReleaseError:
+                    continue
+                package_asset = assets.get(LUMI_RELEASE_ASSET_NAME)
+                if (
+                    package_asset is None
+                    or package_asset.sha256 is None
+                    or package_asset.size <= 0
+                    or package_asset.size > MAX_RELEASE_ARCHIVE_BYTES
+                ):
+                    continue
+                expected_url = (
+                    f"https://github.com/{LUMI_GITHUB_REPOSITORY}/releases/download/"
+                    f"{urllib.parse.quote(tag, safe='')}/"
+                    f"{urllib.parse.quote(LUMI_RELEASE_ASSET_NAME, safe='')}"
+                )
+                try:
+                    if _canonical_https_url(package_asset.download_url) != expected_url:
+                        continue
+                except LumiReleaseError:
+                    continue
+                name = release.get("name")
+                published_at = release.get("published_at")
+                candidates.append(
+                    LumiReleaseCandidate(
+                        tag,
+                        name[:256] if isinstance(name, str) and name else tag,
+                        published_at,
+                        package_asset.sha256,
+                    )
+                )
+            if len(releases) < page_size or fetched_count >= limit:
+                break
+            page += 1
         return tuple(candidates)
 
     def _validate_release_metadata(self, release: Mapping[str, Any], tag: str) -> None:
@@ -1719,11 +1733,15 @@ def _canonical_api_url(value: str) -> str:
         raise LumiReleaseError("a GitHub API URL is outside the pinned origin")
     if parsed.path == collection_path:
         query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        parameters = dict(query)
         if (
-            len(query) != 1
-            or query[0][0] != "per_page"
-            or not query[0][1].isdigit()
-            or not 1 <= int(query[0][1]) <= 100
+            len(query) != 2
+            or len(parameters) != 2
+            or set(parameters) != {"per_page", "page"}
+            or not parameters["per_page"].isdigit()
+            or not 1 <= int(parameters["per_page"]) <= 100
+            or not parameters["page"].isdigit()
+            or not 1 <= int(parameters["page"]) <= 100
         ):
             raise LumiReleaseError(
                 "GitHub release listing URL has invalid query parameters"

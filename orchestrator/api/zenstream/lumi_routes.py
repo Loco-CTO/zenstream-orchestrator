@@ -261,8 +261,8 @@ async def admin_lumi_status(request: Request):
 @router.get("/api/admin/lumi/releases")
 async def admin_lumi_releases(request: Request):
     await _admin(request)
-    release_manager = lumi_host.release_manager
     try:
+        release_manager = lumi_host.release_manager
         releases = await run_control(lumi_host.list_releases_sync, release_manager)
     except Exception as error:
         logger.exception("Lumi published release discovery failed")

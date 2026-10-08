@@ -9,6 +9,7 @@ import stat
 import sys
 import tempfile
 import unittest
+import urllib.parse
 import zipfile
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -25,6 +26,7 @@ from app.lumi_release import (
     LumiReleaseManager,
     LumiReleaseRequestError,
     LumiReleaseUnavailable,
+    MAX_RELEASE_LIST_PAGE_SIZE,
     RuntimeDependency,
     RuntimeHost,
     _extract_wheel,
@@ -37,6 +39,14 @@ from app.lumi_release import (
     _validate_download_url,
     _validate_wheel_archive,
 )
+
+
+def _release_list_url(page: int) -> str:
+    return (
+        f"{LUMI_GITHUB_API}/releases?per_page={MAX_RELEASE_LIST_PAGE_SIZE}"
+        f"&page={page}"
+    )
+
 
 TAG = "v1.2.3"
 ORCHESTRATOR_VERSION = "1.7.3"
@@ -295,7 +305,11 @@ class FakeGitHub:
             body = self.metadata_bytes
             final_url = self.metadata_final_url or url
         elif url.startswith(f"{LUMI_GITHUB_API}/releases?per_page="):
-            body = json.dumps(self.releases).encode("utf-8")
+            query = dict(urllib.parse.parse_qsl(url.split("?", 1)[1]))
+            per_page = int(query["per_page"])
+            page = int(query["page"])
+            start = (page - 1) * per_page
+            body = json.dumps(self.releases[start : start + per_page]).encode("utf-8")
             final_url = url
         else:
             name = url.rsplit("/", 1)[-1]
@@ -692,7 +706,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].tag, TAG)
         self.assertEqual(candidates[0].package_sha256, github.digest_values[0])
-        self.assertEqual(github.requests, [f"{LUMI_GITHUB_API}/releases?per_page=20"])
+        self.assertEqual(github.requests, [_release_list_url(1)])
 
     def test_sync_release_listing_returns_stable_candidates(self):
         github = FakeGitHub()
@@ -701,7 +715,37 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         candidates = manager.list_published_releases_sync()
 
         self.assertEqual([candidate.tag for candidate in candidates], [TAG])
-        self.assertEqual(github.requests, [f"{LUMI_GITHUB_API}/releases?per_page=20"])
+        self.assertEqual(github.requests, [_release_list_url(1)])
+
+    def test_release_listing_paginates_within_metadata_limit(self):
+        github = FakeGitHub()
+        github.releases = []
+        tags = [f"v1.{minor}.0" for minor in range(7)]
+        for tag in tags:
+            metadata = {
+                **github.metadata,
+                "tag_name": tag,
+                "html_url": (
+                    f"https://github.com/{LUMI_GITHUB_REPOSITORY}/releases/tag/{tag}"
+                ),
+                "assets": [
+                    {
+                        **asset,
+                        "browser_download_url": (
+                            f"https://github.com/{LUMI_GITHUB_REPOSITORY}/releases/"
+                            f"download/{tag}/{asset['name']}"
+                        ),
+                    }
+                    for asset in github.metadata["assets"]
+                ],
+            }
+            github.releases.append(metadata)
+        manager = self._manager(github)
+
+        candidates = manager.list_published_releases_sync(limit=len(tags))
+
+        self.assertEqual([candidate.tag for candidate in candidates], tags)
+        self.assertEqual(github.requests, [_release_list_url(1), _release_list_url(2)])
 
     async def test_release_listing_returns_empty_when_github_has_no_releases(self):
         github = FakeGitHub()

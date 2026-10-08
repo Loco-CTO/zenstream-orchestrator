@@ -144,7 +144,7 @@ def _turn_payload(turn: Any) -> dict[str, Any]:
 
 def _sse_event(name: str, value: dict[str, Any]) -> bytes:
     data = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    return f"event: {name}\ndata: {data}\n\n".encode("utf-8")
+    return f"event: {name}\ndata: {data}\n\n".encode()
 
 
 @router.get("/api/lumi/models")
@@ -426,8 +426,7 @@ async def update_admin_lumi_runtime_settings(request: Request):
             and payload["gpuMode"] is not None
             and (
                 not isinstance(payload["gpuMode"], str)
-                or payload["gpuMode"]
-                not in {"automatic", "cpu_only", "gpu_preferred"}
+                or payload["gpuMode"] not in {"automatic", "cpu_only", "gpu_preferred"}
             )
         )
     ):

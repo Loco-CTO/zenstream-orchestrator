@@ -112,19 +112,27 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
             patch.object(lumi_routes, "_service", return_value=service),
         ):
             response = await lumi_routes.lumi_turn_stream(
-                FakeRequest({"message": "hello", "model": "qwen3.5:2b", "thinking": True}),
+                FakeRequest(
+                    {"message": "hello", "model": "qwen3.5:2b", "thinking": True}
+                ),
                 "conversation-1",
             )
-            body = b"".join([chunk async for chunk in response.body_iterator]).decode("utf-8")
+            body = b"".join([chunk async for chunk in response.body_iterator]).decode(
+                "utf-8"
+            )
 
         self.assertEqual(response.media_type, "text/event-stream")
-        self.assertEqual(response.headers["cache-control"], "private, no-store, no-transform")
+        self.assertEqual(
+            response.headers["cache-control"], "private, no-store, no-transform"
+        )
         self.assertEqual(response.headers["x-accel-buffering"], "no")
         self.assertEqual(body.count("event: delta"), 2)
         self.assertEqual(body.count("event: complete"), 1)
         self.assertNotIn("private tool arguments", body)
         self.assertIn('"markdown":"Hello **there**"', body)
-        self.assertEqual(service.call[0], ("trusted-account", "conversation-1", "hello"))
+        self.assertEqual(
+            service.call[0], ("trusted-account", "conversation-1", "hello")
+        )
         self.assertTrue(service.closed)
 
     async def test_stream_turn_uses_complete_event_for_older_installed_release(self):
@@ -151,7 +159,9 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
             response = await lumi_routes.lumi_turn_stream(
                 FakeRequest({"message": "hello"}), "conversation-1"
             )
-            body = b"".join([chunk async for chunk in response.body_iterator]).decode("utf-8")
+            body = b"".join([chunk async for chunk in response.body_iterator]).decode(
+                "utf-8"
+            )
 
         self.assertEqual(body.count("event: complete"), 1)
         self.assertNotIn("event: delta", body)
@@ -218,7 +228,9 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
             response = await lumi_routes.lumi_turn_stream(
                 FakeRequest({"message": "hello"}), "conversation-1"
             )
-            body = b"".join([chunk async for chunk in response.body_iterator]).decode("utf-8")
+            body = b"".join([chunk async for chunk in response.body_iterator]).decode(
+                "utf-8"
+            )
 
         self.assertEqual(body.count("event: reset"), 3)
         self.assertEqual(body.count("event: complete"), 1)
@@ -239,13 +251,17 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
                 "_account",
                 new=AsyncMock(return_value={"id": "trusted-account"}),
             ),
-            patch.object(lumi_routes, "_service", return_value=BrokenStreamingService()),
+            patch.object(
+                lumi_routes, "_service", return_value=BrokenStreamingService()
+            ),
             patch.object(lumi_routes.logger, "exception"),
         ):
             response = await lumi_routes.lumi_turn_stream(
                 FakeRequest({"message": "hello"}), "conversation-1"
             )
-            body = b"".join([chunk async for chunk in response.body_iterator]).decode("utf-8")
+            body = b"".join([chunk async for chunk in response.body_iterator]).decode(
+                "utf-8"
+            )
 
         self.assertIn(
             'event: error\ndata: {"message":"Lumi is temporarily unavailable."}',
@@ -320,7 +336,9 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(error.exception.status_code, 400)
-        self.assertEqual(error.exception.detail, "The Lumi runtime settings are invalid.")
+        self.assertEqual(
+            error.exception.detail, "The Lumi runtime settings are invalid."
+        )
 
     async def test_admin_runtime_settings_accepts_null_optional_gpu_mode(self):
         fake_host = SimpleNamespace(

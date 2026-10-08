@@ -19,13 +19,13 @@ from unittest.mock import Mock, patch
 from app.lumi_release import (
     LUMI_GITHUB_API,
     LUMI_GITHUB_REPOSITORY,
-    HttpAssetResponse,
     MAX_RELEASE_LIST_PAGE_SIZE,
     RELEASE_LIST_CACHE_TTL_SECONDS,
+    HttpAssetResponse,
     HttpResponse,
     ImportedLumiModules,
-    LumiReleaseCompatibilityError,
     LumiReleaseCancelled,
+    LumiReleaseCompatibilityError,
     LumiReleaseError,
     LumiReleaseManager,
     LumiReleaseRequestError,
@@ -1062,9 +1062,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
                 with Path(destination).open("xb") as stream:
                     stream.write(b"partial wheel")
                 cancel_event.set()
-                raise LumiReleaseCancelled(
-                    "Lumi model installation was cancelled"
-                )
+                raise LumiReleaseCancelled("Lumi model installation was cancelled")
             return github.stream_asset(
                 url, headers, max_bytes, destination, cancel_event
             )
@@ -1100,9 +1098,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
                 await manager.enable(TAG)
 
         self.assertIsNone(manager.active_release)
-        self.assertEqual(
-            list((self.data_root / "lumi" / "releases").iterdir()), []
-        )
+        self.assertEqual(list((self.data_root / "lumi" / "releases").iterdir()), [])
 
     async def test_llama_cpp_release_activates_and_installs_its_model_installer(self):
         github = FakeLlamaCppGitHub()
@@ -1277,9 +1273,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             wheel_path = Path(directory) / dependency.asset
             wheel_path.write_bytes(wheel_bytes)
-            expanded = _validate_wheel_archive(
-                wheel_path, dependency, installer=True
-            )
+            expanded = _validate_wheel_archive(wheel_path, dependency, installer=True)
             self.assertGreaterEqual(expanded, 8 * 1024 * 1024)
 
             destination = Path(directory) / "site-packages"
@@ -1356,9 +1350,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             wheel_path.write_bytes(wheel_bytes)
             with patch("app.lumi_release.MAX_INSTALLER_WHEEL_FILE_BYTES", 1024):
                 with self.assertRaisesRegex(LumiReleaseError, "oversized file"):
-                    _validate_wheel_archive(
-                        wheel_path, dependency, installer=True
-                    )
+                    _validate_wheel_archive(wheel_path, dependency, installer=True)
 
     def test_path_wheel_validation_enforces_member_count_limit(self):
         wheel_bytes = _make_installer_wheel(
@@ -1379,9 +1371,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             wheel_path.write_bytes(wheel_bytes)
             with patch("app.lumi_release.MAX_ARCHIVE_ENTRIES", 2):
                 with self.assertRaisesRegex(LumiReleaseError, "too many entries"):
-                    _validate_wheel_archive(
-                        wheel_path, dependency, installer=True
-                    )
+                    _validate_wheel_archive(wheel_path, dependency, installer=True)
 
     def test_model_installer_wheel_ignores_nested_vendored_metadata(self):
         wheel_bytes = _make_installer_wheel(

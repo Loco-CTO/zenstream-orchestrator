@@ -73,9 +73,7 @@ class FakeReleaseManager:
 class LumiHostTests(unittest.IsolatedAsyncioTestCase):
     def test_download_cancellation_is_only_enabled_for_compatible_releases(self):
         class CancellableInstaller:
-            def install_model(
-                self, _model_id, *, progress=None, cancel_event=None
-            ):
+            def install_model(self, _model_id, *, progress=None, cancel_event=None):
                 return None
 
         class LegacyInstaller:
@@ -117,9 +115,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, _model_root):
                 pass
 
-            def install_model(
-                self, model_id, *, progress=None, cancel_event=None
-            ):
+            def install_model(self, model_id, *, progress=None, cancel_event=None):
                 captured.update(
                     model_id=model_id,
                     progress=progress,
@@ -157,9 +153,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_download_cancel_is_cooperative_and_visible_in_status(self):
         class CancellableInstaller:
-            def install_model(
-                self, _model_id, *, progress=None, cancel_event=None
-            ):
+            def install_model(self, _model_id, *, progress=None, cancel_event=None):
                 return None
 
         model = SimpleNamespace(
@@ -223,9 +217,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_cancel_event_reaches_installer_dependency_preparation(self):
         class CancellableInstaller:
-            def install_model(
-                self, _model_id, *, progress=None, cancel_event=None
-            ):
+            def install_model(self, _model_id, *, progress=None, cancel_event=None):
                 return None
 
         model = SimpleNamespace(
@@ -312,7 +304,9 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self, configuration):
                 self.configuration = configuration
 
-        module = SimpleNamespace(LlamaCppConfig=LegacyConfig, LlamaCppChatRuntime=Runtime)
+        module = SimpleNamespace(
+            LlamaCppConfig=LegacyConfig, LlamaCppChatRuntime=Runtime
+        )
         runtime = _create_runtime_adapter(
             module,
             {},
@@ -460,7 +454,9 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             {"context_size": 16_384, "output_tokens": 4_096},
         )
         service.start.assert_awaited_once()
-        self.assertEqual(host._runtime.configuration.values["acceleration_mode"], "gpu_preferred")
+        self.assertEqual(
+            host._runtime.configuration.values["acceleration_mode"], "gpu_preferred"
+        )
 
     async def test_gpu_mode_persists_across_host_restart(self):
         with tempfile.TemporaryDirectory() as directory:

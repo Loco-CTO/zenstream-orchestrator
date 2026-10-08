@@ -1306,7 +1306,8 @@ class LumiHost:
         release_loaded = self._loaded_release is not None
         runtime_module = getattr(self._loaded_release, "runtime_module", None)
         supported = bool(
-            runtime_module is not None and _runtime_supports_acceleration(runtime_module)
+            runtime_module is not None
+            and _runtime_supports_acceleration(runtime_module)
         )
         status: dict[str, Any] = {
             "mode": mode,

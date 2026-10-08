@@ -1018,9 +1018,7 @@ class LumiReleaseManager:
             for dependency, asset in wheel_assets:
                 wheel_path = staging_directory / dependency.asset
                 self._download_asset_to_path(tag, asset, MAX_WHEEL_BYTES, wheel_path)
-                expanded_wheel_bytes += _validate_wheel_archive(
-                    wheel_path, dependency
-                )
+                expanded_wheel_bytes += _validate_wheel_archive(wheel_path, dependency)
                 if expanded_wheel_bytes > MAX_TOTAL_WHEEL_EXPANDED_BYTES:
                     raise LumiReleaseError(
                         "runtime wheels exceed the total expanded size limit"
@@ -1156,7 +1154,10 @@ class LumiReleaseManager:
                     raise LumiReleaseError(
                         "model installer wheels exceed the total expanded size limit"
                     )
-                if total_download_bytes + expanded_bytes > MAX_INSTALLER_TOTAL_WHEEL_DISK_BYTES:
+                if (
+                    total_download_bytes + expanded_bytes
+                    > MAX_INSTALLER_TOTAL_WHEEL_DISK_BYTES
+                ):
                     raise LumiReleaseError(
                         "model installer wheels exceed the managed disk usage limit"
                     )
@@ -1496,9 +1497,7 @@ class LumiReleaseManager:
                 if cancel_event is None:
                     response = self._asset_streamer(*stream_arguments)
                 else:
-                    response = self._asset_streamer(
-                        *stream_arguments, cancel_event
-                    )
+                    response = self._asset_streamer(*stream_arguments, cancel_event)
                 _raise_if_cancelled(cancel_event)
                 _validate_download_url(response.final_url)
                 if response.size != asset.size:
@@ -1534,8 +1533,12 @@ class LumiReleaseManager:
                     view = memoryview(response.body)
                     for offset in range(0, len(view), MAX_ARCHIVE_COPY_CHUNK_BYTES):
                         _raise_if_cancelled(cancel_event)
-                        stream.write(view[offset : offset + MAX_ARCHIVE_COPY_CHUNK_BYTES])
-                response = HttpAssetResponse(len(response.body), digest, response.final_url)
+                        stream.write(
+                            view[offset : offset + MAX_ARCHIVE_COPY_CHUNK_BYTES]
+                        )
+                response = HttpAssetResponse(
+                    len(response.body), digest, response.final_url
+                )
             _raise_if_cancelled(cancel_event)
             return response
         except Exception:
@@ -2025,9 +2028,7 @@ def _stream_github_asset(
             if content_length is not None:
                 try:
                     if int(content_length) > max_bytes:
-                        raise LumiReleaseError(
-                            "GitHub response exceeds the size limit"
-                        )
+                        raise LumiReleaseError("GitHub response exceeds the size limit")
                 except ValueError as error:
                     raise LumiReleaseError(
                         "GitHub returned invalid response size metadata"
@@ -2040,9 +2041,7 @@ def _stream_github_asset(
                         break
                     total_bytes += len(chunk)
                     if total_bytes > max_bytes:
-                        raise LumiReleaseError(
-                            "GitHub response exceeds the size limit"
-                        )
+                        raise LumiReleaseError("GitHub response exceeds the size limit")
                     digest.update(chunk)
                     output.write(chunk)
         return HttpAssetResponse(total_bytes, digest.hexdigest(), final_url)
@@ -2526,9 +2525,7 @@ def _validate_wheel_archive(
     expanded_limit = (
         MAX_INSTALLER_WHEEL_EXPANDED_BYTES if installer else MAX_WHEEL_EXPANDED_BYTES
     )
-    file_limit = (
-        MAX_INSTALLER_WHEEL_FILE_BYTES if installer else MAX_WHEEL_FILE_BYTES
-    )
+    file_limit = MAX_INSTALLER_WHEEL_FILE_BYTES if installer else MAX_WHEEL_FILE_BYTES
     try:
         _raise_if_cancelled(cancel_event)
         source = (
@@ -2581,9 +2578,7 @@ def _validate_wheel_archive(
             for info in infos.values():
                 _raise_if_cancelled(cancel_event)
                 if info.file_size > file_limit:
-                    raise LumiReleaseError(
-                        f"{kind} wheel contains an oversized file"
-                    )
+                    raise LumiReleaseError(f"{kind} wheel contains an oversized file")
                 expanded += info.file_size
                 if expanded > expanded_limit:
                     raise LumiReleaseError(

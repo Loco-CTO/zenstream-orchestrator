@@ -4,6 +4,7 @@ import importlib
 import importlib.machinery
 import io
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -720,6 +721,41 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("lumi", sys.modules)
         self.assertNotIn("onnxruntime_genai", sys.modules)
         self.assertTrue(release.directory.is_dir())
+
+    async def test_release_activation_retries_transient_directory_lock_without_redownload(
+        self,
+    ):
+        github = FakeGitHub()
+        manager = self._manager(github)
+        original_replace = os.replace
+        activation_attempts = 0
+
+        def replace_with_temporary_lock(source, destination):
+            nonlocal activation_attempts
+            if Path(source).name.startswith(f".staging-{TAG}-"):
+                activation_attempts += 1
+                if activation_attempts == 1:
+                    raise PermissionError(5, "access denied while staging is scanned")
+            return original_replace(source, destination)
+
+        with (
+            patch(
+                "app.lumi_release.os.replace", side_effect=replace_with_temporary_lock
+            ),
+            patch("app.lumi_release.time.sleep") as sleep,
+        ):
+            release = await manager.enable(TAG)
+
+        self.assertEqual(activation_attempts, 2)
+        sleep.assert_called_once_with(0.1)
+        self.assertTrue(release.directory.is_dir())
+        asset_downloads = [
+            request
+            for request in github.requests
+            if f"/releases/download/{TAG}/" in request
+        ]
+        self.assertEqual(len(asset_downloads), 2)
+        self.assertEqual(len(set(asset_downloads)), 2)
 
     async def test_disabled_release_is_persistent_and_removal_keeps_user_data(self):
         manager = self._manager(FakeGitHub())

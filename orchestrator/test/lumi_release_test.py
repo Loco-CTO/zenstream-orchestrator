@@ -35,6 +35,7 @@ from app.lumi_release import (
     _matching_dependencies,
     _parse_runtime_dependencies,
     _replace_managed_directory,
+    _runtime_backend_distribution,
     _unload_managed_lumi,
     _validate_download_url,
     _validate_wheel_archive,
@@ -50,9 +51,9 @@ def _release_list_url(page: int) -> str:
 TAG = "v1.2.3"
 ORCHESTRATOR_VERSION = "1.7.3"
 HOST = RuntimeHost("cp312", "cp312", ("win_amd64",))
-WHEEL_NAME = "onnxruntime_genai-0.17.1-cp312-cp312-win_amd64.whl"
-WHEEL_DISTRIBUTION = "onnxruntime-genai"
-WHEEL_VERSION = "0.17.1"
+WHEEL_NAME = "llama_cpp_python-0.3.35-cp312-cp312-win_amd64.whl"
+WHEEL_DISTRIBUTION = "llama-cpp-python"
+WHEEL_VERSION = "0.3.35"
 
 
 def _sha256(content):
@@ -62,14 +63,14 @@ def _sha256(content):
 def _make_wheel():
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("onnxruntime_genai/__init__.py", b"__version__ = '0.17.1'\n")
+        archive.writestr("llama_cpp/__init__.py", b"__version__ = '0.3.35'\n")
         archive.writestr(
-            "onnxruntime_genai/capi/_native.cp312-win_amd64.pyd",
+            "llama_cpp/_llama_cpp.cp312-win_amd64.pyd",
             b"native wheel fixture",
         )
         archive.writestr(
-            "onnxruntime_genai-0.17.1.dist-info/METADATA",
-            "Metadata-Version: 2.1\nName: onnxruntime-genai\nVersion: 0.17.1\n",
+            "llama_cpp_python-0.3.35.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: llama-cpp-python\nVersion: 0.3.35\n",
         )
     return buffer.getvalue()
 
@@ -118,12 +119,20 @@ def _make_installer_wheel(
     return buffer.getvalue()
 
 
-def _make_installer_dependencies(*, torch_platform_tag="win_amd64"):
+def _make_installer_dependencies(*, hub_platform_tag="any"):
+    if hub_platform_tag == "any":
+        hub_python_tag, hub_abi_tag = "py3", "none"
+    else:
+        hub_python_tag, hub_abi_tag = "cp312", "cp312"
     specifications = (
-        ("huggingface-hub", "0.30.0", "huggingface_hub", "py3", "none", "any"),
-        ("onnx-ir", "0.1.0", "onnx_ir", "py3", "none", "any"),
-        ("torch", "2.5.1", "torch", "cp312", "cp312", torch_platform_tag),
-        ("transformers", "4.48.0", "transformers", "py3", "none", "any"),
+        (
+            "huggingface-hub",
+            "0.30.0",
+            "huggingface_hub",
+            hub_python_tag,
+            hub_abi_tag,
+            hub_platform_tag,
+        ),
     )
     dependencies = []
     payloads = {}
@@ -166,9 +175,9 @@ def _make_package_archive(
             b"LUMI_RUNTIME_API_VERSION = "
             + str(runtime_api_version).encode("ascii")
             + b"\n"
-            + b"class OrtGenAIConfig:\n    pass\n"
+            + b"class LlamaCppConfig:\n    pass\n"
             + b"class VerifiedModelArtifact:\n    pass\n"
-            + b"class OrtGenAIChatRuntime:\n"
+            + b"class LlamaCppChatRuntime:\n"
             + b"    def __init__(self, configuration):\n"
             + b"        self.configuration = configuration\n"
             + b"    async def close(self):\n        pass\n"
@@ -231,7 +240,7 @@ class FakeGitHub:
         extra_member=None,
         metadata_final_url=None,
         with_installer_dependencies=False,
-        installer_torch_platform="win_amd64",
+        installer_hub_platform="any",
     ):
         self.requests = []
         self.metadata_final_url = metadata_final_url
@@ -248,7 +257,7 @@ class FakeGitHub:
         }
         if with_installer_dependencies:
             installer_dependencies, installer_payloads = _make_installer_dependencies(
-                torch_platform_tag=installer_torch_platform
+                hub_platform_tag=installer_hub_platform
             )
             self.package_bytes, self.wheel_bytes, self.manifest = _make_package_archive(
                 runtime_api_version=runtime_api_version,
@@ -555,15 +564,32 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("manylinux_2_17_x86_64", host.platform_tags)
         self.assertIn("manylinux2014_x86_64", host.platform_tags)
         dependency = RuntimeDependency(
-            "onnxruntime-genai",
-            "0.17.1",
+            "llama-cpp-python",
+            "0.3.35",
             "cp313",
             "cp313",
             "manylinux_2_17_x86_64",
-            "onnxruntime_genai-0.17.1-cp313-cp313-manylinux_2_17_x86_64.whl",
+            "llama_cpp_python-0.3.35-cp313-cp313-manylinux_2_17_x86_64.whl",
             "0" * 64,
         )
         self.assertEqual(_matching_dependencies((dependency,), host), (dependency,))
+
+    def test_runtime_backend_rejects_onnx_genai_releases(self):
+        dependency = RuntimeDependency(
+            "onnxruntime-genai",
+            "0.17.1",
+            "cp312",
+            "cp312",
+            "win_amd64",
+            "onnxruntime_genai-0.17.1-cp312-cp312-win_amd64.whl",
+            "0" * 64,
+        )
+
+        with self.assertRaisesRegex(
+            LumiReleaseCompatibilityError,
+            "embedded llama.cpp runtime",
+        ):
+            _runtime_backend_distribution((dependency,))
 
     def test_runtime_host_current_uses_cache_tag_when_soabi_is_missing(self):
         runtime_sys = SimpleNamespace(
@@ -591,7 +617,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         )
         for python_tag in ("cp312", "cp313"):
             for platform_tag in target_platforms:
-                for distribution in ("numpy", "onnxruntime_genai", "protobuf"):
+                for distribution in ("numpy", "llama_cpp_python", "protobuf"):
                     asset = (
                         f"{distribution}-1.0.0-{python_tag}-{python_tag}-"
                         f"{platform_tag}.whl"
@@ -828,10 +854,10 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             (release.directory / "dependencies").glob("*/site-packages")
         )
         self.assertTrue(
-            (dependency_root / "onnxruntime_genai" / "__init__.py").is_file()
+            (dependency_root / "llama_cpp" / "__init__.py").is_file()
         )
         self.assertIn(str(dependency_root.resolve()), sys.path)
-        runtime_dependency = importlib.import_module("onnxruntime_genai")
+        runtime_dependency = importlib.import_module("llama_cpp")
         self.assertTrue(
             Path(runtime_dependency.__file__)
             .resolve()
@@ -846,7 +872,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(str(dependency_root.resolve()), sys.path)
         self.assertNotIn(str((release.directory / "package").resolve()), sys.path)
         self.assertNotIn("lumi", sys.modules)
-        self.assertNotIn("onnxruntime_genai", sys.modules)
+        self.assertNotIn("llama_cpp", sys.modules)
         self.assertTrue(release.directory.is_dir())
 
     async def test_release_activation_does_not_require_directory_rename(self):
@@ -917,7 +943,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             directories = await manager.install_model_dependencies()
 
         installer_root = release.directory / "installer-dependencies"
-        self.assertEqual(len(directories), 4)
+        self.assertEqual(len(directories), 1)
         self.assertEqual(
             {path.name for path in (installer_root / "wheelhouse").iterdir()},
             installer_assets,
@@ -1113,7 +1139,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
     ):
         github = FakeGitHub(
             with_installer_dependencies=True,
-            installer_torch_platform="linux_x86_64",
+            installer_hub_platform="linux_x86_64",
         )
         manager = self._manager(github)
         await manager.enable(TAG)
@@ -1477,8 +1503,8 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             def close(self):
                 pass
 
-        runtime_module.OrtGenAIChatRuntime = Runtime
-        runtime_module.OrtGenAIConfig = type("OrtGenAIConfig", (), {})
+        runtime_module.LlamaCppChatRuntime = Runtime
+        runtime_module.LlamaCppConfig = type("LlamaCppConfig", (), {})
         runtime_module.VerifiedModelArtifact = type("VerifiedModelArtifact", (), {})
         modules = ImportedLumiModules(package_module, runtime_module, service_factory)
         manager = self._manager(
@@ -1531,7 +1557,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         native_module = ModuleType("test_managed_native_extension")
         suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
         native_module.__file__ = str(
-            dependency_root / "onnxruntime_genai" / f"onnxruntime_genai{suffix}"
+            dependency_root / "llama_cpp" / f"llama_cpp{suffix}"
         )
         sys.modules[native_module.__name__] = native_module
         self.addCleanup(sys.modules.pop, native_module.__name__, None)

@@ -9,7 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from app.lumi_host import LumiHost, LumiHostError, _create_runtime_adapter
+from app.lumi_host import (
+    LumiHost,
+    LumiHostError,
+    _create_agent_limits,
+    _create_runtime_adapter,
+)
 from app.lumi_release import LumiReleaseCompatibilityError
 
 
@@ -75,8 +80,6 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
         module = SimpleNamespace(
             LlamaCppConfig=Config,
             LlamaCppChatRuntime=Runtime,
-            OrtGenAIConfig=Config,
-            OrtGenAIChatRuntime=Runtime,
         )
         artifacts = {"qwen3.5:2b": object()}
         limits = {
@@ -99,41 +102,14 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    def test_runtime_adapter_keeps_legacy_onnx_releases_working(self):
-        class Config:
-            def __init__(self, **values):
-                self.values = values
-
-        class Runtime:
-            def __init__(self, configuration):
-                self.configuration = configuration
-
-        runtime = _create_runtime_adapter(
-            SimpleNamespace(OrtGenAIConfig=Config, OrtGenAIChatRuntime=Runtime),
-            {},
-            {
-                "idleUnloadSeconds": 300,
-                "maxContextTokens": 8192,
-                "maxOutputTokens": 2048,
-            },
-            "onnxruntime-genai",
-        )
-
-        self.assertIsInstance(runtime, Runtime)
-        self.assertEqual(runtime.configuration.values["model_artifacts"], {})
-
     def test_runtime_adapter_rejects_releases_without_a_local_backend(self):
         with self.assertRaisesRegex(LumiHostError, "local runtime"):
             _create_runtime_adapter(SimpleNamespace(), {}, {}, "onnxruntime-genai")
 
-    def test_runtime_adapter_follows_release_backend_when_both_are_exported(self):
+    def test_runtime_adapter_uses_only_llama_cpp_backend(self):
         class LlamaConfig:
             def __init__(self, **_values):
                 self.backend = "llama-cpp-python"
-
-        class OrtConfig:
-            def __init__(self, **_values):
-                self.backend = "onnxruntime-genai"
 
         class Runtime:
             def __init__(self, configuration):
@@ -142,8 +118,6 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
         module = SimpleNamespace(
             LlamaCppConfig=LlamaConfig,
             LlamaCppChatRuntime=Runtime,
-            OrtGenAIConfig=OrtConfig,
-            OrtGenAIChatRuntime=Runtime,
         )
         runtime = _create_runtime_adapter(
             module,
@@ -153,10 +127,115 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
                 "maxContextTokens": 8192,
                 "maxOutputTokens": 2048,
             },
-            "onnxruntime-genai",
+            "llama-cpp-python",
         )
 
-        self.assertEqual(runtime.configuration.backend, "onnxruntime-genai")
+        self.assertEqual(runtime.configuration.backend, "llama-cpp-python")
+
+    def test_agent_limits_apply_saved_context_and_output_values(self):
+        class AgentLimits:
+            def __init__(self, **values):
+                self.values = values
+
+        result = _create_agent_limits(
+            SimpleNamespace(AgentLimits=AgentLimits),
+            {"maxContextTokens": 16_384, "maxOutputTokens": 4_096},
+        )
+
+        self.assertEqual(
+            result.values,
+            {"context_size": 16_384, "output_tokens": 4_096},
+        )
+
+    async def test_rebuild_passes_saved_agent_limits_to_embedded_service(self):
+        class AgentLimits:
+            def __init__(self, **values):
+                self.values = values
+
+        class Runtime:
+            def __init__(self, configuration):
+                self.configuration = configuration
+
+        class VerifiedModelArtifact:
+            def __init__(self, *values):
+                self.values = values
+
+        service = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+        create_service = Mock(return_value=service)
+        loaded = SimpleNamespace(
+            runtime_module=SimpleNamespace(
+                LlamaCppConfig=lambda **values: SimpleNamespace(values=values),
+                LlamaCppChatRuntime=Runtime,
+                VerifiedModelArtifact=VerifiedModelArtifact,
+            ),
+            manifest=SimpleNamespace(
+                runtime_dependencies=(
+                    SimpleNamespace(distribution="llama-cpp-python"),
+                )
+            ),
+            package_module=SimpleNamespace(),
+            create_embedded_service=create_service,
+        )
+        model_option = {
+            "id": "qwen3.5:2b",
+            "label": "Qwen3.5 2B",
+            "supportsThinking": True,
+        }
+        model_module = SimpleNamespace(
+            QwenModelOption=lambda **values: SimpleNamespace(**values),
+            ModelCatalog=lambda *values: values,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+            host._loaded_release = loaded
+            host._settings["enabled"] = True
+            host._settings["models"] = {
+                "qwen3.5:2b": {
+                    "directory": str(Path(directory) / "model"),
+                    "manifestSha256": "0" * 64,
+                    "enabled": True,
+                }
+            }
+            host._settings["defaultModel"] = "qwen3.5:2b"
+            host._settings["limits"].update(
+                {"maxContextTokens": 16_384, "maxOutputTokens": 4_096}
+            )
+            host._model_catalog = Mock(return_value=[model_option])
+            host._model_artifact = Mock(
+                return_value=host._settings["models"]["qwen3.5:2b"]
+            )
+            host._create_tool_registry = Mock(return_value=object())
+
+            def import_module(name):
+                if name == "lumi.model_catalog":
+                    return model_module
+                if name == "lumi.agent":
+                    return SimpleNamespace(AgentLimits=AgentLimits)
+                raise AssertionError(f"unexpected Lumi module import: {name}")
+
+            with patch(
+                "app.lumi_host.importlib.import_module",
+                side_effect=import_module,
+            ):
+                await host._rebuild_service()
+
+        agent_limits = create_service.call_args.kwargs["agent_limits"]
+        self.assertEqual(
+            agent_limits.values,
+            {"context_size": 16_384, "output_tokens": 4_096},
+        )
+        service.start.assert_awaited_once()
+
+    async def test_runtime_settings_reject_active_conversation_limit_above_service_cap(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory)
+
+            with self.assertRaisesRegex(LumiHostError, "outside its supported range"):
+                await host.update_runtime_settings(
+                    limits={"maxActiveConversations": 2_049}
+                )
 
     def test_clean_host_construction_does_not_create_a_release_manager(self):
         created = []

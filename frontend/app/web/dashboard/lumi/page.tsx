@@ -120,8 +120,8 @@ const RUNTIME_LIMIT_FIELDS: {
 		key: "maxActiveConversations",
 		label: "Active conversations",
 		minimum: 1,
-		maximum: 10000,
-		help: "Maximum saved conversation records.",
+		maximum: 2048,
+		help: "Maximum conversations with active requests at once.",
 	},
 ];
 

@@ -71,7 +71,6 @@ def _create_runtime_adapter(runtime_module, artifacts, limits, backend):
     """Build the embedded runtime adapter declared by the active release."""
     adapters = {
         "llama-cpp-python": ("LlamaCppConfig", "LlamaCppChatRuntime"),
-        "onnxruntime-genai": ("OrtGenAIConfig", "OrtGenAIChatRuntime"),
     }
     adapter = adapters.get(backend)
     if adapter is None:
@@ -92,6 +91,17 @@ def _create_runtime_adapter(runtime_module, artifacts, limits, backend):
         max_output_tokens=limits["maxOutputTokens"],
     )
     return runtime_type(configuration)
+
+
+def _create_agent_limits(agent_module, limits):
+    """Apply Orchestrator's saved context and output bounds to Lumi's agent."""
+    limits_type = getattr(agent_module, "AgentLimits", None)
+    if not callable(limits_type):
+        raise LumiHostError("The selected Lumi release does not expose agent limits.")
+    return limits_type(
+        context_size=limits["maxContextTokens"],
+        output_tokens=limits["maxOutputTokens"],
+    )
 
 
 class LumiHostError(RuntimeError):
@@ -481,7 +491,7 @@ class LumiHost:
                     "maxContextTokens": (512, 32_768),
                     "maxOutputTokens": (64, 8_192),
                     "maxConcurrentChats": (1, 8),
-                    "maxActiveConversations": (1, 10_000),
+                    "maxActiveConversations": (1, 2_048),
                 }
                 for key, value in limits.items():
                     minimum, maximum = bounds[key]
@@ -831,6 +841,8 @@ class LumiHost:
             bool(self._settings.get("defaultThinking", False)),
         )
         registry = self._create_tool_registry(loaded)
+        agent_module = importlib.import_module("lumi.agent")
+        agent_limits = _create_agent_limits(agent_module, limits)
         service = loaded.create_embedded_service(
             runtime=runtime,
             models=model_catalog,
@@ -838,6 +850,7 @@ class LumiHost:
             store_path=self.model_database_path,
             max_concurrent_chats=limits["maxConcurrentChats"],
             max_active_conversations=limits["maxActiveConversations"],
+            agent_limits=agent_limits,
         )
         await service.start()
         previous_service = self._service

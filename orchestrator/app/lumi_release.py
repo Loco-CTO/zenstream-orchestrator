@@ -701,11 +701,17 @@ class LumiReleaseManager:
         selected manifest is still checked for Orchestrator, ABI, platform,
         and runtime API compatibility by enable(tag).
         """
+        return await asyncio.to_thread(self.list_published_releases_sync, limit)
+
+    def list_published_releases_sync(
+        self, limit: int = 20
+    ) -> tuple[LumiReleaseCandidate, ...]:
+        """Synchronously list cached or published releases for a managed worker lane."""
         if type(limit) is not int or not 1 <= limit <= 100:
             raise LumiReleaseCompatibilityError(
                 "release listing limit must be from 1 to 100"
             )
-        return await asyncio.to_thread(self._list_published_releases, limit)
+        return self._list_published_releases(limit)
 
     async def enable(self, tag: str) -> LoadedLumiRelease:
         """Enable one explicitly selected, stable release tag.

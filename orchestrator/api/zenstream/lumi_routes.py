@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from app.client_auth import require_account
-from app.foreground import run_auth
+from app.foreground import run_auth, run_control
 from app.lumi_host import LumiHostError, lumi_host
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -17,6 +18,7 @@ from api.zenstream.library_routes import authenticate_admin_request
 
 router = APIRouter()
 _MAX_BODY_BYTES = 64_000
+logger = logging.getLogger("zenstream.lumi")
 lumi_host.catalog = catalog_service
 
 
@@ -259,9 +261,11 @@ async def admin_lumi_status(request: Request):
 @router.get("/api/admin/lumi/releases")
 async def admin_lumi_releases(request: Request):
     await _admin(request)
+    release_manager = lumi_host.release_manager
     try:
-        releases = await lumi_host.list_releases()
+        releases = await run_control(lumi_host.list_releases_sync, release_manager)
     except Exception as error:
+        logger.exception("Lumi published release discovery failed")
         raise HTTPException(
             503, "Published Lumi releases are temporarily unavailable."
         ) from error

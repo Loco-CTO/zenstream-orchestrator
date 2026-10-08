@@ -694,6 +694,15 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidates[0].package_sha256, github.digest_values[0])
         self.assertEqual(github.requests, [f"{LUMI_GITHUB_API}/releases?per_page=20"])
 
+    def test_sync_release_listing_returns_stable_candidates(self):
+        github = FakeGitHub()
+        manager = self._manager(github)
+
+        candidates = manager.list_published_releases_sync()
+
+        self.assertEqual([candidate.tag for candidate in candidates], [TAG])
+        self.assertEqual(github.requests, [f"{LUMI_GITHUB_API}/releases?per_page=20"])
+
     async def test_release_listing_returns_empty_when_github_has_no_releases(self):
         github = FakeGitHub()
         github.releases = []

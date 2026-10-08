@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from app.lumi_host import LumiHost, LumiHostError
+from app.lumi_host import LumiHost, LumiHostError, _create_runtime_adapter
 from app.lumi_release import LumiReleaseCompatibilityError
 
 
@@ -49,6 +49,105 @@ class FakeReleaseManager:
 
 
 class LumiHostTests(unittest.IsolatedAsyncioTestCase):
+    def test_runtime_adapter_prefers_llama_cpp_and_preserves_settings(self):
+        class Config:
+            def __init__(self, **values):
+                self.values = values
+
+        class Runtime:
+            def __init__(self, configuration):
+                self.configuration = configuration
+
+        module = SimpleNamespace(
+            LlamaCppConfig=Config,
+            LlamaCppChatRuntime=Runtime,
+            OrtGenAIConfig=Config,
+            OrtGenAIChatRuntime=Runtime,
+        )
+        artifacts = {"qwen3.5:2b": object()}
+        limits = {
+            "idleUnloadSeconds": 300,
+            "maxContextTokens": 8192,
+            "maxOutputTokens": 2048,
+        }
+
+        runtime = _create_runtime_adapter(
+            module, artifacts, limits, "llama-cpp-python"
+        )
+
+        self.assertIsInstance(runtime, Runtime)
+        self.assertIsInstance(runtime.configuration, Config)
+        self.assertEqual(
+            runtime.configuration.values,
+            {
+                "model_artifacts": artifacts,
+                "idle_unload_seconds": 300,
+                "max_context_tokens": 8192,
+                "max_output_tokens": 2048,
+            },
+        )
+
+    def test_runtime_adapter_keeps_legacy_onnx_releases_working(self):
+        class Config:
+            def __init__(self, **values):
+                self.values = values
+
+        class Runtime:
+            def __init__(self, configuration):
+                self.configuration = configuration
+
+        runtime = _create_runtime_adapter(
+            SimpleNamespace(OrtGenAIConfig=Config, OrtGenAIChatRuntime=Runtime),
+            {},
+            {
+                "idleUnloadSeconds": 300,
+                "maxContextTokens": 8192,
+                "maxOutputTokens": 2048,
+            },
+            "onnxruntime-genai",
+        )
+
+        self.assertIsInstance(runtime, Runtime)
+        self.assertEqual(runtime.configuration.values["model_artifacts"], {})
+
+    def test_runtime_adapter_rejects_releases_without_a_local_backend(self):
+        with self.assertRaisesRegex(LumiHostError, "local runtime"):
+            _create_runtime_adapter(
+                SimpleNamespace(), {}, {}, "onnxruntime-genai"
+            )
+
+    def test_runtime_adapter_follows_release_backend_when_both_are_exported(self):
+        class LlamaConfig:
+            def __init__(self, **_values):
+                self.backend = "llama-cpp-python"
+
+        class OrtConfig:
+            def __init__(self, **_values):
+                self.backend = "onnxruntime-genai"
+
+        class Runtime:
+            def __init__(self, configuration):
+                self.configuration = configuration
+
+        module = SimpleNamespace(
+            LlamaCppConfig=LlamaConfig,
+            LlamaCppChatRuntime=Runtime,
+            OrtGenAIConfig=OrtConfig,
+            OrtGenAIChatRuntime=Runtime,
+        )
+        runtime = _create_runtime_adapter(
+            module,
+            {},
+            {
+                "idleUnloadSeconds": 300,
+                "maxContextTokens": 8192,
+                "maxOutputTokens": 2048,
+            },
+            "onnxruntime-genai",
+        )
+
+        self.assertEqual(runtime.configuration.backend, "onnxruntime-genai")
+
     def test_clean_host_construction_does_not_create_a_release_manager(self):
         created = []
 

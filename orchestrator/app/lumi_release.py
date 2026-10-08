@@ -103,9 +103,7 @@ _DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0)
 _RUNTIME_BACKEND_INSTALLER_REQUIREMENTS = {
     "llama-cpp-python": frozenset({"huggingface-hub"}),
 }
-_RECOGNIZED_RUNTIME_BACKENDS = frozenset(
-    {"llama-cpp-python", "onnxruntime-genai"}
-)
+_RECOGNIZED_RUNTIME_BACKENDS = frozenset({"llama-cpp-python", "onnxruntime-genai"})
 
 _TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

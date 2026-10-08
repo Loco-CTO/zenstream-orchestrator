@@ -169,9 +169,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
                 VerifiedModelArtifact=VerifiedModelArtifact,
             ),
             manifest=SimpleNamespace(
-                runtime_dependencies=(
-                    SimpleNamespace(distribution="llama-cpp-python"),
-                )
+                runtime_dependencies=(SimpleNamespace(distribution="llama-cpp-python"),)
             ),
             package_module=SimpleNamespace(),
             create_embedded_service=create_service,

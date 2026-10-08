@@ -853,9 +853,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         dependency_root = next(
             (release.directory / "dependencies").glob("*/site-packages")
         )
-        self.assertTrue(
-            (dependency_root / "llama_cpp" / "__init__.py").is_file()
-        )
+        self.assertTrue((dependency_root / "llama_cpp" / "__init__.py").is_file())
         self.assertIn(str(dependency_root.resolve()), sys.path)
         runtime_dependency = importlib.import_module("llama_cpp")
         self.assertTrue(

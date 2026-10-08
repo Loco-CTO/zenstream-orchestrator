@@ -28,8 +28,8 @@ from app.lumi_release import (
     RuntimeDependency,
     RuntimeHost,
     _extract_wheel,
-    _InstallTransaction,
     _import_managed_lumi,
+    _InstallTransaction,
     _matching_dependencies,
     _parse_runtime_dependencies,
     _replace_managed_directory,
@@ -465,9 +465,9 @@ class ManagedReleaseFilesystemTest(unittest.TestCase):
                 "app.lumi_release._DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS",
                 (0.0,),
             ),
+            self.assertRaises(PermissionError),
         ):
-            with self.assertRaises(PermissionError):
-                _replace_managed_directory(source, destination)
+            _replace_managed_directory(source, destination)
 
         self.assertEqual(replace_mock.call_count, 2)
         sleep_mock.assert_called_once_with(0.0)
@@ -804,10 +804,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             release = await manager.enable(TAG)
 
         self.assertTrue(
-            all(
-                not Path(call.args[0]).is_dir()
-                for call in replace_mock.call_args_list
-            )
+            all(not Path(call.args[0]).is_dir() for call in replace_mock.call_args_list)
         )
         self.assertTrue(release.directory.is_dir())
         self.assertTrue(manager.has_installed_release(TAG))

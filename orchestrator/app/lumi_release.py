@@ -299,7 +299,6 @@ class _PreparedRelease:
 class _InstallTransaction:
     release_directory: Path
     previous_directory: Path | None
-    had_previous: bool
 
 
 @dataclass(frozen=True)
@@ -1368,27 +1367,30 @@ class LumiReleaseManager:
         ).hexdigest()
         release_root = _managed_release_root(self._managed_data_path)
         final_directory = release_root / f"{prepared.tag}-{release_digest[:16]}"
-        staging = Path(
-            tempfile.mkdtemp(prefix=f".staging-{prepared.tag}-", dir=release_root)
-        )
-        previous: Path | None = None
-        had_previous = final_directory.exists()
         try:
-            (staging / LUMI_RELEASE_ASSET_NAME).write_bytes(prepared.package_archive)
-            package_root = staging / "package"
+            # Build in the versioned destination and publish the marker last.
+            # Windows can deny activation of a newly built directory with WinError 5.
+            # Until the marker exists, release discovery ignores this folder.
+            if final_directory.exists() or final_directory.is_symlink():
+                _remove_managed_path(final_directory)
+            final_directory.mkdir()
+            (final_directory / LUMI_RELEASE_ASSET_NAME).write_bytes(
+                prepared.package_archive
+            )
+            package_root = final_directory / "package"
             package_root.mkdir()
             _extract_package_archive(
                 prepared.package_archive,
                 package_root,
                 prepared.manifest,
             )
-            wheelhouse = staging / "wheelhouse"
+            wheelhouse = final_directory / "wheelhouse"
             wheelhouse.mkdir()
             for dependency, wheel_bytes in prepared.wheels:
                 wheel_target = wheelhouse / dependency.asset
                 wheel_target.write_bytes(wheel_bytes)
                 dependency_root = (
-                    staging
+                    final_directory
                     / "dependencies"
                     / f"{_normalize_distribution(dependency.distribution)}-{dependency.version}"
                     / "site-packages"
@@ -1407,29 +1409,24 @@ class LumiReleaseManager:
                     for dependency, wheel_bytes in prepared.wheels
                 ],
             }
-            (staging / LUMI_RELEASE_INSTALL_MARKER_NAME).write_text(
-                json.dumps(install_marker, sort_keys=True, separators=(",", ":"))
-                + "\n",
-                encoding="utf-8",
+            marker_path = final_directory / LUMI_RELEASE_INSTALL_MARKER_NAME
+            temporary_marker_path = (
+                final_directory / f".{LUMI_RELEASE_INSTALL_MARKER_NAME}.tmp"
             )
-            if final_directory.exists():
-                previous = (
-                    release_root / f".rollback-{final_directory.name}-{os.getpid()}"
+            with temporary_marker_path.open("xb") as stream:
+                stream.write(
+                    json.dumps(
+                        install_marker, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                    + b"\n"
                 )
-                if previous.exists():
-                    _remove_managed_path(previous)
-                _replace_managed_directory(final_directory, previous)
-            try:
-                _replace_managed_directory(staging, final_directory)
-            except Exception:
-                if previous is not None and previous.exists():
-                    _replace_managed_directory(previous, final_directory)
-                    previous = None
-                raise
-            return _InstallTransaction(final_directory, previous, had_previous)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_marker_path, marker_path)
+            return _InstallTransaction(final_directory, None)
         except Exception:
-            if staging.exists():
-                _remove_managed_path(staging, ignore_errors=True)
+            if final_directory.exists() or final_directory.is_symlink():
+                _remove_managed_path(final_directory, ignore_errors=True)
             raise
 
     @staticmethod

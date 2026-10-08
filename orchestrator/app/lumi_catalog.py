@@ -37,7 +37,7 @@ class LumiCatalogAdapter:
     ) -> dict[str, Any]:
         user_id = _context_user_id(context)
         try:
-            result = await run_foreground(
+            result, history_enabled = await run_foreground(
                 self._search,
                 self._catalog,
                 user_id,
@@ -51,7 +51,9 @@ class LumiCatalogAdapter:
                 "The local catalog lookup is unavailable."
             ) from error
         raw_items = result.get("items") if isinstance(result, dict) else None
-        items = _compact_items(raw_items, max(1, min(10, limit)))
+        items = _compact_items(
+            raw_items, max(1, min(10, limit)), include_history=history_enabled
+        )
         total = result.get("total", 0) if isinstance(result, dict) else 0
         return {"items": items, "total": _count(total)}
 
@@ -64,7 +66,7 @@ class LumiCatalogAdapter:
     ) -> dict[str, Any]:
         user_id = _context_user_id(context)
         try:
-            result = await run_foreground(
+            result, history_enabled = await run_foreground(
                 self._item_detail, self._catalog, user_id, entity_id, language
             )
         except Exception as error:
@@ -74,9 +76,15 @@ class LumiCatalogAdapter:
         if not isinstance(result, dict):
             return {"item": None, "backgroundItem": None, "seasons": []}
         return {
-            "item": _compact_item(result.get("item")),
-            "backgroundItem": _compact_item(result.get("backgroundItem")),
-            "seasons": _compact_items(result.get("seasons"), 12),
+            "item": _compact_item(
+                result.get("item"), include_history=history_enabled
+            ),
+            "backgroundItem": _compact_item(
+                result.get("backgroundItem"), include_history=history_enabled
+            ),
+            "seasons": _compact_items(
+                result.get("seasons"), 12, include_history=history_enabled
+            ),
         }
 
     async def home_recommendations(self, context: Any) -> dict[str, Any]:
@@ -91,13 +99,17 @@ class LumiCatalogAdapter:
     async def favorites(self, context: Any) -> dict[str, Any]:
         user_id = _context_user_id(context)
         try:
-            result = await run_foreground(self._favorites, self._catalog, user_id)
+            result, history_enabled = await run_foreground(
+                self._favorites, self._catalog, user_id
+            )
         except Exception as error:
             raise self._tool_error(
                 "The local favorites lookup is unavailable."
             ) from error
         raw_items = result.get("items") if isinstance(result, dict) else None
-        items = _compact_items(raw_items, MAX_LUMI_FAVORITES)
+        items = _compact_items(
+            raw_items, MAX_LUMI_FAVORITES, include_history=history_enabled
+        )
         total = result.get("total", 0) if isinstance(result, dict) else 0
         return {"items": items, "total": _count(total)}
 
@@ -123,27 +135,37 @@ class LumiCatalogAdapter:
         item_type: str | None,
         limit: int,
         language: str | None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         locale = _effective_language(user_id, language)
-        return catalog.search(user_id, query, locale, 1, limit, item_type)
+        result = catalog.search(user_id, query, locale, 1, limit, item_type)
+        return result, _watch_history_enabled(user_id)
 
     def _item_detail(
         self, catalog: Catalog, user_id: str, entity_id: str, language: str | None
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
         locale = _effective_language(user_id, language)
-        return catalog.detail(user_id, entity_id, locale, None, "header", 1, 12)
+        result = catalog.detail(user_id, entity_id, locale, None, "header", 1, 12)
+        return result, _watch_history_enabled(user_id)
 
     def _history_home(self, user_id: str, method) -> list[dict[str, Any]]:
-        if not AccountPreference(user_id).watch_history().get("enabled", True):
+        if not _watch_history_enabled(user_id):
             return []
         locale = _effective_language(user_id, None)
         return method(user_id, locale)
 
-    def _favorites(self, catalog: Catalog, user_id: str) -> dict[str, Any]:
+    def _favorites(
+        self, catalog: Catalog, user_id: str
+    ) -> tuple[dict[str, Any], bool]:
         locale = _effective_language(user_id, None)
-        return catalog.favorites(
+        result = catalog.favorites(
             user_id, locale, 1, MAX_LUMI_FAVORITES, "title", "ascending"
         )
+        return result, _watch_history_enabled(user_id)
+
+
+def _watch_history_enabled(user_id: str) -> bool:
+    enabled = AccountPreference(user_id).watch_history().get("enabled", True)
+    return enabled is True
 
 
 def _context_user_id(context: Any) -> str:
@@ -173,7 +195,9 @@ def _effective_language(user_id: str, requested: str | None) -> str:
     return configured[0] if configured else "en"
 
 
-def _compact_item(value: object) -> dict[str, Any] | None:
+def _compact_item(
+    value: object, *, include_history: bool = True
+) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     item_id = value.get("id")
@@ -225,36 +249,40 @@ def _compact_item(value: object) -> dict[str, Any] | None:
     state = value.get("userState")
     if isinstance(state, dict):
         selected: dict[str, Any] = {}
-        for key in ("favorite", "played"):
-            if isinstance(state.get(key), bool):
-                selected[key] = state[key]
-        count = state.get("playCount")
-        if type(count) is int and 0 <= count <= 1_000_000_000:
-            selected["playCount"] = count
-        for key in ("positionSeconds", "durationSeconds"):
-            seconds = state.get(key)
-            if (
-                isinstance(seconds, (int, float))
-                and not isinstance(seconds, bool)
-                and math.isfinite(seconds)
-                and 0 <= seconds <= 100_000_000
-            ):
-                selected[key] = seconds
-        last_played = _bounded_text(state.get("lastPlayedAt"), 40)
-        if last_played:
-            selected["lastPlayedAt"] = last_played
+        if isinstance(state.get("favorite"), bool):
+            selected["favorite"] = state["favorite"]
+        if include_history:
+            if isinstance(state.get("played"), bool):
+                selected["played"] = state["played"]
+            count = state.get("playCount")
+            if type(count) is int and 0 <= count <= 1_000_000_000:
+                selected["playCount"] = count
+            for key in ("positionSeconds", "durationSeconds"):
+                seconds = state.get(key)
+                if (
+                    isinstance(seconds, (int, float))
+                    and not isinstance(seconds, bool)
+                    and math.isfinite(seconds)
+                    and 0 <= seconds <= 100_000_000
+                ):
+                    selected[key] = seconds
+            last_played = _bounded_text(state.get("lastPlayedAt"), 40)
+            if last_played:
+                selected["lastPlayedAt"] = last_played
         if selected:
             compact["userState"] = selected
     return compact
 
 
-def _compact_items(values: object, limit: int) -> list[dict[str, Any]]:
+def _compact_items(
+    values: object, limit: int, *, include_history: bool = True
+) -> list[dict[str, Any]]:
     if not isinstance(values, list):
         return []
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for value in values[: max(0, limit)]:
-        item = _compact_item(value)
+        item = _compact_item(value, include_history=include_history)
         if item is None:
             continue
         key = (item["type"], item["id"])

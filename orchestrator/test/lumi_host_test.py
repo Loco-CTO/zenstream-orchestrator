@@ -20,12 +20,15 @@ class FakeReleaseManager:
         self.restart_required = False
         self.installed_tags: set[str] = set()
 
-    async def list_published_releases(self, limit: int):
+    def list_published_releases_sync(self, limit: int):
         return [
             {"tag": "v1.2.3", "releasedAt": None},
             {"tag": "v1.3.0-rc.1", "releasedAt": None},
             {"tag": "main", "releasedAt": None},
         ][:limit]
+
+    async def list_published_releases(self, limit: int):
+        return self.list_published_releases_sync(limit)
 
     async def enable(self, tag: str):
         self.enable_calls.append(tag)
@@ -177,6 +180,17 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             )
 
             releases = await host.list_releases()
+
+        self.assertEqual(releases, [{"tag": "v1.2.3", "releasedAt": None}])
+
+    def test_sync_release_list_contains_only_stable_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(
+                data_directory=directory,
+                release_manager_factory=FakeReleaseManager,
+            )
+
+            releases = host.list_releases_sync(host.release_manager)
 
         self.assertEqual(releases, [{"tag": "v1.2.3", "releasedAt": None}])
 

@@ -45,6 +45,28 @@ _MODEL_INTEGRITY_ERROR = (
 )
 
 
+def _release_summaries(values: Any) -> list[dict[str, str | None]]:
+    if isinstance(values, Mapping):
+        values = values.get("releases", [])
+    releases: list[dict[str, str | None]] = []
+    if not isinstance(values, (tuple, list)):
+        return releases
+    for value in values:
+        if isinstance(value, Mapping):
+            tag = value.get("tag") or value.get("tag_name")
+            released_at = value.get("releasedAt") or value.get("released_at")
+        else:
+            tag = getattr(value, "tag", None) or getattr(value, "tag_name", None)
+            released_at = getattr(value, "released_at", None)
+        if (
+            isinstance(tag, str)
+            and _STABLE_RELEASE_TAG.fullmatch(tag)
+            and (released_at is None or isinstance(released_at, str))
+        ):
+            releases.append({"tag": tag, "releasedAt": released_at})
+    return releases
+
+
 def _create_runtime_adapter(runtime_module, artifacts, limits, backend):
     """Build the embedded runtime adapter declared by the active release."""
     adapters = {
@@ -131,25 +153,11 @@ class LumiHost:
 
     async def list_releases(self) -> list[dict[str, str | None]]:
         values = await self.release_manager.list_published_releases(limit=20)
-        if isinstance(values, Mapping):
-            values = values.get("releases", [])
-        releases: list[dict[str, str | None]] = []
-        if not isinstance(values, (tuple, list)):
-            return releases
-        for value in values:
-            if isinstance(value, Mapping):
-                tag = value.get("tag") or value.get("tag_name")
-                released_at = value.get("releasedAt") or value.get("released_at")
-            else:
-                tag = getattr(value, "tag", None) or getattr(value, "tag_name", None)
-                released_at = getattr(value, "released_at", None)
-            if (
-                isinstance(tag, str)
-                and _STABLE_RELEASE_TAG.fullmatch(tag)
-                and (released_at is None or isinstance(released_at, str))
-            ):
-                releases.append({"tag": tag, "releasedAt": released_at})
-        return releases
+        return _release_summaries(values)
+
+    def list_releases_sync(self, release_manager) -> list[dict[str, str | None]]:
+        values = release_manager.list_published_releases_sync(limit=20)
+        return _release_summaries(values)
 
     async def enable(self, tag: str) -> None:
         if not isinstance(tag, str) or not _STABLE_RELEASE_TAG.fullmatch(tag):

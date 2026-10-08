@@ -101,11 +101,9 @@ MAX_INSTALLER_WHEEL_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_INSTALLER_TOTAL_WHEEL_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 _DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0)
 _RUNTIME_BACKEND_INSTALLER_REQUIREMENTS = {
-    "onnxruntime-genai": frozenset(
-        {"huggingface-hub", "onnx-ir", "torch", "transformers"}
-    ),
     "llama-cpp-python": frozenset({"huggingface-hub"}),
 }
+_RECOGNIZED_RUNTIME_BACKENDS = frozenset({"llama-cpp-python", "onnxruntime-genai"})
 
 _TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -793,7 +791,7 @@ class LumiReleaseManager:
             return self._active
 
     async def install_model_dependencies(self) -> tuple[Path, ...]:
-        """Fetch and extract conversion wheels after an explicit model-install request.
+        """Fetch and extract model installer dependencies after an explicit request.
 
         These potentially large wheels are a separate release-manifest group. They are
         never downloaded by enable(tag), and their import directories are not added to
@@ -1470,10 +1468,11 @@ class LumiReleaseManager:
                 "the Lumi package runtime API does not match its release manifest"
             )
         backend = _runtime_backend_distribution(manifest.runtime_dependencies)
-        runtime_symbols = {
-            "onnxruntime-genai": ("OrtGenAIChatRuntime", "OrtGenAIConfig"),
-            "llama-cpp-python": ("LlamaCppChatRuntime", "LlamaCppConfig"),
-        }[backend]
+        if backend != "llama-cpp-python":
+            raise LumiReleaseCompatibilityError(
+                "Lumi releases must use the embedded llama.cpp runtime"
+            )
+        runtime_symbols = ("LlamaCppChatRuntime", "LlamaCppConfig")
         required_runtime_symbols = (*runtime_symbols, "VerifiedModelArtifact")
         if any(
             not callable(getattr(modules.runtime, name, None))
@@ -1527,13 +1526,18 @@ def _runtime_backend_distribution(
         _normalize_distribution(dependency.distribution)
         for dependency in dependencies
         if _normalize_distribution(dependency.distribution)
-        in _RUNTIME_BACKEND_INSTALLER_REQUIREMENTS
+        in _RECOGNIZED_RUNTIME_BACKENDS
     }
     if len(backends) != 1:
         raise LumiReleaseCompatibilityError(
-            "Lumi release must declare exactly one supported native runtime backend"
+            "Lumi release must declare exactly one native runtime backend"
         )
-    return next(iter(backends))
+    backend = next(iter(backends))
+    if backend != "llama-cpp-python":
+        raise LumiReleaseCompatibilityError(
+            "Lumi releases must use the embedded llama.cpp runtime"
+        )
+    return backend
 
 
 def _required_installer_distributions(backend: str) -> frozenset[str]:
@@ -2010,12 +2014,6 @@ def _parse_wheel_dependencies(
                 raise LumiReleaseCompatibilityError(
                     f"{normalized_distribution} must use a pinned host-specific binary wheel"
                 )
-            if normalized_distribution == "onnxruntime-genai" and (
-                python_tag == "py3" or abi_tag == "none"
-            ):
-                raise LumiReleaseCompatibilityError(
-                    "onnxruntime-genai must use a pinned CPython binary wheel"
-                )
         if not _ASSET_NAME_RE.fullmatch(asset):
             raise LumiReleaseError("Lumi runtime wheel asset name is invalid")
         if not re.fullmatch(r"[A-Za-z0-9_.+-]+", version):
@@ -2316,19 +2314,7 @@ def _validate_wheel_archive(
                     f"{kind} wheel METADATA does not match its pinned identity"
                 )
             normalized_distribution = _normalize_distribution(dependency.distribution)
-            if normalized_distribution == "onnxruntime-genai":
-                native_suffix = (
-                    ".pyd" if dependency.platform_tag.startswith("win_") else ".so"
-                )
-                if not any(
-                    name.startswith("onnxruntime_genai/")
-                    and name.lower().endswith(native_suffix)
-                    for name in infos
-                ):
-                    raise LumiReleaseError(
-                        "pinned onnxruntime-genai wheel has no host-native extension binary"
-                    )
-            elif normalized_distribution == "llama-cpp-python":
+            if normalized_distribution == "llama-cpp-python":
                 native_suffixes = (".pyd", ".so", ".dll", ".dylib")
                 if not any(
                     name.startswith("llama_cpp/")

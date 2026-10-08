@@ -18,28 +18,33 @@ class FakeCatalog:
     def search(self, *args):
         self.calls.append(("search", args))
         return {
-            "items": [
-                {
-                    "id": "series-1",
-                    "type": "series",
-                    "name": "Frieren",
-                    "metadata": {"title": "Frieren", "overview": "A quiet journey."},
-                    "userState": {"favorite": True},
-                }
-            ],
+            "items": [self.search_item()],
             "total": 1,
         }
 
     def detail(self, *args):
         self.calls.append(("detail", args))
-        return {"item": self.search_item(), "backgroundItem": None, "seasons": []}
-
-    def search_item(self):
         return {
-            "id": "series-1",
-            "type": "series",
+            "item": self.search_item(),
+            "backgroundItem": self.search_item("movie-1", "movie"),
+            "seasons": [self.search_item("season-1", "season")],
+        }
+
+    def search_item(self, item_id="series-1", item_type="series"):
+        return {
+            "id": item_id,
+            "type": item_type,
             "name": "Frieren",
-            "metadata": {"title": "Frieren"},
+            "metadata": {"title": "Frieren", "overview": "A quiet journey."},
+            "userState": {
+                "favorite": True,
+                "played": True,
+                "playCount": 4,
+                "positionSeconds": 123.5,
+                "durationSeconds": 240.0,
+                "playedPercentage": 51.5,
+                "lastPlayedAt": "2026-10-01T12:30:00Z",
+            },
         }
 
     def home_recommendations(self, *args):
@@ -120,6 +125,33 @@ class LumiCatalogAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items"][0]["id"], "series-1")
         self.assertEqual(result["items"][0]["title"], "Frieren")
         self.assertEqual(result["total"], 1)
+        self.assertEqual(
+            result["items"][0]["userState"],
+            {
+                "favorite": True,
+                "played": True,
+                "playCount": 4,
+                "positionSeconds": 123.5,
+                "durationSeconds": 240.0,
+                "lastPlayedAt": "2026-10-01T12:30:00Z",
+            },
+        )
+
+    async def test_search_omits_history_state_when_watch_history_is_disabled(self):
+        FakePreferences.history_enabled = False
+
+        try:
+            result = await self.adapter.search(
+                self.context,
+                query="Frieren",
+                item_type="series",
+                limit=5,
+                language=None,
+            )
+        finally:
+            FakePreferences.history_enabled = True
+
+        self.assertEqual(result["items"][0]["userState"], {"favorite": True})
 
     async def test_detail_uses_grant_checked_catalog_detail(self):
         result = await self.adapter.item_detail(
@@ -130,15 +162,48 @@ class LumiCatalogAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.catalog.calls[0][1][0], "trusted-account")
         self.assertEqual(result["item"]["id"], "series-1")
 
+    async def test_detail_omits_history_state_from_every_returned_entity_when_disabled(
+        self,
+    ):
+        FakePreferences.history_enabled = False
+
+        try:
+            result = await self.adapter.item_detail(
+                self.context, entity_id="series-1", language=None
+            )
+        finally:
+            FakePreferences.history_enabled = True
+
+        self.assertEqual(result["item"]["userState"], {"favorite": True})
+        self.assertEqual(result["backgroundItem"]["userState"], {"favorite": True})
+        self.assertEqual(result["seasons"][0]["userState"], {"favorite": True})
+
+    async def test_favorites_remain_available_without_exposing_history_state(self):
+        FakePreferences.history_enabled = False
+
+        try:
+            result = await self.adapter.favorites(self.context)
+        finally:
+            FakePreferences.history_enabled = True
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["userState"], {"favorite": True})
+
     async def test_history_rows_are_empty_when_watch_history_is_disabled(self):
         FakePreferences.history_enabled = False
 
         try:
-            result = await self.adapter.continue_watching(self.context)
+            for method in (
+                self.adapter.home_recommendations,
+                self.adapter.continue_watching,
+                self.adapter.next_up,
+            ):
+                result = await method(self.context)
+                self.assertEqual(result, {"items": []})
         finally:
             FakePreferences.history_enabled = True
 
-        self.assertEqual(result, {"items": []})
         self.assertEqual(self.catalog.calls, [])
 
     async def test_catalog_exceptions_become_a_safe_tool_error(self):

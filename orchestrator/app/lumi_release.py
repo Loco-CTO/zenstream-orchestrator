@@ -42,6 +42,7 @@ import importlib.machinery
 import inspect
 import io
 import json
+import logging
 import os
 import platform
 import re
@@ -97,6 +98,7 @@ MAX_INSTALLER_TOTAL_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 MAX_INSTALLER_WHEEL_FILE_BYTES = 512 * 1024 * 1024
 MAX_INSTALLER_WHEEL_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_INSTALLER_TOTAL_WHEEL_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
+_DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0)
 _RUNTIME_BACKEND_INSTALLER_REQUIREMENTS = {
     "onnxruntime-genai": frozenset(
         {"huggingface-hub", "onnx-ir", "torch", "transformers"}
@@ -108,6 +110,7 @@ _TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9_.+-]+\.whl$")
 _IMPORT_LOCK = threading.RLock()
+_LOGGER = logging.getLogger("zenstream.lumi")
 _DLL_DIRECTORY_HANDLES: dict[str, tuple[object, ...]] = {}
 _GITHUB_ASSET_CDN_HOSTS = frozenset(
     {"objects.githubusercontent.com", "release-assets.githubusercontent.com"}
@@ -1090,12 +1093,12 @@ class LumiReleaseManager:
             if backup.exists() or backup.is_symlink():
                 _remove_managed_path(backup)
             if target.exists():
-                os.replace(target, backup)
+                _replace_managed_directory(target, backup)
             try:
-                os.replace(staging, target)
+                _replace_managed_directory(staging, target)
             except Exception:
                 if backup.exists():
-                    os.replace(backup, target)
+                    _replace_managed_directory(backup, target)
                 raise
             if backup.exists():
                 _remove_managed_path(backup, ignore_errors=True)
@@ -1415,12 +1418,12 @@ class LumiReleaseManager:
                 )
                 if previous.exists():
                     _remove_managed_path(previous)
-                os.replace(final_directory, previous)
+                _replace_managed_directory(final_directory, previous)
             try:
-                os.replace(staging, final_directory)
+                _replace_managed_directory(staging, final_directory)
             except Exception:
                 if previous is not None and previous.exists():
-                    os.replace(previous, final_directory)
+                    _replace_managed_directory(previous, final_directory)
                     previous = None
                 raise
             return _InstallTransaction(final_directory, previous, had_previous)
@@ -1477,7 +1480,9 @@ class LumiReleaseManager:
             transaction.previous_directory is not None
             and transaction.previous_directory.exists()
         ):
-            os.replace(transaction.previous_directory, transaction.release_directory)
+            _replace_managed_directory(
+                transaction.previous_directory, transaction.release_directory
+            )
 
     @staticmethod
     def _commit_install(transaction: _InstallTransaction) -> None:
@@ -2579,6 +2584,25 @@ def _remove_managed_path(path: Path, *, ignore_errors: bool = False) -> None:
     except OSError:
         if not ignore_errors:
             raise
+
+
+def _replace_managed_directory(source: Path, destination: Path) -> None:
+    """Atomically move a staged directory, retrying brief Windows file locks."""
+
+    for attempt in range(len(_DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt >= len(_DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS):
+                raise
+            delay = _DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS[attempt]
+            _LOGGER.warning(
+                "Lumi managed directory activation was temporarily blocked; "
+                "retrying attempt=%s",
+                attempt + 1,
+            )
+            time.sleep(delay)
 
 
 def _remove_managed_release_tree(managed_data_path: Path) -> bool:

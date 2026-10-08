@@ -338,9 +338,10 @@ class LumiHost:
             model_id = option["id"]
             record = configured.get(model_id, {})
             artifact = self._model_artifact(model_id)
-            installed = artifact is not None or self._managed_model_directory(
-                model_id, record
-            ) is not None
+            installed = (
+                artifact is not None
+                or self._managed_model_directory(model_id, record) is not None
+            )
             enabled = bool(artifact is not None and record.get("enabled", False))
             download_error = self._model_errors.get(model_id)
             if installed and artifact is None and download_error is None:
@@ -736,13 +737,15 @@ class LumiHost:
             configured_record = self._settings["models"].get(model_id)
             if not isinstance(configured_record, dict):
                 return False
-            if record is None and self._managed_model_directory(
-                model_id, configured_record
-            ) is None:
+            if (
+                record is None
+                and self._managed_model_directory(model_id, configured_record) is None
+            ):
                 return False
-            if configured_record.get("enabled") or self._settings.get(
-                "defaultModel"
-            ) == model_id:
+            if (
+                configured_record.get("enabled")
+                or self._settings.get("defaultModel") == model_id
+            ):
                 raise LumiHostError(
                     "Disable the model and choose another default before removing it."
                 )
@@ -894,9 +897,7 @@ class LumiHost:
                 return None
         return record
 
-    def _managed_model_directory(
-        self, model_id: str, record: object
-    ) -> Path | None:
+    def _managed_model_directory(self, model_id: str, record: object) -> Path | None:
         """Return an existing fixed model directory that the admin can recover."""
 
         if not isinstance(record, dict) or not isinstance(record.get("directory"), str):
@@ -1234,10 +1235,7 @@ def _model_artifact_fingerprint(
         if manifest_path.is_symlink() or _is_junction(manifest_path):
             return None
         manifest_stat = manifest_path.stat(follow_symlinks=False)
-        if (
-            not stat.S_ISREG(manifest_stat.st_mode)
-            or manifest_stat.st_nlink != 1
-        ):
+        if not stat.S_ISREG(manifest_stat.st_mode) or manifest_stat.st_nlink != 1:
             return None
         manifest_bytes = manifest_path.read_bytes()
         if hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha256:

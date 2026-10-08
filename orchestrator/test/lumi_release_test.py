@@ -739,7 +739,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             return original_replace(source, destination)
 
         with (
-            patch("app.lumi_release.os.replace", side_effect=replace_with_temporary_lock),
+            patch(
+                "app.lumi_release.os.replace", side_effect=replace_with_temporary_lock
+            ),
             patch("app.lumi_release.time.sleep") as sleep,
         ):
             release = await manager.enable(TAG)

@@ -722,40 +722,31 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("onnxruntime_genai", sys.modules)
         self.assertTrue(release.directory.is_dir())
 
-    async def test_release_activation_retries_transient_directory_lock_without_redownload(
-        self,
-    ):
+    async def test_release_activation_does_not_require_directory_rename(self):
         github = FakeGitHub()
         manager = self._manager(github)
         original_replace = os.replace
         activation_attempts = 0
 
-        def replace_with_temporary_lock(source, destination):
+        def reject_directory_rename(source, destination):
             nonlocal activation_attempts
-            if Path(source).name.startswith(f".staging-{TAG}-"):
+            if Path(source).is_dir():
                 activation_attempts += 1
-                if activation_attempts == 1:
-                    raise PermissionError(5, "access denied while staging is scanned")
+                raise PermissionError(5, "directory activation is unavailable")
             return original_replace(source, destination)
 
-        with (
-            patch(
-                "app.lumi_release.os.replace", side_effect=replace_with_temporary_lock
-            ),
-            patch("app.lumi_release.time.sleep") as sleep,
-        ):
+        with patch("app.lumi_release.os.replace", side_effect=reject_directory_rename):
             release = await manager.enable(TAG)
 
-        self.assertEqual(activation_attempts, 2)
-        sleep.assert_called_once_with(0.1)
+        self.assertEqual(activation_attempts, 0)
         self.assertTrue(release.directory.is_dir())
-        asset_downloads = [
-            request
-            for request in github.requests
-            if f"/releases/download/{TAG}/" in request
-        ]
-        self.assertEqual(len(asset_downloads), 2)
-        self.assertEqual(len(set(asset_downloads)), 2)
+        self.assertTrue(manager.has_installed_release(TAG))
+        self.assertFalse(
+            any(
+                path.name.startswith(f".staging-{TAG}-")
+                for path in release.directory.parent.iterdir()
+            )
+        )
 
     async def test_disabled_release_is_persistent_and_removal_keeps_user_data(self):
         manager = self._manager(FakeGitHub())

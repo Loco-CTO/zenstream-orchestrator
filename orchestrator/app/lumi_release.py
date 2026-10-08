@@ -79,26 +79,33 @@ MAX_RELEASE_INSTALL_MARKER_BYTES = 64 * 1024
 MAX_RELEASE_LIST_CACHE_BYTES = 128 * 1024
 RELEASE_LIST_CACHE_TTL_SECONDS = 600
 RELEASE_LIST_CACHE_MAX_STALE_SECONDS = 24 * 60 * 60
-MAX_WHEEL_BYTES = 256 * 1024 * 1024
-MAX_TOTAL_DOWNLOAD_BYTES = 512 * 1024 * 1024
-MAX_ARCHIVE_ENTRIES = 5000
+# A CUDA runtime wheel is already about 300 MiB compressed. Keep generous but
+# finite headroom for combined CUDA/Vulkan builds while streaming to managed disk.
+MAX_WHEEL_BYTES = 1024 * 1024 * 1024
+MAX_TOTAL_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+# Native runtime wheels may contain tens of thousands of small files. Bound
+# central-directory memory while leaving room for CUDA/Vulkan release builds.
+MAX_ARCHIVE_ENTRIES = 50_000
 MAX_ARCHIVE_COMPRESSION_RATIO = 200
+MAX_ARCHIVE_COPY_CHUNK_BYTES = 1024 * 1024
 MAX_PACKAGE_FILES = 1000
 MAX_PACKAGE_FILE_BYTES = 16 * 1024 * 1024
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
-MAX_WHEEL_FILE_BYTES = 128 * 1024 * 1024
-MAX_WHEEL_EXPANDED_BYTES = 512 * 1024 * 1024
-MAX_TOTAL_WHEEL_EXPANDED_BYTES = 1024 * 1024 * 1024
+MAX_WHEEL_FILE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_WHEEL_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
+MAX_TOTAL_WHEEL_EXPANDED_BYTES = 6 * 1024 * 1024 * 1024
+MAX_TOTAL_WHEEL_DISK_BYTES = 8 * 1024 * 1024 * 1024
 # A release manifest contains wheels for every supported host. Keep this separate
 # from MAX_WHEELS, which limits the subset installed for one host.
 MAX_RUNTIME_DEPENDENCIES = 128
 MAX_WHEELS = 16
 MAX_INSTALLER_WHEELS = 128
-MAX_INSTALLER_WHEEL_BYTES = 512 * 1024 * 1024
-MAX_INSTALLER_TOTAL_DOWNLOAD_BYTES = 1024 * 1024 * 1024
-MAX_INSTALLER_WHEEL_FILE_BYTES = 512 * 1024 * 1024
-MAX_INSTALLER_WHEEL_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
-MAX_INSTALLER_TOTAL_WHEEL_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
+MAX_INSTALLER_WHEEL_BYTES = 1024 * 1024 * 1024
+MAX_INSTALLER_TOTAL_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024
+MAX_INSTALLER_WHEEL_FILE_BYTES = 2 * 1024 * 1024 * 1024
+MAX_INSTALLER_WHEEL_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
+MAX_INSTALLER_TOTAL_WHEEL_EXPANDED_BYTES = 6 * 1024 * 1024 * 1024
+MAX_INSTALLER_TOTAL_WHEEL_DISK_BYTES = 8 * 1024 * 1024 * 1024
 _DIRECTORY_REPLACE_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0)
 _RUNTIME_BACKEND_INSTALLER_REQUIREMENTS = {
     "llama-cpp-python": frozenset({"huggingface-hub"}),
@@ -139,6 +146,10 @@ class LumiReleaseCompatibilityError(LumiReleaseError):
     """The release does not support this Orchestrator or host runtime."""
 
 
+class LumiReleaseCancelled(LumiReleaseError):
+    """A caller cooperatively cancelled a Lumi package operation."""
+
+
 @dataclass(frozen=True)
 class HttpResponse:
     """A bounded HTTP response returned by the injected fetcher."""
@@ -146,6 +157,15 @@ class HttpResponse:
     body: bytes
     final_url: str
     headers: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class HttpAssetResponse:
+    """Metadata for an asset streamed directly into a bounded staging file."""
+
+    size: int
+    sha256: str
+    final_url: str
 
 
 @dataclass(frozen=True)
@@ -166,6 +186,9 @@ class ImportedLumiModules:
 
 
 HttpFetcher = Callable[[str, Mapping[str, str], int], HttpResponse]
+HttpAssetStreamer = Callable[
+    [str, Mapping[str, str], int, Path, threading.Event | None], HttpAssetResponse
+]
 RuntimeImporter = Callable[[Path, Sequence[Path]], ImportedLumiModules]
 RuntimeUnloader = Callable[[Path, Sequence[Path]], None]
 
@@ -291,7 +314,8 @@ class _PreparedRelease:
     asset_digest: str
     manifest: LumiReleaseManifest
     package_archive: bytes
-    wheels: tuple[tuple[RuntimeDependency, bytes], ...]
+    staging_directory: Path
+    wheels: tuple[tuple[RuntimeDependency, Path], ...]
 
 
 @dataclass(frozen=True)
@@ -416,6 +440,7 @@ class LumiReleaseManager:
         *,
         runtime_host: RuntimeHost | None = None,
         fetcher: HttpFetcher | None = None,
+        asset_streamer: HttpAssetStreamer | None = None,
         importer: RuntimeImporter | None = None,
         unloader: RuntimeUnloader | None = None,
     ) -> None:
@@ -426,6 +451,9 @@ class LumiReleaseManager:
         )
         self._runtime_host = runtime_host
         self._fetcher = fetcher or _fetch_github_bytes
+        self._asset_streamer = asset_streamer or (
+            _stream_github_asset if fetcher is None else None
+        )
         self._importer = importer or _import_managed_lumi
         self._unloader = unloader or _unload_managed_lumi
         self._active: LoadedLumiRelease | None = None
@@ -743,7 +771,15 @@ class LumiReleaseManager:
             transaction = None
             if installed is None:
                 prepared = await asyncio.to_thread(self._prepare_release, tag)
-                transaction = await asyncio.to_thread(self._install_prepared, prepared)
+                try:
+                    transaction = await asyncio.to_thread(
+                        self._install_prepared, prepared
+                    )
+                finally:
+                    await asyncio.to_thread(
+                        _remove_download_staging,
+                        prepared.staging_directory,
+                    )
                 release_directory = transaction.release_directory
                 manifest = prepared.manifest
             else:
@@ -790,7 +826,9 @@ class LumiReleaseManager:
             )
             return self._active
 
-    async def install_model_dependencies(self) -> tuple[Path, ...]:
+    async def install_model_dependencies(
+        self, cancel_event: threading.Event | None = None
+    ) -> tuple[Path, ...]:
         """Fetch and extract model installer dependencies after an explicit request.
 
         These potentially large wheels are a separate release-manifest group. They are
@@ -799,6 +837,7 @@ class LumiReleaseManager:
         """
 
         async with self._lock:
+            _raise_if_cancelled(cancel_event)
             active = self._active
             if active is None or self._closing_release is not None:
                 raise LumiReleaseError("enable Lumi before installing a model")
@@ -824,7 +863,9 @@ class LumiReleaseManager:
                 _required_installer_distributions(
                     _runtime_backend_distribution(active.manifest.runtime_dependencies)
                 ),
+                cancel_event,
             )
+            _raise_if_cancelled(cancel_event)
             if not directories:
                 raise LumiReleaseCompatibilityError(
                     "the selected Lumi release has no installer wheels for this host"
@@ -942,9 +983,8 @@ class LumiReleaseManager:
                 "the release declares too many runtime wheels"
             )
 
-        wheel_payloads: list[tuple[RuntimeDependency, bytes]] = []
+        wheel_assets: list[tuple[RuntimeDependency, _Asset]] = []
         downloaded_bytes = len(package_bytes)
-        expanded_wheel_bytes = 0
         for dependency in matching_dependencies:
             asset = assets.get(dependency.asset)
             if asset is None:
@@ -955,23 +995,54 @@ class LumiReleaseManager:
                 raise LumiReleaseError(
                     f"release metadata digest does not match the manifest for {dependency.asset}"
                 )
+            if asset.size > MAX_WHEEL_BYTES:
+                raise LumiReleaseError(
+                    f"release asset {dependency.asset} exceeds the size limit"
+                )
             if downloaded_bytes + asset.size > MAX_TOTAL_DOWNLOAD_BYTES:
                 raise LumiReleaseError(
                     "the release exceeds the total download size limit"
                 )
-            wheel_bytes = self._download_asset(tag, asset, MAX_WHEEL_BYTES)
-            downloaded_bytes += len(wheel_bytes)
-            expanded_wheel_bytes += _validate_wheel_archive(wheel_bytes, dependency)
-            if expanded_wheel_bytes > MAX_TOTAL_WHEEL_EXPANDED_BYTES:
-                raise LumiReleaseError(
-                    "runtime wheels exceed the total expanded size limit"
+            downloaded_bytes += asset.size
+            wheel_assets.append((dependency, asset))
+
+        staging_directory = Path(
+            tempfile.mkdtemp(
+                prefix=".lumi-wheel-staging-",
+                dir=_managed_release_root(self._managed_data_path),
+            )
+        )
+        wheel_payloads: list[tuple[RuntimeDependency, Path]] = []
+        expanded_wheel_bytes = 0
+        try:
+            for dependency, asset in wheel_assets:
+                wheel_path = staging_directory / dependency.asset
+                self._download_asset_to_path(tag, asset, MAX_WHEEL_BYTES, wheel_path)
+                expanded_wheel_bytes += _validate_wheel_archive(
+                    wheel_path, dependency
                 )
-            wheel_payloads.append((dependency, wheel_bytes))
+                if expanded_wheel_bytes > MAX_TOTAL_WHEEL_EXPANDED_BYTES:
+                    raise LumiReleaseError(
+                        "runtime wheels exceed the total expanded size limit"
+                    )
+                downloaded_wheel_bytes = downloaded_bytes - len(package_bytes)
+                if (
+                    downloaded_wheel_bytes + expanded_wheel_bytes
+                    > MAX_TOTAL_WHEEL_DISK_BYTES
+                ):
+                    raise LumiReleaseError(
+                        "runtime wheels exceed the managed disk usage limit"
+                    )
+                wheel_payloads.append((dependency, wheel_path))
+        except Exception:
+            _remove_download_staging(staging_directory)
+            raise
         return _PreparedRelease(
             tag,
             package_asset.sha256 or "",
             manifest,
             package_bytes,
+            staging_directory,
             tuple(wheel_payloads),
         )
 
@@ -981,7 +1052,9 @@ class LumiReleaseManager:
         release_directory: Path,
         dependencies: Sequence[RuntimeDependency],
         required_distributions: frozenset[str],
+        cancel_event: threading.Event | None = None,
     ) -> tuple[Path, ...]:
+        _raise_if_cancelled(cancel_event)
         runtime_host = self._host()
         matching = _matching_installer_dependencies(
             dependencies, runtime_host, required_distributions
@@ -1000,6 +1073,7 @@ class LumiReleaseManager:
                 "managed Lumi installer dependencies use an unsafe path"
             )
         if _installer_dependencies_are_valid(target, tag, matching):
+            _raise_if_cancelled(cancel_event)
             return _installer_dependency_directories(release_directory)
 
         metadata_url = (
@@ -1014,6 +1088,7 @@ class LumiReleaseManager:
             },
             MAX_RELEASE_METADATA_BYTES,
         )
+        _raise_if_cancelled(cancel_event)
         if _canonical_api_url(response.final_url) != _canonical_api_url(metadata_url):
             raise LumiReleaseError(
                 "GitHub release metadata came from an unexpected URL"
@@ -1061,21 +1136,30 @@ class LumiReleaseManager:
         expanded_bytes = 0
         try:
             for dependency, asset in selected_assets:
-                wheel_bytes = self._download_asset(
+                _raise_if_cancelled(cancel_event)
+                wheel_path = wheelhouse / dependency.asset
+                self._download_asset_to_path(
                     tag,
                     asset,
                     MAX_INSTALLER_WHEEL_BYTES,
+                    wheel_path,
+                    cancel_event=cancel_event,
                 )
-                expanded_bytes += _validate_wheel_archive(
-                    wheel_bytes,
+                wheel_expanded_bytes = _validate_wheel_archive(
+                    wheel_path,
                     dependency,
                     installer=True,
+                    cancel_event=cancel_event,
                 )
+                expanded_bytes += wheel_expanded_bytes
                 if expanded_bytes > MAX_INSTALLER_TOTAL_WHEEL_EXPANDED_BYTES:
                     raise LumiReleaseError(
                         "model installer wheels exceed the total expanded size limit"
                     )
-                (wheelhouse / dependency.asset).write_bytes(wheel_bytes)
+                if total_download_bytes + expanded_bytes > MAX_INSTALLER_TOTAL_WHEEL_DISK_BYTES:
+                    raise LumiReleaseError(
+                        "model installer wheels exceed the managed disk usage limit"
+                    )
                 destination = (
                     dependency_root
                     / f"{_normalize_distribution(dependency.distribution)}-{dependency.version}"
@@ -1083,11 +1167,13 @@ class LumiReleaseManager:
                 )
                 destination.mkdir(parents=True, exist_ok=True)
                 _extract_wheel(
-                    wheel_bytes,
+                    wheel_path,
                     destination,
                     dependency,
                     installer=True,
+                    cancel_event=cancel_event,
                 )
+            _raise_if_cancelled(cancel_event)
             marker = _installer_dependency_manifest(tag, matching)
             (staging / "lumi-installer-wheels.json").write_text(
                 json.dumps(marker, sort_keys=True, separators=(",", ":")),
@@ -1374,12 +1460,100 @@ class LumiReleaseManager:
             )
         return response.body
 
+    def _download_asset_to_path(
+        self,
+        tag: str,
+        asset: _Asset,
+        max_bytes: int,
+        destination: Path,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> HttpAssetResponse:
+        """Download and verify one wheel without holding the complete body in RAM."""
+        _raise_if_cancelled(cancel_event)
+        expected_url = (
+            f"https://github.com/{LUMI_GITHUB_REPOSITORY}/releases/download/"
+            f"{urllib.parse.quote(tag, safe='')}/{urllib.parse.quote(asset.name, safe='')}"
+        )
+        if _canonical_https_url(asset.download_url) != expected_url:
+            raise LumiReleaseError(f"release asset {asset.name} has an unexpected URL")
+        if asset.sha256 is None:
+            raise LumiReleaseError(f"release asset {asset.name} has no SHA-256 digest")
+        if asset.size <= 0 or asset.size > max_bytes:
+            raise LumiReleaseError(f"release asset {asset.name} exceeds the size limit")
+
+        try:
+            if self._asset_streamer is not None:
+                stream_arguments = (
+                    expected_url,
+                    {
+                        "Accept": "application/octet-stream",
+                        "User-Agent": "ZenStream-Orchestrator",
+                    },
+                    max_bytes,
+                    destination,
+                )
+                if cancel_event is None:
+                    response = self._asset_streamer(*stream_arguments)
+                else:
+                    response = self._asset_streamer(
+                        *stream_arguments, cancel_event
+                    )
+                _raise_if_cancelled(cancel_event)
+                _validate_download_url(response.final_url)
+                if response.size != asset.size:
+                    raise LumiReleaseError(
+                        f"release asset {asset.name} has an unexpected size"
+                    )
+                if response.sha256 != asset.sha256:
+                    raise LumiReleaseError(
+                        f"release asset {asset.name} failed its SHA-256 check"
+                    )
+            else:
+                # Injected fetchers are retained for unit tests and callers with a
+                # bounded in-memory transport. Production uses the streaming path.
+                response = self._fetcher(
+                    expected_url,
+                    {
+                        "Accept": "application/octet-stream",
+                        "User-Agent": "ZenStream-Orchestrator",
+                    },
+                    max_bytes,
+                )
+                _validate_download_url(response.final_url)
+                if len(response.body) != asset.size:
+                    raise LumiReleaseError(
+                        f"release asset {asset.name} has an unexpected size"
+                    )
+                digest = hashlib.sha256(response.body).hexdigest()
+                if digest != asset.sha256:
+                    raise LumiReleaseError(
+                        f"release asset {asset.name} failed its SHA-256 check"
+                    )
+                with destination.open("xb") as stream:
+                    view = memoryview(response.body)
+                    for offset in range(0, len(view), MAX_ARCHIVE_COPY_CHUNK_BYTES):
+                        _raise_if_cancelled(cancel_event)
+                        stream.write(view[offset : offset + MAX_ARCHIVE_COPY_CHUNK_BYTES])
+                response = HttpAssetResponse(len(response.body), digest, response.final_url)
+            _raise_if_cancelled(cancel_event)
+            return response
+        except Exception:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
     def _install_prepared(self, prepared: _PreparedRelease) -> _InstallTransaction:
         digest_parts = [prepared.asset_digest]
-        digest_parts.extend(
-            hashlib.sha256(wheel_bytes).hexdigest()
-            for _, wheel_bytes in prepared.wheels
-        )
+        for dependency, wheel_path in prepared.wheels:
+            actual_digest = _sha256_file(wheel_path)
+            if actual_digest != dependency.sha256:
+                raise LumiReleaseError(
+                    f"release asset {dependency.asset} changed during staging"
+                )
+            digest_parts.append(actual_digest)
         release_digest = hashlib.sha256(
             "".join(digest_parts).encode("ascii")
         ).hexdigest()
@@ -1404,9 +1578,9 @@ class LumiReleaseManager:
             )
             wheelhouse = final_directory / "wheelhouse"
             wheelhouse.mkdir()
-            for dependency, wheel_bytes in prepared.wheels:
+            for dependency, staged_wheel_path in prepared.wheels:
                 wheel_target = wheelhouse / dependency.asset
-                wheel_target.write_bytes(wheel_bytes)
+                os.replace(staged_wheel_path, wheel_target)
                 dependency_root = (
                     final_directory
                     / "dependencies"
@@ -1414,7 +1588,7 @@ class LumiReleaseManager:
                     / "site-packages"
                 )
                 dependency_root.mkdir(parents=True, exist_ok=True)
-                _extract_wheel(wheel_bytes, dependency_root, dependency)
+                _extract_wheel(wheel_target, dependency_root, dependency)
             install_marker = {
                 "schemaVersion": 1,
                 "tag": prepared.tag,
@@ -1422,9 +1596,9 @@ class LumiReleaseManager:
                 "runtimeWheels": [
                     {
                         "asset": dependency.asset,
-                        "sha256": hashlib.sha256(wheel_bytes).hexdigest(),
+                        "sha256": dependency.sha256,
                     }
-                    for dependency, wheel_bytes in prepared.wheels
+                    for dependency, _ in prepared.wheels
                 ],
             }
             marker_path = final_directory / LUMI_RELEASE_INSTALL_MARKER_NAME
@@ -1819,6 +1993,74 @@ def _fetch_github_bytes(
         ) from error
     except (OSError, urllib.error.URLError) as error:
         raise LumiReleaseRequestError("GitHub release request failed") from error
+
+
+def _stream_github_asset(
+    url: str,
+    headers: Mapping[str, str],
+    max_bytes: int,
+    destination: Path,
+    cancel_event: threading.Event | None = None,
+) -> HttpAssetResponse:
+    """Stream one GitHub release asset to disk with a strict byte ceiling."""
+    _raise_if_cancelled(cancel_event)
+    _canonical_https_url(url)
+
+    class RestrictedRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, response_headers, new_url):
+            _validate_download_url(new_url)
+            return super().redirect_request(
+                req, fp, code, msg, response_headers, new_url
+            )
+
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    opener = urllib.request.build_opener(RestrictedRedirectHandler())
+    digest = hashlib.sha256()
+    total_bytes = 0
+    try:
+        with opener.open(request, timeout=45) as response:
+            final_url = response.geturl()
+            _validate_download_url(final_url)
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > max_bytes:
+                        raise LumiReleaseError(
+                            "GitHub response exceeds the size limit"
+                        )
+                except ValueError as error:
+                    raise LumiReleaseError(
+                        "GitHub returned invalid response size metadata"
+                    ) from error
+            with destination.open("xb") as output:
+                while True:
+                    _raise_if_cancelled(cancel_event)
+                    chunk = response.read(MAX_ARCHIVE_COPY_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise LumiReleaseError(
+                            "GitHub response exceeds the size limit"
+                        )
+                    digest.update(chunk)
+                    output.write(chunk)
+        return HttpAssetResponse(total_bytes, digest.hexdigest(), final_url)
+    except urllib.error.HTTPError as error:
+        destination.unlink(missing_ok=True)
+        if error.code == 404:
+            raise LumiReleaseUnavailable(
+                "the selected Lumi release or asset does not exist"
+            ) from error
+        raise LumiReleaseRequestError(
+            f"GitHub release request failed with HTTP {error.code}"
+        ) from error
+    except (OSError, urllib.error.URLError) as error:
+        destination.unlink(missing_ok=True)
+        raise LumiReleaseRequestError("GitHub release request failed") from error
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 def _read_and_validate_manifest(
@@ -2274,17 +2516,27 @@ def _extract_package_archive(
 
 
 def _validate_wheel_archive(
-    wheel_bytes: bytes,
+    wheel_archive: bytes | Path,
     dependency: RuntimeDependency,
     *,
     installer: bool = False,
+    cancel_event: threading.Event | None = None,
 ) -> int:
     kind = "model installer" if installer else "runtime"
     expanded_limit = (
         MAX_INSTALLER_WHEEL_EXPANDED_BYTES if installer else MAX_WHEEL_EXPANDED_BYTES
     )
+    file_limit = (
+        MAX_INSTALLER_WHEEL_FILE_BYTES if installer else MAX_WHEEL_FILE_BYTES
+    )
     try:
-        with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
+        _raise_if_cancelled(cancel_event)
+        source = (
+            io.BytesIO(wheel_archive)
+            if isinstance(wheel_archive, bytes)
+            else wheel_archive
+        )
+        with zipfile.ZipFile(source) as wheel:
             infos = _validate_zip_entries(
                 wheel.infolist(),
                 MAX_ARCHIVE_ENTRIES,
@@ -2303,6 +2555,7 @@ def _validate_wheel_archive(
                 )
             if infos[metadata_names[0]].file_size > 64 * 1024:
                 raise LumiReleaseError(f"{kind} wheel METADATA exceeds the size limit")
+            _raise_if_cancelled(cancel_event)
             metadata = wheel.read(metadata_names[0]).decode("utf-8", errors="strict")
             name_value, version_value = _wheel_metadata_identity(metadata)
             if (
@@ -2324,9 +2577,18 @@ def _validate_wheel_archive(
                     raise LumiReleaseError(
                         "pinned llama-cpp-python wheel has no host-native binary"
                     )
-            expanded = sum(info.file_size for info in infos.values())
-            if expanded > expanded_limit:
-                raise LumiReleaseError(f"{kind} wheel exceeds the expanded size limit")
+            expanded = 0
+            for info in infos.values():
+                _raise_if_cancelled(cancel_event)
+                if info.file_size > file_limit:
+                    raise LumiReleaseError(
+                        f"{kind} wheel contains an oversized file"
+                    )
+                expanded += info.file_size
+                if expanded > expanded_limit:
+                    raise LumiReleaseError(
+                        f"{kind} wheel exceeds the expanded size limit"
+                    )
             return expanded
     except (zipfile.BadZipFile, OSError, UnicodeDecodeError, RuntimeError) as error:
         if isinstance(error, LumiReleaseError):
@@ -2350,11 +2612,12 @@ def _wheel_metadata_identity(metadata: str) -> tuple[str, str]:
 
 
 def _extract_wheel(
-    wheel_bytes: bytes,
+    wheel_archive: bytes | Path,
     destination_root: Path,
     dependency: RuntimeDependency,
     *,
     installer: bool = False,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     kind = "model installer" if installer else "runtime"
     max_file_bytes = (
@@ -2364,7 +2627,13 @@ def _extract_wheel(
         MAX_INSTALLER_WHEEL_EXPANDED_BYTES if installer else MAX_WHEEL_EXPANDED_BYTES
     )
     try:
-        with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
+        _raise_if_cancelled(cancel_event)
+        source = (
+            io.BytesIO(wheel_archive)
+            if isinstance(wheel_archive, bytes)
+            else wheel_archive
+        )
+        with zipfile.ZipFile(source) as wheel:
             infos = _validate_zip_entries(
                 wheel.infolist(),
                 MAX_ARCHIVE_ENTRIES,
@@ -2374,6 +2643,7 @@ def _extract_wheel(
             )
             expanded = 0
             for name, info in infos.items():
+                _raise_if_cancelled(cancel_event)
                 if info.file_size > max_file_bytes:
                     raise LumiReleaseError(f"{kind} wheel contains an oversized file")
                 expanded += info.file_size
@@ -2384,10 +2654,32 @@ def _extract_wheel(
                 relative = _wheel_install_path(name, dependency)
                 if relative is None:
                     continue
-                payload = wheel.read(info)
                 target = destination_root.joinpath(*relative.parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(payload)
+                copied = 0
+                created_target = False
+                try:
+                    with wheel.open(info, "r") as member, target.open("xb") as output:
+                        created_target = True
+                        while True:
+                            _raise_if_cancelled(cancel_event)
+                            chunk = member.read(MAX_ARCHIVE_COPY_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            copied += len(chunk)
+                            if copied > info.file_size:
+                                raise LumiReleaseError(
+                                    f"{kind} wheel member exceeded its declared size"
+                                )
+                            output.write(chunk)
+                except Exception:
+                    if created_target:
+                        target.unlink(missing_ok=True)
+                    raise
+                if copied != info.file_size:
+                    raise LumiReleaseError(
+                        f"{kind} wheel member has an unexpected size"
+                    )
     except (zipfile.BadZipFile, OSError, RuntimeError) as error:
         if isinstance(error, LumiReleaseError):
             raise
@@ -2591,6 +2883,16 @@ def _remove_managed_path(path: Path, *, ignore_errors: bool = False) -> None:
     except OSError:
         if not ignore_errors:
             raise
+
+
+def _remove_download_staging(path: Path) -> None:
+    """Remove only temporary wheel files, preserving the managed release root."""
+    _remove_managed_path(path, ignore_errors=True)
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise LumiReleaseCancelled("Lumi model installation was cancelled")
 
 
 def _replace_managed_directory(source: Path, destination: Path) -> None:

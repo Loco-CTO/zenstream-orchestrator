@@ -75,9 +75,7 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(error.exception.status_code, 503)
         self.assertNotIn("private/release-cache", error.exception.detail)
-        log_exception.assert_called_once_with(
-            "Lumi published release discovery failed"
-        )
+        log_exception.assert_called_once_with("Lumi published release discovery failed")
 
     async def test_admin_removal_endpoint_calls_host_and_returns_private_status(self):
         fake_host = SimpleNamespace(

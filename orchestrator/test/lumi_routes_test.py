@@ -39,6 +39,53 @@ class FakeConversation:
 
 
 class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admin_removal_endpoint_calls_host_and_returns_private_status(self):
+        fake_host = SimpleNamespace(
+            remove_installation=AsyncMock(),
+            status=lambda: {
+                "integration": {
+                    "enabled": False,
+                    "installed": False,
+                    "loaded": False,
+                    "state": "disabled",
+                    "releaseTag": None,
+                    "restartRequired": False,
+                    "error": None,
+                    "progress": None,
+                },
+                "models": [],
+                "defaultModel": None,
+                "defaultThinking": False,
+            },
+        )
+        with (
+            patch.object(lumi_routes, "lumi_host", fake_host),
+            patch.object(lumi_routes, "_admin", new=AsyncMock(return_value="admin")),
+        ):
+            response = await lumi_routes.remove_admin_lumi_installation(None)
+
+        fake_host.remove_installation.assert_awaited_once_with()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+        self.assertFalse(json.loads(response.body)["integration"]["installed"])
+
+    async def test_admin_removal_conflict_is_reported_as_client_conflict(self):
+        fake_host = SimpleNamespace(
+            remove_installation=AsyncMock(
+                side_effect=lumi_routes.LumiHostError(
+                    "restart Orchestrator before removing Lumi runtime files"
+                )
+            )
+        )
+        with (
+            patch.object(lumi_routes, "lumi_host", fake_host),
+            patch.object(lumi_routes, "_admin", new=AsyncMock(return_value="admin")),
+        ):
+            with self.assertRaises(lumi_routes.HTTPException) as error:
+                await lumi_routes.remove_admin_lumi_installation(None)
+
+        self.assertEqual(error.exception.status_code, 409)
+
     async def test_disabled_integration_gates_a_stale_service_reference(self):
         fake_host = SimpleNamespace(
             status=lambda: {"integration": {"enabled": False}},

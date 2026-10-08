@@ -17,6 +17,7 @@ class FakeReleaseManager:
         self.enable_calls: list[str] = []
         self.disabled = 0
         self.restart_required = False
+        self.installed_tags: set[str] = set()
 
     async def list_published_releases(self, limit: int):
         return [
@@ -27,7 +28,16 @@ class FakeReleaseManager:
 
     async def enable(self, tag: str):
         self.enable_calls.append(tag)
+        self.installed_tags.add(tag)
         return self.loaded_release(tag)
+
+    def has_installed_release(self, tag: str) -> bool:
+        return tag in self.installed_tags
+
+    async def remove_installed_releases(self) -> bool:
+        removed = bool(self.installed_tags)
+        self.installed_tags.clear()
+        return removed
 
     @staticmethod
     def loaded_release(tag: str):
@@ -199,7 +209,72 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(host._release_manager.disabled, 1)
             self.assertFalse(host.status()["integration"]["enabled"])
-            self.assertFalse(host.status()["integration"]["installed"])
+            self.assertTrue(host.status()["integration"]["installed"])
+            self.assertFalse(host.status()["integration"]["loaded"])
+
+    def test_disabled_release_remains_reported_as_installed_after_host_restart(self):
+        release_manager = FakeReleaseManager()
+        release_manager.installed_tags.add("v1.2.3")
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "lumi" / "integration.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps(
+                    {"schemaVersion": 1, "enabled": False, "releaseTag": "v1.2.3"}
+                ),
+                encoding="utf-8",
+            )
+            host = LumiHost(
+                data_directory=directory,
+                release_manager_factory=lambda *_args: release_manager,
+            )
+
+            integration = host.status()["integration"]
+
+        self.assertFalse(integration["enabled"])
+        self.assertTrue(integration["installed"])
+        self.assertFalse(integration["loaded"])
+
+    async def test_remove_integration_keeps_conversations_and_model_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(
+                data_directory=directory,
+                release_manager_factory=FakeReleaseManager,
+            )
+            await host.enable("v1.2.3")
+            await host._operation
+            conversations = host.model_database_path
+            conversations.parent.mkdir(parents=True, exist_ok=True)
+            conversations.write_bytes(b"saved conversations")
+            model_directory = host.data_directory / "models" / "qwen3.5-2b"
+            model_directory.mkdir(parents=True)
+            model_file = model_directory / "weights.safetensors"
+            model_file.write_bytes(b"downloaded model")
+            host._settings["models"]["qwen3.5:2b"] = {
+                "directory": str(model_directory.resolve()),
+                "manifestSha256": "0" * 64,
+                "sizeBytes": model_file.stat().st_size,
+                "enabled": False,
+            }
+            host._settings["defaultModel"] = "qwen3.5:2b"
+            host._save_settings()
+
+            await host.remove_installation()
+
+            integration = host.status()["integration"]
+            self.assertFalse(integration["enabled"])
+            self.assertFalse(integration["installed"])
+            self.assertFalse(integration["loaded"])
+            self.assertIsNone(integration["releaseTag"])
+            self.assertEqual(conversations.read_bytes(), b"saved conversations")
+            self.assertEqual(model_file.read_bytes(), b"downloaded model")
+            self.assertFalse(host._release_manager.installed_tags)
+            settings = json.loads(host.settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                settings["models"]["qwen3.5:2b"]["directory"],
+                str(model_directory.resolve()),
+            )
+            self.assertEqual(settings["defaultModel"], "qwen3.5:2b")
 
     async def test_saved_enabled_release_is_restored_only_after_startup_hook(self):
         with tempfile.TemporaryDirectory() as directory:

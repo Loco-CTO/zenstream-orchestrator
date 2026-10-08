@@ -288,6 +288,16 @@ async def update_admin_lumi_settings(request: Request):
     return _private_json(lumi_host.status(), status_code=202)
 
 
+@router.delete("/api/admin/lumi/installation")
+async def remove_admin_lumi_installation(request: Request):
+    await _admin(request)
+    try:
+        await lumi_host.remove_installation()
+    except LumiHostError as error:
+        raise HTTPException(409, str(error)) from error
+    return _private_json(lumi_host.status())
+
+
 @router.get("/api/admin/lumi/models")
 async def admin_lumi_models(request: Request):
     await _admin(request)

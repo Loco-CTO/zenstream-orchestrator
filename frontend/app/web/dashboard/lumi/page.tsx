@@ -21,6 +21,7 @@ type InstallProgress = {
 type Integration = {
 	enabled: boolean;
 	installed: boolean;
+	loaded: boolean;
 	state: IntegrationState;
 	releaseTag: string | null;
 	restartRequired: boolean;
@@ -154,6 +155,7 @@ function normalizeIntegration(value: unknown): Integration | null {
 		!isRecord(value) ||
 		typeof value.enabled !== "boolean" ||
 		typeof value.installed !== "boolean" ||
+		typeof value.loaded !== "boolean" ||
 		!(["disabled", "installing", "ready", "error"] as unknown[]).includes(
 			value.state,
 		) ||
@@ -166,6 +168,7 @@ function normalizeIntegration(value: unknown): Integration | null {
 	return {
 		enabled: value.enabled,
 		installed: value.installed,
+		loaded: value.loaded,
 		state: value.state as IntegrationState,
 		releaseTag: value.releaseTag ? safeText(value.releaseTag) : null,
 		restartRequired: value.restartRequired,
@@ -385,6 +388,8 @@ export default function LumiSettingsPage() {
 	const [releaseError, setReleaseError] = useState("");
 	const [modelsError, setModelsError] = useState("");
 	const [message, setMessage] = useState("");
+	const [confirmRemoveIntegration, setConfirmRemoveIntegration] =
+		useState(false);
 	const requestInFlight = useRef(false);
 	const runtimeSettingsDirtyRef = useRef(false);
 
@@ -440,9 +445,7 @@ export default function LumiSettingsPage() {
 				}
 				setModelInstallAvailable(modelCatalog?.modelInstallAvailable ?? false);
 				setSelectedReleaseTag(
-					(currentTag) =>
-						currentTag ||
-						(status.integration.enabled ? status.integration.releaseTag || "" : ""),
+					(currentTag) => currentTag || status.integration.releaseTag || "",
 				);
 				setError("");
 				if (releasesResponse && !releasesResponse.ok) {
@@ -545,7 +548,37 @@ export default function LumiSettingsPage() {
 					? "Lumi installation and enable request submitted."
 					: "Lumi disabled.",
 			);
-			if (!enabled) setSelectedReleaseTag("");
+			await load(session, true);
+		} catch (cause) {
+			setError(
+				cause instanceof Error && cause.message
+					? safeText(cause.message)
+					: "Could not connect to the Orchestrator.",
+			);
+		} finally {
+			setIntegrationBusy(false);
+		}
+	}
+
+	/** Removes the integration package while retaining conversations and model files. */
+	async function removeIntegration() {
+		if (!session || !integration?.installed || hasDownload) return;
+		setIntegrationBusy(true);
+		setError("");
+		setMessage("");
+		try {
+			const response = await adminFetch("/api/admin/lumi/installation", session, {
+				method: "DELETE",
+			});
+			const value = await response.json().catch(() => null);
+			if (!response.ok) {
+				throw new Error(responseError(value, "Could not remove Lumi."));
+			}
+			setConfirmRemoveIntegration(false);
+			setSelectedReleaseTag("");
+			setMessage(
+				"Lumi runtime removed. Saved conversations and downloaded model files were kept.",
+			);
 			await load(session, true);
 		} catch (cause) {
 			setError(
@@ -795,6 +828,7 @@ export default function LumiSettingsPage() {
 						canEnable={canEnable}
 						onReleaseChange={setSelectedReleaseTag}
 						onIntegrationToggle={updateIntegration}
+						onRequestRemove={() => setConfirmRemoveIntegration(true)}
 					/>
 					<ModelPanel
 						defaultModel={defaultModel}
@@ -838,6 +872,16 @@ export default function LumiSettingsPage() {
 				onClose={() => setModelToDelete(null)}
 				onConfirm={confirmModelDeletion}
 			/>
+			<ConfirmDialog
+				open={confirmRemoveIntegration}
+				title="Remove Lumi runtime?"
+				description="This disables Lumi and removes its managed package and runtime wheels. Saved conversations and downloaded model files will be kept. You can install a release again later."
+				confirmLabel="Remove Lumi"
+				destructive
+				busy={integrationBusy}
+				onClose={() => setConfirmRemoveIntegration(false)}
+				onConfirm={removeIntegration}
+			/>
 		</div>
 	);
 }
@@ -875,6 +919,7 @@ type IntegrationPanelProps = {
 	canEnable: boolean;
 	onReleaseChange: (tag: string) => void;
 	onIntegrationToggle: (enabled: boolean) => void;
+	onRequestRemove: () => void;
 };
 
 /** Renders Lumi release selection, integration state, and enable controls. */
@@ -1042,6 +1087,7 @@ function IntegrationActions({
 	hasDownload,
 	canEnable,
 	onIntegrationToggle,
+	onRequestRemove,
 }: Pick<
 	IntegrationPanelProps,
 	| "integration"
@@ -1049,6 +1095,7 @@ function IntegrationActions({
 	| "hasDownload"
 	| "canEnable"
 	| "onIntegrationToggle"
+	| "onRequestRemove"
 >) {
 	return (
 		<div className="flex flex-wrap gap-2">
@@ -1059,6 +1106,19 @@ function IntegrationActions({
 				canEnable={canEnable}
 				onToggle={onIntegrationToggle}
 			/>
+			{integration?.installed && (
+				<button
+					type="button"
+					onClick={onRequestRemove}
+					disabled={
+						integrationBusy || integration.state === "installing" || hasDownload
+					}
+					className="console-button inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-red-200 disabled:opacity-40"
+				>
+					<IconTrash size={15} />
+					Remove Lumi
+				</button>
+			)}
 		</div>
 	);
 }
@@ -1084,6 +1144,9 @@ function IntegrationBadges({ integration }: { integration: Integration }) {
 			</span>
 			<span className="rounded-full bg-white/5 px-3 py-1 capitalize text-white/55">
 				{integration.state}
+			</span>
+			<span className="rounded-full bg-white/5 px-3 py-1 text-white/55">
+				{integration.loaded ? "Loaded" : "Not loaded"}
 			</span>
 			<span
 				className={`rounded-full px-3 py-1 ${integration.installed ? "bg-cyan-950/50 text-cyan-200" : "bg-white/5 text-white/55"}`}

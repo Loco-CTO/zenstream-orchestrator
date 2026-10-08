@@ -721,6 +721,32 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("onnxruntime_genai", sys.modules)
         self.assertTrue(release.directory.is_dir())
 
+    async def test_disabled_release_is_persistent_and_removal_keeps_user_data(self):
+        manager = self._manager(FakeGitHub())
+        release = await manager.enable(TAG)
+        await manager.disable()
+
+        self.assertTrue(manager.has_installed_release(TAG))
+        self.assertTrue(release.directory.is_dir())
+        restarted_manager = self._manager(FakeGitHub())
+        self.assertTrue(restarted_manager.has_installed_release(TAG))
+        model_file = self.data_root / "models" / "qwen3.5-2b" / "weights.bin"
+        model_file.parent.mkdir(parents=True)
+        model_file.write_bytes(b"local model")
+        conversation_file = self.data_root / "conversations.sqlite3"
+        conversation_file.write_bytes(b"saved conversations")
+
+        async def run_in_worker(function, *args):
+            return await asyncio.to_thread(function, *args)
+
+        with patch("app.foreground.run_control", side_effect=run_in_worker):
+            self.assertTrue(await restarted_manager.remove_installed_releases())
+
+        self.assertFalse(restarted_manager.has_installed_release(TAG))
+        self.assertFalse(release.directory.exists())
+        self.assertEqual(model_file.read_bytes(), b"local model")
+        self.assertEqual(conversation_file.read_bytes(), b"saved conversations")
+
     async def test_model_installer_wheels_download_only_after_explicit_request(self):
         github = FakeGitHub(with_installer_dependencies=True)
         manager = self._manager(github)
@@ -1361,6 +1387,9 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(release.directory.is_dir())
         with self.assertRaisesRegex(LumiReleaseError, "restart Orchestrator"):
             await manager.enable(TAG)
+        with self.assertRaisesRegex(LumiReleaseError, "restart Orchestrator"):
+            await manager.remove_installed_releases()
+        self.assertTrue(release.directory.is_dir())
 
 
 if __name__ == "__main__":

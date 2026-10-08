@@ -491,6 +491,91 @@ class LumiReleaseManager:
                 return installed
         return None
 
+    def has_installed_release(self, tag: str) -> bool:
+        """Report whether a completed release package remains on managed disk.
+
+        This intentionally checks only the small install marker and directory
+        layout. Full hashes and archive validation still run in ``enable``;
+        the status endpoint must not hash potentially large native wheels on
+        every dashboard refresh.
+        """
+        if not isinstance(tag, str) or not _TAG_RE.fullmatch(tag):
+            return False
+        try:
+            release_root = _existing_managed_release_root(self._managed_data_path)
+            candidates = tuple(release_root.iterdir()) if release_root is not None else ()
+        except (LumiReleaseError, OSError):
+            return False
+        if release_root is None:
+            return False
+        candidate_pattern = re.compile(rf"{re.escape(tag)}-[0-9a-f]{{16}}")
+        for directory in candidates:
+            try:
+                if (
+                    not candidate_pattern.fullmatch(directory.name)
+                    or directory.is_symlink()
+                    or not directory.is_dir()
+                ):
+                    continue
+                marker_path = directory / LUMI_RELEASE_INSTALL_MARKER_NAME
+                package_archive = directory / LUMI_RELEASE_ASSET_NAME
+                package_root = directory / "package"
+                wheelhouse = directory / "wheelhouse"
+                dependency_root = directory / "dependencies"
+                if (
+                    marker_path.is_symlink()
+                    or not marker_path.is_file()
+                    or marker_path.stat().st_size > MAX_RELEASE_INSTALL_MARKER_BYTES
+                    or package_archive.is_symlink()
+                    or not package_archive.is_file()
+                    or package_archive.stat().st_size > MAX_RELEASE_ARCHIVE_BYTES
+                    or package_root.is_symlink()
+                    or not package_root.is_dir()
+                    or wheelhouse.is_symlink()
+                    or not wheelhouse.is_dir()
+                    or dependency_root.is_symlink()
+                    or not dependency_root.is_dir()
+                ):
+                    continue
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(marker, dict)
+                and set(marker)
+                == {"schemaVersion", "tag", "packageAssetSha256", "runtimeWheels"}
+                and type(marker.get("schemaVersion")) is int
+                and marker.get("schemaVersion") == 1
+                and marker.get("tag") == tag
+                and isinstance(marker.get("packageAssetSha256"), str)
+                and _SHA256_RE.fullmatch(marker["packageAssetSha256"])
+                and isinstance(marker.get("runtimeWheels"), list)
+            ):
+                return True
+        return False
+
+    async def remove_installed_releases(self) -> bool:
+        """Remove managed Lumi package and wheel files after the release is disabled."""
+        async with self._lock:
+            if self._active is not None or self._closing_release is not None:
+                raise LumiReleaseError("disable Lumi before removing its release files")
+            if self._restart_required:
+                raise LumiReleaseError(
+                    "restart Orchestrator before removing Lumi runtime files"
+                )
+            from app.foreground import run_control
+
+            try:
+                return await run_control(
+                    _remove_managed_release_tree, self._managed_data_path
+                )
+            except LumiReleaseError:
+                raise
+            except OSError as error:
+                raise LumiReleaseError(
+                    "managed Lumi runtime files could not be removed"
+                ) from error
+
     def _validate_installed_release(
         self, directory: Path, tag: str
     ) -> _InstalledRelease | None:
@@ -2495,6 +2580,28 @@ def _remove_managed_path(path: Path, *, ignore_errors: bool = False) -> None:
     except OSError:
         if not ignore_errors:
             raise
+
+
+def _remove_managed_release_tree(managed_data_path: Path) -> bool:
+    """Delete only the release-manager subtree, refusing links to user data."""
+    base = Path(managed_data_path).expanduser().resolve()
+    lumi_root = base / "lumi"
+    release_root = lumi_root / "releases"
+    if lumi_root.is_symlink() or release_root.is_symlink():
+        raise LumiReleaseError("managed Lumi release path is unsafe to remove")
+    if not release_root.exists():
+        return False
+    if not release_root.is_dir():
+        raise LumiReleaseError("managed Lumi release path is not a directory")
+    resolved_lumi_root = lumi_root.resolve()
+    resolved_release_root = release_root.resolve()
+    if (
+        not _is_relative_to(resolved_lumi_root, base)
+        or resolved_release_root.parent != resolved_lumi_root
+    ):
+        raise LumiReleaseError("managed Lumi release path is unsafe to remove")
+    _remove_managed_path(release_root)
+    return True
 
 
 def _import_managed_lumi(

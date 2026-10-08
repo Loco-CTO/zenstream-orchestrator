@@ -195,6 +195,7 @@ class OpenApiContractTest(unittest.TestCase):
             "/api/admin/lumi/status",
             "/api/admin/lumi/releases",
             "/api/admin/lumi/settings",
+            "/api/admin/lumi/installation",
             "/api/admin/lumi/models",
             "/api/admin/lumi/models/settings",
             "/api/admin/lumi/models/{model_id}",

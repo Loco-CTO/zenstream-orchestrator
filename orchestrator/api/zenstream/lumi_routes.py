@@ -11,7 +11,7 @@ from app.client_auth import require_account
 from app.foreground import run_auth, run_control
 from app.lumi_host import LumiHostError, lumi_host
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.zenstream.client_routes import catalog as catalog_service
 from api.zenstream.library_routes import authenticate_admin_request
@@ -113,19 +113,38 @@ def _message(value: Any) -> dict[str, Any]:
 
 def _raise_service_error(error: Exception) -> None:
     """Map package errors to a small stable HTTP surface without leaking internals."""
+    status_code, message = _service_error(error)
+    raise HTTPException(status_code, message) from error
 
+
+def _service_error(error: Exception) -> tuple[int, str]:
+    """Return a safe public status and message for a Lumi package error."""
     name = type(error).__name__
     if name == "ConversationNotFound":
-        raise HTTPException(404, "Conversation not found.") from error
+        return 404, "Conversation not found."
     if name == "ModelConfigurationError":
-        raise HTTPException(
-            409, "The selected model or thinking option is unavailable."
-        ) from error
+        return 409, "The selected model or thinking option is unavailable."
     if name == "LumiServiceBusy":
-        raise HTTPException(429, "Lumi is busy. Try again shortly.") from error
+        return 429, "Lumi is busy. Try again shortly."
     if isinstance(error, (ValueError, TypeError)):
-        raise HTTPException(400, "The Lumi request is invalid.") from error
-    raise HTTPException(503, "Lumi is temporarily unavailable.") from error
+        return 400, "The Lumi request is invalid."
+    return 503, "Lumi is temporarily unavailable."
+
+
+def _turn_payload(turn: Any) -> dict[str, Any]:
+    return {
+        "conversation": _conversation(turn.conversation),
+        "answer": {
+            "markdown": turn.answer.markdown,
+            "references": [_reference(value) for value in turn.answer.references],
+            "sources": [_source(value) for value in turn.answer.sources],
+        },
+    }
+
+
+def _sse_event(name: str, value: dict[str, Any]) -> bytes:
+    data = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {name}\ndata: {data}\n\n".encode()
 
 
 @router.get("/api/lumi/models")
@@ -192,15 +211,97 @@ async def lumi_turn(request: Request, conversation_id: str):
         )
     except Exception as error:
         _raise_service_error(error)
-    return _private_json(
-        {
-            "conversation": _conversation(turn.conversation),
-            "answer": {
-                "markdown": turn.answer.markdown,
-                "references": [_reference(value) for value in turn.answer.references],
-                "sources": [_source(value) for value in turn.answer.sources],
-            },
-        }
+    return _private_json(_turn_payload(turn))
+
+
+@router.post("/api/lumi/conversations/{conversation_id}/turns/stream")
+async def lumi_turn_stream(request: Request, conversation_id: str):
+    account = await _account(request)
+    payload = await _object_body(request)
+    message = payload.get("message")
+    model = payload.get("model")
+    thinking = payload.get("thinking")
+    if (
+        not isinstance(message, str)
+        or not message.strip()
+        or len(message) > 6_000
+        or set(payload) - {"message", "model", "thinking"}
+        or (model is None) != (thinking is None)
+        or (model is not None and (not isinstance(model, str) or len(model) > 200))
+        or (thinking is not None and type(thinking) is not bool)
+    ):
+        raise HTTPException(400, "The Lumi turn request is invalid.")
+    service = _service()
+
+    async def events():
+        stream = None
+        completed = False
+        try:
+            stream_method = getattr(service, "stream_chat_for_account", None)
+            if not callable(stream_method):
+                # Installed Lumi releases remain pinned until an administrator
+                # selects an update. Keep older supported releases usable while
+                # the browser switches to the streaming endpoint.
+                turn = await service.chat_for_account(
+                    account["id"],
+                    conversation_id,
+                    message.strip(),
+                    model=model,
+                    thinking=thinking,
+                )
+                completed = True
+                yield _sse_event("complete", _turn_payload(turn))
+                return
+
+            stream = stream_method(
+                account["id"],
+                conversation_id,
+                message.strip(),
+                model=model,
+                thinking=thinking,
+            )
+            async for event in stream:
+                kind = getattr(event, "kind", None)
+                if kind == "delta" and not completed:
+                    text = getattr(event, "text", None)
+                    if isinstance(text, str) and text:
+                        yield _sse_event("delta", {"text": text})
+                elif kind == "reset" and not completed:
+                    reason = getattr(event, "reason", None)
+                    if reason not in {"intermediate", "cpu_fallback"}:
+                        reason = "intermediate"
+                    yield _sse_event("reset", {"reason": reason})
+                elif kind == "complete" and not completed:
+                    turn = getattr(event, "turn", None)
+                    if turn is None:
+                        raise RuntimeError("Lumi stream completed without a turn")
+                    completed = True
+                    yield _sse_event("complete", _turn_payload(turn))
+            if not completed:
+                yield _sse_event(
+                    "error", {"message": "Lumi did not complete the response."}
+                )
+        except Exception as error:
+            logger.exception("Lumi streaming turn failed")
+            _status_code, safe_message = _service_error(error)
+            yield _sse_event("error", {"message": safe_message})
+        finally:
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception:
+                    logger.warning(
+                        "Lumi streaming turn did not close cleanly", exc_info=True
+                    )
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "private, no-store, no-transform",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -314,18 +415,27 @@ async def update_admin_lumi_runtime_settings(request: Request):
     payload = await _object_body(request)
     if (
         not payload
-        or set(payload) - {"defaultThinking", "limits"}
+        or set(payload) - {"defaultThinking", "limits", "gpuMode"}
         or (
             "defaultThinking" in payload
             and type(payload["defaultThinking"]) is not bool
         )
         or ("limits" in payload and not isinstance(payload["limits"], dict))
+        or (
+            "gpuMode" in payload
+            and payload["gpuMode"] is not None
+            and (
+                not isinstance(payload["gpuMode"], str)
+                or payload["gpuMode"] not in {"automatic", "cpu_only", "gpu_preferred"}
+            )
+        )
     ):
         raise HTTPException(400, "The Lumi runtime settings are invalid.")
     try:
         settings = await lumi_host.update_runtime_settings(
             default_thinking=payload.get("defaultThinking"),
             limits=payload.get("limits"),
+            gpu_mode=payload.get("gpuMode"),
         )
     except LumiHostError as error:
         raise HTTPException(409, str(error)) from error
@@ -358,6 +468,16 @@ async def download_admin_lumi_model(request: Request, model_id: str):
     await _admin(request)
     try:
         await lumi_host.start_model_install(model_id)
+    except LumiHostError as error:
+        raise HTTPException(409, str(error)) from error
+    return _private_json(lumi_host.model_settings(), status_code=202)
+
+
+@router.post("/api/admin/lumi/models/{model_id}/cancel")
+async def cancel_admin_lumi_model_download(request: Request, model_id: str):
+    await _admin(request)
+    try:
+        await lumi_host.cancel_model_install(model_id)
     except LumiHostError as error:
         raise HTTPException(409, str(error)) from error
     return _private_json(lumi_host.model_settings(), status_code=202)

@@ -39,6 +39,9 @@ type LumiModel = {
 	downloadProgress: number | null;
 	downloadStage: string | null;
 	downloadError: string | null;
+	downloadCancelAvailable: boolean;
+	downloadCancelRequested: boolean;
+	downloadCancelled: boolean;
 	supportsThinking: boolean;
 	isDefault: boolean;
 };
@@ -49,6 +52,19 @@ type RuntimeLimits = {
 	maxOutputTokens: number;
 	maxConcurrentChats: number;
 	maxActiveConversations: number;
+};
+
+type GpuMode = "automatic" | "cpu_only" | "gpu_preferred";
+
+type GpuAcceleration = {
+	mode: GpuMode;
+	supported: boolean;
+	state: string;
+	selectedBackend: string | null;
+	selectedDevice: string | null;
+	offloadedLayers: number;
+	totalLayers: number | null;
+	fallbackReason: string | null;
 };
 
 type LumiStatus = {
@@ -65,12 +81,14 @@ type ModelCatalog = {
 	defaultModel: string | null;
 	defaultThinking: boolean;
 	limits: RuntimeLimits;
+	gpuMode: GpuMode;
+	gpuAcceleration: GpuAcceleration;
 	modelInstallAvailable: boolean;
 };
 
 type ModelAction = {
 	id: string;
-	kind: "enable" | "default" | "download" | "delete";
+	kind: "enable" | "default" | "download" | "cancel" | "delete";
 } | null;
 
 const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
@@ -80,6 +98,41 @@ const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
 	maxConcurrentChats: 1,
 	maxActiveConversations: 128,
 };
+const DEFAULT_GPU_ACCELERATION: GpuAcceleration = {
+	mode: "automatic",
+	supported: false,
+	state: "not_installed",
+	selectedBackend: null,
+	selectedDevice: null,
+	offloadedLayers: 0,
+	totalLayers: null,
+	fallbackReason: null,
+};
+const GPU_ACCELERATION_STATE_LABELS: Record<string, string> = {
+	ready: "Accelerated",
+	cpu_fallback: "CPU fallback active",
+	fallback: "CPU fallback active",
+	not_loaded: "Not loaded",
+	not_installed: "Not installed",
+	unavailable: "Temporarily unavailable",
+	initializing: "Starting",
+	cpu: "CPU only",
+	error: "Unavailable",
+};
+
+function gpuAccelerationStateLabel(acceleration: GpuAcceleration): string {
+	if (
+		acceleration.state === "ready" &&
+		(acceleration.mode === "cpu_only" ||
+			acceleration.selectedBackend?.toLowerCase() === "cpu")
+	) {
+		return "CPU only";
+	}
+	return (
+		GPU_ACCELERATION_STATE_LABELS[acceleration.state] ??
+		safeText(acceleration.state).replaceAll("_", " ")
+	);
+}
 
 const RUNTIME_LIMIT_FIELDS: {
 	key: keyof RuntimeLimits;
@@ -209,6 +262,9 @@ function normalizeModel(value: unknown): LumiModel | null {
 			typeof downloadError === "string" && downloadError.trim()
 				? safeText(downloadError.trim())
 				: null,
+		downloadCancelAvailable: value.downloadCancelAvailable === true,
+		downloadCancelRequested: value.downloadCancelRequested === true,
+		downloadCancelled: value.downloadCancelled === true,
 		supportsThinking: value.supportsThinking === true,
 		isDefault: value.isDefault === true,
 	};
@@ -268,9 +324,13 @@ function normalizeModelCatalog(value: unknown): ModelCatalog | null {
 	if (!isRecord(value)) return null;
 	const models = normalizeModels(value.models);
 	const limits = normalizeRuntimeLimits(value.limits);
+	const gpuMode = normalizeGpuMode(value.gpuMode);
+	const gpuAcceleration = normalizeGpuAcceleration(value.gpuAcceleration);
 	if (
 		!models ||
 		!limits ||
+		!gpuMode ||
+		!gpuAcceleration ||
 		!(typeof value.defaultModel === "string" || value.defaultModel === null) ||
 		typeof value.defaultThinking !== "boolean" ||
 		typeof value.modelInstallAvailable !== "boolean"
@@ -282,7 +342,57 @@ function normalizeModelCatalog(value: unknown): ModelCatalog | null {
 		defaultModel: value.defaultModel ? safeText(value.defaultModel) : null,
 		defaultThinking: value.defaultThinking,
 		limits,
+		gpuMode,
+		gpuAcceleration,
 		modelInstallAvailable: value.modelInstallAvailable,
+	};
+}
+
+function normalizeGpuMode(value: unknown): GpuMode | null {
+	return value === "automatic" ||
+		value === "cpu_only" ||
+		value === "gpu_preferred"
+		? value
+		: null;
+}
+
+function normalizeGpuAcceleration(value: unknown): GpuAcceleration | null {
+	if (!isRecord(value)) return null;
+	const mode = normalizeGpuMode(value.mode);
+	if (
+		!mode ||
+		typeof value.supported !== "boolean" ||
+		typeof value.state !== "string" ||
+		!(
+			typeof value.selectedBackend === "string" || value.selectedBackend === null
+		) ||
+		!(
+			typeof value.selectedDevice === "string" || value.selectedDevice === null
+		) ||
+		typeof value.offloadedLayers !== "number" ||
+		!Number.isInteger(value.offloadedLayers) ||
+		value.offloadedLayers < 0 ||
+		!(
+			value.totalLayers === null ||
+			(typeof value.totalLayers === "number" &&
+				Number.isInteger(value.totalLayers) &&
+				value.totalLayers >= 0)
+		) ||
+		!(typeof value.fallbackReason === "string" || value.fallbackReason === null)
+	) {
+		return null;
+	}
+	return {
+		mode,
+		supported: value.supported,
+		state: safeText(value.state),
+		selectedBackend: value.selectedBackend
+			? safeText(value.selectedBackend)
+			: null,
+		selectedDevice: value.selectedDevice ? safeText(value.selectedDevice) : null,
+		offloadedLayers: value.offloadedLayers,
+		totalLayers: value.totalLayers,
+		fallbackReason: value.fallbackReason ? safeText(value.fallbackReason) : null,
 	};
 }
 
@@ -362,6 +472,11 @@ function mergeModels(
 			installed: status?.installed ?? model.installed,
 			downloading: status?.downloading ?? model.downloading,
 			downloadProgress: status?.downloadProgress ?? model.downloadProgress,
+			downloadCancelAvailable:
+				status?.downloadCancelAvailable ?? model.downloadCancelAvailable,
+			downloadCancelRequested:
+				status?.downloadCancelRequested ?? model.downloadCancelRequested,
+			downloadCancelled: status?.downloadCancelled ?? model.downloadCancelled,
 			isDefault: model.id === defaultModel,
 		};
 	});
@@ -376,6 +491,10 @@ export default function LumiSettingsPage() {
 	const [defaultModel, setDefaultModel] = useState<string | null>(null);
 	const [defaultThinking, setDefaultThinking] = useState(false);
 	const [runtimeLimits, setRuntimeLimits] = useState(DEFAULT_RUNTIME_LIMITS);
+	const [gpuMode, setGpuMode] = useState<GpuMode>("automatic");
+	const [gpuAcceleration, setGpuAcceleration] = useState(
+		DEFAULT_GPU_ACCELERATION,
+	);
 	const [runtimeSettingsDirty, setRuntimeSettingsDirty] = useState(false);
 	const [runtimeSettingsBusy, setRuntimeSettingsBusy] = useState(false);
 	const [modelInstallAvailable, setModelInstallAvailable] = useState(false);
@@ -437,11 +556,13 @@ export default function LumiSettingsPage() {
 					mergeModels(status.models, modelCatalog?.models ?? [], nextDefaultModel),
 				);
 				setDefaultModel(nextDefaultModel);
+				if (modelCatalog) setGpuAcceleration(modelCatalog.gpuAcceleration);
 				if (!runtimeSettingsDirtyRef.current) {
 					setDefaultThinking(
 						modelCatalog?.defaultThinking ?? status.defaultThinking,
 					);
 					if (modelCatalog) setRuntimeLimits(modelCatalog.limits);
+					if (modelCatalog) setGpuMode(modelCatalog.gpuMode);
 				}
 				setModelInstallAvailable(modelCatalog?.modelInstallAvailable ?? false);
 				setSelectedReleaseTag(
@@ -700,6 +821,38 @@ export default function LumiSettingsPage() {
 		}
 	}
 
+	/** Requests cooperative cancellation of a supported model download. */
+	async function cancelModelDownload(model: LumiModel) {
+		if (!session || !model.downloading || !model.downloadCancelAvailable) return;
+		setModelAction({ id: model.id, kind: "cancel" });
+		setError("");
+		setMessage("");
+		try {
+			const response = await adminFetch(
+				`/api/admin/lumi/models/${encodeURIComponent(model.id)}/cancel`,
+				session,
+				{ method: "POST" },
+			);
+			const value = await response.json().catch(() => null);
+			if (!response.ok)
+				throw new Error(
+					responseError(value, "Could not stop this model download."),
+				);
+			setMessage(
+				`${model.label} download is stopping. Partial files will be removed.`,
+			);
+			await load(session, true);
+		} catch (cause) {
+			setError(
+				cause instanceof Error && cause.message
+					? safeText(cause.message)
+					: "Could not connect to the Orchestrator.",
+			);
+		} finally {
+			setModelAction(null);
+		}
+	}
+
 	/** Updates a runtime limit while marking the form as unsaved. */
 	function changeRuntimeLimit(key: keyof RuntimeLimits, rawValue: string) {
 		runtimeSettingsDirtyRef.current = true;
@@ -712,7 +865,7 @@ export default function LumiSettingsPage() {
 		}));
 	}
 
-	/** Saves the default thinking mode and inference resource limits. */
+	/** Saves the default behavior, inference limits, and GPU mode. */
 	async function saveRuntimeSettings() {
 		if (!session || !runtimeSettingsDirty) return;
 		setRuntimeSettingsBusy(true);
@@ -728,6 +881,7 @@ export default function LumiSettingsPage() {
 					body: JSON.stringify({
 						defaultThinking,
 						limits: runtimeLimits,
+						gpuMode,
 					}),
 				},
 			);
@@ -841,10 +995,13 @@ export default function LumiSettingsPage() {
 						onUpdateModel={updateModel}
 						onMakeDefault={makeDefault}
 						onDownloadModel={downloadModel}
+						onCancelDownload={cancelModelDownload}
 						onRequestDelete={setModelToDelete}
 					/>
 					<RuntimeSettingsPanel
 						defaultThinking={defaultThinking}
+						gpuMode={gpuMode}
+						gpuAcceleration={gpuAcceleration}
 						runtimeSettingsBusy={runtimeSettingsBusy}
 						runtimeSettingsDirty={runtimeSettingsDirty}
 						runtimeLimits={runtimeLimits}
@@ -854,6 +1011,11 @@ export default function LumiSettingsPage() {
 							setDefaultThinking(enabled);
 						}}
 						onLimitChange={changeRuntimeLimit}
+						onGpuModeChange={(mode) => {
+							runtimeSettingsDirtyRef.current = true;
+							setRuntimeSettingsDirty(true);
+							setGpuMode(mode);
+						}}
 						onSave={saveRuntimeSettings}
 					/>
 				</div>
@@ -1168,6 +1330,7 @@ type ModelPanelProps = {
 	onUpdateModel: (model: LumiModel, enabled: boolean) => void;
 	onMakeDefault: (model: LumiModel) => void;
 	onDownloadModel: (model: LumiModel) => void;
+	onCancelDownload: (model: LumiModel) => void;
 	onRequestDelete: (model: LumiModel) => void;
 };
 
@@ -1183,6 +1346,7 @@ function ModelPanel({
 	onUpdateModel,
 	onMakeDefault,
 	onDownloadModel,
+	onCancelDownload,
 	onRequestDelete,
 }: ModelPanelProps) {
 	return (
@@ -1226,6 +1390,7 @@ function ModelPanel({
 							onUpdateModel={onUpdateModel}
 							onMakeDefault={onMakeDefault}
 							onDownloadModel={onDownloadModel}
+							onCancelDownload={onCancelDownload}
 							onRequestDelete={onRequestDelete}
 						/>
 					))}
@@ -1265,6 +1430,7 @@ type ModelRowProps = {
 	onUpdateModel: (model: LumiModel, enabled: boolean) => void;
 	onMakeDefault: (model: LumiModel) => void;
 	onDownloadModel: (model: LumiModel) => void;
+	onCancelDownload: (model: LumiModel) => void;
 	onRequestDelete: (model: LumiModel) => void;
 };
 
@@ -1277,6 +1443,7 @@ function ModelRow({
 	onUpdateModel,
 	onMakeDefault,
 	onDownloadModel,
+	onCancelDownload,
 	onRequestDelete,
 }: ModelRowProps) {
 	const busy = modelAction?.id === model.id;
@@ -1325,6 +1492,7 @@ function ModelRow({
 					integrationEnabled={integrationEnabled}
 					modelInstallAvailable={modelInstallAvailable}
 					onDownload={() => onDownloadModel(model)}
+					onCancelDownload={() => onCancelDownload(model)}
 					onDelete={() => onRequestDelete(model)}
 				/>
 				{defaultModelNeedsReplacement && (
@@ -1372,6 +1540,11 @@ function ModelSummary({
 			</p>
 			{model.downloading && (
 				<ModelDownloadProgress model={model} progress={progress} />
+			)}
+			{model.downloadCancelled && !model.downloading && (
+				<p role="status" className="mt-3 max-w-xl text-xs text-white/60">
+					Download cancelled. Partial files were removed; you can try again.
+				</p>
 			)}
 			{model.downloadError && !model.downloading && (
 				<p role="alert" className="mt-3 max-w-xl text-xs text-red-200">
@@ -1421,6 +1594,7 @@ function ModelActionButton({
 	integrationEnabled,
 	modelInstallAvailable,
 	onDownload,
+	onCancelDownload,
 	onDelete,
 }: {
 	model: LumiModel;
@@ -1429,9 +1603,29 @@ function ModelActionButton({
 	integrationEnabled: boolean;
 	modelInstallAvailable: boolean;
 	onDownload: () => void;
+	onCancelDownload: () => void;
 	onDelete: () => void;
 }) {
 	if (model.downloading) {
+		if (model.downloadCancelRequested) {
+			return (
+				<span role="status" className="text-xs text-cyan-200">
+					Stopping download…
+				</span>
+			);
+		}
+		if (model.downloadCancelAvailable) {
+			return (
+				<button
+					type="button"
+					onClick={onCancelDownload}
+					disabled={!integrationEnabled || (busy && modelAction?.kind === "cancel")}
+					className="console-button rounded-xl px-3 py-2 text-xs font-semibold disabled:opacity-40"
+				>
+					{busy && modelAction?.kind === "cancel" ? "Stopping…" : "Cancel download"}
+				</button>
+			);
+		}
 		return (
 			<span className="inline-flex items-center gap-2 text-xs text-cyan-200">
 				<IconDownload size={15} /> Downloading…
@@ -1481,10 +1675,13 @@ function ModelActionButton({
 
 type RuntimeSettingsPanelProps = {
 	defaultThinking: boolean;
+	gpuMode: GpuMode;
+	gpuAcceleration: GpuAcceleration;
 	runtimeSettingsBusy: boolean;
 	runtimeSettingsDirty: boolean;
 	runtimeLimits: RuntimeLimits;
 	onThinkingChange: (enabled: boolean) => void;
+	onGpuModeChange: (mode: GpuMode) => void;
 	onLimitChange: (key: keyof RuntimeLimits, value: string) => void;
 	onSave: () => void;
 };
@@ -1492,10 +1689,13 @@ type RuntimeSettingsPanelProps = {
 /** Edits Lumi's default thinking mode and bounded runtime limits. */
 function RuntimeSettingsPanel({
 	defaultThinking,
+	gpuMode,
+	gpuAcceleration,
 	runtimeSettingsBusy,
 	runtimeSettingsDirty,
 	runtimeLimits,
 	onThinkingChange,
+	onGpuModeChange,
 	onLimitChange,
 	onSave,
 }: RuntimeSettingsPanelProps) {
@@ -1525,6 +1725,48 @@ function RuntimeSettingsPanel({
 						model supports it.
 					</span>
 				</span>
+			</label>
+			<label className="block max-w-xl">
+				<span className="text-sm font-semibold">GPU acceleration</span>
+				<select
+					value={gpuMode}
+					disabled={runtimeSettingsBusy}
+					onChange={(event) => {
+						const mode = normalizeGpuMode(event.target.value);
+						if (mode) onGpuModeChange(mode);
+					}}
+					className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
+				>
+					<option value="automatic">Automatic</option>
+					<option value="cpu_only">CPU only</option>
+					<option value="gpu_preferred">GPU preferred</option>
+				</select>
+				<span className="mt-1 block text-xs console-muted">
+					Automatic selects a supported accelerator and safe partial offload when
+					available, then falls back to CPU if initialization fails.
+				</span>
+				<div className="mt-3 rounded-xl border border-white/10 bg-white/[0.025] p-4 text-xs console-muted">
+					<p>
+						{gpuAcceleration.supported
+							? `Acceleration: ${gpuAccelerationStateLabel(gpuAcceleration)}`
+							: "GPU acceleration requires a compatible Lumi release."}
+						{gpuAcceleration.selectedBackend
+							? ` · Backend: ${gpuAcceleration.selectedBackend}`
+							: ""}
+						{gpuAcceleration.selectedDevice
+							? ` · Device: ${gpuAcceleration.selectedDevice}`
+							: ""}
+					</p>
+					{gpuAcceleration.totalLayers !== null && (
+						<p className="mt-1">
+							Layers on GPU: {gpuAcceleration.offloadedLayers} of{" "}
+							{gpuAcceleration.totalLayers}
+						</p>
+					)}
+					{gpuAcceleration.fallbackReason && (
+						<p className="mt-1 text-amber-300">{gpuAcceleration.fallbackReason}</p>
+					)}
+				</div>
 			</label>
 			<div className="grid gap-4 sm:grid-cols-2">
 				{RUNTIME_LIMIT_FIELDS.map((field) => (

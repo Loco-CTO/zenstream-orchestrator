@@ -8,6 +8,7 @@ import os
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.parse
 import zipfile
@@ -20,8 +21,10 @@ from app.lumi_release import (
     LUMI_GITHUB_REPOSITORY,
     MAX_RELEASE_LIST_PAGE_SIZE,
     RELEASE_LIST_CACHE_TTL_SECONDS,
+    HttpAssetResponse,
     HttpResponse,
     ImportedLumiModules,
+    LumiReleaseCancelled,
     LumiReleaseCompatibilityError,
     LumiReleaseError,
     LumiReleaseManager,
@@ -243,6 +246,7 @@ class FakeGitHub:
         installer_hub_platform="any",
     ):
         self.requests = []
+        self.streamed_assets = []
         self.metadata_final_url = metadata_final_url
         self.package_bytes, self.wheel_bytes, self.manifest = _make_package_archive(
             runtime_api_version=runtime_api_version,
@@ -328,6 +332,25 @@ class FakeGitHub:
         if len(body) > max_bytes:
             raise AssertionError("test payload exceeded requested byte limit")
         return HttpResponse(body, final_url, {"Content-Length": str(len(body))})
+
+    def stream_asset(self, url, headers, max_bytes, destination, cancel_event=None):
+        self.requests.append(url)
+        name = url.rsplit("/", 1)[-1]
+        body = self.payloads.get(name)
+        if body is None:
+            raise LumiReleaseUnavailable("asset not found")
+        if len(body) > max_bytes:
+            raise AssertionError("test payload exceeded requested byte limit")
+        digest = hashlib.sha256()
+        with Path(destination).open("xb") as stream:
+            for offset in range(0, len(body), 32 * 1024):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise LumiReleaseCancelled("Lumi model installation was cancelled")
+                chunk = body[offset : offset + 32 * 1024]
+                digest.update(chunk)
+                stream.write(chunk)
+        self.streamed_assets.append(name)
+        return HttpAssetResponse(len(body), digest.hexdigest(), url)
 
 
 class FakeLlamaCppGitHub(FakeGitHub):
@@ -530,12 +553,21 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(url=url), self.assertRaises(LumiReleaseError):
                 _validate_download_url(url)
 
-    def _manager(self, github, *, importer=None, unloader=None, host=HOST):
+    def _manager(
+        self,
+        github,
+        *,
+        importer=None,
+        unloader=None,
+        host=HOST,
+        asset_streamer=None,
+    ):
         manager = LumiReleaseManager(
             self.data_root,
             ORCHESTRATOR_VERSION,
             runtime_host=host,
             fetcher=github.fetch,
+            asset_streamer=asset_streamer,
             importer=importer,
             unloader=unloader,
         )
@@ -873,9 +905,41 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("llama_cpp", sys.modules)
         self.assertTrue(release.directory.is_dir())
 
+    async def test_runtime_wheel_uses_disk_staging_and_removes_the_staging_directory(
+        self,
+    ):
+        github = FakeGitHub()
+        manager = self._manager(github, asset_streamer=github.stream_asset)
+
+        release = await manager.enable(TAG)
+
+        self.assertIn(WHEEL_NAME, github.streamed_assets)
+        self.assertTrue((release.directory / "wheelhouse" / WHEEL_NAME).is_file())
+        self.assertFalse(
+            any(
+                path.name.startswith(".lumi-wheel-staging-")
+                for path in release.directory.parent.iterdir()
+            )
+        )
+
+    async def test_runtime_wheel_digest_failure_cleans_staging(self):
+        github = FakeGitHub()
+
+        def bad_digest_streamer(url, headers, max_bytes, destination):
+            response = github.stream_asset(url, headers, max_bytes, destination)
+            return HttpAssetResponse(response.size, "0" * 64, response.final_url)
+
+        manager = self._manager(github, asset_streamer=bad_digest_streamer)
+
+        with self.assertRaisesRegex(LumiReleaseError, "SHA-256"):
+            await manager.enable(TAG)
+
+        release_root = self.data_root / "lumi" / "releases"
+        self.assertEqual(list(release_root.iterdir()), [])
+
     async def test_release_activation_does_not_require_directory_rename(self):
         github = FakeGitHub()
-        manager = self._manager(github)
+        manager = self._manager(github, asset_streamer=github.stream_asset)
         with patch("app.lumi_release.os.replace", wraps=os.replace) as replace_mock:
             release = await manager.enable(TAG)
 
@@ -919,7 +983,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_installer_wheels_download_only_after_explicit_request(self):
         github = FakeGitHub(with_installer_dependencies=True)
-        manager = self._manager(github)
+        manager = self._manager(github, asset_streamer=github.stream_asset)
         release = await manager.enable(TAG)
         installer_assets = {
             dependency["asset"]
@@ -954,6 +1018,87 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             if any(asset in request for request in github.requests)
         }
         self.assertEqual(requested_assets, installer_assets)
+        self.assertEqual(set(github.streamed_assets), installer_assets | {WHEEL_NAME})
+
+    async def test_model_installer_stream_failure_cleans_partial_staging(self):
+        github = FakeGitHub(with_installer_dependencies=True)
+        installer_assets = set(github.installer_payloads)
+
+        def failing_installer_streamer(url, headers, max_bytes, destination):
+            if url.rsplit("/", 1)[-1] in installer_assets:
+                Path(destination).write_bytes(b"partial wheel")
+                raise OSError("simulated interrupted download")
+            return github.stream_asset(url, headers, max_bytes, destination)
+
+        manager = self._manager(github, asset_streamer=failing_installer_streamer)
+        release = await manager.enable(TAG)
+
+        async def run_in_worker(function, *args):
+            return await asyncio.to_thread(function, *args)
+
+        with patch("app.foreground.run_control", side_effect=run_in_worker):
+            with self.assertRaisesRegex(OSError, "interrupted download"):
+                await manager.install_model_dependencies()
+
+        self.assertFalse((release.directory / "installer-dependencies").exists())
+        self.assertFalse(
+            any(
+                path.name.startswith(".installer-staging-")
+                for path in release.directory.iterdir()
+            )
+        )
+
+    async def test_model_installer_cancellation_cleans_partial_download_staging(self):
+        github = FakeGitHub(with_installer_dependencies=True)
+        installer_assets = set(github.installer_payloads)
+        observed_event = None
+
+        def cancelling_installer_streamer(
+            url, headers, max_bytes, destination, cancel_event=None
+        ):
+            nonlocal observed_event
+            if url.rsplit("/", 1)[-1] in installer_assets:
+                observed_event = cancel_event
+                with Path(destination).open("xb") as stream:
+                    stream.write(b"partial wheel")
+                cancel_event.set()
+                raise LumiReleaseCancelled("Lumi model installation was cancelled")
+            return github.stream_asset(
+                url, headers, max_bytes, destination, cancel_event
+            )
+
+        manager = self._manager(github, asset_streamer=cancelling_installer_streamer)
+        release = await manager.enable(TAG)
+        cancellation = threading.Event()
+
+        async def run_in_worker(function, *args):
+            return await asyncio.to_thread(function, *args)
+
+        with patch("app.foreground.run_control", side_effect=run_in_worker):
+            with self.assertRaisesRegex(LumiReleaseCancelled, "was cancelled"):
+                await manager.install_model_dependencies(cancellation)
+
+        self.assertIs(observed_event, cancellation)
+        self.assertFalse((release.directory / "installer-dependencies").exists())
+        self.assertFalse(
+            any(
+                path.name.startswith(".installer-staging-")
+                for path in release.directory.iterdir()
+            )
+        )
+
+    async def test_runtime_wheel_disk_limit_rejects_before_install_and_cleans_stage(
+        self,
+    ):
+        github = FakeGitHub()
+        manager = self._manager(github)
+
+        with patch("app.lumi_release.MAX_TOTAL_WHEEL_DISK_BYTES", 1):
+            with self.assertRaisesRegex(LumiReleaseError, "managed disk usage"):
+                await manager.enable(TAG)
+
+        self.assertIsNone(manager.active_release)
+        self.assertEqual(list((self.data_root / "lumi" / "releases").iterdir()), [])
 
     async def test_llama_cpp_release_activates_and_installs_its_model_installer(self):
         github = FakeLlamaCppGitHub()
@@ -1110,6 +1255,123 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             )
             installed_resource = Path(directory) / "torch" / "compressible-resource.bin"
             self.assertEqual(installed_resource.stat().st_size, resource.file_size)
+
+    def test_path_wheel_validation_and_extraction_stream_large_members(self):
+        wheel_bytes = _make_installer_wheel(
+            "torch", "2.5.1", "torch", compressible_bytes=8 * 1024 * 1024
+        )
+        dependency = RuntimeDependency(
+            "torch",
+            "2.5.1",
+            "cp312",
+            "cp312",
+            "win_amd64",
+            "torch-2.5.1-cp312-cp312-win_amd64.whl",
+            _sha256(wheel_bytes),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            wheel_path = Path(directory) / dependency.asset
+            wheel_path.write_bytes(wheel_bytes)
+            expanded = _validate_wheel_archive(wheel_path, dependency, installer=True)
+            self.assertGreaterEqual(expanded, 8 * 1024 * 1024)
+
+            destination = Path(directory) / "site-packages"
+            with patch(
+                "app.lumi_release.zipfile.ZipFile.read",
+                side_effect=AssertionError("wheel members must stream"),
+            ):
+                _extract_wheel(
+                    wheel_path,
+                    destination,
+                    dependency,
+                    installer=True,
+                )
+
+            installed_resource = destination / "torch" / "compressible-resource.bin"
+            self.assertEqual(installed_resource.stat().st_size, 8 * 1024 * 1024)
+
+    def test_path_wheel_extraction_cancellation_removes_partial_member(self):
+        wheel_bytes = _make_installer_wheel(
+            "torch", "2.5.1", "torch", compressible_bytes=8 * 1024 * 1024
+        )
+        dependency = RuntimeDependency(
+            "torch",
+            "2.5.1",
+            "cp312",
+            "cp312",
+            "win_amd64",
+            "torch-2.5.1-cp312-cp312-win_amd64.whl",
+            _sha256(wheel_bytes),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            wheel_path = Path(directory) / dependency.asset
+            wheel_path.write_bytes(wheel_bytes)
+            destination = Path(directory) / "site-packages"
+            cancellation = threading.Event()
+            original_read = zipfile.ZipExtFile.read
+
+            def read_then_cancel(member, size=-1):
+                chunk = original_read(member, size)
+                if chunk:
+                    cancellation.set()
+                return chunk
+
+            with patch.object(zipfile.ZipExtFile, "read", new=read_then_cancel):
+                with self.assertRaisesRegex(LumiReleaseCancelled, "was cancelled"):
+                    _extract_wheel(
+                        wheel_path,
+                        destination,
+                        dependency,
+                        installer=True,
+                        cancel_event=cancellation,
+                    )
+
+            if destination.exists():
+                self.assertEqual(list(destination.rglob("*.*")), [])
+
+    def test_path_wheel_validation_enforces_per_member_size_limit(self):
+        wheel_bytes = _make_installer_wheel(
+            "torch", "2.5.1", "torch", compressible_bytes=128 * 1024
+        )
+        dependency = RuntimeDependency(
+            "torch",
+            "2.5.1",
+            "cp312",
+            "cp312",
+            "win_amd64",
+            "torch-2.5.1-cp312-cp312-win_amd64.whl",
+            _sha256(wheel_bytes),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            wheel_path = Path(directory) / dependency.asset
+            wheel_path.write_bytes(wheel_bytes)
+            with patch("app.lumi_release.MAX_INSTALLER_WHEEL_FILE_BYTES", 1024):
+                with self.assertRaisesRegex(LumiReleaseError, "oversized file"):
+                    _validate_wheel_archive(wheel_path, dependency, installer=True)
+
+    def test_path_wheel_validation_enforces_member_count_limit(self):
+        wheel_bytes = _make_installer_wheel(
+            "torch", "2.5.1", "torch", compressible_bytes=1
+        )
+        dependency = RuntimeDependency(
+            "torch",
+            "2.5.1",
+            "cp312",
+            "cp312",
+            "win_amd64",
+            "torch-2.5.1-cp312-cp312-win_amd64.whl",
+            _sha256(wheel_bytes),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            wheel_path = Path(directory) / dependency.asset
+            wheel_path.write_bytes(wheel_bytes)
+            with patch("app.lumi_release.MAX_ARCHIVE_ENTRIES", 2):
+                with self.assertRaisesRegex(LumiReleaseError, "too many entries"):
+                    _validate_wheel_archive(wheel_path, dependency, installer=True)
 
     def test_model_installer_wheel_ignores_nested_vendored_metadata(self):
         wheel_bytes = _make_installer_wheel(
@@ -1320,7 +1582,8 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
                 await manager.enable(TAG)
 
         self.assertIsNone(manager.active_release)
-        self.assertFalse((self.data_root / "lumi" / "releases").exists())
+        release_root = self.data_root / "lumi" / "releases"
+        self.assertTrue(not release_root.exists() or not any(release_root.iterdir()))
 
     async def test_unsupported_python_or_platform_is_rejected_before_wheel_download(
         self,
@@ -1388,7 +1651,8 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             await manager.enable(TAG)
 
         self.assertIsNone(manager.active_release)
-        self.assertFalse((self.data_root / "lumi" / "releases").exists())
+        release_root = self.data_root / "lumi" / "releases"
+        self.assertTrue(not release_root.exists() or not any(release_root.iterdir()))
 
     async def test_release_asset_origin_is_pinned_to_the_configured_github_repo(self):
         github = FakeGitHub()
@@ -1465,7 +1729,8 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             await manager.enable(TAG)
 
         self.assertIsNone(manager.active_release)
-        self.assertEqual(list((self.data_root / "lumi" / "releases").iterdir()), [])
+        release_root = self.data_root / "lumi" / "releases"
+        self.assertTrue(not release_root.exists() or not any(release_root.iterdir()))
 
     async def test_import_failure_rolls_back_new_directory_and_staging(self):
         github = FakeGitHub()

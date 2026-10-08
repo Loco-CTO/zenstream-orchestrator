@@ -503,7 +503,9 @@ class LumiReleaseManager:
             return False
         try:
             release_root = _existing_managed_release_root(self._managed_data_path)
-            candidates = tuple(release_root.iterdir()) if release_root is not None else ()
+            candidates = (
+                tuple(release_root.iterdir()) if release_root is not None else ()
+            )
         except (LumiReleaseError, OSError):
             return False
         if release_root is None:
@@ -748,9 +750,7 @@ class LumiReleaseManager:
                 )
                 self._validate_imported_modules(modules, manifest)
             except Exception as error:
-                dependency_directories = _dependency_directories(
-                    release_directory
-                )
+                dependency_directories = _dependency_directories(release_directory)
                 native_loaded = _has_loaded_native_extension(dependency_directories)
                 self._restart_required = self._restart_required or native_loaded
                 try:
@@ -1144,7 +1144,8 @@ class LumiReleaseManager:
             return None
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"schemaVersion", "fetchedAt", "requestLimit", "releases"}
+            or set(payload)
+            != {"schemaVersion", "fetchedAt", "requestLimit", "releases"}
             or type(payload.get("schemaVersion")) is not int
             or payload.get("schemaVersion") != 1
             or type(payload.get("fetchedAt")) is not int
@@ -1157,10 +1158,12 @@ class LumiReleaseManager:
             return None
         candidates: list[LumiReleaseCandidate] = []
         for item in payload["releases"]:
-            if (
-                not isinstance(item, dict)
-                or set(item) != {"tag", "name", "publishedAt", "packageSha256"}
-            ):
+            if not isinstance(item, dict) or set(item) != {
+                "tag",
+                "name",
+                "publishedAt",
+                "packageSha256",
+            }:
                 return None
             tag = item.get("tag")
             name = item.get("name")
@@ -1177,7 +1180,9 @@ class LumiReleaseManager:
                 or len(published_at) > 64
                 or not isinstance(package_sha256, str)
                 or not _SHA256_RE.fullmatch(package_sha256)
-                or any(ord(character) < 32 or ord(character) == 127 for character in name)
+                or any(
+                    ord(character) < 32 or ord(character) == 127 for character in name
+                )
                 or any(
                     ord(character) < 32 or ord(character) == 127
                     for character in published_at
@@ -1234,9 +1239,7 @@ class LumiReleaseManager:
             if temporary_path is not None and temporary_path.exists():
                 _remove_managed_path(temporary_path, ignore_errors=True)
 
-    def _fetch_published_releases(
-        self, limit: int
-    ) -> tuple[LumiReleaseCandidate, ...]:
+    def _fetch_published_releases(self, limit: int) -> tuple[LumiReleaseCandidate, ...]:
         url = f"{LUMI_GITHUB_API}/releases?per_page={limit}"
         response = self._fetcher(
             url,
@@ -1368,9 +1371,7 @@ class LumiReleaseManager:
         previous: Path | None = None
         had_previous = final_directory.exists()
         try:
-            (staging / LUMI_RELEASE_ASSET_NAME).write_bytes(
-                prepared.package_archive
-            )
+            (staging / LUMI_RELEASE_ASSET_NAME).write_bytes(prepared.package_archive)
             package_root = staging / "package"
             package_root.mkdir()
             _extract_package_archive(
@@ -1585,9 +1586,7 @@ def _installed_wheel_tree_is_valid(
         MAX_INSTALLER_WHEEL_FILE_BYTES if installer else MAX_WHEEL_FILE_BYTES
     )
     max_expanded_bytes = (
-        MAX_INSTALLER_WHEEL_EXPANDED_BYTES
-        if installer
-        else MAX_WHEEL_EXPANDED_BYTES
+        MAX_INSTALLER_WHEEL_EXPANDED_BYTES if installer else MAX_WHEEL_EXPANDED_BYTES
     )
     try:
         with zipfile.ZipFile(wheel_path) as wheel:
@@ -2456,9 +2455,7 @@ def _installer_dependencies_are_valid(
             or marker_path.stat().st_size > MAX_RELEASE_INSTALL_MARKER_BYTES
         ):
             return False
-        marker = json.loads(
-            marker_path.read_text(encoding="utf-8")
-        )
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
         expected = _installer_dependency_manifest(tag, dependencies)
         if marker != expected or {path.name for path in root.iterdir()} != {
             "lumi-installer-wheels.json",
@@ -2482,7 +2479,9 @@ def _installer_dependencies_are_valid(
             f"{_normalize_distribution(item.distribution)}-{item.version}"
             for item in dependencies
         }
-        if {path.name for path in dependency_root.iterdir()} != expected_dependency_names:
+        if {
+            path.name for path in dependency_root.iterdir()
+        } != expected_dependency_names:
             return False
         for dependency in dependencies:
             wheel = wheelhouse / dependency.asset

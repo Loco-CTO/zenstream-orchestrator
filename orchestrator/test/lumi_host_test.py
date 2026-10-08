@@ -81,9 +81,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             "maxOutputTokens": 2048,
         }
 
-        runtime = _create_runtime_adapter(
-            module, artifacts, limits, "llama-cpp-python"
-        )
+        runtime = _create_runtime_adapter(module, artifacts, limits, "llama-cpp-python")
 
         self.assertIsInstance(runtime, Runtime)
         self.assertIsInstance(runtime.configuration, Config)
@@ -122,9 +120,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
 
     def test_runtime_adapter_rejects_releases_without_a_local_backend(self):
         with self.assertRaisesRegex(LumiHostError, "local runtime"):
-            _create_runtime_adapter(
-                SimpleNamespace(), {}, {}, "onnxruntime-genai"
-            )
+            _create_runtime_adapter(SimpleNamespace(), {}, {}, "onnxruntime-genai")
 
     def test_runtime_adapter_follows_release_backend_when_both_are_exported(self):
         class LlamaConfig:

@@ -24,11 +24,13 @@ from app.lumi_release import (
     LumiReleaseUnavailable,
     RuntimeDependency,
     RuntimeHost,
+    _extract_wheel,
     _import_managed_lumi,
     _matching_dependencies,
     _parse_runtime_dependencies,
     _unload_managed_lumi,
     _validate_download_url,
+    _validate_wheel_archive,
 )
 
 TAG = "v1.2.3"
@@ -58,7 +60,14 @@ def _make_wheel():
     return buffer.getvalue()
 
 
-def _make_installer_wheel(distribution, version, package):
+def _make_installer_wheel(
+    distribution,
+    version,
+    package,
+    *,
+    compressible_bytes=0,
+    nested_metadata=False,
+):
     buffer = io.BytesIO()
     wheel_distribution = distribution.replace("-", "_")
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -67,6 +76,16 @@ def _make_installer_wheel(distribution, version, package):
             f"{wheel_distribution}-{version}.dist-info/METADATA",
             f"Metadata-Version: 2.1\nName: {distribution}\nVersion: {version}\n",
         )
+        if nested_metadata:
+            archive.writestr(
+                f"{package}/vendor-1.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: vendor\nVersion: 1.0\n",
+            )
+        if compressible_bytes:
+            archive.writestr(
+                f"{package}/compressible-resource.bin",
+                b"0" * compressible_bytes,
+            )
     return buffer.getvalue()
 
 
@@ -591,6 +610,59 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             if any(asset in request for request in github.requests)
         }
         self.assertEqual(requested_assets, installer_assets)
+
+    def test_model_installer_wheel_accepts_compressible_files_within_size_limits(self):
+        wheel_bytes = _make_installer_wheel(
+            "torch", "2.5.1", "torch", compressible_bytes=256 * 1024
+        )
+        dependency = RuntimeDependency(
+            "torch",
+            "2.5.1",
+            "cp312",
+            "cp312",
+            "win_amd64",
+            "torch-2.5.1-cp312-cp312-win_amd64.whl",
+            _sha256(wheel_bytes),
+        )
+        with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
+            resource = wheel.getinfo("torch/compressible-resource.bin")
+            self.assertGreater(resource.file_size / resource.compress_size, 200)
+
+        expanded = _validate_wheel_archive(wheel_bytes, dependency, installer=True)
+        self.assertGreaterEqual(expanded, resource.file_size)
+        with self.assertRaisesRegex(LumiReleaseError, "compression ratio"):
+            _validate_wheel_archive(wheel_bytes, dependency)
+
+        with tempfile.TemporaryDirectory() as directory:
+            _extract_wheel(
+                wheel_bytes,
+                Path(directory),
+                dependency,
+                installer=True,
+            )
+            installed_resource = Path(directory) / "torch" / "compressible-resource.bin"
+            self.assertEqual(installed_resource.stat().st_size, resource.file_size)
+
+    def test_model_installer_wheel_ignores_nested_vendored_metadata(self):
+        wheel_bytes = _make_installer_wheel(
+            "torch",
+            "2.5.1",
+            "torch",
+            nested_metadata=True,
+        )
+        dependency = RuntimeDependency(
+            "torch",
+            "2.5.1",
+            "cp312",
+            "cp312",
+            "win_amd64",
+            "torch-2.5.1-cp312-cp312-win_amd64.whl",
+            _sha256(wheel_bytes),
+        )
+
+        expanded = _validate_wheel_archive(wheel_bytes, dependency, installer=True)
+
+        self.assertGreater(expanded, 0)
 
     async def test_model_installer_requires_a_complete_wheel_set_for_the_current_host(
         self,

@@ -73,6 +73,7 @@ MAX_RELEASE_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_WHEEL_BYTES = 256 * 1024 * 1024
 MAX_TOTAL_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 5000
+MAX_ARCHIVE_COMPRESSION_RATIO = 200
 MAX_PACKAGE_FILES = 1000
 MAX_PACKAGE_FILE_BYTES = 16 * 1024 * 1024
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
@@ -1612,7 +1613,10 @@ def _validate_relative_member(
 
 
 def _validate_zip_entries(
-    infos: Sequence[zipfile.ZipInfo], maximum_entries: int
+    infos: Sequence[zipfile.ZipInfo],
+    maximum_entries: int,
+    *,
+    maximum_compression_ratio: int | None = MAX_ARCHIVE_COMPRESSION_RATIO,
 ) -> dict[str, zipfile.ZipInfo]:
     if len(infos) > maximum_entries:
         raise LumiReleaseError("release archive contains too many entries")
@@ -1647,7 +1651,11 @@ def _validate_zip_entries(
             raise LumiReleaseError(
                 "release archive contains a suspicious compressed entry"
             )
-        if info.compress_size and info.file_size / info.compress_size > 200:
+        if (
+            maximum_compression_ratio is not None
+            and info.compress_size
+            and info.file_size / info.compress_size > maximum_compression_ratio
+        ):
             raise LumiReleaseError(
                 "release archive compression ratio exceeds the limit"
             )
@@ -1710,13 +1718,21 @@ def _validate_wheel_archive(
     )
     try:
         with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
-            infos = _validate_zip_entries(wheel.infolist(), MAX_ARCHIVE_ENTRIES)
+            infos = _validate_zip_entries(
+                wheel.infolist(),
+                MAX_ARCHIVE_ENTRIES,
+                maximum_compression_ratio=(
+                    None if installer else MAX_ARCHIVE_COMPRESSION_RATIO
+                ),
+            )
             metadata_names = [
-                name for name in infos if name.endswith(".dist-info/METADATA")
+                name
+                for name in infos
+                if name.endswith(".dist-info/METADATA") and name.count("/") == 1
             ]
             if len(metadata_names) != 1:
                 raise LumiReleaseError(
-                    f"{kind} wheel has no unique distribution METADATA"
+                    f"{kind} wheel {dependency.asset} has no unique distribution METADATA"
                 )
             if infos[metadata_names[0]].file_size > 64 * 1024:
                 raise LumiReleaseError(f"{kind} wheel METADATA exceeds the size limit")
@@ -1783,7 +1799,13 @@ def _extract_wheel(
     )
     try:
         with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as wheel:
-            infos = _validate_zip_entries(wheel.infolist(), MAX_ARCHIVE_ENTRIES)
+            infos = _validate_zip_entries(
+                wheel.infolist(),
+                MAX_ARCHIVE_ENTRIES,
+                maximum_compression_ratio=(
+                    None if installer else MAX_ARCHIVE_COMPRESSION_RATIO
+                ),
+            )
             expanded = 0
             for name, info in infos.items():
                 if info.file_size > max_file_bytes:

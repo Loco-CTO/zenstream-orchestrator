@@ -759,12 +759,14 @@ class LumiHost:
             catalog_tools.NextUpTool(client),
             catalog_tools.FavoritesTool(client),
         )
-        web_tools = ()
-        search_url = self.web_search_url
-        if search_url:
-            web_module = importlib.import_module("lumi.web_research")
-            search_config = web_module.WebResearchConfig(searxng_url=search_url)
-            web_tools = web_module.build_web_research_tools(search_config)
+        # Let Lumi decide which stable web tools are available for this release.
+        # Newer releases provide a no-configuration default search adapter; older
+        # releases may return an empty tuple until an optional SearXNG override is
+        # configured. The public builder contract supports both behaviors.
+        web_module = importlib.import_module("lumi.web_research")
+        search_url = self.web_search_url or None
+        search_config = web_module.WebResearchConfig(searxng_url=search_url)
+        web_tools = web_module.build_web_research_tools(search_config)
         return tools_module.ToolRegistry((*local_tools, *web_tools))
 
     def _model_artifact(self, model_id: str) -> dict[str, Any] | None:

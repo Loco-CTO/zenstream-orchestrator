@@ -199,8 +199,14 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(host.status()["integration"]["state"], "disabled")
         self.assertIsNone(host.service)
 
-    def test_local_tool_registry_does_not_require_a_web_search_url(self):
+    def test_web_research_tools_are_built_without_a_search_url(self):
         fake_tool = lambda *_args, **_kwargs: object()
+        search_tool = object()
+        open_tool = object()
+        web_module = SimpleNamespace(
+            WebResearchConfig=Mock(return_value="default-search-config"),
+            build_web_research_tools=Mock(return_value=(search_tool, open_tool)),
+        )
         modules = {
             "lumi.tools": SimpleNamespace(ToolRegistry=lambda tools: tuple(tools)),
             "lumi.orchestrator_tools": SimpleNamespace(
@@ -212,6 +218,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
                 NextUpTool=fake_tool,
                 FavoritesTool=fake_tool,
             ),
+            "lumi.web_research": web_module,
         }
         imported = []
 
@@ -226,10 +233,47 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             ):
                 registry = host._create_tool_registry(SimpleNamespace())
 
-        self.assertEqual(len(registry), 6)
-        self.assertNotIn("lumi.web_research", imported)
+        self.assertEqual(len(registry), 8)
+        self.assertIn("lumi.web_research", imported)
+        web_module.WebResearchConfig.assert_called_once_with(searxng_url=None)
+        web_module.build_web_research_tools.assert_called_once_with(
+            "default-search-config"
+        )
 
-    def test_web_research_tools_are_added_only_when_a_search_url_is_configured(self):
+    def test_older_web_research_release_can_return_no_default_search_tools(self):
+        fake_tool = lambda *_args, **_kwargs: object()
+        web_module = SimpleNamespace(
+            WebResearchConfig=Mock(return_value="default-search-config"),
+            build_web_research_tools=Mock(return_value=()),
+        )
+        modules = {
+            "lumi.tools": SimpleNamespace(ToolRegistry=lambda tools: tuple(tools)),
+            "lumi.orchestrator_tools": SimpleNamespace(
+                _OrchestratorReadError=RuntimeError,
+                CatalogSearchTool=fake_tool,
+                CatalogItemDetailTool=fake_tool,
+                HomeRecommendationsTool=fake_tool,
+                ContinueWatchingTool=fake_tool,
+                NextUpTool=fake_tool,
+                FavoritesTool=fake_tool,
+            ),
+            "lumi.web_research": web_module,
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            host = LumiHost(data_directory=directory, catalog=object())
+            with patch(
+                "app.lumi_host.importlib.import_module",
+                side_effect=lambda name: modules[name],
+            ):
+                registry = host._create_tool_registry(SimpleNamespace())
+
+        self.assertEqual(len(registry), 6)
+        web_module.build_web_research_tools.assert_called_once_with(
+            "default-search-config"
+        )
+
+    def test_web_research_tools_use_the_configured_search_url(self):
         fake_tool = lambda *_args, **_kwargs: object()
         search_tool = object()
         open_tool = object()

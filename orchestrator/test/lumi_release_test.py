@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 from app.lumi_release import (
     LUMI_GITHUB_API,
     LUMI_GITHUB_REPOSITORY,
+    RELEASE_LIST_CACHE_TTL_SECONDS,
     HttpResponse,
     ImportedLumiModules,
     LumiReleaseCompatibilityError,
@@ -23,7 +24,6 @@ from app.lumi_release import (
     LumiReleaseManager,
     LumiReleaseRequestError,
     LumiReleaseUnavailable,
-    RELEASE_LIST_CACHE_TTL_SECONDS,
     RuntimeDependency,
     RuntimeHost,
     _extract_wheel,
@@ -766,13 +766,22 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         release = await manager.enable(TAG)
 
         self.assertEqual(
-            {dependency.distribution for dependency in release.manifest.runtime_dependencies},
+            {
+                dependency.distribution
+                for dependency in release.manifest.runtime_dependencies
+            },
             {"llama-cpp-python"},
         )
         self.assertTrue(manager.model_install_available)
         self.assertTrue(
-            (release.directory / "dependencies" / "llama-cpp-python-0.3.35"
-             / "site-packages" / "llama_cpp" / "__init__.py").is_file()
+            (
+                release.directory
+                / "dependencies"
+                / "llama-cpp-python-0.3.35"
+                / "site-packages"
+                / "llama_cpp"
+                / "__init__.py"
+            ).is_file()
         )
         self.assertFalse((release.directory / "installer-dependencies").exists())
 
@@ -785,8 +794,11 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         installer_root = release.directory / "installer-dependencies"
         self.assertEqual(len(directories), 1)
         self.assertTrue(
-            (installer_root / "wheelhouse"
-             / "huggingface_hub-1.10.0-py3-none-any.whl").is_file()
+            (
+                installer_root
+                / "wheelhouse"
+                / "huggingface_hub-1.10.0-py3-none-any.whl"
+            ).is_file()
         )
 
     async def test_release_and_installer_wheels_survive_manager_restart(self):
@@ -802,9 +814,7 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         request_count = len(github.requests)
         release_directory = first_release.directory
         installer_marker = (
-            release_directory
-            / "installer-dependencies"
-            / "lumi-installer-wheels.json"
+            release_directory / "installer-dependencies" / "lumi-installer-wheels.json"
         )
         self.assertTrue(installer_marker.is_file())
 

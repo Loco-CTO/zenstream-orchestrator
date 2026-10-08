@@ -13,17 +13,17 @@ minimumOrchestratorVersion, maximumOrchestratorVersionExclusive, and
 runtimeDependencies. Each runtime dependency is a separately published GitHub
 release wheel asset with distribution, version, pythonTag, abiTag, platformTag,
 asset, and sha256 fields. Every selected wheel must appear in the GitHub Release
-API asset list with the same SHA-256 digest. Lumi must publish the compatible
-onnxruntime-genai wheel for each supported Python ABI and host platform; the
-wheel is extracted below the managed Lumi release directory and added to
-sys.path only while that release is active. Optional installerDependencies
+API asset list with the same SHA-256 digest. Lumi must publish its pinned native
+runtime wheel for each supported Python ABI and host platform; the wheel is
+extracted below the managed Lumi release directory and added to sys.path only
+while that release is active. Optional installerDependencies
 follow the same pinned wheel contract but are fetched only after an administrator
 explicitly requests a model download. Neither dependency group is installed
 with an unpinned pip command.
 
 The package contract exports lumi.LUMI_PLUGIN_API_VERSION,
-lumi.runtime.LUMI_RUNTIME_API_VERSION, the OrtGenAIChatRuntime,
-OrtGenAIConfig, and VerifiedModelArtifact symbols, plus
+lumi.runtime.LUMI_RUNTIME_API_VERSION, the runtime adapter symbols for its
+declared native backend, and VerifiedModelArtifact, plus
 lumi.service_factory.create_embedded_service. The service object returned by
 the factory exposes close(), which may be synchronous or asynchronous.
 Disable closes services and removes Python import aliases. Python cannot
@@ -51,6 +51,7 @@ import sys
 import sysconfig
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -65,11 +66,17 @@ LUMI_GITHUB_REPOSITORY = "Loco-CTO/zenstream-lumi"
 LUMI_GITHUB_API = f"https://api.github.com/repos/{LUMI_GITHUB_REPOSITORY}"
 LUMI_RELEASE_ASSET_NAME = "lumi-runtime.zip"
 LUMI_RELEASE_MANIFEST_NAME = "lumi-release.json"
+LUMI_RELEASE_INSTALL_MARKER_NAME = "lumi-release-install.json"
+LUMI_RELEASE_LIST_CACHE_NAME = ".lumi-release-candidates.json"
 LUMI_PLUGIN_API_VERSION = 1
 LUMI_RUNTIME_API_VERSION = 1
 
 MAX_RELEASE_METADATA_BYTES = 1024 * 1024
 MAX_RELEASE_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAX_RELEASE_INSTALL_MARKER_BYTES = 64 * 1024
+MAX_RELEASE_LIST_CACHE_BYTES = 128 * 1024
+RELEASE_LIST_CACHE_TTL_SECONDS = 600
+RELEASE_LIST_CACHE_MAX_STALE_SECONDS = 24 * 60 * 60
 MAX_WHEEL_BYTES = 256 * 1024 * 1024
 MAX_TOTAL_DOWNLOAD_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 5000
@@ -90,9 +97,12 @@ MAX_INSTALLER_TOTAL_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 MAX_INSTALLER_WHEEL_FILE_BYTES = 512 * 1024 * 1024
 MAX_INSTALLER_WHEEL_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_INSTALLER_TOTAL_WHEEL_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
-_REQUIRED_INSTALLER_DISTRIBUTIONS = frozenset(
-    {"huggingface-hub", "onnx-ir", "torch", "transformers"}
-)
+_RUNTIME_BACKEND_INSTALLER_REQUIREMENTS = {
+    "onnxruntime-genai": frozenset(
+        {"huggingface-hub", "onnx-ir", "torch", "transformers"}
+    ),
+    "llama-cpp-python": frozenset({"huggingface-hub"}),
+}
 
 _TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -117,6 +127,10 @@ class LumiReleaseError(RuntimeError):
 
 class LumiReleaseUnavailable(LumiReleaseError):
     """The requested official release or one of its required assets is absent."""
+
+
+class LumiReleaseRequestError(LumiReleaseError):
+    """GitHub release metadata could not be fetched because of a network failure."""
 
 
 class LumiReleaseCompatibilityError(LumiReleaseError):
@@ -285,6 +299,13 @@ class _InstallTransaction:
     had_previous: bool
 
 
+@dataclass(frozen=True)
+class _InstalledRelease:
+    tag: str
+    directory: Path
+    manifest: LumiReleaseManifest
+
+
 class LoadedLumiRelease:
     """An imported release, active only while its manager keeps it enabled."""
 
@@ -410,6 +431,7 @@ class LumiReleaseManager:
         self._closing_release: LoadedLumiRelease | None = None
         self._restart_required = False
         self._disable_error: str | None = None
+        self._release_list_lock = threading.RLock()
         self._lock = asyncio.Lock()
 
     @property
@@ -431,6 +453,9 @@ class LumiReleaseManager:
             and _matching_installer_dependencies(
                 active.manifest.installer_dependencies,
                 self._host(),
+                _required_installer_distributions(
+                    _runtime_backend_distribution(active.manifest.runtime_dependencies)
+                ),
             )
         )
 
@@ -441,6 +466,142 @@ class LumiReleaseManager:
 
     def _host(self) -> RuntimeHost:
         return self._runtime_host or RuntimeHost.current()
+
+    def _find_installed_release(self, tag: str) -> _InstalledRelease | None:
+        """Find a complete, verified local release before contacting GitHub."""
+        release_root = _existing_managed_release_root(self._managed_data_path)
+        if release_root is None:
+            return None
+        candidate_pattern = re.compile(rf"{re.escape(tag)}-[0-9a-f]{{16}}")
+        candidates = sorted(
+            (
+                path
+                for path in release_root.iterdir()
+                if candidate_pattern.fullmatch(path.name)
+            ),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        for directory in candidates:
+            try:
+                installed = self._validate_installed_release(directory, tag)
+            except (LumiReleaseError, OSError, UnicodeError, ValueError):
+                continue
+            if installed is not None:
+                return installed
+        return None
+
+    def _validate_installed_release(
+        self, directory: Path, tag: str
+    ) -> _InstalledRelease | None:
+        if directory.is_symlink() or not directory.is_dir():
+            return None
+        marker_path = directory / LUMI_RELEASE_INSTALL_MARKER_NAME
+        package_archive_path = directory / LUMI_RELEASE_ASSET_NAME
+        if (
+            marker_path.is_symlink()
+            or not marker_path.is_file()
+            or marker_path.stat().st_size > MAX_RELEASE_INSTALL_MARKER_BYTES
+            or package_archive_path.is_symlink()
+            or not package_archive_path.is_file()
+            or package_archive_path.stat().st_size > MAX_RELEASE_ARCHIVE_BYTES
+        ):
+            return None
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(marker, dict)
+            or set(marker)
+            != {"schemaVersion", "tag", "packageAssetSha256", "runtimeWheels"}
+            or type(marker.get("schemaVersion")) is not int
+            or marker.get("schemaVersion") != 1
+            or marker.get("tag") != tag
+        ):
+            return None
+
+        package_archive = package_archive_path.read_bytes()
+        package_digest = hashlib.sha256(package_archive).hexdigest()
+        if marker.get("packageAssetSha256") != package_digest:
+            return None
+        manifest = _read_and_validate_manifest(
+            package_archive,
+            tag=tag,
+            orchestrator_version=self._orchestrator_version,
+            runtime_host=self._host(),
+        )
+        runtime_wheels = _matching_dependencies(
+            manifest.runtime_dependencies, self._host()
+        )
+        if (
+            not runtime_wheels
+            or len(runtime_wheels) > MAX_WHEELS
+            or not any(
+                _normalize_distribution(item.distribution)
+                == _runtime_backend_distribution(manifest.runtime_dependencies)
+                for item in runtime_wheels
+            )
+        ):
+            return None
+        expected_wheels = [
+            {"asset": dependency.asset, "sha256": dependency.sha256}
+            for dependency in runtime_wheels
+        ]
+        if marker.get("runtimeWheels") != expected_wheels:
+            return None
+
+        release_digest = hashlib.sha256(
+            "".join(
+                [package_digest, *(dependency.sha256 for dependency in runtime_wheels)]
+            ).encode("ascii")
+        ).hexdigest()
+        if directory.name != f"{tag}-{release_digest[:16]}":
+            return None
+
+        package_root = directory / "package"
+        if not _installed_package_tree_is_valid(
+            package_root, package_archive, manifest
+        ):
+            return None
+        wheelhouse = directory / "wheelhouse"
+        dependency_root = directory / "dependencies"
+        if (
+            wheelhouse.is_symlink()
+            or not wheelhouse.is_dir()
+            or dependency_root.is_symlink()
+            or not dependency_root.is_dir()
+        ):
+            return None
+        expected_asset_names = {dependency.asset for dependency in runtime_wheels}
+        actual_asset_names = {path.name for path in wheelhouse.iterdir()}
+        if actual_asset_names != expected_asset_names:
+            return None
+        expected_dependency_names = {
+            f"{_normalize_distribution(item.distribution)}-{item.version}"
+            for item in runtime_wheels
+        }
+        actual_dependency_names = {path.name for path in dependency_root.iterdir()}
+        if actual_dependency_names != expected_dependency_names:
+            return None
+
+        for dependency in runtime_wheels:
+            wheel_path = wheelhouse / dependency.asset
+            package_directory = (
+                dependency_root
+                / f"{_normalize_distribution(dependency.distribution)}-{dependency.version}"
+                / "site-packages"
+            )
+            if (
+                wheel_path.is_symlink()
+                or not wheel_path.is_file()
+                or _sha256_file(wheel_path) != dependency.sha256
+                or package_directory.parent.is_symlink()
+                or package_directory.is_symlink()
+                or not package_directory.is_dir()
+                or not _installed_wheel_tree_is_valid(
+                    wheel_path, package_directory, dependency
+                )
+            ):
+                return None
+        return _InstalledRelease(tag, directory, manifest)
 
     async def list_published_releases(
         self, limit: int = 20
@@ -484,29 +645,37 @@ class LumiReleaseManager:
                 raise LumiReleaseError(
                     "disable the active Lumi release before enabling another tag"
                 )
-            prepared = await asyncio.to_thread(self._prepare_release, tag)
-            transaction = await asyncio.to_thread(self._install_prepared, prepared)
+            installed = await asyncio.to_thread(self._find_installed_release, tag)
+            transaction = None
+            if installed is None:
+                prepared = await asyncio.to_thread(self._prepare_release, tag)
+                transaction = await asyncio.to_thread(self._install_prepared, prepared)
+                release_directory = transaction.release_directory
+                manifest = prepared.manifest
+            else:
+                release_directory = installed.directory
+                manifest = installed.manifest
             try:
                 modules = await asyncio.to_thread(
                     self._importer,
-                    transaction.release_directory / "package",
-                    _dependency_directories(transaction.release_directory),
+                    release_directory / "package",
+                    _dependency_directories(release_directory),
                 )
-                self._validate_imported_modules(modules, prepared.manifest)
+                self._validate_imported_modules(modules, manifest)
             except Exception as error:
                 dependency_directories = _dependency_directories(
-                    transaction.release_directory
+                    release_directory
                 )
                 native_loaded = _has_loaded_native_extension(dependency_directories)
                 self._restart_required = self._restart_required or native_loaded
                 try:
                     await asyncio.to_thread(
                         self._unloader,
-                        transaction.release_directory / "package",
+                        release_directory / "package",
                         dependency_directories,
                     )
                 finally:
-                    if not native_loaded:
+                    if not native_loaded and transaction is not None:
                         await asyncio.to_thread(self._rollback_install, transaction)
                 if isinstance(error, LumiReleaseError):
                     raise
@@ -519,11 +688,12 @@ class LumiReleaseManager:
                     f"Lumi release {tag} could not be imported; activation was rolled back"
                 ) from error
 
-            await asyncio.to_thread(self._commit_install, transaction)
+            if transaction is not None:
+                await asyncio.to_thread(self._commit_install, transaction)
             self._active = LoadedLumiRelease(
-                prepared.tag,
-                transaction.release_directory,
-                prepared.manifest,
+                tag,
+                release_directory,
+                manifest,
                 modules,
             )
             return self._active
@@ -543,6 +713,9 @@ class LumiReleaseManager:
             matching = _matching_installer_dependencies(
                 active.manifest.installer_dependencies,
                 self._host(),
+                _required_installer_distributions(
+                    _runtime_backend_distribution(active.manifest.runtime_dependencies)
+                ),
             )
             if not matching:
                 raise LumiReleaseCompatibilityError(
@@ -556,6 +729,9 @@ class LumiReleaseManager:
                 active.tag,
                 active.directory,
                 matching,
+                _required_installer_distributions(
+                    _runtime_backend_distribution(active.manifest.runtime_dependencies)
+                ),
             )
             if not directories:
                 raise LumiReleaseCompatibilityError(
@@ -661,12 +837,13 @@ class LumiReleaseManager:
             raise LumiReleaseCompatibilityError(
                 "the release has no runtime dependency wheels for this Python ABI and host"
             )
+        backend = _runtime_backend_distribution(manifest.runtime_dependencies)
         if not any(
-            _normalize_distribution(item.distribution) == "onnxruntime-genai"
+            _normalize_distribution(item.distribution) == backend
             for item in matching_dependencies
         ):
             raise LumiReleaseCompatibilityError(
-                "the release does not provide a pinned onnxruntime-genai wheel for this host"
+                f"the release does not provide a pinned {backend} wheel for this host"
             )
         if len(matching_dependencies) > MAX_WHEELS:
             raise LumiReleaseCompatibilityError(
@@ -711,9 +888,12 @@ class LumiReleaseManager:
         tag: str,
         release_directory: Path,
         dependencies: Sequence[RuntimeDependency],
+        required_distributions: frozenset[str],
     ) -> tuple[Path, ...]:
         runtime_host = self._host()
-        matching = _matching_installer_dependencies(dependencies, runtime_host)
+        matching = _matching_installer_dependencies(
+            dependencies, runtime_host, required_distributions
+        )
         if not matching:
             raise LumiReleaseCompatibilityError(
                 "the release has no complete model installer wheel set for this host"
@@ -841,6 +1021,137 @@ class LumiReleaseManager:
         return _installer_dependency_directories(release_directory)
 
     def _list_published_releases(self, limit: int) -> tuple[LumiReleaseCandidate, ...]:
+        with self._release_list_lock:
+            cached = self._read_release_list_cache()
+            now = int(time.time())
+            if cached is not None:
+                fetched_at, cached_limit, candidates = cached
+                age = max(0, now - fetched_at)
+                if cached_limit >= limit and age <= RELEASE_LIST_CACHE_TTL_SECONDS:
+                    return candidates[:limit]
+            else:
+                age = 0
+
+            try:
+                candidates = self._fetch_published_releases(limit)
+            except (LumiReleaseRequestError, OSError, TimeoutError):
+                if (
+                    cached is not None
+                    and cached[1] >= limit
+                    and age <= RELEASE_LIST_CACHE_MAX_STALE_SECONDS
+                ):
+                    return cached[2][:limit]
+                raise
+            self._write_release_list_cache(limit, candidates, now)
+            return candidates
+
+    def _read_release_list_cache(
+        self,
+    ) -> tuple[int, int, tuple[LumiReleaseCandidate, ...]] | None:
+        path = self._managed_data_path / LUMI_RELEASE_LIST_CACHE_NAME
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            if path.stat().st_size > MAX_RELEASE_LIST_CACHE_BYTES:
+                return None
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"schemaVersion", "fetchedAt", "requestLimit", "releases"}
+            or type(payload.get("schemaVersion")) is not int
+            or payload.get("schemaVersion") != 1
+            or type(payload.get("fetchedAt")) is not int
+            or payload["fetchedAt"] < 0
+            or type(payload.get("requestLimit")) is not int
+            or not 1 <= payload["requestLimit"] <= 100
+            or not isinstance(payload.get("releases"), list)
+            or len(payload["releases"]) > payload["requestLimit"]
+        ):
+            return None
+        candidates: list[LumiReleaseCandidate] = []
+        for item in payload["releases"]:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"tag", "name", "publishedAt", "packageSha256"}
+            ):
+                return None
+            tag = item.get("tag")
+            name = item.get("name")
+            published_at = item.get("publishedAt")
+            package_sha256 = item.get("packageSha256")
+            if (
+                not isinstance(tag, str)
+                or not _TAG_RE.fullmatch(tag)
+                or not isinstance(name, str)
+                or not name
+                or len(name) > 256
+                or not isinstance(published_at, str)
+                or not published_at
+                or len(published_at) > 64
+                or not isinstance(package_sha256, str)
+                or not _SHA256_RE.fullmatch(package_sha256)
+                or any(ord(character) < 32 or ord(character) == 127 for character in name)
+                or any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in published_at
+                )
+            ):
+                return None
+            candidates.append(
+                LumiReleaseCandidate(tag, name, published_at, package_sha256)
+            )
+        return payload["fetchedAt"], payload["requestLimit"], tuple(candidates)
+
+    def _write_release_list_cache(
+        self,
+        limit: int,
+        candidates: tuple[LumiReleaseCandidate, ...],
+        fetched_at: int,
+    ) -> None:
+        path = self._managed_data_path / LUMI_RELEASE_LIST_CACHE_NAME
+        if path.is_symlink():
+            return
+        payload = {
+            "schemaVersion": 1,
+            "fetchedAt": fetched_at,
+            "requestLimit": limit,
+            "releases": [
+                {
+                    "tag": candidate.tag,
+                    "name": candidate.name,
+                    "publishedAt": candidate.published_at,
+                    "packageSha256": candidate.package_sha256,
+                }
+                for candidate in candidates
+            ],
+        }
+        temporary_path: Path | None = None
+        try:
+            self._managed_data_path.mkdir(parents=True, exist_ok=True)
+            handle, temporary_name = tempfile.mkstemp(
+                prefix=".lumi-release-list-",
+                suffix=".tmp",
+                dir=self._managed_data_path,
+            )
+            temporary_path = Path(temporary_name)
+            with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+                json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            if not path.is_symlink():
+                os.replace(temporary_path, path)
+        except OSError:
+            pass
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                _remove_managed_path(temporary_path, ignore_errors=True)
+
+    def _fetch_published_releases(
+        self, limit: int
+    ) -> tuple[LumiReleaseCandidate, ...]:
         url = f"{LUMI_GITHUB_API}/releases?per_page={limit}"
         response = self._fetcher(
             url,
@@ -972,6 +1283,9 @@ class LumiReleaseManager:
         previous: Path | None = None
         had_previous = final_directory.exists()
         try:
+            (staging / LUMI_RELEASE_ASSET_NAME).write_bytes(
+                prepared.package_archive
+            )
             package_root = staging / "package"
             package_root.mkdir()
             _extract_package_archive(
@@ -992,6 +1306,23 @@ class LumiReleaseManager:
                 )
                 dependency_root.mkdir(parents=True, exist_ok=True)
                 _extract_wheel(wheel_bytes, dependency_root, dependency)
+            install_marker = {
+                "schemaVersion": 1,
+                "tag": prepared.tag,
+                "packageAssetSha256": prepared.asset_digest,
+                "runtimeWheels": [
+                    {
+                        "asset": dependency.asset,
+                        "sha256": hashlib.sha256(wheel_bytes).hexdigest(),
+                    }
+                    for dependency, wheel_bytes in prepared.wheels
+                ],
+            }
+            (staging / LUMI_RELEASE_INSTALL_MARKER_NAME).write_text(
+                json.dumps(install_marker, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
             if final_directory.exists():
                 previous = (
                     release_root / f".rollback-{final_directory.name}-{os.getpid()}"
@@ -1032,11 +1363,12 @@ class LumiReleaseManager:
             raise LumiReleaseCompatibilityError(
                 "the Lumi package runtime API does not match its release manifest"
             )
-        required_runtime_symbols = (
-            "OrtGenAIChatRuntime",
-            "OrtGenAIConfig",
-            "VerifiedModelArtifact",
-        )
+        backend = _runtime_backend_distribution(manifest.runtime_dependencies)
+        runtime_symbols = {
+            "onnxruntime-genai": ("OrtGenAIChatRuntime", "OrtGenAIConfig"),
+            "llama-cpp-python": ("LlamaCppChatRuntime", "LlamaCppConfig"),
+        }[backend]
+        required_runtime_symbols = (*runtime_symbols, "VerifiedModelArtifact")
         if any(
             not callable(getattr(modules.runtime, name, None))
             for name in required_runtime_symbols
@@ -1080,12 +1412,135 @@ def _normalize_distribution(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
 
+def _runtime_backend_distribution(
+    dependencies: Sequence[RuntimeDependency],
+) -> str:
+    backends = {
+        _normalize_distribution(dependency.distribution)
+        for dependency in dependencies
+        if _normalize_distribution(dependency.distribution)
+        in _RUNTIME_BACKEND_INSTALLER_REQUIREMENTS
+    }
+    if len(backends) != 1:
+        raise LumiReleaseCompatibilityError(
+            "Lumi release must declare exactly one supported native runtime backend"
+        )
+    return next(iter(backends))
+
+
+def _required_installer_distributions(backend: str) -> frozenset[str]:
+    try:
+        return _RUNTIME_BACKEND_INSTALLER_REQUIREMENTS[backend]
+    except KeyError as error:
+        raise LumiReleaseCompatibilityError(
+            "Lumi release declares an unsupported native runtime backend"
+        ) from error
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _managed_tree_files(root: Path) -> dict[str, Path] | None:
+    if root.is_symlink() or not root.is_dir():
+        return None
+    files: dict[str, Path] = {}
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            return None
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            return None
+        relative = PurePosixPath(*path.relative_to(root).parts)
+        if "__pycache__" in relative.parts or relative.suffix == ".pyc":
+            continue
+        files[relative.as_posix()] = path
+    return files
+
+
+def _installed_package_tree_is_valid(
+    package_root: Path,
+    package_archive: bytes,
+    manifest: LumiReleaseManifest,
+) -> bool:
+    try:
+        with zipfile.ZipFile(io.BytesIO(package_archive)) as archive:
+            infos = _validate_zip_entries(archive.infolist(), MAX_ARCHIVE_ENTRIES)
+            manifest_bytes = archive.read(infos[LUMI_RELEASE_MANIFEST_NAME])
+        expected = dict(manifest.package_files)
+        expected[LUMI_RELEASE_MANIFEST_NAME] = (
+            len(manifest_bytes),
+            hashlib.sha256(manifest_bytes).hexdigest(),
+        )
+        actual = _managed_tree_files(package_root)
+        if actual is None or set(actual) != set(expected):
+            return False
+        return all(
+            path.stat().st_size == size and _sha256_file(path) == digest
+            for name, (size, digest) in expected.items()
+            for path in (actual[name],)
+        )
+    except (KeyError, OSError, RuntimeError, zipfile.BadZipFile):
+        return False
+
+
+def _installed_wheel_tree_is_valid(
+    wheel_path: Path,
+    package_root: Path,
+    dependency: RuntimeDependency,
+    *,
+    installer: bool = False,
+) -> bool:
+    max_file_bytes = (
+        MAX_INSTALLER_WHEEL_FILE_BYTES if installer else MAX_WHEEL_FILE_BYTES
+    )
+    max_expanded_bytes = (
+        MAX_INSTALLER_WHEEL_EXPANDED_BYTES
+        if installer
+        else MAX_WHEEL_EXPANDED_BYTES
+    )
+    try:
+        with zipfile.ZipFile(wheel_path) as wheel:
+            infos = _validate_zip_entries(
+                wheel.infolist(),
+                MAX_ARCHIVE_ENTRIES,
+                maximum_compression_ratio=(
+                    None if installer else MAX_ARCHIVE_COMPRESSION_RATIO
+                ),
+            )
+            expected: dict[str, tuple[int, str]] = {}
+            expanded_bytes = 0
+            for name, info in infos.items():
+                if info.file_size > max_file_bytes:
+                    return False
+                expanded_bytes += info.file_size
+                if expanded_bytes > max_expanded_bytes:
+                    return False
+                relative = _wheel_install_path(name, dependency)
+                if relative is None:
+                    continue
+                if "__pycache__" in relative.parts or relative.suffix == ".pyc":
+                    continue
+                digest = hashlib.sha256()
+                with wheel.open(info) as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                expected[relative.as_posix()] = (info.file_size, digest.hexdigest())
+        actual = _managed_tree_files(package_root)
+        if actual is None or set(actual) != set(expected):
+            return False
+        return all(
+            path.stat().st_size == size and _sha256_file(path) == digest
+            for name, (size, digest) in expected.items()
+            for path in (actual[name],)
+        )
+    except (LumiReleaseError, OSError, RuntimeError, zipfile.BadZipFile):
+        return False
 
 
 def _parse_release_assets(raw_assets: object) -> dict[str, _Asset]:
@@ -1245,11 +1700,11 @@ def _fetch_github_bytes(
             raise LumiReleaseUnavailable(
                 "the selected Lumi release or asset does not exist"
             ) from error
-        raise LumiReleaseError(
+        raise LumiReleaseRequestError(
             f"GitHub release request failed with HTTP {error.code}"
         ) from error
     except (OSError, urllib.error.URLError) as error:
-        raise LumiReleaseError("GitHub release request failed") from error
+        raise LumiReleaseRequestError("GitHub release request failed") from error
 
 
 def _read_and_validate_manifest(
@@ -1319,13 +1774,7 @@ def _read_and_validate_manifest(
         raise LumiReleaseCompatibilityError(
             "Lumi release declares too many runtime dependencies"
         )
-    if not any(
-        _normalize_distribution(item.distribution) == "onnxruntime-genai"
-        for item in dependencies
-    ):
-        raise LumiReleaseCompatibilityError(
-            "Lumi release must declare its pinned onnxruntime-genai wheel"
-        )
+    backend = _runtime_backend_distribution(dependencies)
     _validate_package_archive_members(infos, package_files)
     _validate_dependency_wheel_names(dependencies)
     _validate_dependency_wheel_names(installer_dependencies)
@@ -1338,7 +1787,8 @@ def _read_and_validate_manifest(
             _normalize_distribution(item.distribution)
             for item in installer_dependencies
         }
-        if not _REQUIRED_INSTALLER_DISTRIBUTIONS.issubset(installer_distributions):
+        required_installer_distributions = _required_installer_distributions(backend)
+        if not required_installer_distributions.issubset(installer_distributions):
             raise LumiReleaseCompatibilityError(
                 "Lumi model installer wheel set is incomplete"
             )
@@ -1441,14 +1891,21 @@ def _parse_wheel_dependencies(
         distribution, version, python_tag, abi_tag, platform_tag, asset, digest = values
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", distribution):
             raise LumiReleaseError("Lumi runtime wheel distribution name is invalid")
+        normalized_distribution = _normalize_distribution(distribution)
         if (
             kind == "runtime"
-            and _normalize_distribution(distribution) == "onnxruntime-genai"
-            and (python_tag == "py3" or abi_tag == "none" or platform_tag == "any")
+            and normalized_distribution in _RUNTIME_BACKEND_INSTALLER_REQUIREMENTS
         ):
-            raise LumiReleaseCompatibilityError(
-                "onnxruntime-genai must use a pinned host-specific binary wheel"
-            )
+            if platform_tag == "any":
+                raise LumiReleaseCompatibilityError(
+                    f"{normalized_distribution} must use a pinned host-specific binary wheel"
+                )
+            if normalized_distribution == "onnxruntime-genai" and (
+                python_tag == "py3" or abi_tag == "none"
+            ):
+                raise LumiReleaseCompatibilityError(
+                    "onnxruntime-genai must use a pinned CPython binary wheel"
+                )
         if not _ASSET_NAME_RE.fullmatch(asset):
             raise LumiReleaseError("Lumi runtime wheel asset name is invalid")
         if not re.fullmatch(r"[A-Za-z0-9_.+-]+", version):
@@ -1553,13 +2010,15 @@ def _cpython_minor(python_tag: str) -> int | None:
 
 
 def _matching_installer_dependencies(
-    dependencies: Sequence[RuntimeDependency], host: RuntimeHost
+    dependencies: Sequence[RuntimeDependency],
+    host: RuntimeHost,
+    required_distributions: frozenset[str],
 ) -> tuple[RuntimeDependency, ...]:
     matching = _matching_dependencies(dependencies, host)
     distributions = {
         _normalize_distribution(dependency.distribution) for dependency in matching
     }
-    if not _REQUIRED_INSTALLER_DISTRIBUTIONS.issubset(distributions):
+    if not required_distributions.issubset(distributions):
         return ()
     return matching
 
@@ -1746,7 +2205,8 @@ def _validate_wheel_archive(
                 raise LumiReleaseError(
                     f"{kind} wheel METADATA does not match its pinned identity"
                 )
-            if _normalize_distribution(dependency.distribution) == "onnxruntime-genai":
+            normalized_distribution = _normalize_distribution(dependency.distribution)
+            if normalized_distribution == "onnxruntime-genai":
                 native_suffix = (
                     ".pyd" if dependency.platform_tag.startswith("win_") else ".so"
                 )
@@ -1757,6 +2217,16 @@ def _validate_wheel_archive(
                 ):
                     raise LumiReleaseError(
                         "pinned onnxruntime-genai wheel has no host-native extension binary"
+                    )
+            elif normalized_distribution == "llama-cpp-python":
+                native_suffixes = (".pyd", ".so", ".dll", ".dylib")
+                if not any(
+                    name.startswith("llama_cpp/")
+                    and name.lower().endswith(native_suffixes)
+                    for name in infos
+                ):
+                    raise LumiReleaseError(
+                        "pinned llama-cpp-python wheel has no host-native binary"
                     )
             expanded = sum(info.file_size for info in infos.values())
             if expanded > expanded_limit:
@@ -1894,11 +2364,22 @@ def _installer_dependencies_are_valid(
     if root.is_symlink() or not root.is_dir():
         return False
     try:
+        marker_path = root / "lumi-installer-wheels.json"
+        if (
+            marker_path.is_symlink()
+            or not marker_path.is_file()
+            or marker_path.stat().st_size > MAX_RELEASE_INSTALL_MARKER_BYTES
+        ):
+            return False
         marker = json.loads(
-            (root / "lumi-installer-wheels.json").read_text(encoding="utf-8")
+            marker_path.read_text(encoding="utf-8")
         )
         expected = _installer_dependency_manifest(tag, dependencies)
-        if marker != expected:
+        if marker != expected or {path.name for path in root.iterdir()} != {
+            "lumi-installer-wheels.json",
+            "wheelhouse",
+            "dependencies",
+        }:
             return False
         wheelhouse = root / "wheelhouse"
         dependency_root = root / "dependencies"
@@ -1908,6 +2389,15 @@ def _installer_dependencies_are_valid(
             or dependency_root.is_symlink()
             or not dependency_root.is_dir()
         ):
+            return False
+        expected_wheel_names = {dependency.asset for dependency in dependencies}
+        if {path.name for path in wheelhouse.iterdir()} != expected_wheel_names:
+            return False
+        expected_dependency_names = {
+            f"{_normalize_distribution(item.distribution)}-{item.version}"
+            for item in dependencies
+        }
+        if {path.name for path in dependency_root.iterdir()} != expected_dependency_names:
             return False
         for dependency in dependencies:
             wheel = wheelhouse / dependency.asset
@@ -1924,11 +2414,46 @@ def _installer_dependencies_are_valid(
                 package_directory.parent.is_symlink()
                 or package_directory.is_symlink()
                 or not package_directory.is_dir()
+                or not _installed_wheel_tree_is_valid(
+                    wheel,
+                    package_directory,
+                    dependency,
+                    installer=True,
+                )
             ):
                 return False
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
     return True
+
+
+def _existing_managed_release_root(managed_data_path: Path) -> Path | None:
+    base = managed_data_path.resolve()
+    lumi_root = base / "lumi"
+    if lumi_root.is_symlink() and not _is_relative_to(lumi_root.resolve(), base):
+        raise LumiReleaseError(
+            "managed Lumi path resolves outside the Orchestrator data root"
+        )
+    if not lumi_root.is_dir():
+        return None
+    lumi_root = lumi_root.resolve()
+    if not _is_relative_to(lumi_root, base):
+        raise LumiReleaseError(
+            "managed Lumi path resolves outside the Orchestrator data root"
+        )
+    release_root = lumi_root / "releases"
+    if release_root.is_symlink() and not _is_relative_to(release_root.resolve(), base):
+        raise LumiReleaseError(
+            "managed Lumi release path resolves outside the Orchestrator data root"
+        )
+    if not release_root.is_dir():
+        return None
+    release_root = release_root.resolve()
+    if not _is_relative_to(release_root, base):
+        raise LumiReleaseError(
+            "managed Lumi release path resolves outside the Orchestrator data root"
+        )
+    return release_root
 
 
 def _managed_release_root(managed_data_path: Path) -> Path:

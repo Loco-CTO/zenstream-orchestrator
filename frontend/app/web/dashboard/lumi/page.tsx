@@ -388,89 +388,98 @@ export default function LumiSettingsPage() {
 	const requestInFlight = useRef(false);
 	const runtimeSettingsDirtyRef = useRef(false);
 
-	const load = useCallback(async (current: Session, silent = false) => {
-		if (requestInFlight.current) return;
-		requestInFlight.current = true;
-		if (!silent) {
-			setLoading(true);
-			setError("");
-		}
-		try {
-			const [statusResponse, releasesResponse, modelsResponse] = await Promise.all(
-				[
-					adminFetch("/api/admin/lumi/status", current),
-					adminFetch("/api/admin/lumi/releases", current),
-					adminFetch("/api/admin/lumi/models", current),
-				],
-			);
-			const [statusValue, releasesValue, modelsValue] = await Promise.all([
-				statusResponse.json().catch(() => null),
-				releasesResponse.json().catch(() => null),
-				modelsResponse.json().catch(() => null),
-			]);
-			if (!statusResponse.ok) {
-				throw new Error(
-					responseError(statusValue, "Could not load Lumi integration status."),
-				);
+	const load = useCallback(
+		async (current: Session, silent = false, refreshReleases = true) => {
+			if (requestInFlight.current) return;
+			requestInFlight.current = true;
+			if (!silent) {
+				setLoading(true);
+				setError("");
 			}
-			const status = normalizeStatus(statusValue);
-			if (!status) throw new Error("The Lumi status response was not recognized.");
-
-			const modelCatalog = modelsResponse.ok
-				? normalizeModelCatalog(modelsValue)
-				: null;
-			const nextDefaultModel = modelCatalog
-				? modelCatalog.defaultModel
-				: status.defaultModel;
-			setIntegration(status.integration);
-			setModels(
-				mergeModels(status.models, modelCatalog?.models ?? [], nextDefaultModel),
-			);
-			setDefaultModel(nextDefaultModel);
-			if (!runtimeSettingsDirtyRef.current) {
-				setDefaultThinking(modelCatalog?.defaultThinking ?? status.defaultThinking);
-				if (modelCatalog) setRuntimeLimits(modelCatalog.limits);
-			}
-			setModelInstallAvailable(modelCatalog?.modelInstallAvailable ?? false);
-			setSelectedReleaseTag(
-				(currentTag) =>
-					currentTag ||
-					(status.integration.enabled ? status.integration.releaseTag || "" : ""),
-			);
-			setError("");
-			if (!releasesResponse.ok) {
-				setReleaseError(
-					responseError(releasesValue, "Could not load supported Lumi releases."),
-				);
-			} else {
-				const normalizedReleases = normalizeReleases(releasesValue);
-				if (normalizedReleases) {
-					setReleases(normalizedReleases);
-					setReleaseError("");
-				} else {
-					setReleaseError("The Lumi release list response was not recognized.");
+			try {
+				const [statusResponse, releasesResponse, modelsResponse] =
+					await Promise.all([
+						adminFetch("/api/admin/lumi/status", current),
+						refreshReleases
+							? adminFetch("/api/admin/lumi/releases", current)
+							: Promise.resolve(null),
+						adminFetch("/api/admin/lumi/models", current),
+					]);
+				const [statusValue, modelsValue] = await Promise.all([
+					statusResponse.json().catch(() => null),
+					modelsResponse.json().catch(() => null),
+				]);
+				const releasesValue = releasesResponse
+					? await releasesResponse.json().catch(() => null)
+					: null;
+				if (!statusResponse.ok) {
+					throw new Error(
+						responseError(statusValue, "Could not load Lumi integration status."),
+					);
 				}
-			}
-			if (!modelsResponse.ok) {
-				setModelsError(
-					responseError(modelsValue, "Could not load Lumi model settings."),
+				const status = normalizeStatus(statusValue);
+				if (!status)
+					throw new Error("The Lumi status response was not recognized.");
+
+				const modelCatalog = modelsResponse.ok
+					? normalizeModelCatalog(modelsValue)
+					: null;
+				const nextDefaultModel = modelCatalog
+					? modelCatalog.defaultModel
+					: status.defaultModel;
+				setIntegration(status.integration);
+				setModels(
+					mergeModels(status.models, modelCatalog?.models ?? [], nextDefaultModel),
 				);
-			} else if (!modelCatalog) {
-				setModelsError("The Lumi model list response was not recognized.");
-			} else {
-				setModelsError("");
+				setDefaultModel(nextDefaultModel);
+				if (!runtimeSettingsDirtyRef.current) {
+					setDefaultThinking(
+						modelCatalog?.defaultThinking ?? status.defaultThinking,
+					);
+					if (modelCatalog) setRuntimeLimits(modelCatalog.limits);
+				}
+				setModelInstallAvailable(modelCatalog?.modelInstallAvailable ?? false);
+				setSelectedReleaseTag(
+					(currentTag) =>
+						currentTag ||
+						(status.integration.enabled ? status.integration.releaseTag || "" : ""),
+				);
+				setError("");
+				if (releasesResponse && !releasesResponse.ok) {
+					setReleaseError(
+						responseError(releasesValue, "Could not load supported Lumi releases."),
+					);
+				} else if (releasesResponse) {
+					const normalizedReleases = normalizeReleases(releasesValue);
+					if (normalizedReleases) {
+						setReleases(normalizedReleases);
+						setReleaseError("");
+					} else {
+						setReleaseError("The Lumi release list response was not recognized.");
+					}
+				}
+				if (!modelsResponse.ok) {
+					setModelsError(
+						responseError(modelsValue, "Could not load Lumi model settings."),
+					);
+				} else if (!modelCatalog) {
+					setModelsError("The Lumi model list response was not recognized.");
+				} else {
+					setModelsError("");
+				}
+			} catch (cause) {
+				setError(
+					cause instanceof Error && cause.message
+						? safeText(cause.message)
+						: "Could not connect to the Orchestrator.",
+				);
+			} finally {
+				requestInFlight.current = false;
+				if (!silent) setLoading(false);
 			}
-		} catch (cause) {
-			setError(
-				cause instanceof Error && cause.message
-					? safeText(cause.message)
-					: "Could not connect to the Orchestrator.",
-			);
-		} finally {
-			requestInFlight.current = false;
-			if (!silent) setLoading(false);
-		}
-	}, []);
+		},
+		[],
+	);
 
 	useEffect(() => {
 		const current = readSession();
@@ -495,7 +504,7 @@ export default function LumiSettingsPage() {
 	useEffect(() => {
 		if (!session || !shouldPoll) return undefined;
 		const timer = window.setInterval(() => {
-			load(session, true).catch((cause) => {
+			load(session, true, false).catch((cause) => {
 				setError(
 					cause instanceof Error && cause.message
 						? safeText(cause.message)

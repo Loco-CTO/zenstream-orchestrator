@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from app.lumi_catalog import LumiCatalogAdapter
-from app.lumi_release import LumiReleaseCompatibilityError
+from app.lumi_release import (
+    LumiReleaseCompatibilityError,
+    _runtime_backend_distribution,
+)
 from app.paths import metadata_directory
 from version import __version__ as ORCHESTRATOR_VERSION
 
@@ -34,6 +37,33 @@ _DEFAULT_LIMITS = {
     "maxConcurrentChats": 1,
     "maxActiveConversations": 128,
 }
+
+
+def _create_runtime_adapter(runtime_module, artifacts, limits, backend):
+    """Build the embedded runtime adapter declared by the active release."""
+    adapters = {
+        "llama-cpp-python": ("LlamaCppConfig", "LlamaCppChatRuntime"),
+        "onnxruntime-genai": ("OrtGenAIConfig", "OrtGenAIChatRuntime"),
+    }
+    adapter = adapters.get(backend)
+    if adapter is None:
+        raise LumiHostError(
+            "The selected Lumi release does not declare a supported local runtime."
+        )
+    config_name, runtime_name = adapter
+    config_type = getattr(runtime_module, config_name, None)
+    runtime_type = getattr(runtime_module, runtime_name, None)
+    if not callable(config_type) or not callable(runtime_type):
+        raise LumiHostError(
+            "The selected Lumi release does not expose its declared local runtime."
+        )
+    configuration = config_type(
+        model_artifacts=artifacts,
+        idle_unload_seconds=limits["idleUnloadSeconds"],
+        max_context_tokens=limits["maxContextTokens"],
+        max_output_tokens=limits["maxOutputTokens"],
+    )
+    return runtime_type(configuration)
 
 
 class LumiHostError(RuntimeError):
@@ -697,13 +727,12 @@ class LumiHost:
             for model_id, record in active_models
         }
         limits = self._settings["limits"]
-        runtime_config = runtime_module.OrtGenAIConfig(
-            model_artifacts=artifacts,
-            idle_unload_seconds=limits["idleUnloadSeconds"],
-            max_context_tokens=limits["maxContextTokens"],
-            max_output_tokens=limits["maxOutputTokens"],
+        runtime = _create_runtime_adapter(
+            runtime_module,
+            artifacts,
+            limits,
+            _runtime_backend_distribution(loaded.manifest.runtime_dependencies),
         )
-        runtime = runtime_module.OrtGenAIChatRuntime(runtime_config)
 
         model_module = importlib.import_module("lumi.model_catalog")
         options_by_id = {item["id"]: item for item in self._model_catalog()}

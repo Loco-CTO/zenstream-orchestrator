@@ -21,7 +21,9 @@ from app.lumi_release import (
     LumiReleaseCompatibilityError,
     LumiReleaseError,
     LumiReleaseManager,
+    LumiReleaseRequestError,
     LumiReleaseUnavailable,
+    RELEASE_LIST_CACHE_TTL_SECONDS,
     RuntimeDependency,
     RuntimeHost,
     _extract_wheel,
@@ -34,7 +36,7 @@ from app.lumi_release import (
 )
 
 TAG = "v1.2.3"
-ORCHESTRATOR_VERSION = "1.7.2"
+ORCHESTRATOR_VERSION = "1.7.3"
 HOST = RuntimeHost("cp312", "cp312", ("win_amd64",))
 WHEEL_NAME = "onnxruntime_genai-0.17.1-cp312-cp312-win_amd64.whl"
 WHEEL_DISTRIBUTION = "onnxruntime-genai"
@@ -56,6 +58,21 @@ def _make_wheel():
         archive.writestr(
             "onnxruntime_genai-0.17.1.dist-info/METADATA",
             "Metadata-Version: 2.1\nName: onnxruntime-genai\nVersion: 0.17.1\n",
+        )
+    return buffer.getvalue()
+
+
+def _make_llama_cpp_wheel():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("llama_cpp/__init__.py", b"__version__ = '0.3.35'\n")
+        archive.writestr(
+            "llama_cpp/_llama_cpp.cp312-win_amd64.pyd",
+            b"native wheel fixture",
+        )
+        archive.writestr(
+            "llama_cpp_python-0.3.35.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: llama-cpp-python\nVersion: 0.3.35\n",
         )
     return buffer.getvalue()
 
@@ -286,6 +303,98 @@ class FakeGitHub:
         if len(body) > max_bytes:
             raise AssertionError("test payload exceeded requested byte limit")
         return HttpResponse(body, final_url, {"Content-Length": str(len(body))})
+
+
+class FakeLlamaCppGitHub(FakeGitHub):
+    def __init__(self):
+        self.requests = []
+        self.metadata_final_url = None
+        self.wheel_bytes = _make_llama_cpp_wheel()
+        installer_bytes = _make_installer_wheel(
+            "huggingface-hub", "1.10.0", "huggingface_hub"
+        )
+        wheel_name = "llama_cpp_python-0.3.35-py3-none-win_amd64.whl"
+        installer_name = "huggingface_hub-1.10.0-py3-none-any.whl"
+        installer_dependency = {
+            "distribution": "huggingface-hub",
+            "version": "1.10.0",
+            "pythonTag": "py3",
+            "abiTag": "none",
+            "platformTag": "any",
+            "asset": installer_name,
+            "sha256": _sha256(installer_bytes),
+        }
+        package_sources = {
+            "lumi/__init__.py": (
+                b'"""Lumi runtime package."""\nLUMI_PLUGIN_API_VERSION = 1\n'
+            ),
+            "lumi/runtime/__init__.py": (
+                b"LUMI_RUNTIME_API_VERSION = 1\n"
+                b"class VerifiedModelArtifact:\n    pass\n"
+                b"class LlamaCppConfig:\n    pass\n"
+                b"class LlamaCppChatRuntime:\n"
+                b"    def __init__(self, configuration):\n"
+                b"        self.configuration = configuration\n"
+                b"    async def close(self):\n        pass\n"
+            ),
+            "lumi/service_factory.py": (
+                b"class EmbeddedService:\n"
+                b"    async def close(self):\n        pass\n"
+                b"def create_embedded_service(**_kwargs):\n"
+                b"    return EmbeddedService()\n"
+            ),
+        }
+        self.manifest = {
+            "schemaVersion": 1,
+            "tag": TAG,
+            "runtimeApiVersion": 1,
+            "minimumOrchestratorVersion": "1.7.3",
+            "maximumOrchestratorVersionExclusive": "2.0.0",
+            "files": {
+                name: {"size": len(content), "sha256": _sha256(content)}
+                for name, content in package_sources.items()
+            },
+            "runtimeDependencies": [
+                {
+                    "distribution": "llama-cpp-python",
+                    "version": "0.3.35",
+                    "pythonTag": "py3",
+                    "abiTag": "none",
+                    "platformTag": "win_amd64",
+                    "asset": wheel_name,
+                    "sha256": _sha256(self.wheel_bytes),
+                }
+            ],
+            "installerDependencies": [installer_dependency],
+        }
+        package_buffer = io.BytesIO()
+        with zipfile.ZipFile(
+            package_buffer, "w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
+            archive.writestr("lumi-release.json", json.dumps(self.manifest))
+            for name, content in package_sources.items():
+                archive.writestr(name, content)
+        self.package_bytes = package_buffer.getvalue()
+        self.payloads = {
+            "lumi-runtime.zip": self.package_bytes,
+            wheel_name: self.wheel_bytes,
+            installer_name: installer_bytes,
+        }
+        self.installer_payloads = {installer_name: installer_bytes}
+        self.metadata = {
+            "tag_name": TAG,
+            "html_url": f"https://github.com/{LUMI_GITHUB_REPOSITORY}/releases/tag/{TAG}",
+            "full_name": LUMI_GITHUB_REPOSITORY,
+            "published_at": "2026-01-01T00:00:00Z",
+            "draft": False,
+            "prerelease": False,
+            "assets": [
+                self._asset(name, content, TAG)
+                for name, content in self.payloads.items()
+            ],
+        }
+        self.releases = [self.metadata]
+        self.metadata_bytes = json.dumps(self.metadata).encode("utf-8")
 
 
 class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
@@ -532,6 +641,45 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([candidate.tag for candidate in candidates], [TAG])
 
+    async def test_release_listing_cache_survives_restart_and_rate_limits(self):
+        github = FakeGitHub()
+        first_manager = self._manager(github)
+        with patch("app.lumi_release.time.time", return_value=1_000_000):
+            original_candidates = await first_manager.list_published_releases()
+
+        unavailable_requests = []
+
+        def unavailable_fetcher(url, *_args):
+            unavailable_requests.append(url)
+            raise LumiReleaseRequestError("GitHub is rate-limiting requests")
+
+        fresh_manager = LumiReleaseManager(
+            self.data_root,
+            ORCHESTRATOR_VERSION,
+            runtime_host=HOST,
+            fetcher=unavailable_fetcher,
+        )
+        self.managers.append(fresh_manager)
+        with patch("app.lumi_release.time.time", return_value=1_000_001):
+            fresh_candidates = await fresh_manager.list_published_releases()
+        self.assertEqual(fresh_candidates, original_candidates)
+        self.assertEqual(unavailable_requests, [])
+
+        stale_manager = LumiReleaseManager(
+            self.data_root,
+            ORCHESTRATOR_VERSION,
+            runtime_host=HOST,
+            fetcher=unavailable_fetcher,
+        )
+        self.managers.append(stale_manager)
+        with patch(
+            "app.lumi_release.time.time",
+            return_value=1_000_000 + RELEASE_LIST_CACHE_TTL_SECONDS + 1,
+        ):
+            stale_candidates = await stale_manager.list_published_releases()
+        self.assertEqual(stale_candidates, original_candidates)
+        self.assertEqual(len(unavailable_requests), 1)
+
     async def test_enable_installs_pinned_release_and_disable_closes_and_unloads(self):
         github = FakeGitHub()
         manager = self._manager(github)
@@ -610,6 +758,120 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
             if any(asset in request for request in github.requests)
         }
         self.assertEqual(requested_assets, installer_assets)
+
+    async def test_llama_cpp_release_activates_and_installs_its_model_installer(self):
+        github = FakeLlamaCppGitHub()
+        manager = self._manager(github)
+
+        release = await manager.enable(TAG)
+
+        self.assertEqual(
+            {dependency.distribution for dependency in release.manifest.runtime_dependencies},
+            {"llama-cpp-python"},
+        )
+        self.assertTrue(manager.model_install_available)
+        self.assertTrue(
+            (release.directory / "dependencies" / "llama-cpp-python-0.3.35"
+             / "site-packages" / "llama_cpp" / "__init__.py").is_file()
+        )
+        self.assertFalse((release.directory / "installer-dependencies").exists())
+
+        async def run_in_worker(function, *args):
+            return await asyncio.to_thread(function, *args)
+
+        with patch("app.foreground.run_control", side_effect=run_in_worker):
+            directories = await manager.install_model_dependencies()
+
+        installer_root = release.directory / "installer-dependencies"
+        self.assertEqual(len(directories), 1)
+        self.assertTrue(
+            (installer_root / "wheelhouse"
+             / "huggingface_hub-1.10.0-py3-none-any.whl").is_file()
+        )
+
+    async def test_release_and_installer_wheels_survive_manager_restart(self):
+        github = FakeLlamaCppGitHub()
+        first_manager = self._manager(github)
+        first_release = await first_manager.enable(TAG)
+
+        async def run_in_worker(function, *args):
+            return await asyncio.to_thread(function, *args)
+
+        with patch("app.foreground.run_control", side_effect=run_in_worker):
+            await first_manager.install_model_dependencies()
+        request_count = len(github.requests)
+        release_directory = first_release.directory
+        installer_marker = (
+            release_directory
+            / "installer-dependencies"
+            / "lumi-installer-wheels.json"
+        )
+        self.assertTrue(installer_marker.is_file())
+
+        await first_manager.disable()
+        second_manager = self._manager(github)
+        second_release = await second_manager.enable(TAG)
+
+        self.assertEqual(second_release.directory, release_directory)
+        self.assertEqual(len(github.requests), request_count)
+        self.assertTrue(installer_marker.is_file())
+        with patch("app.foreground.run_control", side_effect=run_in_worker):
+            directories = await second_manager.install_model_dependencies()
+        self.assertEqual(len(directories), 1)
+        self.assertEqual(len(github.requests), request_count)
+
+        cached_hub = (
+            release_directory
+            / "installer-dependencies"
+            / "dependencies"
+            / "huggingface-hub-1.10.0"
+            / "site-packages"
+            / "huggingface_hub"
+            / "__init__.py"
+        )
+        cached_hub.write_bytes(b"damaged cached package")
+        extra_file = cached_hub.parent / "unexpected.py"
+        extra_file.write_bytes(b"unexpected package file")
+        with patch("app.foreground.run_control", side_effect=run_in_worker):
+            await second_manager.install_model_dependencies()
+        self.assertGreater(len(github.requests), request_count)
+        self.assertEqual(cached_hub.read_bytes(), b"__version__ = 'test'\n")
+        self.assertFalse(extra_file.exists())
+
+    async def test_modified_cached_release_is_downloaded_and_repaired(self):
+        github = FakeLlamaCppGitHub()
+        first_manager = self._manager(github)
+        first_release = await first_manager.enable(TAG)
+        runtime_file = (
+            first_release.directory / "package" / "lumi" / "runtime" / "__init__.py"
+        )
+        original_contents = runtime_file.read_bytes()
+        await first_manager.disable()
+        runtime_file.write_bytes(b"modified cached release\n")
+        request_count = len(github.requests)
+
+        second_manager = self._manager(github)
+        repaired_release = await second_manager.enable(TAG)
+
+        self.assertGreater(len(github.requests), request_count)
+        self.assertEqual(repaired_release.directory, first_release.directory)
+        self.assertEqual(runtime_file.read_bytes(), original_contents)
+
+    async def test_llama_cpp_release_rejects_older_orchestrator_version(self):
+        github = FakeLlamaCppGitHub()
+        manager = LumiReleaseManager(
+            self.data_root,
+            "1.7.2",
+            runtime_host=HOST,
+            fetcher=github.fetch,
+        )
+        self.managers.append(manager)
+
+        with self.assertRaisesRegex(
+            LumiReleaseCompatibilityError,
+            "incompatible with this Orchestrator version",
+        ):
+            await manager.enable(TAG)
 
     def test_model_installer_wheel_accepts_compressible_files_within_size_limits(self):
         wheel_bytes = _make_installer_wheel(

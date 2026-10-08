@@ -76,9 +76,7 @@ class LumiCatalogAdapter:
         if not isinstance(result, dict):
             return {"item": None, "backgroundItem": None, "seasons": []}
         return {
-            "item": _compact_item(
-                result.get("item"), include_history=history_enabled
-            ),
+            "item": _compact_item(result.get("item"), include_history=history_enabled),
             "backgroundItem": _compact_item(
                 result.get("backgroundItem"), include_history=history_enabled
             ),
@@ -153,9 +151,7 @@ class LumiCatalogAdapter:
         locale = _effective_language(user_id, None)
         return method(user_id, locale)
 
-    def _favorites(
-        self, catalog: Catalog, user_id: str
-    ) -> tuple[dict[str, Any], bool]:
+    def _favorites(self, catalog: Catalog, user_id: str) -> tuple[dict[str, Any], bool]:
         locale = _effective_language(user_id, None)
         result = catalog.favorites(
             user_id, locale, 1, MAX_LUMI_FAVORITES, "title", "ascending"

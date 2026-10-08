@@ -162,7 +162,9 @@ class LumiCatalogAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.catalog.calls[0][1][0], "trusted-account")
         self.assertEqual(result["item"]["id"], "series-1")
 
-    async def test_detail_omits_history_state_from_every_returned_entity_when_disabled(self):
+    async def test_detail_omits_history_state_from_every_returned_entity_when_disabled(
+        self,
+    ):
         FakePreferences.history_enabled = False
 
         try:

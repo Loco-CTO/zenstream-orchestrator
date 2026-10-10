@@ -12,9 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
-from fastapi import FastAPI
-
 from app.lumi_host import LumiHost
+from fastapi import FastAPI
 
 
 class LumiStartupTests(unittest.IsolatedAsyncioTestCase):
@@ -70,8 +69,8 @@ class LumiStartupTests(unittest.IsolatedAsyncioTestCase):
 
             host._rebuild_service = AsyncMock(side_effect=rebuild_service)
 
-            from api.zenstream import lumi_routes
             import app.app as app_module
+            from api.zenstream import lumi_routes
 
             test_app = FastAPI(lifespan=app_module.lifespan)
 
@@ -91,7 +90,9 @@ class LumiStartupTests(unittest.IsolatedAsyncioTestCase):
                 read_model = patches.enter_context(patch("app.app.CatalogReadModel"))
                 read_model.return_value.bootstrap.return_value = None
                 patches.enter_context(patch("app.app.lumi_host", host))
-                patches.enter_context(patch("api.zenstream.lumi_routes.lumi_host", host))
+                patches.enter_context(
+                    patch("api.zenstream.lumi_routes.lumi_host", host)
+                )
                 patches.enter_context(
                     patch(
                         "app.app.Config",
@@ -114,7 +115,9 @@ class LumiStartupTests(unittest.IsolatedAsyncioTestCase):
                 patches.enter_context(patch("app.app.shutdown_foreground"))
                 patches.enter_context(patch("app.app.hub.broadcast", new=AsyncMock()))
                 patches.enter_context(patch("app.app.hub.shutdown", new=AsyncMock()))
-                patches.enter_context(patch("app.app._database_metrics", return_value={}))
+                patches.enter_context(
+                    patch("app.app._database_metrics", return_value={})
+                )
 
                 startup = asyncio.create_task(lifespan_context.__aenter__())
                 for _ in range(500):

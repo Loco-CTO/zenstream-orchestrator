@@ -697,9 +697,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             host._rebuild_service = AsyncMock()
 
             startup = asyncio.create_task(host.load_saved_integration())
-            self.assertTrue(
-                await asyncio.to_thread(manager.activation_started.wait, 5)
-            )
+            self.assertTrue(await asyncio.to_thread(manager.activation_started.wait, 5))
             self.assertFalse(startup.done())
             self.assertEqual(host.status()["integration"]["state"], "installing")
 
@@ -721,9 +719,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
             model_directory.mkdir(parents=True)
             manifest_bytes = json.dumps({"model": model_id}).encode("utf-8")
             manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-            (model_directory / "lumi-model-manifest.json").write_bytes(
-                manifest_bytes
-            )
+            (model_directory / "lumi-model-manifest.json").write_bytes(manifest_bytes)
             model_file = model_directory / "Qwen35.gguf"
             model_file.write_bytes(b"verified persisted model")
             conversations = lumi_directory / "conversations.sqlite3"

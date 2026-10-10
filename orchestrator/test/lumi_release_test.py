@@ -981,6 +981,34 @@ class LumiReleaseManagerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model_file.read_bytes(), b"local model")
         self.assertEqual(conversation_file.read_bytes(), b"saved conversations")
 
+    async def test_restart_activation_reuses_installed_package_without_network(self):
+        initial_github = FakeGitHub()
+        initial_manager = self._manager(initial_github)
+        installed_release = await initial_manager.enable(TAG)
+        await initial_manager.disable()
+
+        unexpected_requests = []
+
+        def reject_network(url, *_args):
+            unexpected_requests.append(url)
+            raise AssertionError("restart must reuse the installed Lumi release")
+
+        restarted_manager = LumiReleaseManager(
+            self.data_root,
+            ORCHESTRATOR_VERSION,
+            runtime_host=HOST,
+            fetcher=reject_network,
+        )
+        self.managers.append(restarted_manager)
+
+        restored_release = await restarted_manager.enable(TAG)
+
+        self.assertEqual(restored_release.directory, installed_release.directory)
+        self.assertEqual(unexpected_requests, [])
+        self.assertTrue(restarted_manager.has_installed_release(TAG))
+
+        await restarted_manager.disable()
+
     async def test_model_installer_wheels_download_only_after_explicit_request(self):
         github = FakeGitHub(with_installer_dependencies=True)
         manager = self._manager(github, asset_streamer=github.stream_asset)

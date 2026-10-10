@@ -661,10 +661,179 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIsNone(host._release_manager)
             await host.load_saved_integration()
-            await host._operation
 
             self.assertEqual(host._release_manager.enable_calls, ["v1.2.3"])
             self.assertTrue(host.status()["integration"]["enabled"])
+            self.assertTrue(host._operation.done())
+
+            await host.disable()
+
+    async def test_saved_integration_startup_waits_for_release_activation(self):
+        class DelayedReleaseManager(FakeReleaseManager):
+            def __init__(self, *_args):
+                super().__init__()
+                self.activation_started = threading.Event()
+                self.continue_activation = threading.Event()
+
+            async def enable(self, tag: str):
+                self.activation_started.set()
+                await asyncio.to_thread(self.continue_activation.wait)
+                return await super().enable(tag)
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "lumi" / "integration.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(
+                json.dumps(
+                    {"schemaVersion": 1, "enabled": True, "releaseTag": "v1.2.3"}
+                ),
+                encoding="utf-8",
+            )
+            manager = DelayedReleaseManager()
+            host = LumiHost(
+                data_directory=directory,
+                release_manager_factory=lambda *_args: manager,
+            )
+            host._rebuild_service = AsyncMock()
+
+            startup = asyncio.create_task(host.load_saved_integration())
+            self.assertTrue(await asyncio.to_thread(manager.activation_started.wait, 5))
+            self.assertFalse(startup.done())
+            self.assertEqual(host.status()["integration"]["state"], "installing")
+
+            manager.continue_activation.set()
+            await asyncio.wait_for(startup, timeout=5)
+
+            self.assertTrue(host._operation.done())
+            self.assertTrue(host.status()["integration"]["enabled"])
+            self.assertEqual(manager.enable_calls, ["v1.2.3"])
+
+            await host.disable()
+
+    async def test_restart_restores_persisted_model_settings_and_conversations(self):
+        model_id = "qwen3.5:2b"
+        with tempfile.TemporaryDirectory() as directory:
+            metadata_directory = Path(directory) / "metadata"
+            lumi_directory = metadata_directory / "lumi"
+            model_directory = lumi_directory / "models" / "qwen3.5-2b"
+            model_directory.mkdir(parents=True)
+            manifest_bytes = json.dumps({"model": model_id}).encode("utf-8")
+            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            (model_directory / "lumi-model-manifest.json").write_bytes(manifest_bytes)
+            model_file = model_directory / "Qwen35.gguf"
+            model_file.write_bytes(b"verified persisted model")
+            conversations = lumi_directory / "conversations.sqlite3"
+            conversation_bytes = b"persisted conversation database"
+            conversations.write_bytes(conversation_bytes)
+
+            class Installer:
+                model_install_calls = []
+
+                def __init__(self, _root):
+                    pass
+
+                def list_models(self):
+                    return (
+                        SimpleNamespace(
+                            model_id=model_id,
+                            installed=True,
+                            directory=str(model_directory.resolve()),
+                            manifest_sha256=manifest_sha256,
+                            size_bytes=model_file.stat().st_size,
+                        ),
+                    )
+
+                def install_model(self, *_args, **_kwargs):
+                    self.model_install_calls.append(model_id)
+                    raise AssertionError("startup must not reinstall a saved model")
+
+            package_module = SimpleNamespace(
+                __file__=str(
+                    lumi_directory / "release" / "package" / "lumi" / "__init__.py"
+                ),
+                Qwen35ModelInstaller=Installer,
+                supported_models=lambda: (
+                    SimpleNamespace(
+                        model_id=model_id,
+                        label="Qwen3.5 2B",
+                        supports_thinking=True,
+                    ),
+                ),
+            )
+
+            class PersistedReleaseManager(FakeReleaseManager):
+                def __init__(self, *_args):
+                    super().__init__()
+                    self.installed_tags.add("v1.2.3")
+                    self.package_downloads = 0
+
+                def loaded_release(self, tag):
+                    return SimpleNamespace(
+                        tag=tag,
+                        package_module=package_module,
+                        manifest=SimpleNamespace(installer_dependencies=()),
+                    )
+
+                async def enable(self, tag: str):
+                    self.enable_calls.append(tag)
+                    return self.loaded_release(tag)
+
+            model_record = {
+                "directory": str(model_directory.resolve()),
+                "manifestSha256": manifest_sha256,
+                "sizeBytes": model_file.stat().st_size,
+                "enabled": True,
+            }
+            settings_path = lumi_directory / "integration.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "enabled": True,
+                        "releaseTag": "v1.2.3",
+                        "defaultModel": model_id,
+                        "defaultThinking": True,
+                        "gpuMode": "cpu_only",
+                        "models": {model_id: model_record},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = PersistedReleaseManager()
+            host = LumiHost(
+                data_directory=metadata_directory,
+                release_manager_factory=lambda *_args: manager,
+            )
+            restored_store_paths: list[Path] = []
+
+            async def rebuild_service():
+                restored_store_paths.append(host.model_database_path)
+                host._service = SimpleNamespace(
+                    persisted_conversations=host.model_database_path.read_bytes()
+                )
+                host._runtime = object()
+
+            host._rebuild_service = AsyncMock(side_effect=rebuild_service)
+
+            await host.load_saved_integration()
+
+            integration = host.status()["integration"]
+            restored_model = host.model_settings()["models"][0]
+            self.assertTrue(integration["enabled"])
+            self.assertTrue(integration["loaded"])
+            self.assertEqual(integration["state"], "ready")
+            self.assertTrue(restored_model["installed"])
+            self.assertTrue(restored_model["enabled"])
+            self.assertEqual(host._settings["defaultModel"], model_id)
+            self.assertTrue(host._settings["defaultThinking"])
+            self.assertEqual(host._settings["gpuMode"], "cpu_only")
+            self.assertEqual(manager.enable_calls, ["v1.2.3"])
+            self.assertEqual(manager.package_downloads, 0)
+            self.assertEqual(Installer.model_install_calls, [])
+            self.assertEqual(restored_store_paths, [conversations])
+            self.assertEqual(host.service.persisted_conversations, conversation_bytes)
+            self.assertEqual(model_file.read_bytes(), b"verified persisted model")
+            self.assertEqual(conversations.read_bytes(), conversation_bytes)
 
             await host.disable()
 

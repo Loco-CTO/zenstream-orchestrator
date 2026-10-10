@@ -342,6 +342,7 @@ class LumiHost:
             return
         self._state = "installing"
         self._operation = asyncio.create_task(self._install_and_activate(tag))
+        await self._operation
 
     async def shutdown(self) -> None:
         model_operation = self._model_operation

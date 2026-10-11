@@ -65,6 +65,120 @@ class WorkerLaneOverloaded(HTTPException):
         )
 
 
+class _WorkerCall:
+    def __init__(self, lane, function, args, kwargs, slot, queued_at):
+        self.lane = lane
+        self.function = function
+        self.args = args
+        self.kwargs = kwargs
+        self.slot = slot
+        self.queued_at = queued_at
+        self.started_at = 0.0
+        self.completed_at = 0.0
+        self.metrics_recorded = False
+        self.slot_acquired = False
+        self.queue_registered = False
+        self.defer_timing = False
+
+    def acquire(self) -> None:
+        if not self.slot.acquire(blocking=False):
+            raise WorkerLaneOverloaded(self.lane)
+        self.slot_acquired = True
+        with _lock:
+            _queue_depth[self.lane] += 1
+            self.queue_registered = True
+
+    def run(self) -> T:
+        self.started_at = time.perf_counter()
+        with _lock:
+            if self.queue_registered:
+                _queue_depth[self.lane] -= 1
+                self.queue_registered = False
+            _active[self.lane] += 1
+        try:
+            return self.function(*self.args, **self.kwargs)
+        finally:
+            self.completed_at = time.perf_counter()
+            with _lock:
+                _active[self.lane] -= 1
+
+    def record_timing(self) -> None:
+        if not self.started_at or self.metrics_recorded:
+            return
+        self.metrics_recorded = True
+        finished_at = self.completed_at or time.perf_counter()
+        queue_seconds = max(0.0, self.started_at - self.queued_at)
+        execution_seconds = max(0.0, finished_at - self.started_at)
+        with _lock:
+            _completed[self.lane] += 1
+            _queued_seconds[self.lane] += queue_seconds
+            _execution_seconds[self.lane] += execution_seconds
+        if queue_seconds >= 0.1 or execution_seconds >= 2.0:
+            from app.logging_config import get_logger
+
+            get_logger("foreground").warning(
+                "blocking work complete lane=%s operation=%s "
+                "queue_duration_ms=%.1f execution_duration_ms=%.1f",
+                self.lane,
+                getattr(self.function, "__qualname__", type(self.function).__name__),
+                queue_seconds * 1000,
+                execution_seconds * 1000,
+            )
+
+    def submit(self, executor: ThreadPoolExecutor) -> ConcurrentFuture:
+        future = executor.submit(partial(self.run))
+        with _lock:
+            _pending_futures.add(future)
+        future.add_done_callback(_forget_future)
+        return future
+
+    def defer_cancelled(self, awaited: asyncio.Future) -> None:
+        self.defer_timing = True
+        release_slot = self.slot if self.slot_acquired else None
+        self.slot_acquired = False
+        settlement = asyncio.create_task(
+            _settle_cancelled_worker(awaited, release_slot, self)
+        )
+        with _lock:
+            _settlement_tasks.add(settlement)
+        settlement.add_done_callback(_forget_settlement)
+
+    def release(self) -> None:
+        if self.queue_registered:
+            with _lock:
+                if self.queue_registered:
+                    _queue_depth[self.lane] -= 1
+                    self.queue_registered = False
+        if self.slot_acquired:
+            self.slot.release()
+            self.slot_acquired = False
+        if not self.defer_timing:
+            self.record_timing()
+
+
+def _forget_future(done: ConcurrentFuture) -> None:
+    with _lock:
+        _pending_futures.discard(done)
+
+
+def _forget_settlement(done: asyncio.Task) -> None:
+    with _lock:
+        _settlement_tasks.discard(done)
+
+
+async def _settle_cancelled_worker(
+    awaited: asyncio.Future, release_slot, work: _WorkerCall
+) -> None:
+    try:
+        await awaited
+    except BaseException:
+        pass
+    finally:
+        if release_slot is not None:
+            release_slot.release()
+        work.record_timing()
+
+
 def active_requests() -> int:
     with _lock:
         return _active["foreground"]
@@ -105,115 +219,22 @@ async def _run(
 ) -> T:
     queued_at = time.perf_counter()
     loop = asyncio.get_running_loop()
-    started_at = 0.0
-    completed_at = 0.0
-    metrics_recorded = False
     slot = _lane_slots[lane]
-    slot_acquired = False
-    queue_registered = False
-
-    def run() -> T:
-        nonlocal started_at, completed_at, queue_registered
-        started_at = time.perf_counter()
-        with _lock:
-            if queue_registered:
-                _queue_depth[lane] -= 1
-                queue_registered = False
-            _active[lane] += 1
-        try:
-            return function(*args, **kwargs)
-        finally:
-            completed_at = time.perf_counter()
-            with _lock:
-                _active[lane] -= 1
-
-    def record_timing() -> None:
-        nonlocal metrics_recorded
-        if not started_at or metrics_recorded:
-            return
-        metrics_recorded = True
-        finished_at = completed_at or time.perf_counter()
-        queue_seconds = max(0.0, started_at - queued_at)
-        execution_seconds = max(0.0, finished_at - started_at)
-        with _lock:
-            _completed[lane] += 1
-            _queued_seconds[lane] += queue_seconds
-            _execution_seconds[lane] += execution_seconds
-        if queue_seconds >= 0.1 or execution_seconds >= 2.0:
-            from app.logging_config import get_logger
-
-            get_logger("foreground").warning(
-                "blocking work complete lane=%s operation=%s queue_duration_ms=%.1f execution_duration_ms=%.1f",
-                lane,
-                getattr(function, "__qualname__", type(function).__name__),
-                queue_seconds * 1000,
-                execution_seconds * 1000,
-            )
-
-    defer_timing = False
+    work = _WorkerCall(lane, function, args, kwargs, slot, queued_at)
+    work.acquire()
     try:
-        if not slot.acquire(blocking=False):
-            raise WorkerLaneOverloaded(lane)
-        slot_acquired = True
-        with _lock:
-            _queue_depth[lane] += 1
-            queue_registered = True
         # Submit explicitly so shutdown can observe work that outlives an
         # awaiting request. ``run_in_executor`` hides the concurrent future
         # behind an asyncio wrapper.
-        future = executor.submit(partial(run))
-        with _lock:
-            _pending_futures.add(future)
-
-        def forget(done: ConcurrentFuture) -> None:
-            with _lock:
-                _pending_futures.discard(done)
-
-        future.add_done_callback(forget)
+        future = work.submit(executor)
         awaited = asyncio.wrap_future(future, loop=loop)
         try:
-            result = await asyncio.shield(awaited)
+            return await asyncio.shield(awaited)
         except asyncio.CancelledError:
-            defer_timing = True
-            release_slot = slot if slot_acquired else None
-            slot_acquired = False
-
-            async def settle_cancelled():
-                try:
-                    await awaited
-                except BaseException:
-                    pass
-                finally:
-                    if release_slot is not None:
-                        release_slot.release()
-                    record_timing()
-
-            settlement = asyncio.create_task(settle_cancelled())
-            with _lock:
-                _settlement_tasks.add(settlement)
-
-            def forget_settlement(done: asyncio.Task) -> None:
-                with _lock:
-                    _settlement_tasks.discard(done)
-
-            settlement.add_done_callback(forget_settlement)
+            work.defer_cancelled(awaited)
             raise
-        finally:
-            if slot_acquired and slot is not None:
-                slot.release()
-                slot_acquired = False
     finally:
-        if queue_registered:
-            with _lock:
-                if queue_registered:
-                    _queue_depth[lane] -= 1
-                    queue_registered = False
-        if slot_acquired:
-            slot.release()
-            slot_acquired = False
-        if not defer_timing:
-            record_timing()
-    return result
+        work.release()
 
 
 async def run_foreground(function: Callable[..., T], /, *args, **kwargs) -> T:

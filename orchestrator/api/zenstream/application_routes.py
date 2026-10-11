@@ -112,6 +112,16 @@ class _SocketClient:
     sender: asyncio.Task | None = None
 
 
+def _lifecycle_revisions(result, connected: bool) -> list[tuple[str, int]]:
+    states = result[0] if connected and result else result or []
+    revisions = []
+    for entry in states:
+        state = entry[1] if isinstance(entry, tuple) else entry
+        if isinstance(state, dict):
+            revisions.append((state["id"], state["revision"]))
+    return revisions
+
+
 class WebSocketHub:
     def __init__(self):
         self.clients: set[WebSocket] = set()
@@ -151,6 +161,74 @@ class WebSocketHub:
         self._lifecycle_locks.pop(key, None)
         self._lifecycle_tasks.pop(key, None)
 
+    def _lifecycle_token_locked(
+        self, key: tuple[str, str], epoch: int, connected: bool
+    ) -> threading.Event | None:
+        if self._shutting_down:
+            return None
+        token = self._epoch_tokens.get(key)
+        if token is None or token.is_set():
+            return None
+        if self.disconnect_epochs.get(key) != epoch:
+            return None
+        has_socket = any(
+            connection.identity == key for connection in self._connections.values()
+        )
+        if has_socket != connected:
+            return None
+        return token
+
+    async def _execute_lifecycle(
+        self,
+        key: tuple[str, str],
+        user: str,
+        participant: str,
+        epoch: int,
+        function,
+        connected: bool,
+        token: threading.Event,
+        serial: asyncio.Lock,
+    ):
+        try:
+            async with serial:
+                if token.is_set():
+                    return None
+                result = await run_control(
+                    function,
+                    user,
+                    participant,
+                    guard=lambda: not token.is_set(),
+                )
+                outcome = "superseded" if token.is_set() else "settled"
+                revisions = _lifecycle_revisions(result, connected)
+                get_logger("syncplay").debug(
+                    "socket lifecycle operation=%s participant=%s epoch=%s "
+                    "outcome=%s revisions=%s",
+                    function.__name__,
+                    participant,
+                    epoch,
+                    outcome,
+                    revisions,
+                )
+                return None if token.is_set() else result
+        except WorkerLaneOverloaded:
+            raise
+        except Exception:
+            get_logger("syncplay").exception(
+                "socket lifecycle failed operation=%s participant=%s epoch=%s",
+                function.__name__,
+                participant,
+                epoch,
+            )
+            raise
+        finally:
+            task = asyncio.current_task()
+            async with self.lock:
+                tasks = self._lifecycle_tasks.get(key)
+                if tasks is not None:
+                    tasks.discard(task)
+                self._forget_identity_locked(key)
+
     async def run_lifecycle(
         self,
         user: str,
@@ -162,70 +240,22 @@ class WebSocketHub:
     ):
         key = (user, participant)
         async with self.lock:
-            token = self._epoch_tokens.get(key)
-            has_socket = any(
-                connection.identity == key for connection in self._connections.values()
-            )
-            if (
-                self._shutting_down
-                or token is None
-                or token.is_set()
-                or self.disconnect_epochs.get(key) != epoch
-                or has_socket != connected
-            ):
+            token = self._lifecycle_token_locked(key, epoch, connected)
+            if token is None:
                 return None
             serial = self._lifecycle_locks.setdefault(key, asyncio.Lock())
-
-            async def execute():
-                try:
-                    async with serial:
-                        if token.is_set():
-                            return None
-                        result = await run_control(
-                            function,
-                            user,
-                            participant,
-                            guard=lambda: not token.is_set(),
-                        )
-                        outcome = "superseded" if token.is_set() else "settled"
-                        states = result[0] if connected and result else result or []
-                        revisions = [
-                            (state["id"], state["revision"])
-                            for entry in states
-                            if isinstance(
-                                state := entry[1]
-                                if isinstance(entry, tuple)
-                                else entry,
-                                dict,
-                            )
-                        ]
-                        get_logger("syncplay").debug(
-                            "socket lifecycle operation=%s participant=%s epoch=%s outcome=%s revisions=%s",
-                            function.__name__,
-                            participant,
-                            epoch,
-                            outcome,
-                            revisions,
-                        )
-                        return None if token.is_set() else result
-                except WorkerLaneOverloaded:
-                    raise
-                except Exception:
-                    get_logger("syncplay").exception(
-                        "socket lifecycle failed operation=%s participant=%s epoch=%s",
-                        function.__name__,
-                        participant,
-                        epoch,
-                    )
-                    raise
-                finally:
-                    async with self.lock:
-                        tasks = self._lifecycle_tasks.get(key)
-                        if tasks is not None:
-                            tasks.discard(asyncio.current_task())
-                        self._forget_identity_locked(key)
-
-            operation = asyncio.create_task(execute())
+            operation = asyncio.create_task(
+                self._execute_lifecycle(
+                    key,
+                    user,
+                    participant,
+                    epoch,
+                    function,
+                    connected,
+                    token,
+                    serial,
+                )
+            )
             operation.add_done_callback(
                 lambda done: None if done.cancelled() else done.exception()
             )
@@ -514,7 +544,8 @@ async def _run_disconnect_lifecycle(user, participant, epoch, function):
             retries += 1
             if retries == 1:
                 get_logger("syncplay").warning(
-                    "socket lifecycle waiting for worker admission operation=%s participant=%s epoch=%s",
+                    "socket lifecycle waiting for worker admission "
+                    "operation=%s participant=%s epoch=%s",
                     function.__name__,
                     participant,
                     epoch,
@@ -524,7 +555,8 @@ async def _run_disconnect_lifecycle(user, participant, epoch, function):
             continue
         if retries:
             get_logger("syncplay").debug(
-                "socket lifecycle worker admission resumed operation=%s participant=%s epoch=%s retries=%s",
+                "socket lifecycle worker admission resumed "
+                "operation=%s participant=%s epoch=%s retries=%s",
                 function.__name__,
                 participant,
                 epoch,
@@ -1716,8 +1748,7 @@ async def syncplay_participation(group_id: str, request: Request):
     return state
 
 
-@router.websocket("/api/ws/syncplay")
-async def syncplay_socket(websocket: WebSocket):
+async def _syncplay_socket_identity(websocket: WebSocket):
     participant = websocket.headers.get(
         "x-zenstream-participant"
     ) or websocket.query_params.get("participantId")
@@ -1725,8 +1756,8 @@ async def syncplay_socket(websocket: WebSocket):
         account = await run_auth(websocket_account, websocket)
     except WorkerLaneOverloaded:
         await websocket.accept()
-        await websocket.close(code=1013, reason="Orchestrator is busy. Retry shortly.")
-        return
+        await _close_syncplay_socket_busy(websocket)
+        return None
     user_id = account["id"] if account else None
     if (
         not user_id
@@ -1735,41 +1766,68 @@ async def syncplay_socket(websocket: WebSocket):
         or any(ord(character) < 32 for character in participant)
     ):
         await websocket.close(code=1008)
+        return None
+    return user_id, participant
+
+
+async def _close_syncplay_socket_busy(websocket: WebSocket) -> None:
+    await websocket.close(code=1013, reason="Orchestrator is busy. Retry shortly.")
+
+
+async def _initialize_syncplay_socket(
+    websocket: WebSocket, user_id: str, participant: str, epoch: int
+) -> bool:
+    initial = await hub.run_lifecycle(
+        user_id, participant, epoch, _syncplay_socket_initial_sync, connected=True
+    )
+    if initial is None:
+        return False
+    changed, groups = initial
+    for state in changed:
+        await _broadcast_group(state, identity=(user_id, participant), epoch=epoch)
+    return await hub.finish_initial(
+        websocket,
+        {"version": 1, "type": "groups", "groups": groups},
+    )
+
+
+async def _receive_syncplay_socket_messages(websocket: WebSocket) -> None:
+    while True:
+        message = await websocket.receive_json()
+        if message.get("type") != "clock":
+            continue
+        received = time.time()
+        await hub.send(
+            websocket,
+            {
+                "version": 1,
+                "type": "clock",
+                "clientSentAt": message.get("clientSentAt"),
+                "serverReceivedAt": received,
+                "serverSentAt": time.time(),
+            },
+        )
+
+
+async def _finish_syncplay_socket(websocket: WebSocket) -> None:
+    identity, epoch = await hub.remove(websocket)
+    if identity and not await hub.sockets_for(*identity):
+        await hub.schedule_disconnect_cleanup(*identity, epoch)
+
+
+@router.websocket("/api/ws/syncplay")
+async def syncplay_socket(websocket: WebSocket):
+    identity = await _syncplay_socket_identity(websocket)
+    if identity is None:
         return
+    user_id, participant = identity
     epoch = await hub.connect(websocket, user_id, participant, initialize=True)
     try:
-        initial = await hub.run_lifecycle(
-            user_id, participant, epoch, _syncplay_socket_initial_sync, connected=True
-        )
-        if initial is None:
-            return
-        changed, groups = initial
-        for state in changed:
-            await _broadcast_group(state, identity=(user_id, participant), epoch=epoch)
-        if not await hub.finish_initial(
-            websocket,
-            {"version": 1, "type": "groups", "groups": groups},
-        ):
-            return
-        while True:
-            message = await websocket.receive_json()
-            if message.get("type") == "clock":
-                received = time.time()
-                await hub.send(
-                    websocket,
-                    {
-                        "version": 1,
-                        "type": "clock",
-                        "clientSentAt": message.get("clientSentAt"),
-                        "serverReceivedAt": received,
-                        "serverSentAt": time.time(),
-                    },
-                )
+        if await _initialize_syncplay_socket(websocket, user_id, participant, epoch):
+            await _receive_syncplay_socket_messages(websocket)
     except WebSocketDisconnect:
         pass
     except WorkerLaneOverloaded:
-        await websocket.close(code=1013, reason="Orchestrator is busy. Retry shortly.")
+        await _close_syncplay_socket_busy(websocket)
     finally:
-        identity, epoch = await hub.remove(websocket)
-        if identity and not await hub.sockets_for(*identity):
-            await hub.schedule_disconnect_cleanup(*identity, epoch)
+        await _finish_syncplay_socket(websocket)

@@ -30,6 +30,26 @@ class _FakeWebSocket:
         self.messages.append(payload)
 
 
+class _RouteWebSocket:
+    def __init__(self, participant="tab-1", incoming=None):
+        self.headers = {"x-zenstream-participant": participant}
+        self.query_params = {}
+        self.accept_count = 0
+        self.closed = []
+        self.incoming = list(incoming or [])
+
+    async def accept(self):
+        self.accept_count += 1
+
+    async def close(self, code=1000, reason=""):
+        self.closed.append((code, reason))
+
+    async def receive_json(self):
+        if not self.incoming:
+            raise application_routes.WebSocketDisconnect()
+        return self.incoming.pop(0)
+
+
 class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
     def test_all_worker_lanes_bound_admission_and_release_slots(self):
         lanes = (
@@ -81,7 +101,8 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
 
                     def block_cancelled():
                         cancelled_started.set()
-                        return release_cancelled.wait(10)
+                        release_cancelled.wait(10)
+                        raise RuntimeError("worker failed after request cancellation")
 
                     cancelled = asyncio.create_task(submit(block_cancelled))
                     try:
@@ -103,6 +124,21 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
 
                 asyncio.run(exercise())
 
+    def test_worker_submission_failure_releases_queue_and_admission(self):
+        async def exercise():
+            executor = MagicMock()
+            executor.submit.side_effect = RuntimeError("executor is shutting down")
+            slot = threading.BoundedSemaphore(1)
+            with patch.dict(foreground._lane_slots, {"foreground": slot}):
+                with self.assertRaisesRegex(RuntimeError, "shutting down"):
+                    await foreground._run("foreground", executor, lambda: None)
+
+            self.assertEqual(foreground.metrics()["foreground"]["queue_depth"], 0)
+            self.assertTrue(slot.acquire(blocking=False))
+            slot.release()
+
+        asyncio.run(exercise())
+
     def test_disconnect_cleanup_retries_overload_until_transition_succeeds(self):
         async def exercise():
             user = "user-1"
@@ -113,10 +149,18 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
                 epoch = hub._advance_epoch_locked(key)
                 hub._disconnect_tasks[key] = asyncio.current_task()
             state = {"id": "group-1", "revision": 3}
+            group_state = {"id": "group-2", "revision": 5}
+            ended_state = {"id": "group-3", "revision": 6}
             run_control = AsyncMock(
-                side_effect=[WorkerLaneOverloaded("control"), [state], []]
+                side_effect=[
+                    WorkerLaneOverloaded("control"),
+                    [state],
+                    [("group", group_state), ("ended", ended_state)],
+                ]
             )
             broadcast = AsyncMock()
+            wire_broadcast = AsyncMock()
+            hub.broadcast = wire_broadcast
             sleep = AsyncMock()
             with (
                 patch.object(application_routes, "hub", new=hub),
@@ -141,12 +185,306 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
                 run_control.await_args_list[2].args[0],
                 application_routes._expire_disconnected_sync,
             )
-            broadcast.assert_awaited_once_with(
-                state, identity=(user, participant), epoch=epoch
+            broadcast.assert_has_awaits(
+                [
+                    call(state, identity=(user, participant), epoch=epoch),
+                    call(group_state, identity=(user, participant), epoch=epoch),
+                ]
+            )
+            wire_broadcast.assert_awaited_once_with(
+                {
+                    "version": 1,
+                    "type": "group-ended",
+                    "id": ended_state["id"],
+                    "revision": ended_state["revision"],
+                },
+                identity=(user, participant),
+                epoch=epoch,
             )
             sleep.assert_has_awaits([call(30), call(0.25), call(270)])
             self.assertEqual(hub._lifecycle_tasks, {})
             self.assertEqual(hub._disconnect_tasks, {})
+
+        asyncio.run(exercise())
+
+    def test_lifecycle_rejects_stale_epochs_and_runs_current_socket_work(self):
+        async def exercise():
+            user = "user-1"
+            participant = "tab-1"
+            key = (user, participant)
+            hub = WebSocketHub()
+            state = {"id": "group-1", "revision": 4}
+            run_control = AsyncMock(return_value=([state], [state]))
+            logger = MagicMock()
+            socket = _FakeWebSocket()
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(application_routes, "run_control", new=run_control),
+                patch.object(
+                    application_routes, "get_logger", return_value=logger
+                ),
+            ):
+                self.assertIsNone(
+                    await hub.run_lifecycle(
+                        user,
+                        participant,
+                        0,
+                        application_routes._mark_disconnected_sync,
+                    )
+                )
+                async with hub.lock:
+                    epoch = hub._advance_epoch_locked(key)
+                self.assertIsNone(
+                    await hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch + 1,
+                        application_routes._mark_disconnected_sync,
+                    )
+                )
+                self.assertIsNone(
+                    await hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch,
+                        application_routes._mark_disconnected_sync,
+                        connected=True,
+                    )
+                )
+                token = hub._epoch_tokens[key]
+                token.set()
+                self.assertIsNone(
+                    await hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch,
+                        application_routes._mark_disconnected_sync,
+                    )
+                )
+                token.clear()
+                hub._shutting_down = True
+                self.assertIsNone(
+                    await hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch,
+                        application_routes._mark_disconnected_sync,
+                    )
+                )
+                hub._shutting_down = False
+
+                epoch = await hub.connect(socket, user, participant)
+                self.assertIsNone(
+                    await hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch,
+                        application_routes._mark_disconnected_sync,
+                    )
+                )
+                self.assertEqual(
+                    await hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch,
+                        application_routes._syncplay_socket_initial_sync,
+                        connected=True,
+                    ),
+                    ([state], [state]),
+                )
+                run_control.assert_awaited_once()
+                self.assertEqual(
+                    logger.debug.call_args.args[-1], [(state["id"], state["revision"])]
+                )
+                await hub.remove(socket)
+                await hub.shutdown()
+
+        asyncio.run(exercise())
+
+    def test_lifecycle_waiting_on_serial_lock_skips_superseded_work(self):
+        async def exercise():
+            user = "user-1"
+            participant = "tab-1"
+            key = (user, participant)
+            hub = WebSocketHub()
+            async with hub.lock:
+                epoch = hub._advance_epoch_locked(key)
+                serial = asyncio.Lock()
+                await serial.acquire()
+                hub._lifecycle_locks[key] = serial
+            run_control = AsyncMock(return_value=[])
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(application_routes, "run_control", new=run_control),
+            ):
+                operation = asyncio.create_task(
+                    hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch,
+                        application_routes._mark_disconnected_sync,
+                    )
+                )
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                hub._epoch_tokens[key].set()
+                serial.release()
+                self.assertIsNone(await operation)
+
+            run_control.assert_not_awaited()
+            self.assertEqual(hub._lifecycle_tasks, {})
+
+        asyncio.run(exercise())
+
+    def test_lifecycle_control_errors_propagate_and_release_tracking(self):
+        async def exercise():
+            user = "user-1"
+            participant = "tab-1"
+            key = (user, participant)
+            hub = WebSocketHub()
+            async with hub.lock:
+                epoch = hub._advance_epoch_locked(key)
+            run_control = AsyncMock(side_effect=RuntimeError("database failed"))
+            logger = MagicMock()
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(application_routes, "run_control", new=run_control),
+                patch.object(application_routes, "get_logger", return_value=logger),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "database failed"):
+                    await hub.run_lifecycle(
+                        user,
+                        participant,
+                        epoch,
+                        application_routes._mark_disconnected_sync,
+                    )
+
+            logger.exception.assert_called_once()
+            self.assertEqual(hub._lifecycle_tasks, {})
+            self.assertNotIn(key, hub._epoch_tokens)
+
+        asyncio.run(exercise())
+
+    def test_syncplay_socket_closes_auth_overload_and_invalid_identity(self):
+        async def exercise():
+            overloaded = _RouteWebSocket()
+            with patch.object(
+                application_routes,
+                "run_auth",
+                new=AsyncMock(side_effect=WorkerLaneOverloaded("auth")),
+            ):
+                await application_routes.syncplay_socket(overloaded)
+            self.assertEqual(overloaded.accept_count, 1)
+            self.assertEqual(
+                overloaded.closed,
+                [(1013, "Orchestrator is busy. Retry shortly.")],
+            )
+
+            invalid = _RouteWebSocket("tab-\x00-1")
+            with patch.object(
+                application_routes,
+                "run_auth",
+                new=AsyncMock(return_value={"id": "user-1"}),
+            ):
+                await application_routes.syncplay_socket(invalid)
+            self.assertEqual(invalid.accept_count, 0)
+            self.assertEqual(invalid.closed, [(1008, "")])
+
+        asyncio.run(exercise())
+
+    def test_syncplay_socket_closes_on_control_overload_and_cleans_up(self):
+        async def exercise():
+            socket = _RouteWebSocket()
+            hub = WebSocketHub()
+            schedule_cleanup = AsyncMock()
+            hub.schedule_disconnect_cleanup = schedule_cleanup
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(
+                    application_routes,
+                    "run_auth",
+                    new=AsyncMock(return_value={"id": "user-1"}),
+                ),
+                patch.object(
+                    application_routes,
+                    "run_control",
+                    new=AsyncMock(side_effect=WorkerLaneOverloaded("control")),
+                ),
+            ):
+                await application_routes.syncplay_socket(socket)
+                self.assertEqual(await hub.sockets_for("user-1", "tab-1"), ())
+                await hub.shutdown()
+
+            self.assertEqual(socket.accept_count, 1)
+            self.assertEqual(
+                socket.closed,
+                [(1013, "Orchestrator is busy. Retry shortly.")],
+            )
+            schedule_cleanup.assert_awaited_once_with("user-1", "tab-1", 2)
+
+        asyncio.run(exercise())
+
+    def test_syncplay_socket_initializes_broadcasts_and_answers_clock(self):
+        async def exercise():
+            socket = _RouteWebSocket(
+                incoming=[{"type": "clock", "clientSentAt": 1234}]
+            )
+            hub = WebSocketHub()
+            state = {"id": "group-1", "revision": 4}
+            hub.run_lifecycle = AsyncMock(return_value=([state], [state]))
+            hub.finish_initial = AsyncMock(return_value=True)
+            hub.send = AsyncMock(return_value=True)
+            schedule_cleanup = AsyncMock()
+            hub.schedule_disconnect_cleanup = schedule_cleanup
+            broadcast = AsyncMock()
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(
+                    application_routes,
+                    "run_auth",
+                    new=AsyncMock(return_value={"id": "user-1"}),
+                ),
+                patch.object(
+                    application_routes, "_broadcast_group", new=broadcast
+                ),
+            ):
+                await application_routes.syncplay_socket(socket)
+                await hub.shutdown()
+
+            self.assertEqual(socket.accept_count, 1)
+            broadcast.assert_awaited_once_with(
+                state, identity=("user-1", "tab-1"), epoch=1
+            )
+            hub.finish_initial.assert_awaited_once_with(
+                socket, {"version": 1, "type": "groups", "groups": [state]}
+            )
+            hub.send.assert_awaited_once()
+            schedule_cleanup.assert_awaited_once_with("user-1", "tab-1", 2)
+
+        asyncio.run(exercise())
+
+    def test_syncplay_socket_stops_when_initial_lifecycle_is_stale(self):
+        async def exercise():
+            socket = _RouteWebSocket(incoming=[{"type": "clock"}])
+            hub = WebSocketHub()
+            hub.run_lifecycle = AsyncMock(return_value=None)
+            hub.finish_initial = AsyncMock(return_value=True)
+            schedule_cleanup = AsyncMock()
+            hub.schedule_disconnect_cleanup = schedule_cleanup
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(
+                    application_routes,
+                    "run_auth",
+                    new=AsyncMock(return_value={"id": "user-1"}),
+                ),
+            ):
+                await application_routes.syncplay_socket(socket)
+                await hub.shutdown()
+
+            self.assertEqual(socket.incoming, [{"type": "clock"}])
+            hub.finish_initial.assert_not_awaited()
+            schedule_cleanup.assert_awaited_once_with("user-1", "tab-1", 2)
 
         asyncio.run(exercise())
 

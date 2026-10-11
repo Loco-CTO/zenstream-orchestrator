@@ -4323,7 +4323,10 @@ class Catalog:
         candidate_limit = min(256, max(64, limit * 16))
         placeholders = ",".join("?" for _ in allowed)
         rows = self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE id<>? AND library_id IN ({placeholders}) AND entity_type=? LIMIT ?",
+            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,"
+            "episode_number,episode_end_number,created_at,updated_at "
+            f"FROM library_entities WHERE id<>? AND library_id IN ({placeholders}) "
+            "AND entity_type=? LIMIT ?",
             [entity_id, *allowed, source_row[3], candidate_limit],
         )
         ranked = []

@@ -93,6 +93,7 @@ class CatalogTest(unittest.TestCase):
     def test_similar_fallback_limits_candidate_hydration_and_serializes_only_results(
         self,
     ):
+        """Bound fallback candidates and verify the production-shaped query plan."""
         self.db.execute(
             "CREATE INDEX idx_library_entities_home_recent "
             "ON library_entities(library_id,entity_type,parent_id,created_at DESC,id)"
@@ -150,10 +151,12 @@ class CatalogTest(unittest.TestCase):
         metadata_calls = []
 
         def metadata(_user_id, entity_id, _language):
+            """Record each candidate metadata lookup."""
             metadata_calls.append(entity_id)
             return {"metadata": {"genres": ["Drama"], "title": entity_id}}
 
         def serialize(_user_id, row, value, **_kwargs):
+            """Return the small projection used by the fallback test."""
             return {"id": row[0], "title": value["title"]}
 
         with (

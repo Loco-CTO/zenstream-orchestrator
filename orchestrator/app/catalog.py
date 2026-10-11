@@ -4317,10 +4317,14 @@ class Catalog:
                     user_id, [row[:10] for row in rows], language
                 )
                 return {"items": values}
+        # The metadata fallback is used while the indexed genre model is not ready.
+        # Oversample a small result page, but do not hydrate every same-type entity
+        # in a large library on each Similar request.
+        candidate_limit = min(256, max(64, limit * 16))
         placeholders = ",".join("?" for _ in allowed)
         rows = self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE id<>? AND library_id IN ({placeholders}) AND entity_type=?",
-            [entity_id, *allowed, source_row[3]],
+            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE id<>? AND library_id IN ({placeholders}) AND entity_type=? LIMIT ?",
+            [entity_id, *allowed, source_row[3], candidate_limit],
         )
         ranked = []
         for row in rows:
@@ -4336,11 +4340,17 @@ class Catalog:
                         -score,
                         str(metadata.get("title") or "").casefold(),
                         row[0],
-                        self._serialize(user_id, row, metadata, language=language),
+                        row,
+                        metadata,
                     )
                 )
         ranked.sort(key=lambda value: value[:3])
-        return {"items": [value[3] for value in ranked[:limit]]}
+        return {
+            "items": [
+                self._serialize(user_id, row, metadata, language=language)
+                for _, _, _, row, metadata in ranked[:limit]
+            ]
+        }
 
     @_catalog_read
     def detail(

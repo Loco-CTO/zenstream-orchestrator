@@ -4273,6 +4273,7 @@ class Catalog:
 
     @staticmethod
     def _similar_terms(metadata: dict) -> set[str]:
+        """Return normalized genre or tag terms from one metadata payload."""
         return {
             str(value).casefold()
             for value in (metadata.get("genres") or metadata.get("tags") or [])
@@ -4287,6 +4288,7 @@ class Catalog:
         source_row: tuple,
         allowed: set[str],
     ) -> list[dict] | None:
+        """Rank candidates from the persisted genre read model."""
         genre_rows = self.db.execute(
             "SELECT genre_key FROM catalog_item_genres WHERE entity_id=? AND locale=?",
             (entity_id, normalize_metadata_locale(language)),
@@ -4298,12 +4300,22 @@ class Catalog:
         allowed_placeholders = ",".join("?" for _ in allowed)
         genre_placeholders = ",".join("?" for _ in keys)
         rows = self.db.execute(
-            "WITH ranked AS (SELECT g.entity_id,COUNT(*) AS score,MIN(p.title_sort) AS title_sort "
-            "FROM catalog_item_genres g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
-            f"WHERE g.locale=? AND g.genre_key IN ({genre_placeholders}) AND g.entity_id<>? AND g.library_id IN ({allowed_placeholders}) AND g.entity_type=? "
-            "GROUP BY g.entity_id ORDER BY score DESC,title_sort,g.entity_id LIMIT ?) "
-            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-            "FROM ranked JOIN library_entities e ON e.id=ranked.entity_id ORDER BY ranked.score DESC,ranked.title_sort,ranked.entity_id",
+            "WITH ranked AS ("
+            "SELECT g.entity_id,COUNT(*) AS score,MIN(p.title_sort) AS title_sort "
+            "FROM catalog_item_genres g "
+            "JOIN catalog_item_projection p "
+            "ON p.entity_id=g.entity_id AND p.locale=g.locale "
+            f"WHERE g.locale=? AND g.genre_key IN ({genre_placeholders}) "
+            f"AND g.entity_id<>? AND g.library_id IN ({allowed_placeholders}) "
+            "AND g.entity_type=? "
+            "GROUP BY g.entity_id "
+            "ORDER BY score DESC,title_sort,g.entity_id LIMIT ?) "
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+            "e.season_number,e.episode_number,e.episode_end_number,e.created_at,"
+            "e.updated_at "
+            "FROM ranked JOIN library_entities e "
+            "ON e.id=ranked.entity_id "
+            "ORDER BY ranked.score DESC,ranked.title_sort,ranked.entity_id",
             [
                 normalize_metadata_locale(language),
                 *keys,
@@ -4325,6 +4337,7 @@ class Catalog:
         source_terms: set[str],
         allowed: set[str],
     ) -> list[dict]:
+        """Rank and serialize a bounded sample using metadata terms."""
         # Oversample a small result page without hydrating every same-type entity.
         candidate_limit = min(256, max(64, limit * 16))
         rows = self.db.execute(

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-import api.zenstream.application_routes as application_routes
+from api.zenstream import application_routes
 from api.zenstream.application_routes import WebSocketHub
 from app import foreground
 from app.foreground import WorkerLaneOverloaded
@@ -38,74 +38,70 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
             ("auth", foreground.run_auth),
         )
         for lane, submit in lanes:
-            with self.subTest(lane=lane):
-                with patch.dict(
+            with (
+                self.subTest(lane=lane),
+                patch.dict(
                     foreground._lane_slots,
                     {lane: threading.BoundedSemaphore(1)},
-                ):
+                ),
+            ):
 
-                    async def exercise():
-                        started = threading.Event()
-                        release = threading.Event()
+                async def exercise():
+                    started = threading.Event()
+                    release = threading.Event()
 
-                        def block():
-                            started.set()
-                            return release.wait(10)
+                    def block():
+                        started.set()
+                        return release.wait(10)
 
-                        first = asyncio.create_task(submit(block))
-                        try:
-                            self.assertTrue(
-                                await asyncio.wait_for(
-                                    asyncio.to_thread(started.wait, 2), 3
-                                )
+                    first = asyncio.create_task(submit(block))
+                    try:
+                        self.assertTrue(
+                            await asyncio.wait_for(
+                                asyncio.to_thread(started.wait, 2), 3
                             )
-                            self.assertEqual(
-                                foreground.metrics()[lane]["queue_depth"], 0
-                            )
-                            with self.assertRaises(WorkerLaneOverloaded) as raised:
-                                await asyncio.wait_for(submit(lambda: None), 0.25)
-                            self.assertEqual(raised.exception.lane, lane)
-                            self.assertEqual(raised.exception.status_code, 503)
-                            self.assertEqual(
-                                raised.exception.detail,
-                                "Orchestrator is busy. Retry shortly.",
-                            )
-                            self.assertEqual(
-                                raised.exception.headers["Retry-After"], "1"
-                            )
-                        finally:
-                            release.set()
-                        self.assertTrue(await asyncio.wait_for(first, 2))
-                        self.assertTrue(await submit(lambda: True))
-
-                        cancelled_started = threading.Event()
-                        release_cancelled = threading.Event()
-
-                        def block_cancelled():
-                            cancelled_started.set()
-                            return release_cancelled.wait(10)
-
-                        cancelled = asyncio.create_task(submit(block_cancelled))
-                        try:
-                            self.assertTrue(
-                                await asyncio.wait_for(
-                                    asyncio.to_thread(cancelled_started.wait, 2), 3
-                                )
-                            )
-                            cancelled.cancel()
-                            with self.assertRaises(asyncio.CancelledError):
-                                await asyncio.wait_for(cancelled, 1)
-                            with self.assertRaises(WorkerLaneOverloaded):
-                                await asyncio.wait_for(submit(lambda: None), 0.25)
-                        finally:
-                            release_cancelled.set()
-                            await foreground.wait_for_shutdown(timeout=2)
-                        self.assertTrue(await submit(lambda: True))
-                        self.assertEqual(
-                            foreground.metrics()[lane]["queue_depth"], 0
                         )
+                        self.assertEqual(foreground.metrics()[lane]["queue_depth"], 0)
+                        with self.assertRaises(WorkerLaneOverloaded) as raised:
+                            await asyncio.wait_for(submit(lambda: None), 0.25)
+                        self.assertEqual(raised.exception.lane, lane)
+                        self.assertEqual(raised.exception.status_code, 503)
+                        self.assertEqual(
+                            raised.exception.detail,
+                            "Orchestrator is busy. Retry shortly.",
+                        )
+                        self.assertEqual(raised.exception.headers["Retry-After"], "1")
+                    finally:
+                        release.set()
+                    self.assertTrue(await asyncio.wait_for(first, 2))
+                    self.assertTrue(await submit(lambda: True))
 
-                    asyncio.run(exercise())
+                    cancelled_started = threading.Event()
+                    release_cancelled = threading.Event()
+
+                    def block_cancelled():
+                        cancelled_started.set()
+                        return release_cancelled.wait(10)
+
+                    cancelled = asyncio.create_task(submit(block_cancelled))
+                    try:
+                        self.assertTrue(
+                            await asyncio.wait_for(
+                                asyncio.to_thread(cancelled_started.wait, 2), 3
+                            )
+                        )
+                        cancelled.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(cancelled, 1)
+                        with self.assertRaises(WorkerLaneOverloaded):
+                            await asyncio.wait_for(submit(lambda: None), 0.25)
+                    finally:
+                        release_cancelled.set()
+                        await foreground.wait_for_shutdown(timeout=2)
+                    self.assertTrue(await submit(lambda: True))
+                    self.assertEqual(foreground.metrics()[lane]["queue_depth"], 0)
+
+                asyncio.run(exercise())
 
     def test_disconnect_cleanup_retries_overload_until_transition_succeeds(self):
         async def exercise():
@@ -129,9 +125,7 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
                 patch.object(application_routes.asyncio, "sleep", new=sleep),
             ):
                 tasks_before = asyncio.all_tasks()
-                await application_routes._disconnect_cleanup(
-                    user, participant, epoch
-                )
+                await application_routes._disconnect_cleanup(user, participant, epoch)
                 self.assertEqual(asyncio.all_tasks(), tasks_before)
 
             self.assertEqual(run_control.await_count, 3)

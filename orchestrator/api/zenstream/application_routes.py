@@ -1725,9 +1725,7 @@ async def syncplay_socket(websocket: WebSocket):
         account = await run_auth(websocket_account, websocket)
     except WorkerLaneOverloaded:
         await websocket.accept()
-        await websocket.close(
-            code=1013, reason="Orchestrator is busy. Retry shortly."
-        )
+        await websocket.close(code=1013, reason="Orchestrator is busy. Retry shortly.")
         return
     user_id = account["id"] if account else None
     if (
@@ -1770,9 +1768,7 @@ async def syncplay_socket(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except WorkerLaneOverloaded:
-        await websocket.close(
-            code=1013, reason="Orchestrator is busy. Retry shortly."
-        )
+        await websocket.close(code=1013, reason="Orchestrator is busy. Retry shortly.")
     finally:
         identity, epoch = await hub.remove(websocket)
         if identity and not await hub.sockets_for(*identity):

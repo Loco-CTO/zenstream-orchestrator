@@ -90,6 +90,183 @@ class CatalogTest(unittest.TestCase):
                 (locale, json.dumps(payload), "now", "later"),
             )
 
+    def test_similar_fallback_limits_candidate_hydration_and_serializes_only_results(
+        self,
+    ):
+        """Bound fallback candidates and verify the production-shaped query plan."""
+        self.db.execute(
+            "CREATE INDEX idx_library_entities_home_recent "
+            "ON library_entities(library_id,entity_type,parent_id,created_at DESC,id)"
+        )
+        for index in range(300):
+            entity_id = f"candidate-{index:03}"
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    "allowed",
+                    None,
+                    "movie",
+                    entity_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+
+        query_plan = self.db.execute(
+            "EXPLAIN QUERY PLAN SELECT id,library_id,parent_id,entity_type,"
+            "relative_path,season_number,episode_number,episode_end_number,"
+            "created_at,updated_at FROM library_entities WHERE id<>? "
+            "AND library_id IN (SELECT value FROM json_each(?)) "
+            "AND entity_type=? LIMIT ?",
+            ("source", '["allowed"]', "movie", 128),
+        )
+        self.assertTrue(
+            any(
+                "SEARCH library_entities USING INDEX idx_library_entities_home_recent"
+                in row[3]
+                and "library_id=? AND entity_type=?" in row[3]
+                for row in query_plan
+            ),
+            query_plan,
+        )
+
+        catalog = self.catalog()
+        source_row = (
+            "source",
+            "allowed",
+            None,
+            "movie",
+            "source",
+            None,
+            None,
+            None,
+            None,
+            "2026",
+            "2026",
+        )
+        metadata_calls = []
+
+        def metadata(_user_id, entity_id, _language):
+            """Record each candidate metadata lookup."""
+            metadata_calls.append(entity_id)
+            return {"metadata": {"genres": ["Drama"], "title": entity_id}}
+
+        def serialize(_user_id, row, value, **_kwargs):
+            """Return the small projection used by the fallback test."""
+            return {"id": row[0], "title": value["title"]}
+
+        with (
+            patch.object(catalog, "require_entity", return_value=source_row),
+            patch.object(catalog, "allowed_libraries", return_value={"allowed"}),
+            patch.object(catalog, "_read_model_ready", return_value=False),
+            patch.object(catalog, "metadata", side_effect=metadata),
+            patch.object(
+                catalog, "_serialize", side_effect=serialize
+            ) as serialize_mock,
+            patch.object(self.db, "execute", wraps=self.db.execute) as execute_mock,
+        ):
+            small_page = catalog.similar("user", "source", "en", limit=8)
+            candidate_calls_for_small_page = len(metadata_calls) - 1
+            small_page_serializations = serialize_mock.call_count
+            metadata_calls.clear()
+            serialize_mock.reset_mock()
+
+            large_page = catalog.similar("user", "source", "en", limit=40)
+            candidate_calls_for_large_page = len(metadata_calls) - 1
+
+        candidate_queries = [
+            call
+            for call in execute_mock.call_args_list
+            if "WHERE id<>?" in call.args[0]
+        ]
+        self.assertEqual([call.args[1][-1] for call in candidate_queries], [128, 256])
+        self.assertTrue(all("LIMIT ?" in call.args[0] for call in candidate_queries))
+        self.assertEqual(candidate_calls_for_small_page, 128)
+        self.assertEqual(candidate_calls_for_large_page, 256)
+        self.assertEqual(small_page_serializations, 8)
+        self.assertEqual(len(small_page["items"]), 8)
+        self.assertEqual(len(large_page["items"]), 40)
+
+    def test_similar_uses_indexed_genres_and_filters_hidden_libraries(self):
+        """Use the indexed Similar path when the genre read model is ready."""
+        user_id = self.account().create("similar-indexed", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (user_id, "allowed", "now"),
+        )
+        for entity_id, library_id in (
+            ("source", "allowed"),
+            ("match-many-genres", "allowed"),
+            ("match-one-genre", "allowed"),
+            ("hidden-match", "hidden"),
+        ):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    library_id,
+                    None,
+                    "movie",
+                    entity_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,title_sort TEXT,PRIMARY KEY(entity_id,locale))"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,library_id TEXT,entity_type TEXT,genre_key TEXT,genre_name TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        for entity_id in (
+            "source",
+            "match-many-genres",
+            "match-one-genre",
+            "hidden-match",
+        ):
+            self.db.execute(
+                "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+                (entity_id, "en", entity_id),
+            )
+        for entity_id, library_id, genre_key in (
+            ("source", "allowed", "drama"),
+            ("source", "allowed", "comedy"),
+            ("match-many-genres", "allowed", "drama"),
+            ("match-many-genres", "allowed", "comedy"),
+            ("match-one-genre", "allowed", "drama"),
+            ("hidden-match", "hidden", "drama"),
+        ):
+            self.db.execute(
+                "INSERT INTO catalog_item_genres VALUES(?,?,?,?,?,?)",
+                (entity_id, "en", library_id, "movie", genre_key, genre_key),
+            )
+
+        catalog = self.catalog()
+        catalog.metadata = lambda *_args: {"metadata": {"genres": ["Drama"]}}
+        catalog._hydrate_rows = lambda _user, rows, _language: [
+            {"id": row[0]} for row in rows
+        ]
+
+        result = catalog.similar(user_id, "source", "en")
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["match-many-genres", "match-one-genre"],
+        )
+
     def test_credits_supports_legacy_localization_value_column(self):
         """Deployed databases may use ``value`` instead of ``name``."""
         self.db.execute(

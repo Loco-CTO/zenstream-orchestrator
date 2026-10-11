@@ -3,10 +3,12 @@ import asyncio
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import api.zenstream.application_routes as application_routes
 from api.zenstream.application_routes import WebSocketHub
-from app.foreground import run_control
+from app import foreground
+from app.foreground import WorkerLaneOverloaded
 from app.models.syncplay import SyncplayGroup
 
 
@@ -29,6 +31,171 @@ class _FakeWebSocket:
 
 
 class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
+    def test_all_worker_lanes_bound_admission_and_release_slots(self):
+        lanes = (
+            ("foreground", foreground.run_foreground),
+            ("control", foreground.run_control),
+            ("auth", foreground.run_auth),
+        )
+        for lane, submit in lanes:
+            with self.subTest(lane=lane):
+                with patch.dict(
+                    foreground._lane_slots,
+                    {lane: threading.BoundedSemaphore(1)},
+                ):
+
+                    async def exercise():
+                        started = threading.Event()
+                        release = threading.Event()
+
+                        def block():
+                            started.set()
+                            return release.wait(10)
+
+                        first = asyncio.create_task(submit(block))
+                        try:
+                            self.assertTrue(
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(started.wait, 2), 3
+                                )
+                            )
+                            self.assertEqual(
+                                foreground.metrics()[lane]["queue_depth"], 0
+                            )
+                            with self.assertRaises(WorkerLaneOverloaded) as raised:
+                                await asyncio.wait_for(submit(lambda: None), 0.25)
+                            self.assertEqual(raised.exception.lane, lane)
+                            self.assertEqual(raised.exception.status_code, 503)
+                            self.assertEqual(
+                                raised.exception.detail,
+                                "Orchestrator is busy. Retry shortly.",
+                            )
+                            self.assertEqual(
+                                raised.exception.headers["Retry-After"], "1"
+                            )
+                        finally:
+                            release.set()
+                        self.assertTrue(await asyncio.wait_for(first, 2))
+                        self.assertTrue(await submit(lambda: True))
+
+                        cancelled_started = threading.Event()
+                        release_cancelled = threading.Event()
+
+                        def block_cancelled():
+                            cancelled_started.set()
+                            return release_cancelled.wait(10)
+
+                        cancelled = asyncio.create_task(submit(block_cancelled))
+                        try:
+                            self.assertTrue(
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(cancelled_started.wait, 2), 3
+                                )
+                            )
+                            cancelled.cancel()
+                            with self.assertRaises(asyncio.CancelledError):
+                                await asyncio.wait_for(cancelled, 1)
+                            with self.assertRaises(WorkerLaneOverloaded):
+                                await asyncio.wait_for(submit(lambda: None), 0.25)
+                        finally:
+                            release_cancelled.set()
+                            await foreground.wait_for_shutdown(timeout=2)
+                        self.assertTrue(await submit(lambda: True))
+                        self.assertEqual(
+                            foreground.metrics()[lane]["queue_depth"], 0
+                        )
+
+                    asyncio.run(exercise())
+
+    def test_disconnect_cleanup_retries_overload_until_transition_succeeds(self):
+        async def exercise():
+            user = "user-1"
+            participant = "tab-1"
+            key = (user, participant)
+            hub = WebSocketHub()
+            async with hub.lock:
+                epoch = hub._advance_epoch_locked(key)
+                hub._disconnect_tasks[key] = asyncio.current_task()
+            state = {"id": "group-1", "revision": 3}
+            run_control = AsyncMock(
+                side_effect=[WorkerLaneOverloaded("control"), [state], []]
+            )
+            broadcast = AsyncMock()
+            sleep = AsyncMock()
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(application_routes, "run_control", new=run_control),
+                patch.object(application_routes, "_broadcast_group", new=broadcast),
+                patch.object(application_routes.asyncio, "sleep", new=sleep),
+            ):
+                tasks_before = asyncio.all_tasks()
+                await application_routes._disconnect_cleanup(
+                    user, participant, epoch
+                )
+                self.assertEqual(asyncio.all_tasks(), tasks_before)
+
+            self.assertEqual(run_control.await_count, 3)
+            self.assertIs(
+                run_control.await_args_list[0].args[0],
+                application_routes._mark_disconnected_sync,
+            )
+            self.assertIs(
+                run_control.await_args_list[1].args[0],
+                application_routes._mark_disconnected_sync,
+            )
+            self.assertIs(
+                run_control.await_args_list[2].args[0],
+                application_routes._expire_disconnected_sync,
+            )
+            broadcast.assert_awaited_once_with(
+                state, identity=(user, participant), epoch=epoch
+            )
+            sleep.assert_has_awaits([call(30), call(0.25), call(270)])
+            self.assertEqual(hub._lifecycle_tasks, {})
+            self.assertEqual(hub._disconnect_tasks, {})
+
+        asyncio.run(exercise())
+
+    def test_disconnect_retry_stops_when_lifecycle_is_superseded(self):
+        async def exercise():
+            user = "user-1"
+            participant = "tab-1"
+            key = (user, participant)
+            hub = WebSocketHub()
+            async with hub.lock:
+                epoch = hub._advance_epoch_locked(key)
+                hub._disconnect_tasks[key] = asyncio.current_task()
+            run_control = AsyncMock(side_effect=WorkerLaneOverloaded("control"))
+
+            async def reconnect(delay):
+                self.assertEqual(delay, 0.25)
+                async with hub.lock:
+                    self.assertEqual(hub._advance_epoch_locked(key), epoch + 1)
+
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(application_routes, "run_control", new=run_control),
+                patch.object(application_routes.asyncio, "sleep", new=reconnect),
+            ):
+                tasks_before = asyncio.all_tasks()
+                result = await application_routes._run_disconnect_lifecycle(
+                    user,
+                    participant,
+                    epoch,
+                    application_routes._mark_disconnected_sync,
+                )
+                self.assertIsNone(result)
+                self.assertEqual(asyncio.all_tasks(), tasks_before)
+                await hub.finish_disconnect_cleanup(
+                    user, participant, epoch, asyncio.current_task()
+                )
+
+            run_control.assert_awaited_once()
+            self.assertEqual(hub._lifecycle_tasks, {})
+            self.assertEqual(hub._disconnect_tasks, {})
+
+        asyncio.run(exercise())
+
     def test_control_work_does_not_stop_the_event_loop(self):
         gate = threading.Event()
 

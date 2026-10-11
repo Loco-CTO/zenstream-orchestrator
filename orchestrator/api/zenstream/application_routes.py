@@ -16,7 +16,7 @@ from app.client_auth import (
     websocket_account,
 )
 from app.config import Config
-from app.foreground import run_auth, run_control
+from app.foreground import WorkerLaneOverloaded, run_auth, run_control
 from app.intro_outro import IntroOutroStore
 from app.jobs import AnalysisMaintenanceTimeout, scheduler
 from app.logging_config import get_logger
@@ -208,6 +208,8 @@ class WebSocketHub:
                             revisions,
                         )
                         return None if token.is_set() else result
+                except WorkerLaneOverloaded:
+                    raise
                 except Exception:
                     get_logger("syncplay").exception(
                         "socket lifecycle failed operation=%s participant=%s epoch=%s",
@@ -502,6 +504,35 @@ async def _broadcast_group(state, *, identity=None, epoch=None):
         )
 
 
+async def _run_disconnect_lifecycle(user, participant, epoch, function):
+    retry_delay = 0.25
+    retries = 0
+    while True:
+        try:
+            result = await hub.run_lifecycle(user, participant, epoch, function)
+        except WorkerLaneOverloaded:
+            retries += 1
+            if retries == 1:
+                get_logger("syncplay").warning(
+                    "socket lifecycle waiting for worker admission operation=%s participant=%s epoch=%s",
+                    function.__name__,
+                    participant,
+                    epoch,
+                )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 2.0)
+            continue
+        if retries:
+            get_logger("syncplay").debug(
+                "socket lifecycle worker admission resumed operation=%s participant=%s epoch=%s retries=%s",
+                function.__name__,
+                participant,
+                epoch,
+                retries,
+            )
+        return result
+
+
 async def _disconnect_cleanup(user, participant, epoch):
     task = asyncio.current_task()
     try:
@@ -510,7 +541,7 @@ async def _disconnect_cleanup(user, participant, epoch):
             user, participant
         ):
             return
-        states = await hub.run_lifecycle(
+        states = await _run_disconnect_lifecycle(
             user, participant, epoch, _mark_disconnected_sync
         )
         if states is None:
@@ -523,7 +554,7 @@ async def _disconnect_cleanup(user, participant, epoch):
             user, participant
         ):
             return
-        states = await hub.run_lifecycle(
+        states = await _run_disconnect_lifecycle(
             user, participant, epoch, _expire_disconnected_sync
         )
         if states is None:
@@ -1690,7 +1721,14 @@ async def syncplay_socket(websocket: WebSocket):
     participant = websocket.headers.get(
         "x-zenstream-participant"
     ) or websocket.query_params.get("participantId")
-    account = await run_auth(websocket_account, websocket)
+    try:
+        account = await run_auth(websocket_account, websocket)
+    except WorkerLaneOverloaded:
+        await websocket.accept()
+        await websocket.close(
+            code=1013, reason="Orchestrator is busy. Retry shortly."
+        )
+        return
     user_id = account["id"] if account else None
     if (
         not user_id
@@ -1731,6 +1769,10 @@ async def syncplay_socket(websocket: WebSocket):
                 )
     except WebSocketDisconnect:
         pass
+    except WorkerLaneOverloaded:
+        await websocket.close(
+            code=1013, reason="Orchestrator is busy. Retry shortly."
+        )
     finally:
         identity, epoch = await hub.remove(websocket)
         if identity and not await hub.sockets_for(*identity):

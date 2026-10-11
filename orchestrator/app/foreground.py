@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import TypeVar
 
+from fastapi import HTTPException
+
 T = TypeVar("T")
 
 
@@ -24,6 +26,7 @@ def _worker_count(name: str, default: int, minimum: int = 1, maximum: int = 64) 
 _workers = _worker_count("FOREGROUND_WORKERS", 16, minimum=1, maximum=128)
 _control_workers = _worker_count("CONTROL_WORKERS", 8, minimum=1, maximum=64)
 _auth_workers = _worker_count("AUTH_WORKERS", 4, minimum=1, maximum=16)
+_foreground_queue = min(512, _workers * 4)
 _control_queue = _worker_count(
     "CONTROL_QUEUE", _control_workers * 4, minimum=0, maximum=256
 )
@@ -36,8 +39,9 @@ _auth_executor = ThreadPoolExecutor(
     max_workers=_auth_workers, thread_name_prefix="auth"
 )
 _lane_slots = {
-    "control": asyncio.Semaphore(_control_workers + _control_queue),
-    "auth": asyncio.Semaphore(_auth_workers + _auth_queue),
+    "foreground": threading.BoundedSemaphore(_workers + _foreground_queue),
+    "control": threading.BoundedSemaphore(_control_workers + _control_queue),
+    "auth": threading.BoundedSemaphore(_auth_workers + _auth_queue),
 }
 _active = {"foreground": 0, "control": 0, "auth": 0}
 _completed = {"foreground": 0, "control": 0, "auth": 0}
@@ -47,6 +51,18 @@ _queue_depth = {"foreground": 0, "control": 0, "auth": 0}
 _lock = threading.Lock()
 _pending_futures: set[ConcurrentFuture] = set()
 _settlement_tasks: set[asyncio.Task] = set()
+
+
+class WorkerLaneOverloaded(HTTPException):
+    """Raised when a worker lane has no active or pending admission capacity."""
+
+    def __init__(self, lane: str):
+        self.lane = lane
+        super().__init__(
+            status_code=503,
+            detail="Orchestrator is busy. Retry shortly.",
+            headers={"Retry-After": "1"},
+        )
 
 
 def active_requests() -> int:
@@ -92,16 +108,17 @@ async def _run(
     started_at = 0.0
     completed_at = 0.0
     metrics_recorded = False
-    slot = _lane_slots.get(lane)
-    waiting = True
+    slot = _lane_slots[lane]
     slot_acquired = False
-    with _lock:
-        _queue_depth[lane] += 1
+    queue_registered = False
 
     def run() -> T:
-        nonlocal started_at, completed_at
+        nonlocal started_at, completed_at, queue_registered
         started_at = time.perf_counter()
         with _lock:
+            if queue_registered:
+                _queue_depth[lane] -= 1
+                queue_registered = False
             _active[lane] += 1
         try:
             return function(*args, **kwargs)
@@ -135,12 +152,12 @@ async def _run(
 
     defer_timing = False
     try:
-        if slot is not None:
-            await slot.acquire()
-            slot_acquired = True
-        waiting = False
+        if not slot.acquire(blocking=False):
+            raise WorkerLaneOverloaded(lane)
+        slot_acquired = True
         with _lock:
-            _queue_depth[lane] -= 1
+            _queue_depth[lane] += 1
+            queue_registered = True
         # Submit explicitly so shutdown can observe work that outlives an
         # awaiting request. ``run_in_executor`` hides the concurrent future
         # behind an asyncio wrapper.
@@ -186,10 +203,12 @@ async def _run(
                 slot.release()
                 slot_acquired = False
     finally:
-        if waiting:
+        if queue_registered:
             with _lock:
-                _queue_depth[lane] -= 1
-        if slot_acquired and slot is not None:
+                if queue_registered:
+                    _queue_depth[lane] -= 1
+                    queue_registered = False
+        if slot_acquired:
             slot.release()
             slot_acquired = False
         if not defer_timing:

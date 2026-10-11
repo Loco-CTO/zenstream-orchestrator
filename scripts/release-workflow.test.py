@@ -41,6 +41,28 @@ class CandidateFirstWorkflowTest(unittest.TestCase):
             publish.index("Upload and verify Windows release assets"),
         )
 
+    def test_new_release_candidate_refreshes_openapi_snapshot(self) -> None:
+        workflow = RELEASE.read_text(encoding="utf-8")
+        candidate = job_block(workflow, "candidate")
+        self.assertRegex(
+            candidate, r"Set up Python for OpenAPI snapshot generation"
+        )
+        self.assertRegex(
+            candidate,
+            r"Install Python dependencies for OpenAPI snapshot generation",
+        )
+        version_bump = candidate.index('sed -i "s/^__version__ =')
+        export = candidate.index("python orchestrator/scripts/export_openapi.py\n")
+        snapshot_check = candidate.index(
+            "python orchestrator/scripts/export_openapi.py --check"
+        )
+        stage_snapshot = candidate.index("git add \\\n")
+        commit_candidate = candidate.index("git commit -m \"chore: release $tag\"")
+        self.assertLess(version_bump, export)
+        self.assertLess(export, snapshot_check)
+        self.assertLess(snapshot_check, stage_snapshot)
+        self.assertLess(stage_snapshot, commit_candidate)
+
     def test_reusable_ci_checks_explicit_candidate_sha(self) -> None:
         coverage = (ROOT / ".github" / "workflows" / "coverage.yml").read_text(
             encoding="utf-8"

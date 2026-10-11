@@ -48,6 +48,22 @@ jobs:
         with:
           node-version: 24
 
+      - name: Set up Python for OpenAPI snapshot generation
+        if: ${{ inputs.retry_version == '' }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-contracts.txt
+
+      - name: Install Python dependencies for OpenAPI snapshot generation
+        if: ${{ inputs.retry_version == '' }}
+        run: >-
+          python -m pip install --disable-pip-version-check
+          -r requirements.txt -r requirements-contracts.txt
+
       - name: Prepare or reuse release candidate
         id: prepare
         env:
@@ -146,9 +162,16 @@ jobs:
             sed -i "s/^__version__ = \"$current_version\"$/__version__ = \"$version\"/" orchestrator/version.py
             npm version "$version" --no-git-tag-version --allow-same-version --prefix launcher
             printf '{\n  "main": 0\n}\n' > .main-version.json
+            python orchestrator/scripts/export_openapi.py
+            python orchestrator/scripts/export_openapi.py --check
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add orchestrator/version.py launcher/package.json launcher/package-lock.json .main-version.json
+            git add \
+              orchestrator/version.py \
+              launcher/package.json \
+              launcher/package-lock.json \
+              .main-version.json \
+              contracts/openapi.json
             git commit -m "chore: release $tag" -m "release-base-main: $base_main" -m "release-base-stable: $base_stable"
             sha="$(git rev-parse HEAD)"
             git push origin "$sha:$candidate_ref"

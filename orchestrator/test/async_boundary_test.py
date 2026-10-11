@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 from api.zenstream import application_routes
 from api.zenstream.application_routes import WebSocketHub
 from app import foreground
-from app.foreground import WorkerLaneOverloaded
+from app.foreground import WorkerLaneOverloaded, run_control
 from app.models.syncplay import SyncplayGroup
 
 

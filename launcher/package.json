@@ -37,6 +37,9 @@
     "vitest": "^5.0.2",
     "wait-on": "^9.5.1"
   },
+  "overrides": {
+    "shell-quote": "1.11.0"
+  },
   "build": {
     "appId": "net.rystal.zenstream.orchestrator",
     "productName": "ZenStream Orchestrator",

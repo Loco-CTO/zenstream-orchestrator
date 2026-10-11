@@ -93,6 +93,10 @@ class CatalogTest(unittest.TestCase):
     def test_similar_fallback_limits_candidate_hydration_and_serializes_only_results(
         self,
     ):
+        self.db.execute(
+            "CREATE INDEX idx_library_entities_home_recent "
+            "ON library_entities(library_id,entity_type,parent_id,created_at DESC,id)"
+        )
         for index in range(300):
             entity_id = f"candidate-{index:03}"
             self.db.execute(
@@ -111,6 +115,23 @@ class CatalogTest(unittest.TestCase):
                     "2026",
                 ),
             )
+
+        query_plan = self.db.execute(
+            "EXPLAIN QUERY PLAN SELECT id,library_id,parent_id,entity_type,"
+            "relative_path,season_number,episode_number,episode_end_number,"
+            "created_at,updated_at FROM library_entities WHERE id<>? "
+            "AND library_id IN (?) AND entity_type=? LIMIT ?",
+            ("source", "allowed", "movie", 128),
+        )
+        self.assertTrue(
+            any(
+                "SEARCH library_entities USING INDEX idx_library_entities_home_recent"
+                in row[3]
+                and "library_id=? AND entity_type=?" in row[3]
+                for row in query_plan
+            ),
+            query_plan,
+        )
 
         catalog = self.catalog()
         source_row = (

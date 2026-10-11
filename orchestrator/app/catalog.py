@@ -4271,55 +4271,61 @@ class Catalog:
             "total": len(values),
         }
 
-    @_catalog_read
-    def similar(
-        self, user_id: str, entity_id: str, language: str, limit: int = 8
-    ) -> dict:
-        source_row = self.require_entity(user_id, entity_id)
-        source = self.metadata(user_id, entity_id, language)["metadata"]
-        source_terms = {
+    @staticmethod
+    def _similar_terms(metadata: dict) -> set[str]:
+        return {
             str(value).casefold()
-            for value in (source.get("genres") or source.get("tags") or [])
+            for value in (metadata.get("genres") or metadata.get("tags") or [])
         }
-        if not source_terms:
-            return {"items": []}
-        allowed = self.allowed_libraries(user_id)
-        if (
-            self._read_model_ready()
-            and self._has_table("catalog_item_genres")
-            and allowed
-        ):
-            genre_rows = self.db.execute(
-                "SELECT genre_key FROM catalog_item_genres WHERE entity_id=? AND locale=?",
-                (entity_id, normalize_metadata_locale(language)),
-            )
-            keys = [row[0] for row in genre_rows]
-            if keys:
-                allowed_placeholders = ",".join("?" for _ in allowed)
-                genre_placeholders = ",".join("?" for _ in keys)
-                rows = self.db.execute(
-                    "WITH ranked AS (SELECT g.entity_id,COUNT(*) AS score,MIN(p.title_sort) AS title_sort "
-                    "FROM catalog_item_genres g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
-                    f"WHERE g.locale=? AND g.genre_key IN ({genre_placeholders}) AND g.entity_id<>? AND g.library_id IN ({allowed_placeholders}) AND g.entity_type=? "
-                    "GROUP BY g.entity_id ORDER BY score DESC,title_sort,g.entity_id LIMIT ?) "
-                    "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-                    "FROM ranked JOIN library_entities e ON e.id=ranked.entity_id ORDER BY ranked.score DESC,ranked.title_sort,ranked.entity_id",
-                    [
-                        normalize_metadata_locale(language),
-                        *keys,
-                        entity_id,
-                        *allowed,
-                        source_row[3],
-                        limit,
-                    ],
-                )
-                values = self._hydrate_rows(
-                    user_id, [row[:10] for row in rows], language
-                )
-                return {"items": values}
-        # The metadata fallback is used while the indexed genre model is not ready.
-        # Oversample a small result page, but do not hydrate every same-type entity
-        # in a large library on each Similar request.
+
+    def _similar_from_genre_index(
+        self,
+        user_id: str,
+        entity_id: str,
+        language: str,
+        limit: int,
+        source_row: tuple,
+        allowed: set[str],
+    ) -> list[dict] | None:
+        genre_rows = self.db.execute(
+            "SELECT genre_key FROM catalog_item_genres WHERE entity_id=? AND locale=?",
+            (entity_id, normalize_metadata_locale(language)),
+        )
+        keys = [row[0] for row in genre_rows]
+        if not keys:
+            return None
+
+        allowed_placeholders = ",".join("?" for _ in allowed)
+        genre_placeholders = ",".join("?" for _ in keys)
+        rows = self.db.execute(
+            "WITH ranked AS (SELECT g.entity_id,COUNT(*) AS score,MIN(p.title_sort) AS title_sort "
+            "FROM catalog_item_genres g JOIN catalog_item_projection p ON p.entity_id=g.entity_id AND p.locale=g.locale "
+            f"WHERE g.locale=? AND g.genre_key IN ({genre_placeholders}) AND g.entity_id<>? AND g.library_id IN ({allowed_placeholders}) AND g.entity_type=? "
+            "GROUP BY g.entity_id ORDER BY score DESC,title_sort,g.entity_id LIMIT ?) "
+            "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+            "FROM ranked JOIN library_entities e ON e.id=ranked.entity_id ORDER BY ranked.score DESC,ranked.title_sort,ranked.entity_id",
+            [
+                normalize_metadata_locale(language),
+                *keys,
+                entity_id,
+                *allowed,
+                source_row[3],
+                limit,
+            ],
+        )
+        return self._hydrate_rows(user_id, [row[:10] for row in rows], language)
+
+    def _similar_from_metadata(
+        self,
+        user_id: str,
+        entity_id: str,
+        language: str,
+        limit: int,
+        source_row: tuple,
+        source_terms: set[str],
+        allowed: set[str],
+    ) -> list[dict]:
+        # Oversample a small result page without hydrating every same-type entity.
         candidate_limit = min(256, max(64, limit * 16))
         rows = self.db.execute(
             "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,"
@@ -4332,11 +4338,7 @@ class Catalog:
         ranked = []
         for row in rows:
             metadata = self.metadata(user_id, row[0], language)["metadata"]
-            terms = {
-                str(value).casefold()
-                for value in (metadata.get("genres") or metadata.get("tags") or [])
-            }
-            score = len(source_terms & terms)
+            score = len(source_terms & self._similar_terms(metadata))
             if score:
                 ranked.append(
                     (
@@ -4348,11 +4350,38 @@ class Catalog:
                     )
                 )
         ranked.sort(key=lambda value: value[:3])
+        return [
+            self._serialize(user_id, row, metadata, language=language)
+            for _, _, _, row, metadata in ranked[:limit]
+        ]
+
+    @_catalog_read
+    def similar(
+        self, user_id: str, entity_id: str, language: str, limit: int = 8
+    ) -> dict:
+        source_row = self.require_entity(user_id, entity_id)
+        source = self.metadata(user_id, entity_id, language)["metadata"]
+        source_terms = self._similar_terms(source)
+        if not source_terms:
+            return {"items": []}
+
+        allowed = self.allowed_libraries(user_id)
+        if (
+            allowed
+            and self._read_model_ready()
+            and self._has_table("catalog_item_genres")
+        ):
+            indexed = self._similar_from_genre_index(
+                user_id, entity_id, language, limit, source_row, allowed
+            )
+            if indexed is not None:
+                return {"items": indexed}
+
+        # The metadata fallback is used while the indexed genre model is not ready.
         return {
-            "items": [
-                self._serialize(user_id, row, metadata, language=language)
-                for _, _, _, row, metadata in ranked[:limit]
-            ]
+            "items": self._similar_from_metadata(
+                user_id, entity_id, language, limit, source_row, source_terms, allowed
+            )
         }
 
     @_catalog_read

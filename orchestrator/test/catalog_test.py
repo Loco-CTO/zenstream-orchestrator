@@ -192,6 +192,81 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(len(small_page["items"]), 8)
         self.assertEqual(len(large_page["items"]), 40)
 
+    def test_similar_uses_indexed_genres_and_filters_hidden_libraries(self):
+        """Use the indexed Similar path when the genre read model is ready."""
+        user_id = self.account().create("similar-indexed", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (user_id, "allowed", "now"),
+        )
+        for entity_id, library_id in (
+            ("source", "allowed"),
+            ("match-many-genres", "allowed"),
+            ("match-one-genre", "allowed"),
+            ("hidden-match", "hidden"),
+        ):
+            self.db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    entity_id,
+                    library_id,
+                    None,
+                    "movie",
+                    entity_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "2026",
+                    "2026",
+                ),
+            )
+        self.db.execute(
+            "CREATE TABLE catalog_item_projection(entity_id TEXT,locale TEXT,title_sort TEXT,PRIMARY KEY(entity_id,locale))"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_item_genres(entity_id TEXT,locale TEXT,library_id TEXT,entity_type TEXT,genre_key TEXT,genre_name TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE catalog_read_model_status(id INTEGER PRIMARY KEY,state TEXT)"
+        )
+        self.db.execute("INSERT INTO catalog_read_model_status VALUES(1,'ready')")
+        for entity_id in (
+            "source",
+            "match-many-genres",
+            "match-one-genre",
+            "hidden-match",
+        ):
+            self.db.execute(
+                "INSERT INTO catalog_item_projection VALUES(?,?,?)",
+                (entity_id, "en", entity_id),
+            )
+        for entity_id, library_id, genre_key in (
+            ("source", "allowed", "drama"),
+            ("source", "allowed", "comedy"),
+            ("match-many-genres", "allowed", "drama"),
+            ("match-many-genres", "allowed", "comedy"),
+            ("match-one-genre", "allowed", "drama"),
+            ("hidden-match", "hidden", "drama"),
+        ):
+            self.db.execute(
+                "INSERT INTO catalog_item_genres VALUES(?,?,?,?,?,?)",
+                (entity_id, "en", library_id, "movie", genre_key, genre_key),
+            )
+
+        catalog = self.catalog()
+        catalog.metadata = lambda *_args: {"metadata": {"genres": ["Drama"]}}
+        catalog._hydrate_rows = lambda _user, rows, _language: [
+            {"id": row[0]} for row in rows
+        ]
+
+        result = catalog.similar(user_id, "source", "en")
+
+        self.assertEqual(
+            [item["id"] for item in result["items"]],
+            ["match-many-genres", "match-one-genre"],
+        )
+
     def test_credits_supports_legacy_localization_value_column(self):
         """Deployed databases may use ``value`` instead of ``name``."""
         self.db.execute(

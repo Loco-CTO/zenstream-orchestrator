@@ -121,8 +121,9 @@ class CatalogTest(unittest.TestCase):
             "EXPLAIN QUERY PLAN SELECT id,library_id,parent_id,entity_type,"
             "relative_path,season_number,episode_number,episode_end_number,"
             "created_at,updated_at FROM library_entities WHERE id<>? "
-            "AND library_id IN (?) AND entity_type=? LIMIT ?",
-            ("source", "allowed", "movie", 128),
+            "AND library_id IN (SELECT value FROM json_each(?)) "
+            "AND entity_type=? LIMIT ?",
+            ("source", '["allowed"]', "movie", 128),
         )
         self.assertTrue(
             any(

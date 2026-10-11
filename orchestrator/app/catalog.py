@@ -4321,13 +4321,13 @@ class Catalog:
         # Oversample a small result page, but do not hydrate every same-type entity
         # in a large library on each Similar request.
         candidate_limit = min(256, max(64, limit * 16))
-        placeholders = ",".join("?" for _ in allowed)
         rows = self.db.execute(
-            f"SELECT id,library_id,parent_id,entity_type,relative_path,season_number,"
+            "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,"
             "episode_number,episode_end_number,created_at,updated_at "
-            f"FROM library_entities WHERE id<>? AND library_id IN ({placeholders}) "
+            "FROM library_entities WHERE id<>? "
+            "AND library_id IN (SELECT value FROM json_each(?)) "
             "AND entity_type=? LIMIT ?",
-            [entity_id, *allowed, source_row[3], candidate_limit],
+            [entity_id, json.dumps(sorted(allowed)), source_row[3], candidate_limit],
         )
         ranked = []
         for row in rows:

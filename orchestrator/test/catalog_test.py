@@ -90,7 +90,9 @@ class CatalogTest(unittest.TestCase):
                 (locale, json.dumps(payload), "now", "later"),
             )
 
-    def test_similar_fallback_limits_candidate_hydration_and_serializes_only_results(self):
+    def test_similar_fallback_limits_candidate_hydration_and_serializes_only_results(
+        self,
+    ):
         for index in range(300):
             entity_id = f"candidate-{index:03}"
             self.db.execute(
@@ -138,7 +140,9 @@ class CatalogTest(unittest.TestCase):
             patch.object(catalog, "allowed_libraries", return_value={"allowed"}),
             patch.object(catalog, "_read_model_ready", return_value=False),
             patch.object(catalog, "metadata", side_effect=metadata),
-            patch.object(catalog, "_serialize", side_effect=serialize) as serialize_mock,
+            patch.object(
+                catalog, "_serialize", side_effect=serialize
+            ) as serialize_mock,
             patch.object(self.db, "execute", wraps=self.db.execute) as execute_mock,
         ):
             small_page = catalog.similar("user", "source", "en", limit=8)
@@ -155,9 +159,7 @@ class CatalogTest(unittest.TestCase):
             for call in execute_mock.call_args_list
             if "WHERE id<>?" in call.args[0]
         ]
-        self.assertEqual(
-            [call.args[1][-1] for call in candidate_queries], [128, 256]
-        )
+        self.assertEqual([call.args[1][-1] for call in candidate_queries], [128, 256])
         self.assertTrue(all("LIMIT ?" in call.args[0] for call in candidate_queries))
         self.assertEqual(candidate_calls_for_small_page, 128)
         self.assertEqual(candidate_calls_for_large_page, 256)

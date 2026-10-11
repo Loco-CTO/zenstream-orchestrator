@@ -139,6 +139,41 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_slow_worker_completion_records_metrics_and_warns(self):
+        def blocking_operation():
+            return None
+
+        work = foreground._WorkerCall(
+            "foreground",
+            blocking_operation,
+            (),
+            {},
+            threading.BoundedSemaphore(1),
+            queued_at=10.0,
+        )
+        work.started_at = 11.0
+        work.completed_at = 12.5
+        logger = MagicMock()
+
+        with (
+            patch.dict(foreground._completed, {"foreground": 0}),
+            patch.dict(foreground._queued_seconds, {"foreground": 0.0}),
+            patch.dict(foreground._execution_seconds, {"foreground": 0.0}),
+            patch("app.logging_config.get_logger", return_value=logger) as get_logger,
+        ):
+            work.record_timing()
+
+            self.assertEqual(foreground._completed["foreground"], 1)
+            self.assertEqual(foreground._queued_seconds["foreground"], 1.0)
+            self.assertEqual(foreground._execution_seconds["foreground"], 1.5)
+
+        get_logger.assert_called_once_with("foreground")
+        logger.warning.assert_called_once()
+        self.assertEqual(
+            logger.warning.call_args.args[1:],
+            ("foreground", blocking_operation.__qualname__, 1000.0, 1500.0),
+        )
+
     def test_disconnect_cleanup_retries_overload_until_transition_succeeds(self):
         async def exercise():
             user = "user-1"
@@ -169,7 +204,10 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
                 patch.object(application_routes.asyncio, "sleep", new=sleep),
             ):
                 tasks_before = asyncio.all_tasks()
-                await application_routes._disconnect_cleanup(user, participant, epoch)
+                await asyncio.wait_for(
+                    application_routes._disconnect_cleanup(user, participant, epoch),
+                    timeout=2,
+                )
                 self.assertEqual(asyncio.all_tasks(), tasks_before)
 
             self.assertEqual(run_control.await_count, 3)
@@ -204,6 +242,126 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
             sleep.assert_has_awaits([call(30), call(0.25), call(270)])
             self.assertEqual(hub._lifecycle_tasks, {})
             self.assertEqual(hub._disconnect_tasks, {})
+
+        asyncio.run(exercise())
+
+    def test_disconnect_cleanup_stops_on_reconnect_or_superseded_transition(self):
+        async def run_case(
+            epoch_results,
+            socket_results,
+            lifecycle_results,
+            expected_sleeps,
+            expected_lifecycle_calls,
+            expected_group_broadcasts,
+        ):
+            user = "user-1"
+            participant = "tab-1"
+            epoch = 4
+            state = {"id": "group-1", "revision": 3}
+            hub = MagicMock()
+            hub.epoch = AsyncMock(side_effect=epoch_results)
+            hub.sockets_for = AsyncMock(side_effect=socket_results)
+            hub.finish_disconnect_cleanup = AsyncMock()
+            hub.broadcast = AsyncMock()
+            lifecycle = AsyncMock(side_effect=lifecycle_results)
+            broadcast_group = AsyncMock()
+            sleep = AsyncMock()
+
+            with (
+                patch.object(application_routes, "hub", new=hub),
+                patch.object(
+                    application_routes, "_run_disconnect_lifecycle", new=lifecycle
+                ),
+                patch.object(
+                    application_routes, "_broadcast_group", new=broadcast_group
+                ),
+                patch.object(application_routes.asyncio, "sleep", new=sleep),
+            ):
+                await application_routes._disconnect_cleanup(user, participant, epoch)
+                hub.finish_disconnect_cleanup.assert_awaited_once_with(
+                    user, participant, epoch, asyncio.current_task()
+                )
+
+            self.assertEqual(lifecycle.await_count, expected_lifecycle_calls)
+            self.assertEqual(broadcast_group.await_count, expected_group_broadcasts)
+            self.assertEqual(sleep.await_args_list, expected_sleeps)
+
+        async def exercise():
+            state = {"id": "group-1", "revision": 3}
+            cases = (
+                (
+                    "stale before disconnect transition",
+                    [5],
+                    [],
+                    [],
+                    [call(30)],
+                    0,
+                    0,
+                ),
+                (
+                    "socket active before disconnect transition",
+                    [4],
+                    [("socket",)],
+                    [],
+                    [call(30)],
+                    0,
+                    0,
+                ),
+                (
+                    "disconnect transition superseded",
+                    [4],
+                    [()],
+                    [None],
+                    [call(30)],
+                    1,
+                    0,
+                ),
+                (
+                    "stale before expiration transition",
+                    [4, 5],
+                    [()],
+                    [[state]],
+                    [call(30), call(270)],
+                    1,
+                    1,
+                ),
+                (
+                    "socket active before expiration transition",
+                    [4, 4],
+                    [(), ("socket",)],
+                    [[state]],
+                    [call(30), call(270)],
+                    1,
+                    1,
+                ),
+                (
+                    "expiration transition superseded",
+                    [4, 4],
+                    [(), ()],
+                    [[state], None],
+                    [call(30), call(270)],
+                    2,
+                    1,
+                ),
+            )
+            for (
+                name,
+                epoch_results,
+                socket_results,
+                lifecycle_results,
+                expected_sleeps,
+                expected_lifecycle_calls,
+                expected_group_broadcasts,
+            ) in cases:
+                with self.subTest(case=name):
+                    await run_case(
+                        epoch_results,
+                        socket_results,
+                        lifecycle_results,
+                        expected_sleeps,
+                        expected_lifecycle_calls,
+                        expected_group_broadcasts,
+                    )
 
         asyncio.run(exercise())
 
@@ -424,7 +582,12 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
 
     def test_syncplay_socket_initializes_broadcasts_and_answers_clock(self):
         async def exercise():
-            socket = _RouteWebSocket(incoming=[{"type": "clock", "clientSentAt": 1234}])
+            socket = _RouteWebSocket(
+                incoming=[
+                    {"type": "presence"},
+                    {"type": "clock", "clientSentAt": 1234},
+                ]
+            )
             hub = WebSocketHub()
             state = {"id": "group-1", "revision": 4}
             hub.run_lifecycle = AsyncMock(return_value=([state], [state]))
@@ -446,6 +609,7 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
                 await hub.shutdown()
 
             self.assertEqual(socket.accept_count, 1)
+            self.assertEqual(socket.incoming, [])
             broadcast.assert_awaited_once_with(
                 state, identity=("user-1", "tab-1"), epoch=1
             )

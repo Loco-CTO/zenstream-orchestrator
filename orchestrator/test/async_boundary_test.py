@@ -220,9 +220,7 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
             with (
                 patch.object(application_routes, "hub", new=hub),
                 patch.object(application_routes, "run_control", new=run_control),
-                patch.object(
-                    application_routes, "get_logger", return_value=logger
-                ),
+                patch.object(application_routes, "get_logger", return_value=logger),
             ):
                 self.assertIsNone(
                     await hub.run_lifecycle(
@@ -426,9 +424,7 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
 
     def test_syncplay_socket_initializes_broadcasts_and_answers_clock(self):
         async def exercise():
-            socket = _RouteWebSocket(
-                incoming=[{"type": "clock", "clientSentAt": 1234}]
-            )
+            socket = _RouteWebSocket(incoming=[{"type": "clock", "clientSentAt": 1234}])
             hub = WebSocketHub()
             state = {"id": "group-1", "revision": 4}
             hub.run_lifecycle = AsyncMock(return_value=([state], [state]))
@@ -444,9 +440,7 @@ class ForegroundAndSyncplayBoundaryTests(unittest.TestCase):
                     "run_auth",
                     new=AsyncMock(return_value={"id": "user-1"}),
                 ),
-                patch.object(
-                    application_routes, "_broadcast_group", new=broadcast
-                ),
+                patch.object(application_routes, "_broadcast_group", new=broadcast),
             ):
                 await application_routes.syncplay_socket(socket)
                 await hub.shutdown()

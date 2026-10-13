@@ -220,6 +220,7 @@ class CalendarProviderTest(unittest.TestCase):
         self.assertNotIn("includeSeries", params)
 
     def test_v3_and_radarr_use_their_selected_query_parameters(self):
+        """Send only the selected endpoint and query parameters."""
         for connection, expected_endpoint, expected_params in (
             (
                 {
@@ -289,12 +290,14 @@ class CalendarProviderTest(unittest.TestCase):
             "apiKey": "secret",
         }
 
-        with patch("app.calendar.httpx.Client", http_client):
-            with self.assertRaisesRegex(ProviderError, "endpoint was not found"):
-                ArrCalendarClient(connection).fetch(
-                    datetime(2026, 10, 1, tzinfo=timezone.utc),
-                    datetime(2026, 10, 31, tzinfo=timezone.utc),
-                )
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            self.assertRaisesRegex(ProviderError, "endpoint was not found"),
+        ):
+            ArrCalendarClient(connection).fetch(
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
 
         client.get.assert_called_once()
 
@@ -399,12 +402,14 @@ class CalendarProviderTest(unittest.TestCase):
             "apiKey": "secret",
         }
 
-        with patch("app.calendar.httpx.Client", http_client):
-            with self.assertRaisesRegex(ProviderError, "invalid response"):
-                ArrCalendarClient(connection).fetch(
-                    datetime(2026, 10, 1, tzinfo=timezone.utc),
-                    datetime(2026, 10, 31, tzinfo=timezone.utc),
-                )
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            self.assertRaisesRegex(ProviderError, "invalid response"),
+        ):
+            ArrCalendarClient(connection).fetch(
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
 
     def test_http_response_errors_are_wrapped_as_provider_errors(self):
         """Wrap HTTP status failures in the provider-facing error type."""
@@ -426,12 +431,14 @@ class CalendarProviderTest(unittest.TestCase):
             "apiKey": "secret",
         }
 
-        with patch("app.calendar.httpx.Client", http_client):
-            with self.assertRaisesRegex(ProviderError, "HTTPStatusError"):
-                ArrCalendarClient(connection).fetch(
-                    datetime(2026, 10, 1, tzinfo=timezone.utc),
-                    datetime(2026, 10, 31, tzinfo=timezone.utc),
-                )
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            self.assertRaisesRegex(ProviderError, "HTTPStatusError"),
+        ):
+            ArrCalendarClient(connection).fetch(
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
 
 
 class CalendarConnectionStoreTest(unittest.TestCase):
@@ -709,9 +716,11 @@ class CalendarConnectionInputTest(unittest.TestCase):
         self.assertEqual(_normalize_base_url("   "), "")
         self.assertEqual(_normalize_base_url("///"), "")
         for value in ("https://sonarr", "/api?key=value", "/api#calendar"):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(ValueError, "must be a path"):
-                    _normalize_base_url(value)
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "must be a path"),
+            ):
+                _normalize_base_url(value)
 
     def test_address_validation(self):
         """Accept host and IP values while rejecting paths and query data."""
@@ -735,9 +744,11 @@ class CalendarConnectionInputTest(unittest.TestCase):
         """Accept valid TCP ports and reject nonnumeric or out-of-range values."""
         self.assertEqual(_parse_port("8989"), 8989)
         for value in (None, "port", 0, 65536):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(ValueError, "between 1 and 65535"):
-                    _parse_port(value)
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "between 1 and 65535"),
+            ):
+                _parse_port(value)
 
 
 class CalendarSyncTest(unittest.TestCase):

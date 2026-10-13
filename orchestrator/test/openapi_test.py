@@ -335,6 +335,12 @@ class OpenApiContractTest(unittest.TestCase):
                 for value in radarr_update["apiVersion"].get("anyOf", [])
             ],
         )
+        calendar_settings_update = schemas["CalendarSettingsUpdate"]["properties"]
+        self.assertTrue(
+            {"enabled", "connections", "sonarr", "radarr"}.issubset(
+                calendar_settings_update
+            )
+        )
 
         lyrics = schemas["LyricsResponse"]["properties"]
         self.assertIn("trackId", lyrics)

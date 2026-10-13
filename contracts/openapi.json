@@ -1884,6 +1884,27 @@
       "CalendarSettingsUpdate": {
         "additionalProperties": true,
         "properties": {
+          "connections": {
+            "deprecated": true,
+            "description": "Legacy compatibility field; update Sonarr or Radarr settings directly.",
+            "items": {},
+            "title": "Connections",
+            "type": "array"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "deprecated": true,
+            "description": "Legacy compatibility field; update Sonarr or Radarr settings directly.",
+            "title": "Enabled"
+          },
           "radarr": {
             "anyOf": [
               {

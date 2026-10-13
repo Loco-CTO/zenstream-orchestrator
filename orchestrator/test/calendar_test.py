@@ -1376,6 +1376,7 @@ class CalendarReadTest(unittest.TestCase):
 
     def test_title_returns_none_when_identity_or_cached_title_is_missing(self):
         """Return no title when the provider identity or translations are absent."""
+
         class Cache:
             """Represent an empty localized metadata cache."""
 
@@ -1395,6 +1396,7 @@ class CalendarReadTest(unittest.TestCase):
 
     def test_title_rejects_a_placeholder_when_no_locale_has_a_real_title(self):
         """Reject provider placeholder text when no locale has a usable title."""
+
         class Cache:
             """Represent a localized metadata cache with only a placeholder."""
 

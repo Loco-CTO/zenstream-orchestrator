@@ -1070,8 +1070,6 @@ class CalendarReadService:
         if selected is None:
             return None, None
         series_id = selected.get("seriesId")
-        if not series_id and selected["entityType"] == "series":
-            series_id = selected["entityId"]
         return selected["entityId"], series_id
 
     def list(self, user_id: str, start: datetime, end: datetime) -> dict:

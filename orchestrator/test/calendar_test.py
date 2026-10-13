@@ -42,6 +42,18 @@ class CalendarWindowTest(unittest.TestCase):
 
         self.assertLessEqual(end - start, timedelta(days=130))
 
+    def test_explicit_naive_dates_are_interpreted_as_utc(self):
+        start, end = parse_calendar_window(
+            "2026-08-20T12:00:00", "2026-08-21T12:00:00"
+        )
+
+        self.assertEqual(start, datetime(2026, 8, 20, 12, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 8, 21, 12, tzinfo=timezone.utc))
+
+    def test_invalid_explicit_date_raises_a_calendar_error(self):
+        with self.assertRaisesRegex(ValueError, "must be ISO dates"):
+            parse_calendar_window("not-a-date", "2026-08-21")
+
 
 class CalendarProviderTest(unittest.TestCase):
     def test_provider_file_flag_is_not_calendar_presence(self):
@@ -1252,6 +1264,42 @@ class CalendarSyncTest(unittest.TestCase):
 
 
 class CalendarReadTest(unittest.TestCase):
+    def test_constructor_builds_database_and_metadata_caches(self):
+        database = MagicMock()
+        with (
+            patch("app.calendar.Config") as config,
+            patch("app.calendar.MetadataCache") as normal_cache,
+            patch("app.calendar.FutureMetadataCache") as future_cache,
+        ):
+            config.return_value.database = database
+            service = CalendarReadService()
+
+        self.assertIs(service.db, database)
+        self.assertIs(service.normal_cache, normal_cache.return_value)
+        self.assertIs(service.future_cache, future_cache.return_value)
+
+    def test_payload_uses_the_cache_for_the_requested_metadata_age(self):
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.normal_cache = MagicMock()
+        service.future_cache = MagicMock()
+        service.normal_cache.get.return_value = {"title": "Catalog title"}
+        service.future_cache.get.return_value = {"title": "Upcoming title"}
+
+        self.assertEqual(
+            service._payload("tvdb", "episode", "episode-tvdb", "en", False),
+            {"title": "Catalog title"},
+        )
+        self.assertEqual(
+            service._payload("tvdb", "episode", "episode-tvdb", "en", True),
+            {"title": "Upcoming title"},
+        )
+        service.normal_cache.get.assert_called_once_with(
+            "tvdb", "episode", "episode-tvdb", "en"
+        )
+        service.future_cache.get.assert_called_once_with(
+            "tvdb", "episode", "episode-tvdb", "en"
+        )
+
     def test_has_file_comes_from_granted_playable_catalog_media(self):
         service = CalendarReadService.__new__(CalendarReadService)
         service.db = MagicMock()
@@ -1305,6 +1353,53 @@ class CalendarReadTest(unittest.TestCase):
             ),
             (None, None),
         )
+
+    def test_linked_item_uses_only_the_catalog_entity_matching_event_kind(self):
+        self.assertEqual(CalendarReadService._linked_item([], "episode"), (None, None))
+        self.assertEqual(
+            CalendarReadService._linked_item(
+                [
+                    {"entityId": "series-id", "entityType": "series"},
+                    {
+                        "entityId": "episode-id",
+                        "entityType": "episode",
+                        "seriesId": "catalog-series-id",
+                    },
+                ],
+                "episode",
+            ),
+            ("episode-id", "catalog-series-id"),
+        )
+
+    def test_title_returns_none_when_identity_or_cached_title_is_missing(self):
+        class Cache:
+            @staticmethod
+            def get_locales(provider, entity_type, provider_id):
+                return {}
+
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.normal_cache = Cache()
+        service.future_cache = Cache()
+
+        self.assertIsNone(service._title("tvdb", "episode", None, "en", False))
+        self.assertIsNone(
+            service._title("tvdb", "episode", "missing-tvdb", "en", False)
+        )
+
+    def test_title_rejects_a_placeholder_when_no_locale_has_a_real_title(self):
+        class Cache:
+            @staticmethod
+            def get_locales(provider, entity_type, provider_id):
+                return {"en": {"title": "  UNKNOWN  ", "originalLanguage": "en"}}
+
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.normal_cache = Cache()
+        service.future_cache = Cache()
+        with patch("app.calendar.MetadataLanguageSettings") as settings:
+            settings.return_value.get.return_value = ["en"]
+            self.assertIsNone(
+                service._title("tvdb", "episode", "episode-tvdb", "en", False)
+            )
 
     def test_title_falls_back_to_configured_english(self):
         class Cache:

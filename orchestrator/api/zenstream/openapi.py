@@ -1116,16 +1116,12 @@ class CalendarSettingsUpdate(DocsModel):
     enabled: bool | None = Field(
         default=None,
         deprecated=True,
-        description=(
-            "Legacy compatibility field; update Sonarr or Radarr settings directly."
-        ),
+        description="Legacy compatibility field; update provider-specific settings.",
     )
     connections: list[Any] = Field(
         default_factory=list,
         deprecated=True,
-        description=(
-            "Legacy compatibility field; update Sonarr or Radarr settings directly."
-        ),
+        description="Legacy compatibility field; update provider-specific settings.",
     )
     sonarr: SonarrCalendarConnectionUpdate | None = None
     radarr: RadarrCalendarConnectionUpdate | None = None

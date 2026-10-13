@@ -1890,7 +1890,7 @@
         "properties": {
           "connections": {
             "deprecated": true,
-            "description": "Legacy compatibility field; update Sonarr or Radarr settings directly.",
+            "description": "Legacy compatibility field; update provider-specific settings.",
             "items": {},
             "title": "Connections",
             "type": "array"
@@ -1906,7 +1906,7 @@
             ],
             "default": null,
             "deprecated": true,
-            "description": "Legacy compatibility field; update Sonarr or Radarr settings directly.",
+            "description": "Legacy compatibility field; update provider-specific settings.",
             "title": "Enabled"
           },
           "radarr": {

@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import httpx
-
 from app.calendar import (
     ArrCalendarClient,
     CalendarConnectionStore,
@@ -317,8 +316,9 @@ class CalendarProviderTest(unittest.TestCase):
             "apiKey": "secret",
         }
 
-        with patch("app.calendar.httpx.Client", http_client), patch(
-            "app.calendar.time.sleep"
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            patch("app.calendar.time.sleep"),
         ):
             self.assertEqual(
                 ArrCalendarClient(connection).fetch(
@@ -354,8 +354,9 @@ class CalendarProviderTest(unittest.TestCase):
         http_client = MagicMock()
         http_client.return_value.__enter__.return_value = client
 
-        with patch("app.calendar.httpx.Client", http_client), patch(
-            "app.calendar.time.sleep"
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            patch("app.calendar.time.sleep"),
         ):
             self.assertEqual(
                 ArrCalendarClient(connection).fetch(
@@ -368,14 +369,15 @@ class CalendarProviderTest(unittest.TestCase):
         self.assertEqual(client.get.call_count, 2)
 
         client.get.side_effect = [httpx.ConnectError("offline") for _ in range(3)]
-        with patch("app.calendar.httpx.Client", http_client), patch(
-            "app.calendar.time.sleep"
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            patch("app.calendar.time.sleep"),
+            self.assertRaisesRegex(ProviderError, "ConnectError"),
         ):
-            with self.assertRaisesRegex(ProviderError, "ConnectError"):
-                ArrCalendarClient(connection).fetch(
-                    datetime(2026, 10, 1, tzinfo=timezone.utc),
-                    datetime(2026, 10, 31, tzinfo=timezone.utc),
-                )
+            ArrCalendarClient(connection).fetch(
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
 
         self.assertEqual(client.get.call_count, 5)
 
@@ -515,12 +517,14 @@ class CalendarConnectionStoreTest(unittest.TestCase):
             config.return_value.database = database
             store = CalendarConnectionStore()
 
-        with patch(
-            "app.calendar.decrypt_calendar_api_key",
-            side_effect=ValueError("invalid ciphertext"),
+        with (
+            patch(
+                "app.calendar.decrypt_calendar_api_key",
+                side_effect=ValueError("invalid ciphertext"),
+            ),
+            self.assertLogs("zenstream.calendar", level="ERROR"),
         ):
-            with self.assertLogs("zenstream.calendar", level="ERROR"):
-                self.assertEqual(store.internal(), [])
+            self.assertEqual(store.internal(), [])
 
     def test_disabled_settings_clear_connection(self):
         """Clear a provider connection when the legacy disabled flag is false."""
@@ -529,8 +533,11 @@ class CalendarConnectionStoreTest(unittest.TestCase):
             config.return_value.database = database
             store = CalendarConnectionStore()
 
-        with patch.object(store, "clear") as clear, patch.object(
-            store, "public", return_value={"sonarr": {"configured": False}}
+        with (
+            patch.object(store, "clear") as clear,
+            patch.object(
+                store, "public", return_value={"sonarr": {"configured": False}}
+            ),
         ):
             result = store.save("sonarr", {"enabled": False})
 
@@ -545,10 +552,13 @@ class CalendarConnectionStoreTest(unittest.TestCase):
             config.return_value.database = database
             store = CalendarConnectionStore()
 
-        with patch(
-            "app.calendar.encrypt_calendar_api_key", return_value="encrypted"
-        ) as encrypt, patch.object(
-            store, "public", return_value={"sonarr": {"apiVersion": "v3"}}
+        with (
+            patch(
+                "app.calendar.encrypt_calendar_api_key", return_value="encrypted"
+            ) as encrypt,
+            patch.object(
+                store, "public", return_value={"sonarr": {"apiVersion": "v3"}}
+            ),
         ):
             result = store.save(
                 "sonarr",
@@ -673,9 +683,8 @@ class CalendarConnectionInputTest(unittest.TestCase):
             "host#fragment",
             ":8989",
         ):
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError):
-                    _normalize_address(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _normalize_address(value)
         with self.assertRaisesRegex(ValueError, "non-empty"):
             _normalize_address("a" * 256)
 

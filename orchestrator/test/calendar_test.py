@@ -12,6 +12,7 @@ from app.calendar import (
     CalendarFutureMetadataJob,
     CalendarFutureMetadataService,
     CalendarReadService,
+    CalendarSyncJob,
     CalendarSyncService,
     _normalize_address,
     _normalize_base_url,
@@ -53,6 +54,16 @@ class CalendarWindowTest(unittest.TestCase):
         """Reject malformed explicit calendar dates."""
         with self.assertRaisesRegex(ValueError, "must be ISO dates"):
             parse_calendar_window("not-a-date", "2026-08-21")
+
+    def test_reversed_explicit_range_is_rejected(self):
+        """Reject calendar ranges whose end is not after their start."""
+        with self.assertRaisesRegex(ValueError, "end must be after start"):
+            parse_calendar_window("2026-08-21", "2026-08-20")
+
+    def test_explicit_range_over_the_limit_is_rejected(self):
+        """Reject calendar ranges longer than the supported maximum."""
+        with self.assertRaisesRegex(ValueError, "cannot exceed 130 days"):
+            parse_calendar_window("2026-01-01", "2026-06-01")
 
 
 class CalendarProviderTest(unittest.TestCase):
@@ -1476,6 +1487,93 @@ class CalendarReadTest(unittest.TestCase):
                 service._title("tvdb", "episode", "episode-tvdb", "ja", False),
                 "Episode 16",
             )
+
+
+class CalendarSyncJobTest(unittest.TestCase):
+    """Exercise the scheduled calendar sync job's lifecycle and progress."""
+
+    @staticmethod
+    def _result(provider_events=None):
+        """Return a compact successful calendar sync result for job tests."""
+        return {
+            "provider_events": provider_events or {},
+            "events": sum((provider_events or {}).values()),
+            "existing": 1,
+            "errors": [],
+            "metadata": {"targets": 0, "errors": []},
+        }
+
+    def test_termination_before_sync_stops_the_job(self):
+        """Stop before network sync work when cancellation is already requested."""
+        from app.library import JobTerminated
+
+        with self.assertRaises(JobTerminated):
+            CalendarSyncJob(MagicMock()).run("run-id", lambda: True)
+
+    def test_sync_job_reports_provider_counts_and_metadata_progress(self):
+        """Report both provider counts and success or failure metadata progress."""
+        result = self._result({"sonarr": 3, "radarr": 2})
+        result["errors"] = ["radarr offline"]
+        result["metadata"] = {"targets": 4, "errors": ["one identity failed"]}
+        store = MagicMock()
+
+        def sync(**kwargs):
+            """Exercise the job's success and failure progress callbacks."""
+            report = kwargs["metadata_progress"]
+            report(1, 4, "TVDB episode 1", False)
+            report(2, 4, "TMDB movie 1", True)
+            return result
+
+        should_terminate = MagicMock(side_effect=[False, False])
+        with patch("app.calendar.CalendarSyncService") as service:
+            service.return_value.sync.side_effect = sync
+            CalendarSyncJob(store).run("run-id", should_terminate)
+
+        self.assertEqual(store.update_run.call_count, 3)
+        first_progress = store.update_run.call_args_list[0].kwargs
+        failed_progress = store.update_run.call_args_list[1].kwargs
+        final_update = store.update_run.call_args_list[-1].kwargs
+        self.assertEqual(
+            first_progress["progress_label"], "Fetching new calendar metadata"
+        )
+        self.assertEqual(
+            failed_progress["progress_label"], "Calendar metadata identity failed"
+        )
+        self.assertEqual(final_update["state"], "completed")
+        self.assertIn("Sonarr: 3, Radarr: 2", final_update["message"])
+        self.assertIn("1 provider connection(s) failed", final_update["message"])
+        self.assertIn(
+            "Fetched metadata for 4 new calendar identities", final_update["message"]
+        )
+        self.assertIn(
+            "1 calendar metadata identity(ies) failed", final_update["message"]
+        )
+
+    def test_sync_job_uses_summary_without_provider_counts(self):
+        """Keep the generic completion summary when provider counts are absent."""
+        store = MagicMock()
+        with patch("app.calendar.CalendarSyncService") as service:
+            service.return_value.sync.return_value = self._result()
+            CalendarSyncJob(store).run("run-id", lambda: False)
+
+        self.assertEqual(
+            store.update_run.call_args.kwargs["message"],
+            "Synced 0 calendar events (1 linked to catalog).",
+        )
+
+    def test_termination_after_sync_stops_before_completion_update(self):
+        """Stop after provider work if cancellation arrives before completion."""
+        from app.library import JobTerminated
+
+        store = MagicMock()
+        should_terminate = MagicMock(side_effect=[False, True])
+        with patch("app.calendar.CalendarSyncService") as service:
+            service.return_value.sync.return_value = self._result({"sonarr": 1})
+            with self.assertRaises(JobTerminated):
+                CalendarSyncJob(store).run("run-id", should_terminate)
+
+        service.return_value.sync.assert_called_once()
+        store.update_run.assert_not_called()
 
 
 class CalendarFutureMetadataTest(unittest.TestCase):

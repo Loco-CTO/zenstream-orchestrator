@@ -4,19 +4,28 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import httpx
 from app.calendar import (
     ArrCalendarClient,
+    CalendarConnectionStore,
     CalendarEventValue,
     CalendarFutureMetadataJob,
     CalendarFutureMetadataService,
     CalendarReadService,
+    CalendarSyncJob,
     CalendarSyncService,
+    _normalize_address,
+    _normalize_base_url,
+    _normalize_radarr,
     _normalize_sonarr,
+    _parse_port,
     calendar_window,
+    normalize_calendar_events,
     parse_calendar_window,
 )
 from app.database import DatabaseHandler
 from app.models.calendar import FutureMetadataCache
+from app.providers import ProviderError
 
 
 class CalendarWindowTest(unittest.TestCase):
@@ -34,6 +43,28 @@ class CalendarWindowTest(unittest.TestCase):
 
         self.assertLessEqual(end - start, timedelta(days=130))
 
+    def test_explicit_naive_dates_are_interpreted_as_utc(self):
+        """Interpret timezone-naive API input dates as UTC."""
+        start, end = parse_calendar_window("2026-08-20T12:00:00", "2026-08-21T12:00:00")
+
+        self.assertEqual(start, datetime(2026, 8, 20, 12, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 8, 21, 12, tzinfo=timezone.utc))
+
+    def test_invalid_explicit_date_raises_a_calendar_error(self):
+        """Reject malformed explicit calendar dates."""
+        with self.assertRaisesRegex(ValueError, "must be ISO dates"):
+            parse_calendar_window("not-a-date", "2026-08-21")
+
+    def test_reversed_explicit_range_is_rejected(self):
+        """Reject calendar ranges whose end is not after their start."""
+        with self.assertRaisesRegex(ValueError, "end must be after start"):
+            parse_calendar_window("2026-08-21", "2026-08-20")
+
+    def test_explicit_range_over_the_limit_is_rejected(self):
+        """Reject calendar ranges longer than the supported maximum."""
+        with self.assertRaisesRegex(ValueError, "cannot exceed 130 days"):
+            parse_calendar_window("2026-01-01", "2026-06-01")
+
 
 class CalendarProviderTest(unittest.TestCase):
     def test_provider_file_flag_is_not_calendar_presence(self):
@@ -49,6 +80,101 @@ class CalendarProviderTest(unittest.TestCase):
 
         self.assertIsNotNone(event)
         self.assertFalse(hasattr(event, "has_file"))
+
+    def test_sonarr_episode_without_tvdb_id_uses_nested_series_identity(self):
+        """Use the series TVDB identity when Sonarr omits an episode identity."""
+        event = _normalize_sonarr(
+            {
+                "id": 52921,
+                "tvdbId": 0,
+                "series": {"tvdbId": 429934},
+                "airDateUtc": "2026-10-03T23:00:00Z",
+                "seasonNumber": 2,
+                "episodeNumber": 4,
+            },
+            "library",
+        )
+
+        self.assertIsNotNone(event)
+        self.assertIsNone(event.tvdb_id)
+        self.assertEqual(event.series_tvdb_id, "429934")
+        self.assertEqual(event.source_event_id, "52921")
+
+    def test_sonarr_episode_without_episode_or_series_identity_is_skipped(self):
+        """Skip Sonarr events without either episode or series identity."""
+        event = _normalize_sonarr(
+            {
+                "id": 52921,
+                "tvdbId": 0,
+                "series": {"tvdbId": 0},
+                "airDateUtc": "2026-10-03T23:00:00Z",
+            },
+            "library",
+        )
+
+        self.assertIsNone(event)
+
+    def test_sonarr_invalid_numbering_is_omitted(self):
+        """Keep a valid event when provider numbering is malformed."""
+        event = _normalize_sonarr(
+            {
+                "id": 52921,
+                "tvdbId": 429934,
+                "airDateUtc": "2026-10-03T23:00:00Z",
+                "seasonNumber": "special",
+                "episodeNumber": "4",
+            },
+            "library",
+        )
+
+        self.assertIsNotNone(event)
+        self.assertIsNone(event.season_number)
+        self.assertIsNone(event.episode_number)
+
+    def test_radarr_normalizes_multiple_dates_and_fallback_release(self):
+        """Normalize provider dates and use the generic release fallback."""
+        events = _normalize_radarr(
+            {
+                "id": 91,
+                "tmdbID": 777,
+                "inCinemas": "not-a-date",
+                "digitalRelease": "2026-10-15T12:00:00Z",
+                "physicalRelease": None,
+                "monitored": False,
+            },
+            "movies",
+        )
+        fallback = _normalize_radarr(
+            {"id": 92, "tmdbId": 778, "releaseDate": "2026-11-01"},
+            "movies",
+        )
+
+        self.assertEqual([event.release_type for event in events], ["digital"])
+        self.assertFalse(events[0].monitored)
+        self.assertEqual(fallback[0].release_type, "release")
+        self.assertEqual(fallback[0].tmdb_id, "778")
+
+    def test_normalize_events_dispatches_both_providers_and_skips_bad_ids(self):
+        """Normalize Sonarr and Radarr records while ignoring invalid IDs."""
+        sonarr = normalize_calendar_events(
+            "sonarr",
+            "tv",
+            [
+                {"id": 1, "tvdbId": 101, "airDate": "2026-10-03"},
+                {"id": 2, "tvdbId": 0, "airDate": "2026-10-03"},
+            ],
+        )
+        radarr = normalize_calendar_events(
+            "radarr",
+            "movies",
+            [
+                {"id": 1, "tmdbId": 201, "releaseDate": "2026-10-03"},
+                {"id": None, "tmdbId": 202, "releaseDate": "2026-10-03"},
+            ],
+        )
+
+        self.assertEqual(len(sonarr), 1)
+        self.assertEqual(len(radarr), 1)
 
     def test_fetch_sends_the_inclusive_provider_dates(self):
         response = MagicMock(status_code=200)
@@ -79,6 +205,574 @@ class CalendarProviderTest(unittest.TestCase):
         self.assertEqual(params["start"], "2026-08-09")
         self.assertEqual(params["end"], "2026-12-12")
 
+    def test_sonarr_v5_uses_only_selected_endpoint_and_v5_subresources(self):
+        """Call the selected v5 endpoint with its supported subresource query."""
+        response = MagicMock(status_code=200)
+        response.json.return_value = []
+        client = MagicMock()
+        client.get.return_value = response
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with patch("app.calendar.httpx.Client", http_client):
+            self.assertEqual(
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 8, 9, tzinfo=timezone.utc),
+                    datetime(2026, 12, 12, 23, 59, 59, 999999, tzinfo=timezone.utc),
+                ),
+                [],
+            )
+
+        client.get.assert_called_once()
+        self.assertEqual(
+            client.get.call_args.args[0],
+            "http://sonarr.local:8989/api/v5/calendar",
+        )
+        params = client.get.call_args.kwargs["params"]
+        self.assertEqual(params["includeUnmonitored"], "false")
+        self.assertEqual(params["includeSubresources"], ["series", "episodeFile"])
+        self.assertNotIn("includeSeries", params)
+
+    def test_v3_and_radarr_use_their_selected_query_parameters(self):
+        """Send only the selected endpoint and query parameters."""
+        for connection, expected_endpoint, expected_params in (
+            (
+                {
+                    "provider": "sonarr",
+                    "apiVersion": "v3",
+                    "address": "sonarr.local",
+                    "port": 8989,
+                    "baseUrl": "/sonarr",
+                    "useSsl": True,
+                    "apiKey": "secret",
+                },
+                "https://sonarr.local:8989/sonarr/api/v3/calendar",
+                {
+                    "unmonitored": "false",
+                    "includeSeries": "true",
+                    "includeEpisodeFile": "true",
+                    "includeEpisodeImages": "false",
+                },
+            ),
+            (
+                {
+                    "provider": "radarr",
+                    "address": "radarr.local",
+                    "port": 7878,
+                    "baseUrl": "",
+                    "useSsl": False,
+                    "apiKey": "secret",
+                },
+                "http://radarr.local:7878/api/v3/calendar",
+                {"unmonitored": "false", "includeMovieFile": "true"},
+            ),
+        ):
+            with self.subTest(provider=connection["provider"]):
+                response = MagicMock(status_code=200)
+                response.json.return_value = {"data": [{"id": 1}, "ignored"]}
+                client = MagicMock()
+                client.get.return_value = response
+                http_client = MagicMock()
+                http_client.return_value.__enter__.return_value = client
+
+                with patch("app.calendar.httpx.Client", http_client):
+                    result = ArrCalendarClient(connection).fetch(
+                        datetime(2026, 10, 1, tzinfo=timezone.utc),
+                        datetime(2026, 10, 31, tzinfo=timezone.utc),
+                    )
+
+                self.assertEqual(result, [{"id": 1}])
+                self.assertEqual(client.get.call_args.args[0], expected_endpoint)
+                params = client.get.call_args.kwargs["params"]
+                for key, value in expected_params.items():
+                    self.assertEqual(params[key], value)
+
+    def test_selected_sonarr_endpoint_is_not_retried_as_another_version(self):
+        """Report a missing configured endpoint without probing another version."""
+        response = MagicMock(status_code=404)
+        client = MagicMock()
+        client.get.return_value = response
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            self.assertRaisesRegex(ProviderError, "endpoint was not found"),
+        ):
+            ArrCalendarClient(connection).fetch(
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
+
+        client.get.assert_called_once()
+
+    def test_transient_response_retries_same_endpoint(self):
+        """Retry a transient response without switching the configured version."""
+        response = MagicMock(status_code=200)
+        response.json.return_value = []
+        client = MagicMock()
+        client.get.side_effect = [MagicMock(status_code=503), response]
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            patch("app.calendar.time.sleep"),
+        ):
+            self.assertEqual(
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    datetime(2026, 10, 31, tzinfo=timezone.utc),
+                ),
+                [],
+            )
+
+        self.assertEqual(client.get.call_count, 2)
+        self.assertTrue(
+            all(
+                call.args[0] == "http://sonarr.local:8989/api/v5/calendar"
+                for call in client.get.call_args_list
+            )
+        )
+
+    def test_transport_error_retries_and_exhaustion_becomes_provider_error(self):
+        """Retry transport errors and report the final failed request."""
+        response = MagicMock(status_code=200)
+        response.json.return_value = []
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+        client = MagicMock()
+        client.get.side_effect = [httpx.ConnectError("offline"), response]
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            patch("app.calendar.time.sleep"),
+        ):
+            self.assertEqual(
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    datetime(2026, 10, 31, tzinfo=timezone.utc),
+                ),
+                [],
+            )
+
+        self.assertEqual(client.get.call_count, 2)
+
+        client.get.side_effect = [httpx.ConnectError("offline") for _ in range(3)]
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            patch("app.calendar.time.sleep"),
+            self.assertRaisesRegex(ProviderError, "ConnectError"),
+        ):
+            ArrCalendarClient(connection).fetch(
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(client.get.call_count, 5)
+
+    def test_invalid_response_payload_is_rejected(self):
+        """Reject provider payloads without a supported calendar envelope."""
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"data": "not-an-array"}
+        client = MagicMock()
+        client.get.return_value = response
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            self.assertRaisesRegex(ProviderError, "invalid response"),
+        ):
+            ArrCalendarClient(connection).fetch(
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
+
+    def test_http_response_errors_are_wrapped_as_provider_errors(self):
+        """Wrap HTTP status failures in the provider-facing error type."""
+        response = MagicMock(status_code=500)
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "provider failed", request=MagicMock(), response=MagicMock()
+        )
+        client = MagicMock()
+        client.get.return_value = response
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with (
+            patch("app.calendar.httpx.Client", http_client),
+            self.assertRaisesRegex(ProviderError, "HTTPStatusError"),
+        ):
+            ArrCalendarClient(connection).fetch(
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
+
+
+class CalendarConnectionStoreTest(unittest.TestCase):
+    """Tests for persisting selected calendar provider versions."""
+
+    def test_save_persists_selected_sonarr_api_version_and_keeps_saved_key(self):
+        """Save the selected version while retaining an encrypted saved key."""
+        database = MagicMock()
+        database.execute.side_effect = [
+            [("tv_series",)],
+            [("encrypted-api-key", "v3")],
+            None,
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with patch.object(
+            store, "public", return_value={"sonarr": {"apiVersion": "v5"}}
+        ):
+            result = store.save(
+                "sonarr",
+                {
+                    "address": "localhost",
+                    "port": 8989,
+                    "useSsl": False,
+                    "libraryId": "library",
+                    "apiVersion": "v5",
+                },
+            )
+
+        insert = database.execute.call_args_list[2]
+        self.assertIn("api_version", insert.args[0])
+        self.assertEqual(insert.args[1][1], "v5")
+        self.assertEqual(insert.args[1][7], "encrypted-api-key")
+        self.assertEqual(result["apiVersion"], "v5")
+
+    def test_save_rejects_unsupported_sonarr_api_version(self):
+        """Reject unsupported Sonarr versions before persisting the connection."""
+        database = MagicMock()
+        database.execute.side_effect = [[("tv_series",)], []]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with self.assertRaisesRegex(ValueError, "must be v3 or v5"):
+            store.save(
+                "sonarr",
+                {
+                    "address": "localhost",
+                    "port": 8989,
+                    "useSsl": False,
+                    "libraryId": "library",
+                    "apiVersion": "v4",
+                    "apiKey": "secret",
+                },
+            )
+        self.assertEqual(database.execute.call_count, 2)
+
+    def test_internal_returns_selected_version_and_decrypted_key(self):
+        """Expose the stored API version and decrypted key to the sync client."""
+        database = MagicMock()
+        database.execute.return_value = [
+            ("sonarr", "v5", "localhost", 8989, "/", 0, "tv", "ciphertext")
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with patch("app.calendar.decrypt_calendar_api_key", return_value="secret"):
+            result = store.internal()
+
+        self.assertEqual(result[0]["apiVersion"], "v5")
+        self.assertEqual(result[0]["apiKey"], "secret")
+
+    def test_public_reports_configured_version_and_unconfigured_defaults(self):
+        """Expose saved versions while defaulting missing providers to v3."""
+        database = MagicMock()
+        database.execute.side_effect = [
+            [
+                (
+                    "sonarr",
+                    "v5",
+                    "localhost",
+                    8989,
+                    "/sonarr",
+                    1,
+                    "tv",
+                    "ciphertext",
+                    "validated-at",
+                    "synced-at",
+                    None,
+                    "updated-at",
+                    "TV",
+                )
+            ],
+            [],
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        result = store.public()
+
+        self.assertEqual(result["sonarr"]["apiVersion"], "v5")
+        self.assertTrue(result["sonarr"]["apiKeyConfigured"])
+        self.assertEqual(result["sonarr"]["libraryName"], "TV")
+        self.assertNotIn("apiKey", result["sonarr"])
+        self.assertEqual(
+            result["radarr"],
+            {
+                "provider": "radarr",
+                "apiVersion": "v3",
+                "configured": False,
+                "apiKeyConfigured": False,
+            },
+        )
+
+    def test_internal_skips_connections_with_undecryptable_keys(self):
+        """Skip a provider whose stored API key can no longer be decrypted."""
+        database = MagicMock()
+        database.execute.return_value = [
+            ("sonarr", "v5", "localhost", 8989, "/", 0, "tv", "ciphertext")
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with (
+            patch(
+                "app.calendar.decrypt_calendar_api_key",
+                side_effect=ValueError("invalid ciphertext"),
+            ),
+            self.assertLogs("zenstream.calendar", level="ERROR"),
+        ):
+            self.assertEqual(store.internal(), [])
+
+    def test_disabled_settings_clear_connection(self):
+        """Clear a provider connection when the legacy disabled flag is false."""
+        database = MagicMock()
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with (
+            patch.object(store, "clear") as clear,
+            patch.object(
+                store, "public", return_value={"sonarr": {"configured": False}}
+            ),
+        ):
+            result = store.save("sonarr", {"enabled": False})
+
+        clear.assert_called_once_with("sonarr")
+        self.assertFalse(result["configured"])
+
+    def test_save_defaults_new_connections_to_v3_and_encrypts_key(self):
+        """Persist a new connection with the default API version and key."""
+        database = MagicMock()
+        database.execute.side_effect = [[("tv_series",)], [], None]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with (
+            patch(
+                "app.calendar.encrypt_calendar_api_key", return_value="encrypted"
+            ) as encrypt,
+            patch.object(
+                store, "public", return_value={"sonarr": {"apiVersion": "v3"}}
+            ),
+        ):
+            result = store.save(
+                "sonarr",
+                {
+                    "address": "localhost",
+                    "port": 8989,
+                    "useSsl": False,
+                    "libraryId": "tv",
+                    "apiKey": "  secret  ",
+                },
+            )
+
+        encrypt.assert_called_once_with("secret")
+        self.assertEqual(database.execute.call_args_list[2].args[1][1], "v3")
+        self.assertEqual(result["apiVersion"], "v3")
+
+    def test_save_preserves_existing_version_when_legacy_client_omits_it(self):
+        """Retain a saved version when an older dashboard omits the field."""
+        database = MagicMock()
+        database.execute.side_effect = [
+            [("tv_series",)],
+            [("encrypted", "v5")],
+            None,
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with patch.object(
+            store, "public", return_value={"sonarr": {"apiVersion": "v5"}}
+        ):
+            result = store.save(
+                "sonarr",
+                {
+                    "address": "localhost",
+                    "port": 8989,
+                    "useSsl": False,
+                    "libraryId": "tv",
+                },
+            )
+
+        self.assertEqual(database.execute.call_args_list[2].args[1][1], "v5")
+        self.assertEqual(result["apiVersion"], "v5")
+
+    def test_save_rejects_invalid_provider_shape_and_ssl(self):
+        """Reject invalid settings before they reach the persistence layer."""
+        database = MagicMock()
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with self.assertRaisesRegex(ValueError, "Unsupported calendar provider"):
+            store.save("other", {})
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            store.save("sonarr", [])
+        with self.assertRaisesRegex(ValueError, "useSsl"):
+            store.save(
+                "sonarr",
+                {"address": "localhost", "port": 8989, "useSsl": "false"},
+            )
+        database.execute.assert_not_called()
+
+    def test_save_rejects_missing_library_and_wrong_provider_library_type(self):
+        """Require a selected library of the provider's matching media type."""
+        database = MagicMock()
+        database.execute.side_effect = [[], [("movies",)]]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        base = {"address": "localhost", "port": 8989, "useSsl": False}
+        with self.assertRaisesRegex(ValueError, "Choose a library"):
+            store.save("sonarr", base)
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            store.save("sonarr", {**base, "libraryId": "missing"})
+        with self.assertRaisesRegex(ValueError, "must be mapped"):
+            store.save("sonarr", {**base, "libraryId": "movies"})
+
+    def test_save_rejects_radarr_v5_and_missing_new_api_key(self):
+        """Keep Radarr on v3 and require a key when no saved key exists."""
+        database = MagicMock()
+        database.execute.side_effect = [[("movies",)], [], [("movies",)], []]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        base = {
+            "address": "localhost",
+            "port": 7878,
+            "useSsl": False,
+            "libraryId": "movies",
+        }
+        with self.assertRaisesRegex(ValueError, "Radarr API version must be v3"):
+            store.save("radarr", {**base, "apiVersion": "v5", "apiKey": "secret"})
+        with self.assertRaisesRegex(ValueError, "API key is required"):
+            store.save("radarr", base)
+
+
+class CalendarConnectionInputTest(unittest.TestCase):
+    """Tests for validating administrator-supplied Arr connection fields."""
+
+    def test_base_url_normalization_and_rejection(self):
+        """Normalize paths and reject URLs, query strings, and fragments."""
+        self.assertEqual(_normalize_base_url("  sonarr/api///  "), "/sonarr/api")
+        self.assertEqual(_normalize_base_url("   "), "")
+        self.assertEqual(_normalize_base_url("///"), "")
+        for value in ("https://sonarr", "/api?key=value", "/api#calendar"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "must be a path"),
+            ):
+                _normalize_base_url(value)
+
+    def test_address_validation(self):
+        """Accept host and IP values while rejecting paths and query data."""
+        self.assertEqual(_normalize_address(" localhost "), "localhost")
+        self.assertEqual(_normalize_address("[::1]"), "[::1]")
+        for value in (
+            "",
+            "host name",
+            "https://host",
+            "host/path",
+            "host?query",
+            "host#fragment",
+            ":8989",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _normalize_address(value)
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            _normalize_address("a" * 256)
+
+    def test_port_validation(self):
+        """Accept valid TCP ports and reject nonnumeric or out-of-range values."""
+        self.assertEqual(_parse_port("8989"), 8989)
+        for value in (None, "port", 0, 65536):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "between 1 and 65535"),
+            ):
+                _parse_port(value)
+
 
 class CalendarSyncTest(unittest.TestCase):
     @staticmethod
@@ -106,6 +800,55 @@ class CalendarSyncTest(unittest.TestCase):
         service._matching_entities = MagicMock(return_value=matches)
         return service
 
+    def test_constructor_and_event_id(self):
+        """Build sync dependencies and generate stable event identifiers."""
+        database = MagicMock()
+        with (
+            patch("app.calendar.Config") as config,
+            patch("app.calendar.CalendarConnectionStore") as connections,
+            patch("app.calendar.FutureMetadataCache") as cache,
+        ):
+            config.return_value.database = database
+            service = CalendarSyncService()
+
+        event_id = service._event_id(self.event())
+
+        self.assertIs(service.db, database)
+        self.assertIs(service.connections, connections.return_value)
+        self.assertIs(service.future_cache, cache.return_value)
+        self.assertEqual(event_id, service._event_id(self.event()))
+
+    def test_matching_entities_uses_episode_and_series_ids(self):
+        """Find and de-duplicate catalog matches for both Sonarr identities."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service.db.execute.side_effect = [
+            [("episode-id", "episode"), ("episode-id", "episode")],
+            [("series-id", "series")],
+        ]
+
+        matches = service._matching_entities(self.event())
+
+        self.assertEqual(matches, [("episode-id", "episode"), ("series-id", "series")])
+        self.assertEqual(service.db.execute.call_count, 2)
+
+    def test_unusable_sonarr_payload_does_not_delete_saved_events(self):
+        """Preserve persisted events when Sonarr returns unusable identities."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+
+        with self.assertRaisesRegex(ProviderError, "without usable"):
+            service._replace_provider_events(
+                "sonarr",
+                "library",
+                [{"id": 1, "tvdbId": 0, "airDateUtc": "2026-10-04"}],
+                "seen-at",
+                datetime(2026, 10, 1, tzinfo=timezone.utc),
+                datetime(2026, 10, 31, tzinfo=timezone.utc),
+            )
+
+        service.db.execute.assert_not_called()
+
     def test_series_match_alone_stays_future(self):
         service = self.service([("series-id", "series")])
 
@@ -123,6 +866,48 @@ class CalendarSyncTest(unittest.TestCase):
         self.assertEqual(linked, [(linked[0][0], "episode-id")])
         update = service.db.execute.call_args_list[-1]
         self.assertEqual(update.args[1][0], "existing")
+
+    def test_episode_without_episode_tvdb_id_promotes_series_metadata(self):
+        """Promote series metadata when a matched episode has no TVDB ID."""
+        service = self.service([("episode-id", "episode")])
+        event = replace(self.event(), tvdb_id=None)
+
+        self.assertTrue(service._upsert(event, "2026-08-20T00:00:00+00:00"))
+
+        service.future_cache.promote_identity.assert_called_once_with(
+            "tvdb", "series", "series-tvdb"
+        )
+
+    def test_movie_match_promotes_tmdb_metadata(self):
+        """Promote the TMDB identity when a movie calendar event matches."""
+        service = self.service([("movie-id", "movie")])
+        event = replace(
+            self.event(),
+            provider="radarr",
+            kind="movie",
+            release_type="cinema",
+            tvdb_id=None,
+            series_tvdb_id=None,
+            tmdb_id="movie-tmdb",
+            season_number=None,
+            episode_number=None,
+        )
+
+        self.assertTrue(service._upsert(event, "2026-08-20T00:00:00+00:00"))
+
+        service.future_cache.promote_identity.assert_called_once_with(
+            "tmdb", "movie", "movie-tmdb"
+        )
+
+    def test_reconcile_catalog_links_skips_when_required_tables_are_missing(self):
+        """Avoid querying or mutating a partial pre-migration database."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service.db.execute.return_value = []
+
+        self.assertEqual(service.reconcile_catalog_links("library"), 0)
+
+        service.db.transaction.assert_not_called()
 
     def test_out_of_window_provider_events_are_not_persisted(self):
         service = CalendarSyncService.__new__(CalendarSyncService)
@@ -181,6 +966,31 @@ class CalendarSyncTest(unittest.TestCase):
             },
         )
 
+    def test_replace_provider_events_counts_existing_events(self):
+        """Count catalog-linked events while replacing a provider's window."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service._upsert = MagicMock(return_value=True)
+        seen_at = "2026-08-20T00:00:00+00:00"
+
+        with patch(
+            "app.calendar.normalize_calendar_events",
+            return_value=[self.event()],
+        ):
+            result = service._replace_provider_events(
+                "sonarr",
+                "library",
+                [],
+                seen_at,
+                datetime(2026, 8, 9, tzinfo=timezone.utc),
+                datetime(2026, 12, 12, 23, 59, 59, 999999, tzinfo=timezone.utc),
+                set(),
+            )
+
+        self.assertEqual(result, (1, 1))
+        service._upsert.assert_called_once_with(self.event(), seen_at)
+        service.db.execute.assert_called_once()
+
     def test_sync_fetches_unlinked_metadata_immediately(self):
         service = CalendarSyncService.__new__(CalendarSyncService)
         service.connections = MagicMock()
@@ -221,6 +1031,72 @@ class CalendarSyncTest(unittest.TestCase):
             },
         )
         self.assertEqual(result["metadata"], metadata_result)
+
+    def test_sync_stops_before_fetch_when_termination_is_requested(self):
+        """Stop the sync before making provider calls after cancellation."""
+        from app.library import JobTerminated
+
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.connections = MagicMock()
+        service.connections.internal.return_value = [
+            {"provider": "sonarr", "libraryId": "library"}
+        ]
+
+        with self.assertRaises(JobTerminated):
+            service.sync(should_terminate=lambda: True)
+
+    def test_sync_records_provider_errors_without_failing_the_run(self):
+        """Record a provider failure and return it in the sync result."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.connections = MagicMock()
+        service.connections.internal.return_value = [
+            {"provider": "sonarr", "libraryId": "library"}
+        ]
+
+        with patch("app.calendar.ArrCalendarClient") as client_type:
+            client_type.return_value.fetch.side_effect = RuntimeError("offline")
+            result = service.sync()
+
+        self.assertEqual(result["providers"], 0)
+        self.assertEqual(result["provider_events"], {"sonarr": 0})
+        self.assertEqual(result["errors"], ["sonarr: RuntimeError: offline"])
+        service.connections.record_sync.assert_called_once_with(
+            "sonarr", error="sonarr: RuntimeError: offline"
+        )
+
+    def test_sync_reports_immediate_metadata_failures(self):
+        """Keep a successful calendar sync when immediate metadata fetch fails."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.connections = MagicMock()
+        service.connections.internal.return_value = [
+            {"provider": "sonarr", "libraryId": "library"}
+        ]
+
+        def replace_events(*args):
+            """Collect a future metadata target for the sync call."""
+            args[-1].add(("tvdb", "series", "series-tvdb"))
+            return 1, 0
+
+        service._replace_provider_events = MagicMock(side_effect=replace_events)
+        progress = MagicMock()
+        with (
+            patch("app.calendar.ArrCalendarClient") as client_type,
+            patch("app.calendar.CalendarFutureMetadataService") as future_type,
+        ):
+            client_type.return_value.fetch.return_value = []
+            future_type.return_value.refetch.side_effect = RuntimeError(
+                "metadata unavailable"
+            )
+            result = service.sync(metadata_progress=progress)
+
+        self.assertEqual(result["events"], 1)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(
+            result["metadata"]["errors"], ["RuntimeError: metadata unavailable"]
+        )
+        self.assertIs(
+            future_type.return_value.refetch.call_args.kwargs["progress"], progress
+        )
 
     def test_reconcile_catalog_links_matches_catalog_identities(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
@@ -399,6 +1275,44 @@ class CalendarSyncTest(unittest.TestCase):
 
 
 class CalendarReadTest(unittest.TestCase):
+    def test_constructor_builds_database_and_metadata_caches(self):
+        """Build the read service's database and metadata cache dependencies."""
+        database = MagicMock()
+        with (
+            patch("app.calendar.Config") as config,
+            patch("app.calendar.MetadataCache") as normal_cache,
+            patch("app.calendar.FutureMetadataCache") as future_cache,
+        ):
+            config.return_value.database = database
+            service = CalendarReadService()
+
+        self.assertIs(service.db, database)
+        self.assertIs(service.normal_cache, normal_cache.return_value)
+        self.assertIs(service.future_cache, future_cache.return_value)
+
+    def test_payload_uses_the_cache_for_the_requested_metadata_age(self):
+        """Select the normal or future cache according to the metadata age."""
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.normal_cache = MagicMock()
+        service.future_cache = MagicMock()
+        service.normal_cache.get.return_value = {"title": "Catalog title"}
+        service.future_cache.get.return_value = {"title": "Upcoming title"}
+
+        self.assertEqual(
+            service._payload("tvdb", "episode", "episode-tvdb", "en", False),
+            {"title": "Catalog title"},
+        )
+        self.assertEqual(
+            service._payload("tvdb", "episode", "episode-tvdb", "en", True),
+            {"title": "Upcoming title"},
+        )
+        service.normal_cache.get.assert_called_once_with(
+            "tvdb", "episode", "episode-tvdb", "en"
+        )
+        service.future_cache.get.assert_called_once_with(
+            "tvdb", "episode", "episode-tvdb", "en"
+        )
+
     def test_has_file_comes_from_granted_playable_catalog_media(self):
         service = CalendarReadService.__new__(CalendarReadService)
         service.db = MagicMock()
@@ -453,6 +1367,87 @@ class CalendarReadTest(unittest.TestCase):
             (None, None),
         )
 
+    def test_linked_item_uses_only_the_catalog_entity_matching_event_kind(self):
+        """Select the matching episode link and ignore its parent series row."""
+        self.assertEqual(CalendarReadService._linked_item([], "episode"), (None, None))
+        self.assertEqual(
+            CalendarReadService._linked_item(
+                [
+                    {"entityId": "series-id", "entityType": "series"},
+                    {
+                        "entityId": "episode-id",
+                        "entityType": "episode",
+                        "seriesId": "catalog-series-id",
+                    },
+                ],
+                "episode",
+            ),
+            ("episode-id", "catalog-series-id"),
+        )
+
+    def test_title_returns_none_when_identity_or_cached_title_is_missing(self):
+        """Return no title when the provider identity or translations are absent."""
+
+        class Cache:
+            """Represent an empty localized metadata cache."""
+
+            @staticmethod
+            def get_locales(provider, entity_type, provider_id):
+                """Return no localized payload for the requested identity."""
+                return {}
+
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.normal_cache = Cache()
+        service.future_cache = Cache()
+
+        self.assertIsNone(service._title("tvdb", "episode", None, "en", False))
+        self.assertIsNone(
+            service._title("tvdb", "episode", "missing-tvdb", "en", False)
+        )
+
+    def test_title_rejects_a_placeholder_when_no_locale_has_a_real_title(self):
+        """Reject provider placeholder text when no locale has a usable title."""
+
+        class Cache:
+            """Represent a localized metadata cache with only a placeholder."""
+
+            @staticmethod
+            def get_locales(provider, entity_type, provider_id):
+                """Return the placeholder translation for the requested identity."""
+                return {"en": {"title": "  UNKNOWN  ", "originalLanguage": "en"}}
+
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.normal_cache = Cache()
+        service.future_cache = Cache()
+        with patch("app.calendar.MetadataLanguageSettings") as settings:
+            settings.return_value.get.return_value = ["en"]
+            self.assertIsNone(
+                service._title("tvdb", "episode", "episode-tvdb", "en", False)
+            )
+
+    def test_title_uses_future_cache_for_unlinked_calendar_identity(self):
+        """Read an upcoming title from the future metadata cache."""
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.normal_cache = MagicMock()
+        service.future_cache = MagicMock()
+        service.future_cache.get_locales.return_value = {
+            "en": {
+                "title": "Upcoming episode",
+                "originalLanguage": "en",
+            }
+        }
+        with patch("app.calendar.MetadataLanguageSettings") as settings:
+            settings.return_value.get.return_value = ["en"]
+            self.assertEqual(
+                service._title("tvdb", "episode", "episode-tvdb", "en", True),
+                "Upcoming episode",
+            )
+
+        service.future_cache.get_locales.assert_called_once_with(
+            "tvdb", "episode", "episode-tvdb"
+        )
+        service.normal_cache.get_locales.assert_not_called()
+
     def test_title_falls_back_to_configured_english(self):
         class Cache:
             @staticmethod
@@ -494,7 +1489,109 @@ class CalendarReadTest(unittest.TestCase):
             )
 
 
+class CalendarSyncJobTest(unittest.TestCase):
+    """Exercise the scheduled calendar sync job's lifecycle and progress."""
+
+    @staticmethod
+    def _result(provider_events=None):
+        """Return a compact successful calendar sync result for job tests."""
+        return {
+            "provider_events": provider_events or {},
+            "events": sum((provider_events or {}).values()),
+            "existing": 1,
+            "errors": [],
+            "metadata": {"targets": 0, "errors": []},
+        }
+
+    def test_termination_before_sync_stops_the_job(self):
+        """Stop before network sync work when cancellation is already requested."""
+        from app.library import JobTerminated
+
+        with self.assertRaises(JobTerminated):
+            CalendarSyncJob(MagicMock()).run("run-id", lambda: True)
+
+    def test_sync_job_reports_provider_counts_and_metadata_progress(self):
+        """Report both provider counts and success or failure metadata progress."""
+        result = self._result({"sonarr": 3, "radarr": 2})
+        result["errors"] = ["radarr offline"]
+        result["metadata"] = {"targets": 4, "errors": ["one identity failed"]}
+        store = MagicMock()
+
+        def sync(**kwargs):
+            """Exercise the job's success and failure progress callbacks."""
+            report = kwargs["metadata_progress"]
+            report(1, 4, "TVDB episode 1", False)
+            report(2, 4, "TMDB movie 1", True)
+            return result
+
+        should_terminate = MagicMock(side_effect=[False, False])
+        with patch("app.calendar.CalendarSyncService") as service:
+            service.return_value.sync.side_effect = sync
+            CalendarSyncJob(store).run("run-id", should_terminate)
+
+        self.assertEqual(store.update_run.call_count, 3)
+        first_progress = store.update_run.call_args_list[0].kwargs
+        failed_progress = store.update_run.call_args_list[1].kwargs
+        final_update = store.update_run.call_args_list[-1].kwargs
+        self.assertEqual(
+            first_progress["progress_label"], "Fetching new calendar metadata"
+        )
+        self.assertEqual(
+            failed_progress["progress_label"], "Calendar metadata identity failed"
+        )
+        self.assertEqual(final_update["state"], "completed")
+        self.assertIn("Sonarr: 3, Radarr: 2", final_update["message"])
+        self.assertIn("1 provider connection(s) failed", final_update["message"])
+        self.assertIn(
+            "Fetched metadata for 4 new calendar identities", final_update["message"]
+        )
+        self.assertIn(
+            "1 calendar metadata identity(ies) failed", final_update["message"]
+        )
+
+    def test_sync_job_uses_summary_without_provider_counts(self):
+        """Keep the generic completion summary when provider counts are absent."""
+        store = MagicMock()
+        with patch("app.calendar.CalendarSyncService") as service:
+            service.return_value.sync.return_value = self._result()
+            CalendarSyncJob(store).run("run-id", lambda: False)
+
+        self.assertEqual(
+            store.update_run.call_args.kwargs["message"],
+            "Synced 0 calendar events (1 linked to catalog).",
+        )
+
+    def test_termination_after_sync_stops_before_completion_update(self):
+        """Stop after provider work if cancellation arrives before completion."""
+        from app.library import JobTerminated
+
+        store = MagicMock()
+        should_terminate = MagicMock(side_effect=[False, True])
+        with patch("app.calendar.CalendarSyncService") as service:
+            service.return_value.sync.return_value = self._result({"sonarr": 1})
+            with self.assertRaises(JobTerminated):
+                CalendarSyncJob(store).run("run-id", should_terminate)
+
+        service.return_value.sync.assert_called_once()
+        store.update_run.assert_not_called()
+
+
 class CalendarFutureMetadataTest(unittest.TestCase):
+    def test_constructor_builds_database_and_metadata_dependencies(self):
+        """Construct the future metadata service from app-owned dependencies."""
+        database = MagicMock()
+        with (
+            patch("app.calendar.Config") as config,
+            patch("app.calendar.FutureMetadataCache") as cache,
+            patch("app.calendar.MetadataService") as metadata,
+        ):
+            config.return_value.database = database
+            service = CalendarFutureMetadataService()
+
+        self.assertIs(service.db, database)
+        self.assertIs(service.cache, cache.return_value)
+        self.assertIs(service.metadata, metadata.return_value)
+
     def test_target_window_includes_the_entire_boundary_date(self):
         service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
         service.db = MagicMock()
@@ -509,6 +1606,26 @@ class CalendarFutureMetadataTest(unittest.TestCase):
         query, params = service.db.execute.call_args.args
         self.assertIn("e.event_date>=?", query)
         self.assertEqual(params, ("2026-08-13", "2026-11-18"))
+
+    def test_targets_resolve_episode_series_and_movie_identities(self):
+        """Resolve each eligible event to its future metadata identities."""
+        service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
+        service.db = MagicMock()
+        service.db.execute.return_value = [
+            ("episode", "episode-tvdb", "series-tvdb", None),
+            ("movie", None, None, "movie-tmdb"),
+        ]
+
+        targets = service._targets()
+
+        self.assertEqual(
+            targets,
+            [
+                ("tmdb", "movie", "movie-tmdb"),
+                ("tvdb", "episode", "episode-tvdb"),
+                ("tvdb", "series", "series-tvdb"),
+            ],
+        )
 
     def test_refetch_reports_each_identity(self):
         service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
@@ -567,6 +1684,56 @@ class CalendarFutureMetadataTest(unittest.TestCase):
             project=False,
             cache=service.cache,
         )
+
+    def test_refetch_stops_before_fetch_when_termination_is_requested(self):
+        """Stop metadata refetch before the first provider request on cancellation."""
+        from app.library import JobTerminated
+
+        service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
+        service.cache = MagicMock()
+        service.metadata = MagicMock()
+
+        with (
+            patch("app.calendar.MetadataLanguageSettings") as settings,
+            self.assertRaises(JobTerminated),
+        ):
+            settings.return_value.get.return_value = ["en"]
+            service.refetch(
+                should_terminate=lambda: True,
+                targets=[("tvdb", "episode", "episode-1")],
+            )
+
+        service.metadata.fetch_locales.assert_not_called()
+        service.cache.prune_expired.assert_not_called()
+
+    def test_refetch_reports_metadata_fetch_errors(self):
+        """Record failed identities and expose the failed progress callback."""
+        service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
+        service.cache = MagicMock()
+        service.metadata = MagicMock()
+        service.metadata.fetch_locales.side_effect = RuntimeError(
+            "provider unavailable"
+        )
+        progress = []
+
+        with patch("app.calendar.MetadataLanguageSettings") as settings:
+            settings.return_value.get.return_value = ["en"]
+            result = service.refetch(
+                force=False,
+                progress=lambda current, total, item, failed: progress.append(
+                    (current, total, item, failed)
+                ),
+                targets=[("tvdb", "episode", "episode-1")],
+            )
+
+        self.assertEqual(result["targets"], 1)
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(
+            result["errors"],
+            ["tvdb episode episode-1: RuntimeError: provider unavailable"],
+        )
+        self.assertEqual(progress[-1], (1, 1, "TVDB episode episode-1", True))
+        service.cache.prune_expired.assert_called_once()
 
     def test_future_cache_drops_artwork_references(self):
         cache = FutureMetadataCache.__new__(FutureMetadataCache)

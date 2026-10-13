@@ -1048,9 +1048,83 @@ class CalendarPage(DocsModel):
     end: str | None = Field(default=None, examples=["2025-02-01"])
 
 
+class CalendarConnectionUpdate(DocsModel):
+    """Shared fields accepted when updating an Arr calendar connection."""
+
+    enabled: bool | None = None
+    address: str | None = None
+    port: int | None = None
+    baseUrl: str | None = None
+    useSsl: bool | None = None
+    libraryId: str | None = None
+    apiKey: str | None = None
+
+
+class SonarrCalendarConnectionUpdate(CalendarConnectionUpdate):
+    """Sonarr connection fields, including its selected API version."""
+
+    apiVersion: Literal["v3", "v5"] | None = None
+
+
+class RadarrCalendarConnectionUpdate(CalendarConnectionUpdate):
+    """Radarr connection fields, which use API v3."""
+
+    apiVersion: Literal["v3"] | None = None
+
+
+class CalendarConnectionStatus(DocsModel):
+    """Public connection status shared by Sonarr and Radarr."""
+
+    address: str | None = None
+    port: int | None = None
+    baseUrl: str | None = None
+    useSsl: bool | None = None
+    libraryId: str | None = None
+    libraryName: str | None = None
+    apiKeyConfigured: bool
+    configured: bool
+    validatedAt: str | None = None
+    lastSyncAt: str | None = None
+    lastError: str | None = None
+    updatedAt: str | None = None
+
+
+class SonarrCalendarConnectionStatus(CalendarConnectionStatus):
+    """Public Sonarr connection status and selected API version."""
+
+    provider: Literal["sonarr"]
+    apiVersion: Literal["v3", "v5"]
+
+
+class RadarrCalendarConnectionStatus(CalendarConnectionStatus):
+    """Public Radarr connection status, fixed to API v3."""
+
+    provider: Literal["radarr"]
+    apiVersion: Literal["v3"]
+
+
 class CalendarSettings(DocsModel):
-    enabled: bool | None = Field(default=None, examples=[True])
-    connections: list[Any] = Field(default_factory=list)
+    """Public status for the configured calendar providers."""
+
+    sonarr: SonarrCalendarConnectionStatus | None = None
+    radarr: RadarrCalendarConnectionStatus | None = None
+
+
+class CalendarSettingsUpdate(DocsModel):
+    """Provider-specific calendar settings accepted by the administrator API."""
+
+    enabled: bool | None = Field(
+        default=None,
+        deprecated=True,
+        description="Legacy compatibility field; update provider-specific settings.",
+    )
+    connections: list[Any] = Field(
+        default_factory=list,
+        deprecated=True,
+        description="Legacy compatibility field; update provider-specific settings.",
+    )
+    sonarr: SonarrCalendarConnectionUpdate | None = None
+    radarr: RadarrCalendarConnectionUpdate | None = None
 
 
 class CalendarFollowRequest(DocsModel):
@@ -1484,7 +1558,14 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     NotificationDeleteResponse,
     CalendarEvent,
     CalendarPage,
+    CalendarConnectionUpdate,
+    SonarrCalendarConnectionUpdate,
+    RadarrCalendarConnectionUpdate,
+    CalendarConnectionStatus,
+    SonarrCalendarConnectionStatus,
+    RadarrCalendarConnectionStatus,
     CalendarSettings,
+    CalendarSettingsUpdate,
     CalendarFollowRequest,
     CalendarFollowResponse,
     BazarrSettings,
@@ -2427,7 +2508,7 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("POST", "/api/catalog/items/{entity_id}/bazarr/download"): BazarrDownloadRequest,
     ("PUT", "/api/admin/bazarr/settings"): BazarrSettings,
     ("PATCH", "/api/calendar/events/{event_id}/follow"): CalendarFollowRequest,
-    ("PUT", "/api/admin/calendar/settings"): CalendarSettings,
+    ("PUT", "/api/admin/calendar/settings"): CalendarSettingsUpdate,
     ("PATCH", "/api/notifications/{notification_id}"): NotificationPatchRequest,
     ("PUT", "/api/admin/metadata/languages"): MetadataLanguageSettingsResponse,
     ("PUT", "/api/admin/metadata/refresh/settings"): MetadataRefreshSettings,
@@ -2766,6 +2847,16 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
     BazarrSearchRequest: {"sourceId": "source-0001", "languages": ["eng"]},
     BazarrDownloadRequest: {"sourceId": "source-0001", "matchId": "match-0001"},
     CalendarFollowRequest: {"following": True},
+    CalendarSettingsUpdate: {
+        "sonarr": {
+            "address": "localhost",
+            "port": 8989,
+            "baseUrl": "/",
+            "apiVersion": "v5",
+            "useSsl": False,
+            "libraryId": "library-0001",
+        }
+    },
     InviteRequest: {
         "libraryIds": ["library-0001"],
         "maxUses": 1,
@@ -2975,6 +3066,19 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
     NotificationReadResponse: {"id": "notification-0001", "readAt": None},
     NotificationDeleteResponse: {"id": "notification-0001", "removed": True},
     CalendarPage: {"events": [], "start": "2025-01-01", "end": "2025-02-01"},
+    CalendarSettings: {
+        "sonarr": {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "localhost",
+            "port": 8989,
+            "baseUrl": "/",
+            "useSsl": False,
+            "libraryId": "library-0001",
+            "apiKeyConfigured": True,
+            "configured": True,
+        }
+    },
     SyncplayGroupsResponse: {"groups": []},
     SyncplayGroup: {"id": "group-0001", "revision": 4, "members": [], "ended": False},
     JobRunResponse: {

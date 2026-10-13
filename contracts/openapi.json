@@ -1224,6 +1224,238 @@
         "title": "BootstrapResponse",
         "type": "object"
       },
+      "CalendarConnectionStatus": {
+        "additionalProperties": true,
+        "description": "Public connection status shared by Sonarr and Radarr.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Address"
+          },
+          "apiKeyConfigured": {
+            "title": "Apikeyconfigured",
+            "type": "boolean"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Baseurl"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "lastError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lasterror"
+          },
+          "lastSyncAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lastsyncat"
+          },
+          "libraryId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryid"
+          },
+          "libraryName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryname"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Port"
+          },
+          "updatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Updatedat"
+          },
+          "useSsl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Usessl"
+          },
+          "validatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Validatedat"
+          }
+        },
+        "required": [
+          "apiKeyConfigured",
+          "configured"
+        ],
+        "title": "CalendarConnectionStatus",
+        "type": "object"
+      },
+      "CalendarConnectionUpdate": {
+        "additionalProperties": true,
+        "description": "Shared fields accepted when updating an Arr calendar connection.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Address"
+          },
+          "apiKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Apikey"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Baseurl"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Enabled"
+          },
+          "libraryId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryid"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Port"
+          },
+          "useSsl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Usessl"
+          }
+        },
+        "title": "CalendarConnectionUpdate",
+        "type": "object"
+      },
       "CalendarEvent": {
         "additionalProperties": true,
         "properties": {
@@ -1624,8 +1856,41 @@
       },
       "CalendarSettings": {
         "additionalProperties": true,
+        "description": "Public status for the configured calendar providers.",
+        "properties": {
+          "radarr": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RadarrCalendarConnectionStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "sonarr": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SonarrCalendarConnectionStatus"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "CalendarSettings",
+        "type": "object"
+      },
+      "CalendarSettingsUpdate": {
+        "additionalProperties": true,
+        "description": "Provider-specific calendar settings accepted by the administrator API.",
         "properties": {
           "connections": {
+            "deprecated": true,
+            "description": "Legacy compatibility field; update provider-specific settings.",
             "items": {},
             "title": "Connections",
             "type": "array"
@@ -1640,13 +1905,34 @@
               }
             ],
             "default": null,
-            "examples": [
-              true
-            ],
+            "deprecated": true,
+            "description": "Legacy compatibility field; update provider-specific settings.",
             "title": "Enabled"
+          },
+          "radarr": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RadarrCalendarConnectionUpdate"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "sonarr": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SonarrCalendarConnectionUpdate"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
-        "title": "CalendarSettings",
+        "title": "CalendarSettingsUpdate",
         "type": "object"
       },
       "CatalogArtwork": {
@@ -8556,6 +8842,263 @@
         "title": "PublicWebUrlResponse",
         "type": "object"
       },
+      "RadarrCalendarConnectionStatus": {
+        "additionalProperties": true,
+        "description": "Public Radarr connection status, fixed to API v3.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Address"
+          },
+          "apiKeyConfigured": {
+            "title": "Apikeyconfigured",
+            "type": "boolean"
+          },
+          "apiVersion": {
+            "const": "v3",
+            "title": "Apiversion",
+            "type": "string"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Baseurl"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "lastError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lasterror"
+          },
+          "lastSyncAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lastsyncat"
+          },
+          "libraryId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryid"
+          },
+          "libraryName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryname"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Port"
+          },
+          "provider": {
+            "const": "radarr",
+            "title": "Provider",
+            "type": "string"
+          },
+          "updatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Updatedat"
+          },
+          "useSsl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Usessl"
+          },
+          "validatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Validatedat"
+          }
+        },
+        "required": [
+          "apiKeyConfigured",
+          "configured",
+          "provider",
+          "apiVersion"
+        ],
+        "title": "RadarrCalendarConnectionStatus",
+        "type": "object"
+      },
+      "RadarrCalendarConnectionUpdate": {
+        "additionalProperties": true,
+        "description": "Radarr connection fields, which use API v3.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Address"
+          },
+          "apiKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Apikey"
+          },
+          "apiVersion": {
+            "anyOf": [
+              {
+                "const": "v3",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Apiversion"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Baseurl"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Enabled"
+          },
+          "libraryId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryid"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Port"
+          },
+          "useSsl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Usessl"
+          }
+        },
+        "title": "RadarrCalendarConnectionUpdate",
+        "type": "object"
+      },
       "RefreshQueueResponse": {
         "additionalProperties": true,
         "properties": {
@@ -8813,6 +9356,269 @@
           }
         },
         "title": "SessionResponse",
+        "type": "object"
+      },
+      "SonarrCalendarConnectionStatus": {
+        "additionalProperties": true,
+        "description": "Public Sonarr connection status and selected API version.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Address"
+          },
+          "apiKeyConfigured": {
+            "title": "Apikeyconfigured",
+            "type": "boolean"
+          },
+          "apiVersion": {
+            "enum": [
+              "v3",
+              "v5"
+            ],
+            "title": "Apiversion",
+            "type": "string"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Baseurl"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "lastError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lasterror"
+          },
+          "lastSyncAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lastsyncat"
+          },
+          "libraryId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryid"
+          },
+          "libraryName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryname"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Port"
+          },
+          "provider": {
+            "const": "sonarr",
+            "title": "Provider",
+            "type": "string"
+          },
+          "updatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Updatedat"
+          },
+          "useSsl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Usessl"
+          },
+          "validatedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Validatedat"
+          }
+        },
+        "required": [
+          "apiKeyConfigured",
+          "configured",
+          "provider",
+          "apiVersion"
+        ],
+        "title": "SonarrCalendarConnectionStatus",
+        "type": "object"
+      },
+      "SonarrCalendarConnectionUpdate": {
+        "additionalProperties": true,
+        "description": "Sonarr connection fields, including its selected API version.",
+        "properties": {
+          "address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Address"
+          },
+          "apiKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Apikey"
+          },
+          "apiVersion": {
+            "anyOf": [
+              {
+                "enum": [
+                  "v3",
+                  "v5"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Apiversion"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Baseurl"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Enabled"
+          },
+          "libraryId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryid"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Port"
+          },
+          "useSsl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Usessl"
+          }
+        },
+        "title": "SonarrCalendarConnectionUpdate",
         "type": "object"
       },
       "SyncplayCommandRequest": {
@@ -12437,6 +13243,19 @@
           "200": {
             "content": {
               "application/json": {
+                "example": {
+                  "sonarr": {
+                    "address": "localhost",
+                    "apiKeyConfigured": true,
+                    "apiVersion": "v5",
+                    "baseUrl": "/",
+                    "configured": true,
+                    "libraryId": "library-0001",
+                    "port": 8989,
+                    "provider": "sonarr",
+                    "useSsl": false
+                  }
+                },
                 "schema": {
                   "$ref": "#/components/schemas/CalendarSettings"
                 }
@@ -12515,8 +13334,18 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "example": {
+                "sonarr": {
+                  "address": "localhost",
+                  "apiVersion": "v5",
+                  "baseUrl": "/",
+                  "libraryId": "library-0001",
+                  "port": 8989,
+                  "useSsl": false
+                }
+              },
               "schema": {
-                "$ref": "#/components/schemas/CalendarSettings"
+                "$ref": "#/components/schemas/CalendarSettingsUpdate"
               }
             }
           },
@@ -12526,6 +13355,19 @@
           "200": {
             "content": {
               "application/json": {
+                "example": {
+                  "sonarr": {
+                    "address": "localhost",
+                    "apiKeyConfigured": true,
+                    "apiVersion": "v5",
+                    "baseUrl": "/",
+                    "configured": true,
+                    "libraryId": "library-0001",
+                    "port": 8989,
+                    "provider": "sonarr",
+                    "useSsl": false
+                  }
+                },
                 "schema": {
                   "$ref": "#/components/schemas/CalendarSettings"
                 }

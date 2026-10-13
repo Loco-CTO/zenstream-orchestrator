@@ -1050,6 +1050,7 @@ class CalendarSyncTest(unittest.TestCase):
         ]
 
         def replace_events(*args):
+            """Collect a future metadata target for the sync call."""
             args[-1].add(("tvdb", "series", "series-tvdb"))
             return 1, 0
 

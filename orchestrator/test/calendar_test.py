@@ -43,12 +43,14 @@ class CalendarWindowTest(unittest.TestCase):
         self.assertLessEqual(end - start, timedelta(days=130))
 
     def test_explicit_naive_dates_are_interpreted_as_utc(self):
+        """Interpret timezone-naive API input dates as UTC."""
         start, end = parse_calendar_window("2026-08-20T12:00:00", "2026-08-21T12:00:00")
 
         self.assertEqual(start, datetime(2026, 8, 20, 12, tzinfo=timezone.utc))
         self.assertEqual(end, datetime(2026, 8, 21, 12, tzinfo=timezone.utc))
 
     def test_invalid_explicit_date_raises_a_calendar_error(self):
+        """Reject malformed explicit calendar dates."""
         with self.assertRaisesRegex(ValueError, "must be ISO dates"):
             parse_calendar_window("not-a-date", "2026-08-21")
 
@@ -1263,6 +1265,7 @@ class CalendarSyncTest(unittest.TestCase):
 
 class CalendarReadTest(unittest.TestCase):
     def test_constructor_builds_database_and_metadata_caches(self):
+        """Build the read service's database and metadata cache dependencies."""
         database = MagicMock()
         with (
             patch("app.calendar.Config") as config,
@@ -1277,6 +1280,7 @@ class CalendarReadTest(unittest.TestCase):
         self.assertIs(service.future_cache, future_cache.return_value)
 
     def test_payload_uses_the_cache_for_the_requested_metadata_age(self):
+        """Select the normal or future cache according to the metadata age."""
         service = CalendarReadService.__new__(CalendarReadService)
         service.normal_cache = MagicMock()
         service.future_cache = MagicMock()
@@ -1353,6 +1357,7 @@ class CalendarReadTest(unittest.TestCase):
         )
 
     def test_linked_item_uses_only_the_catalog_entity_matching_event_kind(self):
+        """Select the matching episode link and ignore its parent series row."""
         self.assertEqual(CalendarReadService._linked_item([], "episode"), (None, None))
         self.assertEqual(
             CalendarReadService._linked_item(
@@ -1370,9 +1375,13 @@ class CalendarReadTest(unittest.TestCase):
         )
 
     def test_title_returns_none_when_identity_or_cached_title_is_missing(self):
+        """Return no title when the provider identity or translations are absent."""
         class Cache:
+            """Represent an empty localized metadata cache."""
+
             @staticmethod
             def get_locales(provider, entity_type, provider_id):
+                """Return no localized payload for the requested identity."""
                 return {}
 
         service = CalendarReadService.__new__(CalendarReadService)
@@ -1385,9 +1394,13 @@ class CalendarReadTest(unittest.TestCase):
         )
 
     def test_title_rejects_a_placeholder_when_no_locale_has_a_real_title(self):
+        """Reject provider placeholder text when no locale has a usable title."""
         class Cache:
+            """Represent a localized metadata cache with only a placeholder."""
+
             @staticmethod
             def get_locales(provider, entity_type, provider_id):
+                """Return the placeholder translation for the requested identity."""
                 return {"en": {"title": "  UNKNOWN  ", "originalLanguage": "en"}}
 
         service = CalendarReadService.__new__(CalendarReadService)

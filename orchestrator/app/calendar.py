@@ -90,6 +90,7 @@ def _string_id(value) -> str | None:
 
 
 def _calendar_identity_id(value) -> str | None:
+    """Return a usable calendar identity, treating provider zero values as absent."""
     raw = _string_id(value)
     return raw if raw and raw != "0" else None
 
@@ -175,9 +176,11 @@ class CalendarConnectionStore:
         values = {}
         for provider in CALENDAR_PROVIDERS:
             rows = self.db.execute(
-                "SELECT c.provider,c.api_version,c.address,c.port,c.base_url,c.use_ssl,c.library_id,c.api_key_ciphertext,"
+                "SELECT c.provider,c.api_version,c.address,c.port,c.base_url,c.use_ssl,"
+                "c.library_id,c.api_key_ciphertext,"
                 "c.validated_at,c.last_sync_at,c.last_error,c.updated_at,l.name "
-                "FROM calendar_connections c JOIN libraries l ON l.id=c.library_id WHERE c.provider=?",
+                "FROM calendar_connections c JOIN libraries l "
+                "ON l.id=c.library_id WHERE c.provider=?",
                 (provider,),
             )
             values[provider] = (
@@ -194,7 +197,8 @@ class CalendarConnectionStore:
 
     def internal(self) -> list[dict]:
         rows = self.db.execute(
-            "SELECT provider,api_version,address,port,base_url,use_ssl,library_id,api_key_ciphertext "
+            "SELECT provider,api_version,address,port,base_url,use_ssl,"
+            "library_id,api_key_ciphertext "
             "FROM calendar_connections ORDER BY provider"
         )
         values = []
@@ -229,14 +233,8 @@ class CalendarConnectionStore:
             )
         return values
 
-    def save(self, provider: str, values: dict) -> dict:
-        if provider not in CALENDAR_PROVIDERS:
-            raise ValueError("Unsupported calendar provider")
-        if not isinstance(values, dict):
-            raise ValueError("Calendar settings must be an object")
-        if values.get("enabled") is False:
-            self.clear(provider)
-            return self.public()[provider]
+    def _normalized_values(self, provider: str, values: dict) -> dict:
+        """Validate and normalize the network and library fields for a connection."""
         address = _normalize_address(values.get("address"))
         port = _parse_port(values.get("port"))
         base_url = _normalize_base_url(values.get("baseUrl"))
@@ -251,44 +249,79 @@ class CalendarConnectionStore:
         )
         if not library_rows:
             raise ValueError("Selected library does not exist")
-        if library_rows[0][0] != EXPECTED_LIBRARY_TYPES[provider]:
+        expected_type = EXPECTED_LIBRARY_TYPES[provider]
+        if library_rows[0][0] != expected_type:
             raise ValueError(
-                f"{provider.title()} must be mapped to a {EXPECTED_LIBRARY_TYPES[provider]} library"
+                f"{provider.title()} must be mapped to a {expected_type} library"
             )
-        existing = self.db.execute(
-            "SELECT api_key_ciphertext,api_version FROM calendar_connections WHERE provider=?",
-            (provider,),
-        )
-        requested_api_version = values.get("apiVersion")
-        if requested_api_version is None:
-            api_version = existing[0][1] if existing else "v3"
+        return {
+            "address": address,
+            "port": port,
+            "baseUrl": base_url,
+            "useSsl": use_ssl,
+            "libraryId": library_id,
+        }
+
+    @staticmethod
+    def _api_version(provider: str, requested: object, existing: list) -> str:
+        """Select and validate the configured provider API version."""
+        if requested is None:
+            version = existing[0][1] if existing else "v3"
         else:
-            api_version = str(requested_api_version).strip().lower()
-        allowed_versions = {"v3", "v5"} if provider == "sonarr" else {"v3"}
-        if api_version not in allowed_versions:
+            version = str(requested).strip().lower()
+        allowed = {"v3", "v5"} if provider == "sonarr" else {"v3"}
+        if version not in allowed:
             if provider == "sonarr":
                 raise ValueError("Sonarr API version must be v3 or v5")
             raise ValueError("Radarr API version must be v3")
-        supplied_key = values.get("apiKey")
-        if supplied_key is not None and str(supplied_key).strip():
-            ciphertext = encrypt_calendar_api_key(str(supplied_key).strip())
-        elif existing:
-            ciphertext = existing[0][0]
-        else:
-            raise ValueError("An API key is required for a new calendar service")
+        return version
+
+    @staticmethod
+    def _api_key(supplied: object, existing: list) -> str:
+        """Encrypt a supplied key or preserve the previously saved key."""
+        if supplied is not None and str(supplied).strip():
+            return encrypt_calendar_api_key(str(supplied).strip())
+        if existing:
+            return existing[0][0]
+        raise ValueError("An API key is required for a new calendar service")
+
+    def save(self, provider: str, values: dict) -> dict:
+        """Validate and persist one provider connection."""
+        if provider not in CALENDAR_PROVIDERS:
+            raise ValueError("Unsupported calendar provider")
+        if not isinstance(values, dict):
+            raise ValueError("Calendar settings must be an object")
+        if values.get("enabled") is False:
+            self.clear(provider)
+            return self.public()[provider]
+        normalized = self._normalized_values(provider, values)
+        existing = self.db.execute(
+            "SELECT api_key_ciphertext,api_version "
+            "FROM calendar_connections WHERE provider=?",
+            (provider,),
+        )
+        api_version = self._api_version(provider, values.get("apiVersion"), existing)
+        ciphertext = self._api_key(values.get("apiKey"), existing)
         timestamp = iso_now()
         self.db.execute(
-            "INSERT INTO calendar_connections(provider,api_version,address,port,base_url,use_ssl,library_id,api_key_ciphertext,validated_at,last_sync_at,last_error,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET api_version=excluded.api_version,address=excluded.address,port=excluded.port,base_url=excluded.base_url,"
-            "use_ssl=excluded.use_ssl,library_id=excluded.library_id,api_key_ciphertext=excluded.api_key_ciphertext,validated_at=NULL,last_error=NULL,updated_at=excluded.updated_at",
+            "INSERT INTO calendar_connections("
+            "provider,api_version,address,port,base_url,use_ssl,library_id,"
+            "api_key_ciphertext,validated_at,last_sync_at,last_error,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(provider) DO UPDATE SET "
+            "api_version=excluded.api_version,address=excluded.address,"
+            "port=excluded.port,base_url=excluded.base_url,"
+            "use_ssl=excluded.use_ssl,library_id=excluded.library_id,"
+            "api_key_ciphertext=excluded.api_key_ciphertext,validated_at=NULL,"
+            "last_error=NULL,updated_at=excluded.updated_at",
             (
                 provider,
                 api_version,
-                address,
-                port,
-                base_url,
-                int(use_ssl),
-                library_id,
+                normalized["address"],
+                normalized["port"],
+                normalized["baseUrl"],
+                int(normalized["useSsl"]),
+                normalized["libraryId"],
                 ciphertext,
                 None,
                 None,
@@ -341,7 +374,8 @@ class ArrCalendarClient:
     def endpoint(self) -> str:
         return self.endpoints[0]
 
-    def fetch(self, start: datetime, end: datetime) -> list[dict]:
+    def _params(self, start: datetime, end: datetime) -> dict:
+        """Build the selected provider version's calendar query parameters."""
         params = {"start": start.date().isoformat(), "end": end.date().isoformat()}
         if self.connection["provider"] == "sonarr":
             if str(self.connection.get("apiVersion") or "v3").lower() == "v5":
@@ -363,6 +397,46 @@ class ArrCalendarClient:
         else:
             params["unmonitored"] = "false"
             params["includeMovieFile"] = "true"
+        return params
+
+    def _request(self, endpoint: str, params: dict) -> httpx.Response:
+        """Retry transient provider failures against the already selected endpoint."""
+        with httpx.Client(
+            timeout=self.timeout,
+            follow_redirects=False,
+            trust_env=False,
+            headers={
+                "Accept": "application/json",
+                "X-Api-Key": self.connection["apiKey"],
+                "User-Agent": "ZenStream/Calendar",
+            },
+        ) as client:
+            attempt = 0
+            while True:
+                try:
+                    response = client.get(endpoint, params=params)
+                except httpx.TransportError:
+                    if attempt == 2:
+                        raise
+                else:
+                    if response.status_code not in {429, 502, 503, 504} or attempt == 2:
+                        return response
+                time.sleep(min(5.0, 0.25 * (2**attempt)))
+                attempt += 1
+        raise RuntimeError("calendar request retry loop ended unexpectedly")
+
+    @staticmethod
+    def _response_items(payload: object) -> list[dict]:
+        """Return calendar records from either supported response envelope."""
+        if isinstance(payload, list):
+            return [value for value in payload if isinstance(value, dict)]
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            return [value for value in payload["data"] if isinstance(value, dict)]
+        raise ProviderError("calendar provider returned an invalid response")
+
+    def fetch(self, start: datetime, end: datetime) -> list[dict]:
+        """Fetch events from the configured calendar endpoint."""
+        params = self._params(start, end)
         started = time.monotonic()
         logger.info(
             "calendar provider request start provider=%s endpoint=%s start=%s end=%s",
@@ -372,32 +446,9 @@ class ArrCalendarClient:
             params["end"],
         )
         try:
-            response = None
             endpoint = self.endpoint
             attempted_endpoint = endpoint
-            with httpx.Client(
-                timeout=self.timeout,
-                follow_redirects=False,
-                trust_env=False,
-                headers={
-                    "Accept": "application/json",
-                    "X-Api-Key": self.connection["apiKey"],
-                    "User-Agent": "ZenStream/Calendar",
-                },
-            ) as client:
-                for attempt in range(3):
-                    try:
-                        response = client.get(endpoint, params=params)
-                    except httpx.TransportError:
-                        if attempt == 2:
-                            raise
-                        time.sleep(min(5.0, 0.25 * (2**attempt)))
-                        continue
-                    if response.status_code not in {429, 502, 503, 504} or attempt == 2:
-                        break
-                    time.sleep(min(5.0, 0.25 * (2**attempt)))
-            if response is None:
-                raise ProviderError("calendar provider returned no response")
+            response = self._request(endpoint, params)
             if response.status_code == 404:
                 raise ProviderError(f"calendar endpoint was not found: {endpoint}")
             response.raise_for_status()
@@ -413,11 +464,7 @@ class ArrCalendarClient:
             raise ProviderError(
                 f"{self.connection['provider']} calendar request failed: {type(error).__name__}: {error}"
             ) from error
-        if isinstance(payload, list):
-            return [value for value in payload if isinstance(value, dict)]
-        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
-            return [value for value in payload["data"] if isinstance(value, dict)]
-        raise ProviderError("calendar provider returned an invalid response")
+        return self._response_items(payload)
 
 
 @dataclass(frozen=True)
@@ -782,7 +829,8 @@ class CalendarSyncService:
         all_normalized = normalize_calendar_events(provider, library_id, payload)
         if provider == "sonarr" and payload and not all_normalized:
             raise ProviderError(
-                "Sonarr returned calendar entries without usable episode or series identities"
+                "Sonarr returned calendar entries without usable "
+                "episode or series identities"
             )
         normalized = [
             event
@@ -1239,7 +1287,10 @@ class CalendarSyncJob:
                 f"{result['existing']} linked to catalog)."
             )
         else:
-            message = f"Synced {result['events']} calendar events ({result['existing']} linked to catalog)."
+            message = (
+                f"Synced {result['events']} calendar events "
+                f"({result['existing']} linked to catalog)."
+            )
         if result["errors"]:
             message += f" {len(result['errors'])} provider connection(s) failed."
         metadata = result["metadata"]

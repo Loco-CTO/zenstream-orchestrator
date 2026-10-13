@@ -1226,6 +1226,7 @@
       },
       "CalendarConnectionStatus": {
         "additionalProperties": true,
+        "description": "Public connection status shared by Sonarr and Radarr.",
         "properties": {
           "address": {
             "anyOf": [
@@ -1365,6 +1366,7 @@
       },
       "CalendarConnectionUpdate": {
         "additionalProperties": true,
+        "description": "Shared fields accepted when updating an Arr calendar connection.",
         "properties": {
           "address": {
             "anyOf": [
@@ -1854,6 +1856,7 @@
       },
       "CalendarSettings": {
         "additionalProperties": true,
+        "description": "Public status for the configured calendar providers.",
         "properties": {
           "radarr": {
             "anyOf": [
@@ -1883,6 +1886,7 @@
       },
       "CalendarSettingsUpdate": {
         "additionalProperties": true,
+        "description": "Provider-specific calendar settings accepted by the administrator API.",
         "properties": {
           "connections": {
             "deprecated": true,
@@ -8840,6 +8844,7 @@
       },
       "RadarrCalendarConnectionStatus": {
         "additionalProperties": true,
+        "description": "Public Radarr connection status, fixed to API v3.",
         "properties": {
           "address": {
             "anyOf": [
@@ -8991,6 +8996,7 @@
       },
       "RadarrCalendarConnectionUpdate": {
         "additionalProperties": true,
+        "description": "Radarr connection fields, which use API v3.",
         "properties": {
           "address": {
             "anyOf": [
@@ -9354,6 +9360,7 @@
       },
       "SonarrCalendarConnectionStatus": {
         "additionalProperties": true,
+        "description": "Public Sonarr connection status and selected API version.",
         "properties": {
           "address": {
             "anyOf": [
@@ -9508,6 +9515,7 @@
       },
       "SonarrCalendarConnectionUpdate": {
         "additionalProperties": true,
+        "description": "Sonarr connection fields, including its selected API version.",
         "properties": {
           "address": {
             "anyOf": [
@@ -13326,6 +13334,16 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "example": {
+                "sonarr": {
+                  "address": "localhost",
+                  "apiVersion": "v5",
+                  "baseUrl": "/",
+                  "libraryId": "library-0001",
+                  "port": 8989,
+                  "useSsl": false
+                }
+              },
               "schema": {
                 "$ref": "#/components/schemas/CalendarSettingsUpdate"
               }

@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 from app.calendar import (
     ArrCalendarClient,
     CalendarConnectionStore,
@@ -12,8 +14,13 @@ from app.calendar import (
     CalendarFutureMetadataService,
     CalendarReadService,
     CalendarSyncService,
+    _normalize_address,
+    _normalize_base_url,
+    _normalize_radarr,
     _normalize_sonarr,
+    _parse_port,
     calendar_window,
+    normalize_calendar_events,
     parse_calendar_window,
 )
 from app.database import DatabaseHandler
@@ -53,6 +60,7 @@ class CalendarProviderTest(unittest.TestCase):
         self.assertFalse(hasattr(event, "has_file"))
 
     def test_sonarr_episode_without_tvdb_id_uses_nested_series_identity(self):
+        """Use the series TVDB identity when Sonarr omits an episode identity."""
         event = _normalize_sonarr(
             {
                 "id": 52921,
@@ -71,6 +79,7 @@ class CalendarProviderTest(unittest.TestCase):
         self.assertEqual(event.source_event_id, "52921")
 
     def test_sonarr_episode_without_episode_or_series_identity_is_skipped(self):
+        """Skip Sonarr events without either episode or series identity."""
         event = _normalize_sonarr(
             {
                 "id": 52921,
@@ -82,6 +91,68 @@ class CalendarProviderTest(unittest.TestCase):
         )
 
         self.assertIsNone(event)
+
+    def test_sonarr_invalid_numbering_is_omitted(self):
+        """Keep a valid event when provider numbering is malformed."""
+        event = _normalize_sonarr(
+            {
+                "id": 52921,
+                "tvdbId": 429934,
+                "airDateUtc": "2026-10-03T23:00:00Z",
+                "seasonNumber": "special",
+                "episodeNumber": "4",
+            },
+            "library",
+        )
+
+        self.assertIsNotNone(event)
+        self.assertIsNone(event.season_number)
+        self.assertIsNone(event.episode_number)
+
+    def test_radarr_normalizes_multiple_dates_and_fallback_release(self):
+        """Normalize provider dates and use the generic release fallback."""
+        events = _normalize_radarr(
+            {
+                "id": 91,
+                "tmdbID": 777,
+                "inCinemas": "not-a-date",
+                "digitalRelease": "2026-10-15T12:00:00Z",
+                "physicalRelease": None,
+                "monitored": False,
+            },
+            "movies",
+        )
+        fallback = _normalize_radarr(
+            {"id": 92, "tmdbId": 778, "releaseDate": "2026-11-01"},
+            "movies",
+        )
+
+        self.assertEqual([event.release_type for event in events], ["digital"])
+        self.assertFalse(events[0].monitored)
+        self.assertEqual(fallback[0].release_type, "release")
+        self.assertEqual(fallback[0].tmdb_id, "778")
+
+    def test_normalize_events_dispatches_both_providers_and_skips_bad_ids(self):
+        """Normalize Sonarr and Radarr records while ignoring invalid IDs."""
+        sonarr = normalize_calendar_events(
+            "sonarr",
+            "tv",
+            [
+                {"id": 1, "tvdbId": 101, "airDate": "2026-10-03"},
+                {"id": 2, "tvdbId": 0, "airDate": "2026-10-03"},
+            ],
+        )
+        radarr = normalize_calendar_events(
+            "radarr",
+            "movies",
+            [
+                {"id": 1, "tmdbId": 201, "releaseDate": "2026-10-03"},
+                {"id": None, "tmdbId": 202, "releaseDate": "2026-10-03"},
+            ],
+        )
+
+        self.assertEqual(len(sonarr), 1)
+        self.assertEqual(len(radarr), 1)
 
     def test_fetch_sends_the_inclusive_provider_dates(self):
         response = MagicMock(status_code=200)
@@ -113,6 +184,7 @@ class CalendarProviderTest(unittest.TestCase):
         self.assertEqual(params["end"], "2026-12-12")
 
     def test_sonarr_v5_uses_only_selected_endpoint_and_v5_subresources(self):
+        """Call the selected v5 endpoint with its supported subresource query."""
         response = MagicMock(status_code=200)
         response.json.return_value = []
         client = MagicMock()
@@ -148,9 +220,223 @@ class CalendarProviderTest(unittest.TestCase):
         self.assertEqual(params["includeSubresources"], ["series", "episodeFile"])
         self.assertNotIn("includeSeries", params)
 
+    def test_v3_and_radarr_use_their_selected_query_parameters(self):
+        for connection, expected_endpoint, expected_params in (
+            (
+                {
+                    "provider": "sonarr",
+                    "apiVersion": "v3",
+                    "address": "sonarr.local",
+                    "port": 8989,
+                    "baseUrl": "/sonarr",
+                    "useSsl": True,
+                    "apiKey": "secret",
+                },
+                "https://sonarr.local:8989/sonarr/api/v3/calendar",
+                {
+                    "unmonitored": "false",
+                    "includeSeries": "true",
+                    "includeEpisodeFile": "true",
+                    "includeEpisodeImages": "false",
+                },
+            ),
+            (
+                {
+                    "provider": "radarr",
+                    "address": "radarr.local",
+                    "port": 7878,
+                    "baseUrl": "",
+                    "useSsl": False,
+                    "apiKey": "secret",
+                },
+                "http://radarr.local:7878/api/v3/calendar",
+                {"unmonitored": "false", "includeMovieFile": "true"},
+            ),
+        ):
+            with self.subTest(provider=connection["provider"]):
+                response = MagicMock(status_code=200)
+                response.json.return_value = {"data": [{"id": 1}, "ignored"]}
+                client = MagicMock()
+                client.get.return_value = response
+                http_client = MagicMock()
+                http_client.return_value.__enter__.return_value = client
+
+                with patch("app.calendar.httpx.Client", http_client):
+                    result = ArrCalendarClient(connection).fetch(
+                        datetime(2026, 10, 1, tzinfo=timezone.utc),
+                        datetime(2026, 10, 31, tzinfo=timezone.utc),
+                    )
+
+                self.assertEqual(result, [{"id": 1}])
+                self.assertEqual(client.get.call_args.args[0], expected_endpoint)
+                params = client.get.call_args.kwargs["params"]
+                for key, value in expected_params.items():
+                    self.assertEqual(params[key], value)
+
+    def test_selected_sonarr_endpoint_is_not_retried_as_another_version(self):
+        """Report a missing configured endpoint without probing another version."""
+        response = MagicMock(status_code=404)
+        client = MagicMock()
+        client.get.return_value = response
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with patch("app.calendar.httpx.Client", http_client):
+            with self.assertRaisesRegex(ProviderError, "endpoint was not found"):
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    datetime(2026, 10, 31, tzinfo=timezone.utc),
+                )
+
+        client.get.assert_called_once()
+
+    def test_transient_response_retries_same_endpoint(self):
+        """Retry a transient response without switching the configured version."""
+        response = MagicMock(status_code=200)
+        response.json.return_value = []
+        client = MagicMock()
+        client.get.side_effect = [MagicMock(status_code=503), response]
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with patch("app.calendar.httpx.Client", http_client), patch(
+            "app.calendar.time.sleep"
+        ):
+            self.assertEqual(
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    datetime(2026, 10, 31, tzinfo=timezone.utc),
+                ),
+                [],
+            )
+
+        self.assertEqual(client.get.call_count, 2)
+        self.assertTrue(
+            all(
+                call.args[0] == "http://sonarr.local:8989/api/v5/calendar"
+                for call in client.get.call_args_list
+            )
+        )
+
+    def test_transport_error_retries_and_exhaustion_becomes_provider_error(self):
+        """Retry transport errors and report the final failed request."""
+        response = MagicMock(status_code=200)
+        response.json.return_value = []
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+        client = MagicMock()
+        client.get.side_effect = [httpx.ConnectError("offline"), response]
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+
+        with patch("app.calendar.httpx.Client", http_client), patch(
+            "app.calendar.time.sleep"
+        ):
+            self.assertEqual(
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    datetime(2026, 10, 31, tzinfo=timezone.utc),
+                ),
+                [],
+            )
+
+        self.assertEqual(client.get.call_count, 2)
+
+        client.get.side_effect = [httpx.ConnectError("offline") for _ in range(3)]
+        with patch("app.calendar.httpx.Client", http_client), patch(
+            "app.calendar.time.sleep"
+        ):
+            with self.assertRaisesRegex(ProviderError, "ConnectError"):
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    datetime(2026, 10, 31, tzinfo=timezone.utc),
+                )
+
+        self.assertEqual(client.get.call_count, 5)
+
+    def test_invalid_response_payload_is_rejected(self):
+        """Reject provider payloads without a supported calendar envelope."""
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"data": "not-an-array"}
+        client = MagicMock()
+        client.get.return_value = response
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with patch("app.calendar.httpx.Client", http_client):
+            with self.assertRaisesRegex(ProviderError, "invalid response"):
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    datetime(2026, 10, 31, tzinfo=timezone.utc),
+                )
+
+    def test_http_response_errors_are_wrapped_as_provider_errors(self):
+        """Wrap HTTP status failures in the provider-facing error type."""
+        response = MagicMock(status_code=500)
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "provider failed", request=MagicMock(), response=MagicMock()
+        )
+        client = MagicMock()
+        client.get.return_value = response
+        http_client = MagicMock()
+        http_client.return_value.__enter__.return_value = client
+        connection = {
+            "provider": "sonarr",
+            "apiVersion": "v5",
+            "address": "sonarr.local",
+            "port": 8989,
+            "baseUrl": "",
+            "useSsl": False,
+            "apiKey": "secret",
+        }
+
+        with patch("app.calendar.httpx.Client", http_client):
+            with self.assertRaisesRegex(ProviderError, "HTTPStatusError"):
+                ArrCalendarClient(connection).fetch(
+                    datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    datetime(2026, 10, 31, tzinfo=timezone.utc),
+                )
+
 
 class CalendarConnectionStoreTest(unittest.TestCase):
+    """Tests for persisting selected calendar provider versions."""
+
     def test_save_persists_selected_sonarr_api_version_and_keeps_saved_key(self):
+        """Save the selected version while retaining an encrypted saved key."""
         database = MagicMock()
         database.execute.side_effect = [
             [("tv_series",)],
@@ -182,6 +468,7 @@ class CalendarConnectionStoreTest(unittest.TestCase):
         self.assertEqual(result["apiVersion"], "v5")
 
     def test_save_rejects_unsupported_sonarr_api_version(self):
+        """Reject unsupported Sonarr versions before persisting the connection."""
         database = MagicMock()
         database.execute.side_effect = [[("tv_series",)], []]
         with patch("app.calendar.Config") as config:
@@ -201,6 +488,204 @@ class CalendarConnectionStoreTest(unittest.TestCase):
                 },
             )
         self.assertEqual(database.execute.call_count, 2)
+
+    def test_internal_returns_selected_version_and_decrypted_key(self):
+        """Expose the stored API version and decrypted key to the sync client."""
+        database = MagicMock()
+        database.execute.return_value = [
+            ("sonarr", "v5", "localhost", 8989, "/", 0, "tv", "ciphertext")
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with patch("app.calendar.decrypt_calendar_api_key", return_value="secret"):
+            result = store.internal()
+
+        self.assertEqual(result[0]["apiVersion"], "v5")
+        self.assertEqual(result[0]["apiKey"], "secret")
+
+    def test_internal_skips_connections_with_undecryptable_keys(self):
+        """Skip a provider whose stored API key can no longer be decrypted."""
+        database = MagicMock()
+        database.execute.return_value = [
+            ("sonarr", "v5", "localhost", 8989, "/", 0, "tv", "ciphertext")
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with patch(
+            "app.calendar.decrypt_calendar_api_key",
+            side_effect=ValueError("invalid ciphertext"),
+        ):
+            with self.assertLogs("zenstream.calendar", level="ERROR"):
+                self.assertEqual(store.internal(), [])
+
+    def test_disabled_settings_clear_connection(self):
+        """Clear a provider connection when the legacy disabled flag is false."""
+        database = MagicMock()
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with patch.object(store, "clear") as clear, patch.object(
+            store, "public", return_value={"sonarr": {"configured": False}}
+        ):
+            result = store.save("sonarr", {"enabled": False})
+
+        clear.assert_called_once_with("sonarr")
+        self.assertFalse(result["configured"])
+
+    def test_save_defaults_new_connections_to_v3_and_encrypts_key(self):
+        """Persist a new connection with the default API version and key."""
+        database = MagicMock()
+        database.execute.side_effect = [[("tv_series",)], [], None]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with patch(
+            "app.calendar.encrypt_calendar_api_key", return_value="encrypted"
+        ) as encrypt, patch.object(
+            store, "public", return_value={"sonarr": {"apiVersion": "v3"}}
+        ):
+            result = store.save(
+                "sonarr",
+                {
+                    "address": "localhost",
+                    "port": 8989,
+                    "useSsl": False,
+                    "libraryId": "tv",
+                    "apiKey": "  secret  ",
+                },
+            )
+
+        encrypt.assert_called_once_with("secret")
+        self.assertEqual(database.execute.call_args_list[2].args[1][1], "v3")
+        self.assertEqual(result["apiVersion"], "v3")
+
+    def test_save_preserves_existing_version_when_legacy_client_omits_it(self):
+        """Retain a saved version when an older dashboard omits the field."""
+        database = MagicMock()
+        database.execute.side_effect = [
+            [("tv_series",)],
+            [("encrypted", "v5")],
+            None,
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with patch.object(
+            store, "public", return_value={"sonarr": {"apiVersion": "v5"}}
+        ):
+            result = store.save(
+                "sonarr",
+                {
+                    "address": "localhost",
+                    "port": 8989,
+                    "useSsl": False,
+                    "libraryId": "tv",
+                },
+            )
+
+        self.assertEqual(database.execute.call_args_list[2].args[1][1], "v5")
+        self.assertEqual(result["apiVersion"], "v5")
+
+    def test_save_rejects_invalid_provider_shape_and_ssl(self):
+        """Reject invalid settings before they reach the persistence layer."""
+        database = MagicMock()
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        with self.assertRaisesRegex(ValueError, "Unsupported calendar provider"):
+            store.save("other", {})
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            store.save("sonarr", [])
+        with self.assertRaisesRegex(ValueError, "useSsl"):
+            store.save(
+                "sonarr",
+                {"address": "localhost", "port": 8989, "useSsl": "false"},
+            )
+        database.execute.assert_not_called()
+
+    def test_save_rejects_missing_library_and_wrong_provider_library_type(self):
+        """Require a selected library of the provider's matching media type."""
+        database = MagicMock()
+        database.execute.side_effect = [[], [("movies",)]]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        base = {"address": "localhost", "port": 8989, "useSsl": False}
+        with self.assertRaisesRegex(ValueError, "Choose a library"):
+            store.save("sonarr", base)
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            store.save("sonarr", {**base, "libraryId": "missing"})
+        with self.assertRaisesRegex(ValueError, "must be mapped"):
+            store.save("sonarr", {**base, "libraryId": "movies"})
+
+    def test_save_rejects_radarr_v5_and_missing_new_api_key(self):
+        """Keep Radarr on v3 and require a key when no saved key exists."""
+        database = MagicMock()
+        database.execute.side_effect = [[("movies",)], [], [("movies",)], []]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        base = {
+            "address": "localhost",
+            "port": 7878,
+            "useSsl": False,
+            "libraryId": "movies",
+        }
+        with self.assertRaisesRegex(ValueError, "Radarr API version must be v3"):
+            store.save("radarr", {**base, "apiVersion": "v5", "apiKey": "secret"})
+        with self.assertRaisesRegex(ValueError, "API key is required"):
+            store.save("radarr", base)
+
+
+class CalendarConnectionInputTest(unittest.TestCase):
+    """Tests for validating administrator-supplied Arr connection fields."""
+
+    def test_base_url_normalization_and_rejection(self):
+        """Normalize paths and reject URLs, query strings, and fragments."""
+        self.assertEqual(_normalize_base_url("  sonarr/api///  "), "/sonarr/api")
+        self.assertEqual(_normalize_base_url("   "), "")
+        self.assertEqual(_normalize_base_url("///"), "")
+        for value in ("https://sonarr", "/api?key=value", "/api#calendar"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "must be a path"):
+                    _normalize_base_url(value)
+
+    def test_address_validation(self):
+        """Accept host and IP values while rejecting paths and query data."""
+        self.assertEqual(_normalize_address(" localhost "), "localhost")
+        self.assertEqual(_normalize_address("[::1]"), "[::1]")
+        for value in (
+            "",
+            "host name",
+            "https://host",
+            "host/path",
+            "host?query",
+            "host#fragment",
+            ":8989",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    _normalize_address(value)
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            _normalize_address("a" * 256)
+
+    def test_port_validation(self):
+        """Accept valid TCP ports and reject nonnumeric or out-of-range values."""
+        self.assertEqual(_parse_port("8989"), 8989)
+        for value in (None, "port", 0, 65536):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "between 1 and 65535"):
+                    _parse_port(value)
 
 
 class CalendarSyncTest(unittest.TestCase):
@@ -230,6 +715,7 @@ class CalendarSyncTest(unittest.TestCase):
         return service
 
     def test_unusable_sonarr_payload_does_not_delete_saved_events(self):
+        """Preserve persisted events when Sonarr returns unusable identities."""
         service = CalendarSyncService.__new__(CalendarSyncService)
         service.db = MagicMock()
 

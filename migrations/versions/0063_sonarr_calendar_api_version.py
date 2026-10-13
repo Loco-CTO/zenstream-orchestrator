@@ -8,6 +8,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Store the selected Arr API version for each calendar connection."""
     op.add_column(
         "calendar_connections",
         sa.Column("api_version", sa.Text(), nullable=False, server_default="v3"),
@@ -15,4 +16,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Remove the saved Arr API version from calendar connections."""
     op.drop_column("calendar_connections", "api_version")

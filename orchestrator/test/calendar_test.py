@@ -1414,6 +1414,29 @@ class CalendarReadTest(unittest.TestCase):
                 service._title("tvdb", "episode", "episode-tvdb", "en", False)
             )
 
+    def test_title_uses_future_cache_for_unlinked_calendar_identity(self):
+        """Read an upcoming title from the future metadata cache."""
+        service = CalendarReadService.__new__(CalendarReadService)
+        service.normal_cache = MagicMock()
+        service.future_cache = MagicMock()
+        service.future_cache.get_locales.return_value = {
+            "en": {
+                "title": "Upcoming episode",
+                "originalLanguage": "en",
+            }
+        }
+        with patch("app.calendar.MetadataLanguageSettings") as settings:
+            settings.return_value.get.return_value = ["en"]
+            self.assertEqual(
+                service._title("tvdb", "episode", "episode-tvdb", "en", True),
+                "Upcoming episode",
+            )
+
+        service.future_cache.get_locales.assert_called_once_with(
+            "tvdb", "episode", "episode-tvdb"
+        )
+        service.normal_cache.get_locales.assert_not_called()
+
     def test_title_falls_back_to_configured_english(self):
         class Cache:
             @staticmethod

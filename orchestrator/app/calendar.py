@@ -298,9 +298,7 @@ class ArrCalendarClient:
     def endpoints(self) -> tuple[str, ...]:
         scheme = "https" if self.connection["useSsl"] else "http"
         base = self.connection["baseUrl"].rstrip("/")
-        versions = (
-            ("v5", "v3") if self.connection["provider"] == "sonarr" else ("v3",)
-        )
+        versions = ("v5", "v3") if self.connection["provider"] == "sonarr" else ("v3",)
         return tuple(
             f"{scheme}://{self.connection['address']}:{self.connection['port']}"
             f"{base}/api/{version}/calendar"

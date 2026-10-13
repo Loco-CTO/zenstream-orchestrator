@@ -393,10 +393,7 @@ class ArrCalendarClient:
                             raise
                         time.sleep(min(5.0, 0.25 * (2**attempt)))
                         continue
-                    if (
-                        response.status_code not in {429, 502, 503, 504}
-                        or attempt == 2
-                    ):
+                    if response.status_code not in {429, 502, 503, 504} or attempt == 2:
                         break
                     time.sleep(min(5.0, 0.25 * (2**attempt)))
             if response is None:
@@ -447,9 +444,9 @@ def _normalize_sonarr(item: dict, library_id: str) -> CalendarEventValue | None:
         item.get("tvdbID")
     )
     series = item.get("series") if isinstance(item.get("series"), dict) else {}
-    series_tvdb_id = _calendar_identity_id(series.get("tvdbId")) or _calendar_identity_id(
-        series.get("tvdbID")
-    )
+    series_tvdb_id = _calendar_identity_id(
+        series.get("tvdbId")
+    ) or _calendar_identity_id(series.get("tvdbID"))
     parsed = _parse_datetime(item.get("airDateUtc")) or _parse_datetime(
         item.get("airDate")
     )

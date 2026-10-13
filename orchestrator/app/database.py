@@ -81,7 +81,6 @@ class DatabaseHandler:
         self.read_connection = None
         self.persistence = None
         self.lock = FairWriteGate()
-        self.read_lock = threading.RLock()
         self.write_local = threading.local()
         self.read_local = threading.local()
         self.read_connections = []
@@ -372,7 +371,9 @@ class DatabaseHandler:
         started = time.monotonic()
         if self.db_file == ":memory:":
             connection = self.connection
-            lock = self.read_lock
+            # In-memory SQLite shares the writer connection, so reads must
+            # serialize with writes as well as with other reads.
+            lock = self.lock
         else:
             if self.persistence is None or self.persistence.read_sessions is None:
                 raise RuntimeError("SQLite read sessions are not available")

@@ -161,6 +161,70 @@ class DatabaseHandlerTest(unittest.TestCase):
         finally:
             database.close()
 
+    def test_in_memory_read_error_does_not_rollback_concurrent_write(self):
+        database = DatabaseHandler("sqlite", {}, ":memory:")
+        database.execute("CREATE TABLE values_table(value INTEGER)")
+        transaction_started = threading.Event()
+        reader_entered = threading.Event()
+        release_reader = threading.Event()
+        reader_finished = threading.Event()
+        writer_errors = []
+        reader_errors = []
+
+        def fail_read():
+            reader_entered.set()
+            release_reader.wait(2)
+            raise RuntimeError("expected read failure")
+
+        database.connection.create_function("wait_then_fail", 0, fail_read)
+
+        def writer():
+            try:
+                with database.transaction() as cursor:
+                    cursor.execute("INSERT INTO values_table VALUES(1)")
+                    transaction_started.set()
+                    if reader_entered.wait(1):
+                        release_reader.set()
+                        reader_finished.wait(2)
+                    else:
+                        release_reader.set()
+            except Exception as error:
+                writer_errors.append(error)
+
+        def reader():
+            if not transaction_started.wait(2):
+                reader_errors.append(RuntimeError("writer did not start"))
+                reader_finished.set()
+                return
+            try:
+                database.read_execute("SELECT wait_then_fail()")
+            except Exception as error:
+                reader_errors.append(error)
+            finally:
+                reader_finished.set()
+
+        writer_thread = threading.Thread(target=writer)
+        reader_thread = threading.Thread(target=reader)
+        writer_thread.start()
+        try:
+            self.assertTrue(transaction_started.wait(2))
+            reader_thread.start()
+            writer_thread.join(4)
+            reader_thread.join(4)
+
+            self.assertFalse(writer_thread.is_alive())
+            self.assertFalse(reader_thread.is_alive())
+            self.assertEqual(writer_errors, [])
+            self.assertEqual(len(reader_errors), 1)
+            self.assertEqual(
+                database.execute("SELECT value FROM values_table"), [(1,)]
+            )
+        finally:
+            release_reader.set()
+            writer_thread.join(2)
+            reader_thread.join(2)
+            database.close()
+
     def test_nested_writes_and_reads_share_the_outer_transaction(self):
         database = DatabaseHandler("sqlite", {}, ":memory:")
         database.execute("CREATE TABLE values_table(value INTEGER)")

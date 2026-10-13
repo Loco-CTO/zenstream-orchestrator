@@ -295,10 +295,21 @@ class ArrCalendarClient:
         self.timeout = max(3.0, min(60.0, configured_timeout))
 
     @property
-    def endpoint(self) -> str:
+    def endpoints(self) -> tuple[str, ...]:
         scheme = "https" if self.connection["useSsl"] else "http"
         base = self.connection["baseUrl"].rstrip("/")
-        return f"{scheme}://{self.connection['address']}:{self.connection['port']}{base}/api/v3/calendar"
+        versions = (
+            ("v5", "v3") if self.connection["provider"] == "sonarr" else ("v3",)
+        )
+        return tuple(
+            f"{scheme}://{self.connection['address']}:{self.connection['port']}"
+            f"{base}/api/{version}/calendar"
+            for version in versions
+        )
+
+    @property
+    def endpoint(self) -> str:
+        return self.endpoints[0]
 
     def fetch(self, start: datetime, end: datetime) -> list[dict]:
         params = {
@@ -326,6 +337,8 @@ class ArrCalendarClient:
         )
         try:
             response = None
+            endpoints = self.endpoints
+            attempted_endpoint = endpoints[0]
             with httpx.Client(
                 timeout=self.timeout,
                 follow_redirects=False,
@@ -336,28 +349,50 @@ class ArrCalendarClient:
                     "User-Agent": "ZenStream/Calendar",
                 },
             ) as client:
-                for attempt in range(3):
-                    try:
-                        response = client.get(self.endpoint, params=params)
-                    except httpx.TransportError:
-                        if attempt == 2:
-                            raise
+                for endpoint_index, endpoint in enumerate(endpoints):
+                    attempted_endpoint = endpoint
+                    for attempt in range(3):
+                        try:
+                            response = client.get(endpoint, params=params)
+                        except httpx.TransportError:
+                            if attempt == 2:
+                                raise
+                            time.sleep(min(5.0, 0.25 * (2**attempt)))
+                            continue
+                        if (
+                            response.status_code not in {429, 502, 503, 504}
+                            or attempt == 2
+                        ):
+                            break
                         time.sleep(min(5.0, 0.25 * (2**attempt)))
+                    if (
+                        response is not None
+                        and response.status_code == 404
+                        and endpoint_index < len(endpoints) - 1
+                    ):
+                        fallback = endpoints[endpoint_index + 1]
+                        logger.info(
+                            "calendar API endpoint not found "
+                            "provider=%s endpoint=%s; trying fallback=%s",
+                            self.connection["provider"],
+                            endpoint,
+                            fallback,
+                        )
+                        response = None
                         continue
-                    if response.status_code not in {429, 502, 503, 504} or attempt == 2:
+                    if response is not None:
                         break
-                    time.sleep(min(5.0, 0.25 * (2**attempt)))
             if response is None:
                 raise ProviderError("calendar provider returned no response")
             if response.status_code == 404:
-                raise ProviderError("calendar endpoint was not found")
+                raise ProviderError(f"calendar endpoint was not found: {endpoint}")
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as error:
             logger.warning(
                 "calendar provider request failed provider=%s endpoint=%s duration_seconds=%.1f error=%s",
                 self.connection["provider"],
-                self.endpoint,
+                attempted_endpoint,
                 time.monotonic() - started,
                 error,
             )

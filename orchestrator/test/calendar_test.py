@@ -43,9 +43,7 @@ class CalendarWindowTest(unittest.TestCase):
         self.assertLessEqual(end - start, timedelta(days=130))
 
     def test_explicit_naive_dates_are_interpreted_as_utc(self):
-        start, end = parse_calendar_window(
-            "2026-08-20T12:00:00", "2026-08-21T12:00:00"
-        )
+        start, end = parse_calendar_window("2026-08-20T12:00:00", "2026-08-21T12:00:00")
 
         self.assertEqual(start, datetime(2026, 8, 20, 12, tzinfo=timezone.utc))
         self.assertEqual(end, datetime(2026, 8, 21, 12, tzinfo=timezone.utc))

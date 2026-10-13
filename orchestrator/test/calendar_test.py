@@ -943,6 +943,31 @@ class CalendarSyncTest(unittest.TestCase):
             },
         )
 
+    def test_replace_provider_events_counts_existing_events(self):
+        """Count catalog-linked events while replacing a provider's window."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service._upsert = MagicMock(return_value=True)
+        seen_at = "2026-08-20T00:00:00+00:00"
+
+        with patch(
+            "app.calendar.normalize_calendar_events",
+            return_value=[self.event()],
+        ):
+            result = service._replace_provider_events(
+                "sonarr",
+                "library",
+                [],
+                seen_at,
+                datetime(2026, 8, 9, tzinfo=timezone.utc),
+                datetime(2026, 12, 12, 23, 59, 59, 999999, tzinfo=timezone.utc),
+                set(),
+            )
+
+        self.assertEqual(result, (1, 1))
+        service._upsert.assert_called_once_with(self.event(), seen_at)
+        service.db.execute.assert_called_once()
+
     def test_sync_fetches_unlinked_metadata_immediately(self):
         service = CalendarSyncService.__new__(CalendarSyncService)
         service.connections = MagicMock()
@@ -983,6 +1008,71 @@ class CalendarSyncTest(unittest.TestCase):
             },
         )
         self.assertEqual(result["metadata"], metadata_result)
+
+    def test_sync_stops_before_fetch_when_termination_is_requested(self):
+        """Stop the sync before making provider calls after cancellation."""
+        from app.library import JobTerminated
+
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.connections = MagicMock()
+        service.connections.internal.return_value = [
+            {"provider": "sonarr", "libraryId": "library"}
+        ]
+
+        with self.assertRaises(JobTerminated):
+            service.sync(should_terminate=lambda: True)
+
+    def test_sync_records_provider_errors_without_failing_the_run(self):
+        """Record a provider failure and return it in the sync result."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.connections = MagicMock()
+        service.connections.internal.return_value = [
+            {"provider": "sonarr", "libraryId": "library"}
+        ]
+
+        with patch("app.calendar.ArrCalendarClient") as client_type:
+            client_type.return_value.fetch.side_effect = RuntimeError("offline")
+            result = service.sync()
+
+        self.assertEqual(result["providers"], 0)
+        self.assertEqual(result["provider_events"], {"sonarr": 0})
+        self.assertEqual(result["errors"], ["sonarr: RuntimeError: offline"])
+        service.connections.record_sync.assert_called_once_with(
+            "sonarr", error="sonarr: RuntimeError: offline"
+        )
+
+    def test_sync_reports_immediate_metadata_failures(self):
+        """Keep a successful calendar sync when immediate metadata fetch fails."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.connections = MagicMock()
+        service.connections.internal.return_value = [
+            {"provider": "sonarr", "libraryId": "library"}
+        ]
+
+        def replace_events(*args):
+            args[-1].add(("tvdb", "series", "series-tvdb"))
+            return 1, 0
+
+        service._replace_provider_events = MagicMock(side_effect=replace_events)
+        progress = MagicMock()
+        with (
+            patch("app.calendar.ArrCalendarClient") as client_type,
+            patch("app.calendar.CalendarFutureMetadataService") as future_type,
+        ):
+            client_type.return_value.fetch.return_value = []
+            future_type.return_value.refetch.side_effect = RuntimeError(
+                "metadata unavailable"
+            )
+            result = service.sync(metadata_progress=progress)
+
+        self.assertEqual(result["events"], 1)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(
+            result["metadata"]["errors"], ["RuntimeError: metadata unavailable"]
+        )
+        self.assertIs(
+            future_type.return_value.refetch.call_args.kwargs["progress"], progress
+        )
 
     def test_reconcile_catalog_links_matches_catalog_identities(self):
         db = DatabaseHandler("sqlite", {}, ":memory:")
@@ -1257,6 +1347,21 @@ class CalendarReadTest(unittest.TestCase):
 
 
 class CalendarFutureMetadataTest(unittest.TestCase):
+    def test_constructor_builds_database_and_metadata_dependencies(self):
+        """Construct the future metadata service from app-owned dependencies."""
+        database = MagicMock()
+        with (
+            patch("app.calendar.Config") as config,
+            patch("app.calendar.FutureMetadataCache") as cache,
+            patch("app.calendar.MetadataService") as metadata,
+        ):
+            config.return_value.database = database
+            service = CalendarFutureMetadataService()
+
+        self.assertIs(service.db, database)
+        self.assertIs(service.cache, cache.return_value)
+        self.assertIs(service.metadata, metadata.return_value)
+
     def test_target_window_includes_the_entire_boundary_date(self):
         service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
         service.db = MagicMock()
@@ -1271,6 +1376,26 @@ class CalendarFutureMetadataTest(unittest.TestCase):
         query, params = service.db.execute.call_args.args
         self.assertIn("e.event_date>=?", query)
         self.assertEqual(params, ("2026-08-13", "2026-11-18"))
+
+    def test_targets_resolve_episode_series_and_movie_identities(self):
+        """Resolve each eligible event to its future metadata identities."""
+        service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
+        service.db = MagicMock()
+        service.db.execute.return_value = [
+            ("episode", "episode-tvdb", "series-tvdb", None),
+            ("movie", None, None, "movie-tmdb"),
+        ]
+
+        targets = service._targets()
+
+        self.assertEqual(
+            targets,
+            [
+                ("tmdb", "movie", "movie-tmdb"),
+                ("tvdb", "episode", "episode-tvdb"),
+                ("tvdb", "series", "series-tvdb"),
+            ],
+        )
 
     def test_refetch_reports_each_identity(self):
         service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
@@ -1329,6 +1454,56 @@ class CalendarFutureMetadataTest(unittest.TestCase):
             project=False,
             cache=service.cache,
         )
+
+    def test_refetch_stops_before_fetch_when_termination_is_requested(self):
+        """Stop metadata refetch before the first provider request on cancellation."""
+        from app.library import JobTerminated
+
+        service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
+        service.cache = MagicMock()
+        service.metadata = MagicMock()
+
+        with (
+            patch("app.calendar.MetadataLanguageSettings") as settings,
+            self.assertRaises(JobTerminated),
+        ):
+            settings.return_value.get.return_value = ["en"]
+            service.refetch(
+                should_terminate=lambda: True,
+                targets=[("tvdb", "episode", "episode-1")],
+            )
+
+        service.metadata.fetch_locales.assert_not_called()
+        service.cache.prune_expired.assert_not_called()
+
+    def test_refetch_reports_metadata_fetch_errors(self):
+        """Record failed identities and expose the failed progress callback."""
+        service = CalendarFutureMetadataService.__new__(CalendarFutureMetadataService)
+        service.cache = MagicMock()
+        service.metadata = MagicMock()
+        service.metadata.fetch_locales.side_effect = RuntimeError(
+            "provider unavailable"
+        )
+        progress = []
+
+        with patch("app.calendar.MetadataLanguageSettings") as settings:
+            settings.return_value.get.return_value = ["en"]
+            result = service.refetch(
+                force=False,
+                progress=lambda current, total, item, failed: progress.append(
+                    (current, total, item, failed)
+                ),
+                targets=[("tvdb", "episode", "episode-1")],
+            )
+
+        self.assertEqual(result["targets"], 1)
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(
+            result["errors"],
+            ["tvdb episode episode-1: RuntimeError: provider unavailable"],
+        )
+        self.assertEqual(progress[-1], (1, 1, "TVDB episode episode-1", True))
+        service.cache.prune_expired.assert_called_once()
 
     def test_future_cache_drops_artwork_references(self):
         cache = FutureMetadataCache.__new__(FutureMetadataCache)

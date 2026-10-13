@@ -507,6 +507,49 @@ class CalendarConnectionStoreTest(unittest.TestCase):
         self.assertEqual(result[0]["apiVersion"], "v5")
         self.assertEqual(result[0]["apiKey"], "secret")
 
+    def test_public_reports_configured_version_and_unconfigured_defaults(self):
+        """Expose saved versions while defaulting missing providers to v3."""
+        database = MagicMock()
+        database.execute.side_effect = [
+            [
+                (
+                    "sonarr",
+                    "v5",
+                    "localhost",
+                    8989,
+                    "/sonarr",
+                    1,
+                    "tv",
+                    "ciphertext",
+                    "validated-at",
+                    "synced-at",
+                    None,
+                    "updated-at",
+                    "TV",
+                )
+            ],
+            [],
+        ]
+        with patch("app.calendar.Config") as config:
+            config.return_value.database = database
+            store = CalendarConnectionStore()
+
+        result = store.public()
+
+        self.assertEqual(result["sonarr"]["apiVersion"], "v5")
+        self.assertTrue(result["sonarr"]["apiKeyConfigured"])
+        self.assertEqual(result["sonarr"]["libraryName"], "TV")
+        self.assertNotIn("apiKey", result["sonarr"])
+        self.assertEqual(
+            result["radarr"],
+            {
+                "provider": "radarr",
+                "apiVersion": "v3",
+                "configured": False,
+                "apiKeyConfigured": False,
+            },
+        )
+
     def test_internal_skips_connections_with_undecryptable_keys(self):
         """Skip a provider whose stored API key can no longer be decrypted."""
         database = MagicMock()
@@ -723,6 +766,38 @@ class CalendarSyncTest(unittest.TestCase):
         service._matching_entities = MagicMock(return_value=matches)
         return service
 
+    def test_constructor_and_event_id(self):
+        """Build sync dependencies and generate stable event identifiers."""
+        database = MagicMock()
+        with (
+            patch("app.calendar.Config") as config,
+            patch("app.calendar.CalendarConnectionStore") as connections,
+            patch("app.calendar.FutureMetadataCache") as cache,
+        ):
+            config.return_value.database = database
+            service = CalendarSyncService()
+
+        event_id = service._event_id(self.event())
+
+        self.assertIs(service.db, database)
+        self.assertIs(service.connections, connections.return_value)
+        self.assertIs(service.future_cache, cache.return_value)
+        self.assertEqual(event_id, service._event_id(self.event()))
+
+    def test_matching_entities_uses_episode_and_series_ids(self):
+        """Find and de-duplicate catalog matches for both Sonarr identities."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service.db.execute.side_effect = [
+            [("episode-id", "episode"), ("episode-id", "episode")],
+            [("series-id", "series")],
+        ]
+
+        matches = service._matching_entities(self.event())
+
+        self.assertEqual(matches, [("episode-id", "episode"), ("series-id", "series")])
+        self.assertEqual(service.db.execute.call_count, 2)
+
     def test_unusable_sonarr_payload_does_not_delete_saved_events(self):
         """Preserve persisted events when Sonarr returns unusable identities."""
         service = CalendarSyncService.__new__(CalendarSyncService)
@@ -757,6 +832,48 @@ class CalendarSyncTest(unittest.TestCase):
         self.assertEqual(linked, [(linked[0][0], "episode-id")])
         update = service.db.execute.call_args_list[-1]
         self.assertEqual(update.args[1][0], "existing")
+
+    def test_episode_without_episode_tvdb_id_promotes_series_metadata(self):
+        """Promote series metadata when a matched episode has no TVDB ID."""
+        service = self.service([("episode-id", "episode")])
+        event = replace(self.event(), tvdb_id=None)
+
+        self.assertTrue(service._upsert(event, "2026-08-20T00:00:00+00:00"))
+
+        service.future_cache.promote_identity.assert_called_once_with(
+            "tvdb", "series", "series-tvdb"
+        )
+
+    def test_movie_match_promotes_tmdb_metadata(self):
+        """Promote the TMDB identity when a movie calendar event matches."""
+        service = self.service([("movie-id", "movie")])
+        event = replace(
+            self.event(),
+            provider="radarr",
+            kind="movie",
+            release_type="cinema",
+            tvdb_id=None,
+            series_tvdb_id=None,
+            tmdb_id="movie-tmdb",
+            season_number=None,
+            episode_number=None,
+        )
+
+        self.assertTrue(service._upsert(event, "2026-08-20T00:00:00+00:00"))
+
+        service.future_cache.promote_identity.assert_called_once_with(
+            "tmdb", "movie", "movie-tmdb"
+        )
+
+    def test_reconcile_catalog_links_skips_when_required_tables_are_missing(self):
+        """Avoid querying or mutating a partial pre-migration database."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service.db.execute.return_value = []
+
+        self.assertEqual(service.reconcile_catalog_links("library"), 0)
+
+        service.db.transaction.assert_not_called()
 
     def test_out_of_window_provider_events_are_not_persisted(self):
         service = CalendarSyncService.__new__(CalendarSyncService)

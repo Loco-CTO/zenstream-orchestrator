@@ -423,7 +423,6 @@ class ArrCalendarClient:
                         return response
                 time.sleep(min(5.0, 0.25 * (2**attempt)))
                 attempt += 1
-        raise RuntimeError("calendar request retry loop ended unexpectedly")
 
     @staticmethod
     def _response_items(payload: object) -> list[dict]:

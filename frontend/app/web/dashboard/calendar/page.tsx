@@ -16,6 +16,7 @@ import {
 } from "../components/dashboard-surface";
 
 type Provider = "sonarr" | "radarr";
+type SonarrApiVersion = "v3" | "v5";
 
 type Library = {
 	id: string;
@@ -28,6 +29,7 @@ type ServiceSettings = {
 	address: string;
 	port: number;
 	baseUrl: string;
+	apiVersion: SonarrApiVersion;
 	useSsl: boolean;
 	libraryId: string;
 	libraryName?: string;
@@ -45,6 +47,7 @@ const DEFAULTS: Record<Provider, ServiceSettings> = {
 		address: "",
 		port: 8989,
 		baseUrl: "/",
+		apiVersion: "v3",
 		useSsl: false,
 		libraryId: "",
 		apiKeyConfigured: false,
@@ -56,6 +59,7 @@ const DEFAULTS: Record<Provider, ServiceSettings> = {
 		address: "",
 		port: 7878,
 		baseUrl: "/",
+		apiVersion: "v3",
 		useSsl: false,
 		libraryId: "",
 		apiKeyConfigured: false,
@@ -144,6 +148,7 @@ export default function CalendarSettingsPage() {
 					address: service.address,
 					port: service.port,
 					baseUrl: service.baseUrl,
+					apiVersion: service.apiVersion,
 					useSsl: service.useSsl,
 					libraryId: service.libraryId,
 					...(service.apiKey ? { apiKey: service.apiKey } : {}),
@@ -322,6 +327,26 @@ function ServiceCard({
 						/>
 					</label>
 				</div>
+				{isSonarr && (
+					<label className="block">
+						<span className="text-sm font-semibold">Sonarr API version</span>
+						<select
+							value={service.apiVersion}
+							onChange={(event) =>
+								onChange(provider, {
+									apiVersion: event.target.value as SonarrApiVersion,
+								})
+							}
+							className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none"
+						>
+							<option value="v3">v3</option>
+							<option value="v5">v5</option>
+						</select>
+						<span className="mt-2 block text-xs console-muted">
+							Calendar sync uses only the selected Sonarr API version.
+						</span>
+					</label>
+				)}
 				<label className="flex items-center gap-3 text-sm">
 					<input
 						type="checkbox"

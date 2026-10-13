@@ -312,6 +312,30 @@ class OpenApiContractTest(unittest.TestCase):
             }.issubset(calendar_event)
         )
 
+        calendar_settings = schemas["CalendarSettings"]["properties"]
+        self.assertEqual(set(calendar_settings), {"sonarr", "radarr"})
+        connection_status = schemas["SonarrCalendarConnectionStatus"]["properties"]
+        self.assertIn("apiVersion", connection_status)
+        self.assertEqual(connection_status["apiVersion"]["enum"], ["v3", "v5"])
+        radarr_status = schemas["RadarrCalendarConnectionStatus"]["properties"]
+        self.assertEqual(radarr_status["apiVersion"]["const"], "v3")
+        connection_update = schemas["SonarrCalendarConnectionUpdate"]["properties"]
+        self.assertIn(
+            ["v3", "v5"],
+            [
+                value.get("enum")
+                for value in connection_update["apiVersion"].get("anyOf", [])
+            ],
+        )
+        radarr_update = schemas["RadarrCalendarConnectionUpdate"]["properties"]
+        self.assertIn(
+            "v3",
+            [
+                value.get("const")
+                for value in radarr_update["apiVersion"].get("anyOf", [])
+            ],
+        )
+
         lyrics = schemas["LyricsResponse"]["properties"]
         self.assertIn("trackId", lyrics)
         lyrics_schema = lyrics["lyrics"]

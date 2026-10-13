@@ -216,9 +216,7 @@ class DatabaseHandlerTest(unittest.TestCase):
             self.assertFalse(reader_thread.is_alive())
             self.assertEqual(writer_errors, [])
             self.assertEqual(len(reader_errors), 1)
-            self.assertEqual(
-                database.execute("SELECT value FROM values_table"), [(1,)]
-            )
+            self.assertEqual(database.execute("SELECT value FROM values_table"), [(1,)])
         finally:
             release_reader.set()
             writer_thread.join(2)

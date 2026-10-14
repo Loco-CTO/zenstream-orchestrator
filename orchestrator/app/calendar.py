@@ -660,6 +660,7 @@ def _matching_catalog_entities(
     season_number: int | None,
     episode_number: int | None,
 ) -> list[tuple[str, str]]:
+    """Return provider identity matches, including a numbering fallback for episodes."""
     matches = []
     for provider, provider_id, entity_type in _catalog_entity_identities(
         kind,
@@ -748,6 +749,7 @@ class CalendarSyncService:
         with self.db.transaction() as cursor:
 
             def execute_rows(query, parameters):
+                """Fetch lookup rows through the active reconciliation transaction."""
                 return cursor.execute(query, parameters).fetchall()
 
             event_rows = cursor.execute(

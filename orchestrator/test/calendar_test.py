@@ -841,9 +841,7 @@ class CalendarSyncTest(unittest.TestCase):
             [("episode-id", "episode")],
         ]
 
-        matches = service._matching_entities(
-            replace(self.event(), tvdb_id=None)
-        )
+        matches = service._matching_entities(replace(self.event(), tvdb_id=None))
 
         self.assertEqual(
             matches,

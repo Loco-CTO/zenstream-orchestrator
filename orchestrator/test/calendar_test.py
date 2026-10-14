@@ -832,6 +832,23 @@ class CalendarSyncTest(unittest.TestCase):
         self.assertEqual(matches, [("episode-id", "episode"), ("series-id", "series")])
         self.assertEqual(service.db.execute.call_count, 2)
 
+    def test_matching_entities_falls_back_to_series_episode_number(self):
+        """Resolve a catalog episode by its series and numbering without an episode TVDB ID."""
+        service = CalendarSyncService.__new__(CalendarSyncService)
+        service.db = MagicMock()
+        service.db.execute.side_effect = [
+            [("series-id", "series")],
+            [("episode-id", "episode")],
+        ]
+
+        matches = service._matching_entities(replace(self.event(), tvdb_id=None))
+
+        self.assertEqual(
+            matches,
+            [("series-id", "series"), ("episode-id", "episode")],
+        )
+        self.assertEqual(service.db.execute.call_count, 2)
+
     def test_unusable_sonarr_payload_does_not_delete_saved_events(self):
         """Preserve persisted events when Sonarr returns unusable identities."""
         service = CalendarSyncService.__new__(CalendarSyncService)
@@ -1102,20 +1119,20 @@ class CalendarSyncTest(unittest.TestCase):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         try:
             db.execute(
-                "CREATE TABLE calendar_events (id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,tvdb_id TEXT,tmdb_id TEXT,series_tvdb_id TEXT,state TEXT,updated_at TEXT)"
+                "CREATE TABLE calendar_events (id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,tvdb_id TEXT,tmdb_id TEXT,series_tvdb_id TEXT,season_number INTEGER,episode_number INTEGER,state TEXT,updated_at TEXT)"
             )
             db.execute(
                 "CREATE TABLE calendar_event_entities (event_id TEXT,entity_id TEXT,PRIMARY KEY(event_id,entity_id))"
             )
             db.execute(
-                "CREATE TABLE library_entities (id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT)"
+                "CREATE TABLE library_entities (id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT,parent_id TEXT,season_number INTEGER,episode_number INTEGER)"
             )
             db.execute(
                 "CREATE TABLE entity_provider_ids (entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,PRIMARY KEY(entity_id,provider,identifier_type))"
             )
             db.execute("CREATE TABLE media_files (entity_id TEXT,role TEXT)")
             db.execute(
-                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     "episode-event",
                     "library",
@@ -1123,12 +1140,14 @@ class CalendarSyncTest(unittest.TestCase):
                     "episode-tvdb",
                     None,
                     "series-tvdb",
+                    1,
+                    2,
                     "future",
                     "before",
                 ),
             )
             db.execute(
-                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     "movie-event",
                     "library",
@@ -1136,12 +1155,14 @@ class CalendarSyncTest(unittest.TestCase):
                     None,
                     "movie-tmdb",
                     None,
+                    None,
+                    None,
                     "future",
                     "before",
                 ),
             )
             db.execute(
-                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     "series-only-event",
                     "library",
@@ -1149,21 +1170,42 @@ class CalendarSyncTest(unittest.TestCase):
                     "missing-episode",
                     None,
                     "series-tvdb",
+                    1,
+                    99,
                     "future",
                     "before",
                 ),
             )
             db.execute(
-                "INSERT INTO library_entities VALUES(?,?,?)",
-                ("series-1", "library", "series"),
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "number-only-event",
+                    "library",
+                    "episode",
+                    None,
+                    None,
+                    "series-tvdb",
+                    1,
+                    2,
+                    "future",
+                    "before",
+                ),
             )
             db.execute(
-                "INSERT INTO library_entities VALUES(?,?,?)",
-                ("episode-1", "library", "episode"),
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?)",
+                ("series-1", "library", "series", None, None, None),
             )
             db.execute(
-                "INSERT INTO library_entities VALUES(?,?,?)",
-                ("movie-1", "library", "movie"),
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?)",
+                ("season-1", "library", "season", "series-1", 1, None),
+            )
+            db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?)",
+                ("episode-1", "library", "episode", "season-1", 1, 2),
+            )
+            db.execute(
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?)",
+                ("movie-1", "library", "movie", None, None, None),
             )
             db.execute(
                 "INSERT INTO entity_provider_ids VALUES(?,?,?,?)",
@@ -1190,18 +1232,23 @@ class CalendarSyncTest(unittest.TestCase):
             service.db = db
             service.future_cache = MagicMock()
 
-            self.assertEqual(service.reconcile_catalog_links("library"), 2)
+            self.assertEqual(service.reconcile_catalog_links("library"), 3)
             self.assertEqual(
                 db.execute(
                     "SELECT event_id,entity_id FROM calendar_event_entities ORDER BY event_id"
                 ),
-                [("episode-event", "episode-1"), ("movie-event", "movie-1")],
+                [
+                    ("episode-event", "episode-1"),
+                    ("movie-event", "movie-1"),
+                    ("number-only-event", "episode-1"),
+                ],
             )
             self.assertEqual(
                 db.execute("SELECT id,state FROM calendar_events ORDER BY id"),
                 [
                     ("episode-event", "existing"),
                     ("movie-event", "existing"),
+                    ("number-only-event", "existing"),
                     ("series-only-event", "future"),
                 ],
             )
@@ -1209,7 +1256,7 @@ class CalendarSyncTest(unittest.TestCase):
                 db.execute(
                     "SELECT COUNT(*) FROM calendar_event_entities x JOIN media_files m ON m.entity_id=x.entity_id AND m.role='media'"
                 )[0][0],
-                2,
+                3,
             )
             service.future_cache.promote_identity.assert_any_call(
                 "tvdb", "episode", "episode-tvdb"
@@ -1227,19 +1274,19 @@ class CalendarSyncTest(unittest.TestCase):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         try:
             db.execute(
-                "CREATE TABLE calendar_events (id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,tvdb_id TEXT,tmdb_id TEXT,series_tvdb_id TEXT,state TEXT,updated_at TEXT)"
+                "CREATE TABLE calendar_events (id TEXT PRIMARY KEY,library_id TEXT,kind TEXT,tvdb_id TEXT,tmdb_id TEXT,series_tvdb_id TEXT,season_number INTEGER,episode_number INTEGER,state TEXT,updated_at TEXT)"
             )
             db.execute(
                 "CREATE TABLE calendar_event_entities (event_id TEXT,entity_id TEXT,PRIMARY KEY(event_id,entity_id))"
             )
             db.execute(
-                "CREATE TABLE library_entities (id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT)"
+                "CREATE TABLE library_entities (id TEXT PRIMARY KEY,library_id TEXT,entity_type TEXT,parent_id TEXT,season_number INTEGER,episode_number INTEGER)"
             )
             db.execute(
                 "CREATE TABLE entity_provider_ids (entity_id TEXT,provider TEXT,identifier_type TEXT,provider_id TEXT,PRIMARY KEY(entity_id,provider,identifier_type))"
             )
             db.execute(
-                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO calendar_events VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     "event-1",
                     "library",
@@ -1247,13 +1294,15 @@ class CalendarSyncTest(unittest.TestCase):
                     "episode-tvdb",
                     None,
                     "series-tvdb",
+                    1,
+                    2,
                     "existing",
                     "before",
                 ),
             )
             db.execute(
-                "INSERT INTO library_entities VALUES(?,?,?)",
-                ("episode-1", "library", "episode"),
+                "INSERT INTO library_entities VALUES(?,?,?,?,?,?)",
+                ("episode-1", "library", "episode", None, 1, 2),
             )
             db.execute(
                 "INSERT INTO calendar_event_entities VALUES(?,?)",

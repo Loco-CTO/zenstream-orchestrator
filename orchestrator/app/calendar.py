@@ -746,6 +746,7 @@ class CalendarSyncService:
         promoted_identities: set[tuple[str, str, str]] = set()
         updated_at = iso_now()
         with self.db.transaction() as cursor:
+
             def execute_rows(query, parameters):
                 return cursor.execute(query, parameters).fetchall()
 

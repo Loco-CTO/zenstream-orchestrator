@@ -650,6 +650,46 @@ def _episode_matches_by_series_number(
     return [(row[0], row[1]) for row in rows]
 
 
+def _matching_catalog_entities(
+    execute,
+    library_id: str,
+    kind: str,
+    tvdb_id: str | None,
+    series_tvdb_id: str | None,
+    tmdb_id: str | None,
+    season_number: int | None,
+    episode_number: int | None,
+) -> list[tuple[str, str]]:
+    matches = []
+    for provider, provider_id, entity_type in _catalog_entity_identities(
+        kind,
+        tvdb_id=tvdb_id,
+        series_tvdb_id=series_tvdb_id,
+        tmdb_id=tmdb_id,
+    ):
+        rows = execute(
+            "SELECT e.id,e.entity_type FROM entity_provider_ids p "
+            "JOIN library_entities e ON e.id=p.entity_id "
+            "WHERE e.library_id=? AND p.provider=? AND p.provider_id=? "
+            "AND e.entity_type=?",
+            (library_id, provider, provider_id, entity_type),
+        )
+        matches.extend((row[0], row[1]) for row in rows)
+    if kind == "episode" and not any(
+        entity_type == "episode" for _, entity_type in matches
+    ):
+        matches.extend(
+            _episode_matches_by_series_number(
+                execute,
+                library_id,
+                series_tvdb_id,
+                season_number,
+                episode_number,
+            )
+        )
+    return list(dict.fromkeys(matches))
+
+
 class CalendarSyncService:
     def __init__(self):
         self.db = Config().database
@@ -666,32 +706,16 @@ class CalendarSyncService:
         )
 
     def _matching_entities(self, event: CalendarEventValue) -> list[tuple[str, str]]:
-        matches = []
-        for provider, provider_id, entity_type in _catalog_entity_identities(
+        return _matching_catalog_entities(
+            self.db.execute,
+            event.library_id,
             event.kind,
-            tvdb_id=event.tvdb_id,
-            series_tvdb_id=event.series_tvdb_id,
-            tmdb_id=event.tmdb_id,
-        ):
-            rows = self.db.execute(
-                "SELECT e.id,e.entity_type FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
-                "WHERE e.library_id=? AND p.provider=? AND p.provider_id=? AND e.entity_type=?",
-                (event.library_id, provider, provider_id, entity_type),
-            )
-            matches.extend((row[0], row[1]) for row in rows)
-        if event.kind == "episode" and not any(
-            entity_type == "episode" for _, entity_type in matches
-        ):
-            matches.extend(
-                _episode_matches_by_series_number(
-                    self.db.execute,
-                    event.library_id,
-                    event.series_tvdb_id,
-                    event.season_number,
-                    event.episode_number,
-                )
-            )
-        return list(dict.fromkeys(matches))
+            event.tvdb_id,
+            event.series_tvdb_id,
+            event.tmdb_id,
+            event.season_number,
+            event.episode_number,
+        )
 
     def reconcile_catalog_links(self, library_id: str) -> int:
         """Relink stored calendar events after catalog admission or cleanup.
@@ -722,8 +746,12 @@ class CalendarSyncService:
         promoted_identities: set[tuple[str, str, str]] = set()
         updated_at = iso_now()
         with self.db.transaction() as cursor:
+            def execute_rows(query, parameters):
+                return cursor.execute(query, parameters).fetchall()
+
             event_rows = cursor.execute(
-                "SELECT id,kind,tvdb_id,tmdb_id,series_tvdb_id,season_number,episode_number,state "
+                "SELECT id,kind,tvdb_id,tmdb_id,series_tvdb_id,"
+                "season_number,episode_number,state "
                 "FROM calendar_events WHERE library_id=? ORDER BY id",
                 (library_id,),
             ).fetchall()
@@ -738,31 +766,16 @@ class CalendarSyncService:
                 current_state,
             ) in event_rows:
                 expected_entity_type = "movie" if kind == "movie" else "episode"
-                matches: list[tuple[str, str]] = []
-                for provider, provider_id, entity_type in _catalog_entity_identities(
+                matches = _matching_catalog_entities(
+                    execute_rows,
+                    library_id,
                     kind,
                     tvdb_id=tvdb_id,
                     series_tvdb_id=series_tvdb_id,
                     tmdb_id=tmdb_id,
-                ):
-                    rows = cursor.execute(
-                        "SELECT e.id,e.entity_type FROM entity_provider_ids p JOIN library_entities e ON e.id=p.entity_id "
-                        "WHERE e.library_id=? AND p.provider=? AND p.provider_id=? AND e.entity_type=?",
-                        (library_id, provider, provider_id, entity_type),
-                    ).fetchall()
-                    matches.extend((row[0], row[1]) for row in rows)
-                if kind == "episode" and not any(
-                    entity_type == "episode" for _, entity_type in matches
-                ):
-                    matches.extend(
-                        _episode_matches_by_series_number(
-                            cursor.execute,
-                            library_id,
-                            series_tvdb_id,
-                            season_number,
-                            episode_number,
-                        )
-                    )
+                    season_number=season_number,
+                    episode_number=episode_number,
+                )
                 matched_ids = sorted(
                     {
                         entity_id

@@ -849,6 +849,45 @@ class CalendarSyncTest(unittest.TestCase):
         )
         self.assertEqual(service.db.execute.call_count, 2)
 
+    def test_matching_entities_skips_incomplete_or_invalid_series_number(self):
+        """Skip episode-number fallback when a provider identity or number is unusable."""
+        cases = (
+            (
+                replace(self.event(), tvdb_id=None, series_tvdb_id=None),
+                0,
+                [],
+            ),
+            (
+                replace(self.event(), tvdb_id=None, season_number=None),
+                1,
+                [("series-id", "series")],
+            ),
+            (
+                replace(self.event(), tvdb_id=None, episode_number=None),
+                1,
+                [("series-id", "series")],
+            ),
+            (
+                replace(self.event(), tvdb_id=None, season_number="invalid"),
+                1,
+                [("series-id", "series")],
+            ),
+            (
+                replace(self.event(), tvdb_id=None, season_number=[]),
+                1,
+                [("series-id", "series")],
+            ),
+        )
+
+        for event, expected_queries, expected_matches in cases:
+            with self.subTest(event=event):
+                service = CalendarSyncService.__new__(CalendarSyncService)
+                service.db = MagicMock()
+                service.db.execute.return_value = [("series-id", "series")]
+
+                self.assertEqual(service._matching_entities(event), expected_matches)
+                self.assertEqual(service.db.execute.call_count, expected_queries)
+
     def test_unusable_sonarr_payload_does_not_delete_saved_events(self):
         """Preserve persisted events when Sonarr returns unusable identities."""
         service = CalendarSyncService.__new__(CalendarSyncService)

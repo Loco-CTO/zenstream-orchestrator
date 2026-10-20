@@ -167,8 +167,7 @@ class LumiCatalogAdapter:
             ),
         }
         item_count = sum(
-            value is not None
-            for value in (compact["item"], compact["backgroundItem"])
+            value is not None for value in (compact["item"], compact["backgroundItem"])
         ) + len(compact["seasons"])
         logger.info(
             "Lumi catalog read completed turn_id=%s operation=item_detail phase=compact duration_ms=%.1f item_count=%d duration_ms_total=%.1f",

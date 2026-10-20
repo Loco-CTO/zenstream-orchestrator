@@ -159,9 +159,7 @@ async def lifespan(_app: FastAPI):
         """Dump thread stacks if the loop cannot re-arm the native timer for 5s."""
         try:
             while True:
-                faulthandler.dump_traceback_later(
-                    5.0, repeat=True, file=sys.stderr
-                )
+                faulthandler.dump_traceback_later(5.0, repeat=True, file=sys.stderr)
                 await asyncio.sleep(1.0)
         except (OSError, RuntimeError, ValueError):
             event_loop_logger.exception("event loop traceback watchdog failed")

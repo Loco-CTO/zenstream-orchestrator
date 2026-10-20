@@ -67,6 +67,12 @@ def configure_logging() -> None:
         file_handler.setFormatter(formatter)
         file_handler.setLevel(logging.DEBUG)
         root.addHandler(file_handler)
+        lumi_logger = logging.getLogger("lumi")
+        lumi_logger.setLevel(level)
+        lumi_logger.propagate = False
+        for handler in root.handlers:
+            if handler not in lumi_logger.handlers:
+                lumi_logger.addHandler(handler)
         for logger_name in ("uvicorn.access", "uvicorn.error"):
             external_logger = logging.getLogger(logger_name)
             for handler in external_logger.handlers:

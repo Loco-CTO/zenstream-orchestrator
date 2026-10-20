@@ -5128,6 +5128,57 @@ class LibraryMetadataTest(unittest.TestCase):
         )
 
 
+class LibraryRenameTest(unittest.TestCase):
+    def setUp(self):
+        self.db = DatabaseHandler("sqlite", {}, ":memory:")
+        self.db.execute(
+            "CREATE TABLE libraries (id TEXT PRIMARY KEY, name TEXT, type TEXT, sort_order INTEGER, directory TEXT, watch_enabled INTEGER, scan_interval_minutes INTEGER, scan_state TEXT, scan_error TEXT, last_scan_started_at TEXT, last_scan_finished_at TEXT, created_at TEXT, updated_at TEXT)"
+        )
+        self.db.execute(
+            "CREATE TABLE library_sources (library_id TEXT, source_library_id TEXT)"
+        )
+        self.db.execute(
+            "INSERT INTO libraries VALUES('library-1','Movies','movies',0,'C:/media/movies',1,1440,'ready',NULL,NULL,NULL,'before','before')"
+        )
+        self.db.execute(
+            "INSERT INTO libraries VALUES('library-2','TV','tv_series',-1,'C:/media/tv',0,720,'ready',NULL,NULL,NULL,'before','before')"
+        )
+        self.store = LibraryStore.__new__(LibraryStore)
+        self.store.db = self.db
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_name_only_patch_renames_library_without_scanning(self):
+        with (
+            patch.object(library_routes, "store", self.store),
+            patch.object(
+                library_routes.scheduler, "refresh_library_definition"
+            ) as refresh_definition,
+            patch.object(library_routes.runtime, "enqueue") as enqueue,
+            patch.object(library_routes.runtime, "refresh_watchers") as refresh_watchers,
+        ):
+            result = library_routes._update_library_sync(
+                "library-1", {"name": "  Films  "}
+            )
+
+        self.assertEqual(result["name"], "Films")
+        self.assertEqual(result["directory"], "C:/media/movies")
+        self.assertTrue(result["watchEnabled"])
+        self.assertEqual(result["scanIntervalMinutes"], 1440)
+        refresh_definition.assert_called_once()
+        self.assertEqual(refresh_definition.call_args.args[0]["name"], "Films")
+        enqueue.assert_not_called()
+        refresh_watchers.assert_not_called()
+
+    def test_blank_and_duplicate_library_names_are_rejected(self):
+        for name in ("  ", "tv"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.store.update("library-1", {"name": name})
+
+        self.assertEqual(self.store.get("library-1")["name"], "Movies")
+
+
 class LibraryJobControlTest(unittest.TestCase):
     def setUp(self):
         self.db = DatabaseHandler("sqlite", {}, ":memory:")

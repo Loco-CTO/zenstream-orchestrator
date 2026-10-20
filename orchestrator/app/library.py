@@ -1134,7 +1134,12 @@ class LibraryStore:
         sort_order = self._normalize_sort_order(
             values.get("sortOrder", current.get("sortOrder", 0))
         )
-        name = str(values.get("name", current["name"])).strip()
+        name_value = values.get("name", current["name"])
+        if not isinstance(name_value, str):
+            raise ValueError("Library name must be text.")
+        name = name_value.strip()
+        if not name:
+            raise ValueError("A library name is required.")
         interval = max(
             15,
             min(
@@ -1149,27 +1154,33 @@ class LibraryStore:
         if current["type"] != "collection" and "directory" in values:
             directory = normalized_path(str(values["directory"]))
         watch_enabled = int(bool(values.get("watchEnabled", current["watchEnabled"])))
-        if "sort_order" in self._library_columns:
-            self.db.execute(
-                "UPDATE libraries SET name=?,sort_order=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
-                (
-                    name,
-                    sort_order,
-                    directory,
-                    watch_enabled,
-                    interval,
-                    now(),
-                    library_id,
-                ),
-            )
-        else:
-            self.db.execute(
-                "UPDATE libraries SET name=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
-                (name, directory, watch_enabled, interval, now(), library_id),
-            )
-        if current["type"] == "collection" and "sourceLibraryIds" in values:
-            source_ids = list(dict.fromkeys(values["sourceLibraryIds"]))
-            with self.db.transaction() as cursor:
+        with self.db.transaction() as cursor:
+            duplicate = cursor.execute(
+                "SELECT 1 FROM libraries WHERE name=? COLLATE NOCASE AND id<>?",
+                (name, library_id),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("A library with that name already exists.")
+            if "sort_order" in self._library_columns:
+                cursor.execute(
+                    "UPDATE libraries SET name=?,sort_order=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
+                    (
+                        name,
+                        sort_order,
+                        directory,
+                        watch_enabled,
+                        interval,
+                        now(),
+                        library_id,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE libraries SET name=?,directory=?,watch_enabled=?,scan_interval_minutes=?,updated_at=? WHERE id=?",
+                    (name, directory, watch_enabled, interval, now(), library_id),
+                )
+            if current["type"] == "collection" and "sourceLibraryIds" in values:
+                source_ids = list(dict.fromkeys(values["sourceLibraryIds"]))
                 cursor.execute(
                     "DELETE FROM library_sources WHERE library_id=?", (library_id,)
                 )

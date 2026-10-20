@@ -381,6 +381,8 @@ class OpenApiContractTest(unittest.TestCase):
         update_schema = self.schema["components"]["schemas"]["LibraryUpdateRequest"]
         self.assertEqual(update_schema.get("required", []), [])
         self.assertIn("name", update_schema["properties"])
+        self.assertIn("type", update_schema["properties"])
+        self.assertIn("enabled", update_schema["properties"])
 
     def test_readiness_is_public_and_documents_database_failure(self):
         """Document public readiness and database-failure responses."""

@@ -1235,9 +1235,11 @@ class LibraryUpdateRequest(DocsModel):
         description="Optional new library name. A name-only update does not queue a scan.",
         examples=["Films"],
     )
+    type: str = Field(default="movie", examples=["movie"])
     directory: str = Field(
         default="<configured-library-root>", examples=["<configured-library-root>"]
     )
+    enabled: bool | None = Field(default=True, examples=[True])
     watchEnabled: bool = Field(default=True, examples=[True])
     scanIntervalMinutes: int = Field(default=1440, examples=[1440])
     sourceLibraryIds: list[str] = Field(default_factory=list)

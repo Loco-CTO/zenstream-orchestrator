@@ -4986,6 +4986,21 @@
             "title": "Directory",
             "type": "string"
           },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": true,
+            "examples": [
+              true
+            ],
+            "title": "Enabled"
+          },
           "name": {
             "default": "Films",
             "description": "Optional new library name. A name-only update does not queue a scan.",
@@ -5017,6 +5032,14 @@
             },
             "title": "Sourcelibraryids",
             "type": "array"
+          },
+          "type": {
+            "default": "movie",
+            "examples": [
+              "movie"
+            ],
+            "title": "Type",
+            "type": "string"
           },
           "watchEnabled": {
             "default": true,

@@ -4977,6 +4977,7 @@
       },
       "LibraryUpdateRequest": {
         "additionalProperties": true,
+        "description": "Describe the fields accepted by a partial library update.",
         "properties": {
           "directory": {
             "default": "<configured-library-root>",

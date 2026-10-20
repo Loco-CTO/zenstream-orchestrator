@@ -1230,9 +1230,13 @@ class LibraryRequest(DocsModel):
 
 
 class LibraryUpdateRequest(DocsModel):
+    """Describe the fields accepted by a partial library update."""
+
     name: str = Field(
         default="Films",
-        description="Optional new library name. A name-only update does not queue a scan.",
+        description=(
+            "Optional new library name. A name-only update does not queue a scan."
+        ),
         examples=["Films"],
     )
     type: str = Field(default="movie", examples=["movie"])

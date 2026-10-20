@@ -372,12 +372,8 @@ class OpenApiContractTest(unittest.TestCase):
 
     def test_library_patch_documents_name_only_updates(self):
         """Allow an admin client to document a partial library rename."""
-        operation = self.schema["paths"]["/api/admin/libraries/{library_id}"][
-            "patch"
-        ]
-        body_schema = operation["requestBody"]["content"]["application/json"][
-            "schema"
-        ]
+        operation = self.schema["paths"]["/api/admin/libraries/{library_id}"]["patch"]
+        body_schema = operation["requestBody"]["content"]["application/json"]["schema"]
         self.assertEqual(
             body_schema["$ref"],
             "#/components/schemas/LibraryUpdateRequest",

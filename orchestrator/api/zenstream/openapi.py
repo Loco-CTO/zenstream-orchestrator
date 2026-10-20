@@ -2222,7 +2222,10 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/admin/libraries"): "List administrator libraries",
     ("POST", "/api/admin/libraries"): "Create a library",
     ("GET", "/api/admin/libraries/{library_id}"): "Get a library",
-    ("PATCH", "/api/admin/libraries/{library_id}"): "Update library settings or rename it",
+    (
+        "PATCH",
+        "/api/admin/libraries/{library_id}",
+    ): "Update library settings or rename it",
     ("DELETE", "/api/admin/libraries/{library_id}"): "Delete a library",
     ("POST", "/api/admin/libraries/{library_id}/scan"): "Queue a library scan",
     (

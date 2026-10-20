@@ -5156,7 +5156,9 @@ class LibraryRenameTest(unittest.TestCase):
                 library_routes.scheduler, "refresh_library_definition"
             ) as refresh_definition,
             patch.object(library_routes.runtime, "enqueue") as enqueue,
-            patch.object(library_routes.runtime, "refresh_watchers") as refresh_watchers,
+            patch.object(
+                library_routes.runtime, "refresh_watchers"
+            ) as refresh_watchers,
         ):
             result = library_routes._update_library_sync(
                 "library-1", {"name": "  Films  "}

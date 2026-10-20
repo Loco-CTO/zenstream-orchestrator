@@ -7,6 +7,7 @@ import {
 	IconChevronUp,
 	IconEye,
 	IconFolder,
+	IconPencil,
 	IconPlus,
 	IconRefresh,
 	IconTrash,
@@ -54,6 +55,8 @@ export default function LibrariesPage() {
 	const [interval, setIntervalValue] = useState(1440);
 	const [message, setMessage] = useState("");
 	const [addModal, setAddModal] = useState(false);
+	const [renameModal, setRenameModal] = useState<Library | null>(null);
+	const [renameName, setRenameName] = useState("");
 	const [deleteModal, setDeleteModal] = useState<Library | null>(null);
 
 	async function load(current = session) {
@@ -140,6 +143,34 @@ export default function LibrariesPage() {
 		);
 		setDeleteModal(null);
 		void load();
+	}
+	async function rename(event: FormEvent) {
+		event.preventDefault();
+		if (!session || !renameModal) return;
+		const nextName = renameName.trim();
+		if (!nextName) {
+			setMessage("A library name is required.");
+			return;
+		}
+		const response = await adminFetch(
+			`/api/admin/libraries/${renameModal.id}`,
+			session,
+			{
+				method: "PATCH",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name: nextName }),
+			},
+		);
+		setMessage(
+			response.ok
+				? `Library renamed to ${nextName}.`
+				: (await response.json().catch(() => null))?.detail ||
+						"Could not rename library.",
+		);
+		if (response.ok) {
+			setRenameModal(null);
+			void load();
+		}
 	}
 
 	return (
@@ -334,6 +365,26 @@ export default function LibrariesPage() {
 								>
 									<IconEye size={15} />
 								</Link>
+								<button
+									type="button"
+									onClick={() => {
+										setRenameName(library.name);
+										setRenameModal(library);
+									}}
+									aria-label={`Rename ${library.name}`}
+									title="Rename library"
+									style={{
+										width: 32,
+										height: 32,
+										border: 0,
+										background: "none",
+										color: "#777",
+										cursor: "pointer",
+										borderRadius: 8,
+									}}
+								>
+									<IconPencil size={15} />
+								</button>
 								<button
 									type="button"
 									onClick={() => void rescan(library)}
@@ -549,6 +600,68 @@ export default function LibrariesPage() {
 						>
 							<IconPlus size={14} />
 							Create and scan
+						</button>
+					</div>
+				</form>
+			</DashboardModal>
+			<DashboardModal
+				open={Boolean(renameModal)}
+				onClose={() => setRenameModal(null)}
+				title="Rename library"
+			>
+				<form
+					onSubmit={rename}
+					style={{ display: "flex", flexDirection: "column", gap: 14 }}
+				>
+					<label
+						style={{
+							fontSize: 10,
+							fontWeight: 600,
+							color: "var(--primary)",
+							letterSpacing: ".1em",
+							textTransform: "uppercase",
+						}}
+					>
+						Name
+						<input
+							autoFocus
+							required
+							value={renameName}
+							onChange={(event) => setRenameName(event.target.value)}
+							placeholder="Library name"
+							style={{ ...inputStyle, marginTop: 8 }}
+						/>
+					</label>
+					<div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+						<button
+							type="button"
+							onClick={() => setRenameModal(null)}
+							style={{
+								border: "1px solid var(--border-strong)",
+								background: "transparent",
+								color: "#aaa",
+								borderRadius: 7,
+								padding: "9px 14px",
+								fontSize: 12,
+								cursor: "pointer",
+							}}
+						>
+							Cancel
+						</button>
+						<button
+							type="submit"
+							style={{
+								border: 0,
+								background: "var(--primary)",
+								color: "#000",
+								borderRadius: 7,
+								padding: "9px 14px",
+								fontSize: 12,
+								fontWeight: 600,
+								cursor: "pointer",
+							}}
+						>
+							Save name
 						</button>
 					</div>
 				</form>

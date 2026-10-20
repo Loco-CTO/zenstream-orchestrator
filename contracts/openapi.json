@@ -4975,6 +4975,85 @@
         "title": "LibraryRequest",
         "type": "object"
       },
+      "LibraryUpdateRequest": {
+        "additionalProperties": true,
+        "description": "Describe the fields accepted by a partial library update.",
+        "properties": {
+          "directory": {
+            "default": "<configured-library-root>",
+            "examples": [
+              "<configured-library-root>"
+            ],
+            "title": "Directory",
+            "type": "string"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": true,
+            "examples": [
+              true
+            ],
+            "title": "Enabled"
+          },
+          "name": {
+            "default": "Films",
+            "description": "Optional new library name. A name-only update does not queue a scan.",
+            "examples": [
+              "Films"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "scanIntervalMinutes": {
+            "default": 1440,
+            "examples": [
+              1440
+            ],
+            "title": "Scanintervalminutes",
+            "type": "integer"
+          },
+          "sortOrder": {
+            "default": 0,
+            "examples": [
+              0
+            ],
+            "title": "Sortorder",
+            "type": "integer"
+          },
+          "sourceLibraryIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sourcelibraryids",
+            "type": "array"
+          },
+          "type": {
+            "default": "movie",
+            "examples": [
+              "movie"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "watchEnabled": {
+            "default": true,
+            "examples": [
+              true
+            ],
+            "title": "Watchenabled",
+            "type": "boolean"
+          }
+        },
+        "title": "LibraryUpdateRequest",
+        "type": "object"
+      },
       "LocalePatchRequest": {
         "additionalProperties": true,
         "properties": {
@@ -15908,7 +15987,7 @@
         ]
       },
       "patch": {
-        "description": "Update a library. This administrator operation exposes persisted library/job state without changing scheduler ownership or scan behavior. Method: `PATCH`; path: `/api/admin/libraries/{library_id}`.",
+        "description": "Update library settings or rename it. This administrator operation exposes persisted library/job state without changing scheduler ownership or scan behavior. Method: `PATCH`; path: `/api/admin/libraries/{library_id}`.",
         "operationId": "patch_api_admin_libraries_by_library_id",
         "parameters": [
           {
@@ -15961,8 +16040,11 @@
         "requestBody": {
           "content": {
             "application/json": {
+              "example": {
+                "name": "Films"
+              },
               "schema": {
-                "$ref": "#/components/schemas/LibraryRequest"
+                "$ref": "#/components/schemas/LibraryUpdateRequest"
               }
             }
           },
@@ -16039,7 +16121,7 @@
             "AdminUsernameHeader": []
           }
         ],
-        "summary": "Update a library",
+        "summary": "Update library settings or rename it",
         "tags": [
           "Admin · Libraries & Jobs"
         ]

@@ -1229,6 +1229,27 @@ class LibraryRequest(DocsModel):
     enabled: bool | None = Field(default=True, examples=[True])
 
 
+class LibraryUpdateRequest(DocsModel):
+    """Describe the fields accepted by a partial library update."""
+
+    name: str = Field(
+        default="Films",
+        description=(
+            "Optional new library name. A name-only update does not queue a scan."
+        ),
+        examples=["Films"],
+    )
+    type: str = Field(default="movie", examples=["movie"])
+    directory: str = Field(
+        default="<configured-library-root>", examples=["<configured-library-root>"]
+    )
+    enabled: bool | None = Field(default=True, examples=[True])
+    watchEnabled: bool = Field(default=True, examples=[True])
+    scanIntervalMinutes: int = Field(default=1440, examples=[1440])
+    sourceLibraryIds: list[str] = Field(default_factory=list)
+    sortOrder: int = Field(default=0, examples=[0])
+
+
 class LibraryMoveRequest(DocsModel):
     direction: str = Field(default="up", examples=["up"])
 
@@ -1581,6 +1602,7 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     ProviderCredentialRequest,
     Library,
     LibraryRequest,
+    LibraryUpdateRequest,
     LibraryMoveRequest,
     LibraryIdsResponse,
     JobRun,
@@ -2206,7 +2228,10 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/admin/libraries"): "List administrator libraries",
     ("POST", "/api/admin/libraries"): "Create a library",
     ("GET", "/api/admin/libraries/{library_id}"): "Get a library",
-    ("PATCH", "/api/admin/libraries/{library_id}"): "Update a library",
+    (
+        "PATCH",
+        "/api/admin/libraries/{library_id}",
+    ): "Update library settings or rename it",
     ("DELETE", "/api/admin/libraries/{library_id}"): "Delete a library",
     ("POST", "/api/admin/libraries/{library_id}/scan"): "Queue a library scan",
     (
@@ -2519,7 +2544,7 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
         "/api/admin/metadata/providers/{provider}/test",
     ): ProviderCredentialRequest,
     ("POST", "/api/admin/libraries"): LibraryRequest,
-    ("PATCH", "/api/admin/libraries/{library_id}"): LibraryRequest,
+    ("PATCH", "/api/admin/libraries/{library_id}"): LibraryUpdateRequest,
     ("POST", "/api/admin/libraries/{library_id}/move"): LibraryMoveRequest,
     ("PATCH", "/api/admin/jobs/{job_id}"): FlexibleObject,
     ("POST", "/api/admin/jobs/{job_id}/triggers"): JobTrigger,
@@ -2863,6 +2888,7 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
         "expiresInSeconds": 604800,
     },
     LibraryMoveRequest: {"direction": "up"},
+    LibraryUpdateRequest: {"name": "Films"},
     SyncplaySettingsRequest: {
         "expectedRevision": 4,
         "operationId": "operation-0001",

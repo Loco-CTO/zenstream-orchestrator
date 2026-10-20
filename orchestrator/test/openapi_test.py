@@ -370,6 +370,20 @@ class OpenApiContractTest(unittest.TestCase):
             self.assertTrue(operation.get("summary"), (method, path))
             self.assertTrue(operation.get("description"), (method, path))
 
+    def test_library_patch_documents_name_only_updates(self):
+        """Allow an admin client to document a partial library rename."""
+        operation = self.schema["paths"]["/api/admin/libraries/{library_id}"]["patch"]
+        body_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            body_schema["$ref"],
+            "#/components/schemas/LibraryUpdateRequest",
+        )
+        update_schema = self.schema["components"]["schemas"]["LibraryUpdateRequest"]
+        self.assertEqual(update_schema.get("required", []), [])
+        self.assertIn("name", update_schema["properties"])
+        self.assertIn("type", update_schema["properties"])
+        self.assertIn("enabled", update_schema["properties"])
+
     def test_readiness_is_public_and_documents_database_failure(self):
         """Document public readiness and database-failure responses."""
         operation = self.schema["paths"]["/health/ready"]["get"]

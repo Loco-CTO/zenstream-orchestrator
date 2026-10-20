@@ -255,13 +255,15 @@ def _get_library_sync(library_id: str):
 
 def _update_library_sync(library_id: str, values: dict):
     library = store.update(library_id, values)
-    if set(values) != {"sortOrder"}:
+    name_only = set(values) == {"name"}
+    if set(values) != {"sortOrder"} and not name_only:
         runtime.enqueue(
             library_id,
             "collection_rebuild" if library["type"] == "collection" else "scan",
         )
     scheduler.refresh_library_definition(library)
-    runtime.refresh_watchers()
+    if not name_only:
+        runtime.refresh_watchers()
     library["sourceLibraryIds"] = store.sources(library_id)
     return library
 

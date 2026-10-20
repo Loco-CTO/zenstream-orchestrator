@@ -1,6 +1,8 @@
 import asyncio
 import contextlib
+import faulthandler
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
 
@@ -51,6 +53,7 @@ from fastapi.staticfiles import StaticFiles
 from version import __version__
 
 request_logger = get_logger("http")
+event_loop_logger = get_logger("event_loop")
 
 
 def _authenticate_bearer(token: str):
@@ -139,7 +142,7 @@ async def lifespan(_app: FastAPI):
             lag = current - expected
             if lag >= 0.25:
                 socket_metrics = await hub.queue_metrics()
-                get_logger("event_loop").warning(
+                event_loop_logger.warning(
                     "event loop lag lag_ms=%.1f foreground_active=%s control_active=%s auth_active=%s foreground_metrics=%s sqlite_metrics=%s library_metrics=%s websocket_metrics=%s",
                     lag * 1000,
                     active_requests(),
@@ -152,15 +155,37 @@ async def lifespan(_app: FastAPI):
                 )
             expected = current + interval
 
+    async def event_loop_traceback_watchdog():
+        """Dump thread stacks if the loop cannot re-arm the native timer for 5s."""
+        try:
+            while True:
+                faulthandler.dump_traceback_later(5.0, repeat=True, file=sys.stderr)
+                await asyncio.sleep(1.0)
+        except (OSError, RuntimeError, ValueError):
+            event_loop_logger.exception("event loop traceback watchdog failed")
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+
     maintenance_task = asyncio.create_task(maintain_sessions())
     artwork_prewarm_task = asyncio.create_task(prewarm_artwork())
     event_loop_task = asyncio.create_task(monitor_event_loop())
+    event_loop_watchdog_task = asyncio.create_task(event_loop_traceback_watchdog())
     try:
         yield
     finally:
-        for task in (maintenance_task, artwork_prewarm_task, event_loop_task):
+        for task in (
+            maintenance_task,
+            artwork_prewarm_task,
+            event_loop_task,
+            event_loop_watchdog_task,
+        ):
             task.cancel()
-        for task in (maintenance_task, artwork_prewarm_task, event_loop_task):
+        for task in (
+            maintenance_task,
+            artwork_prewarm_task,
+            event_loop_task,
+            event_loop_watchdog_task,
+        ):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         try:

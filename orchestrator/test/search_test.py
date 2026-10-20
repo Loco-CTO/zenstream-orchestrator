@@ -239,6 +239,29 @@ class CatalogSearchTest(unittest.TestCase):
         self.assertEqual([item["id"] for item in first_page["items"]], ["movie-1"])
         self.assertEqual(second_page["items"], [])
 
+    def test_read_model_search_returns_only_page_rows_and_keeps_empty_page_totals(self):
+        self._seed_read_index()
+        catalog = self._catalog()
+        original_execute = catalog.db.execute
+        match_query_row_counts = []
+
+        def record_match_query_rows(query, params=None):
+            rows = original_execute(query, params)
+            if "facet_counts AS MATERIALIZED" in query:
+                match_query_row_counts.append(len(rows))
+            return rows
+
+        with patch.object(catalog.db, "execute", side_effect=record_match_query_rows):
+            first_page = self._search(catalog, page=1, page_size=1)
+            out_of_range_page = self._search(catalog, page=8, page_size=1)
+
+        self.assertEqual(match_query_row_counts, [1, 1])
+        self.assertEqual(first_page["total"], 3)
+        self.assertEqual(first_page["facets"]["all"], 3)
+        self.assertEqual(len(first_page["items"]), 1)
+        self.assertEqual(out_of_range_page["items"], [])
+        self.assertEqual(out_of_range_page["total"], 3)
+
     def test_search_rejects_unknown_entity_type(self):
         self._seed_legacy_index()
         with self.assertRaises(HTTPException) as error:

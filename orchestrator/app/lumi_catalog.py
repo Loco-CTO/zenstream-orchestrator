@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
+import time
 from typing import Any
 
 from app.catalog import Catalog
@@ -13,6 +16,12 @@ from app.models.metadata import MetadataLanguageSettings
 
 MAX_LUMI_ITEMS = 18
 MAX_LUMI_FAVORITES = 10
+logger = logging.getLogger("zenstream.lumi.catalog")
+
+
+def _turn_id(context: Any) -> str:
+    value = getattr(context, "turn_id", None)
+    return value if isinstance(value, str) and value else "unknown"
 
 
 class LumiCatalogAdapter:
@@ -36,7 +45,17 @@ class LumiCatalogAdapter:
         language: str | None,
     ) -> dict[str, Any]:
         user_id = _context_user_id(context)
+        turn_id = _turn_id(context)
+        started = time.perf_counter()
+        logger.info(
+            "Lumi catalog read started turn_id=%s operation=search query_chars=%d item_type=%s limit=%d",
+            turn_id,
+            len(query),
+            item_type or "all",
+            limit,
+        )
         try:
+            lookup_started = time.perf_counter()
             result, history_enabled = await run_foreground(
                 self._search,
                 self._catalog,
@@ -46,15 +65,45 @@ class LumiCatalogAdapter:
                 limit,
                 language,
             )
+        except asyncio.CancelledError:
+            logger.info(
+                "Lumi catalog read cancelled turn_id=%s operation=search phase=lookup duration_ms=%.1f",
+                turn_id,
+                (time.perf_counter() - started) * 1000,
+            )
+            raise
         except Exception as error:
+            logger.warning(
+                "Lumi catalog read failed turn_id=%s operation=search phase=lookup category=%s duration_ms=%.1f",
+                turn_id,
+                type(error).__name__,
+                (time.perf_counter() - started) * 1000,
+                exc_info=True,
+            )
             raise self._tool_error(
                 "The local catalog lookup is unavailable."
             ) from error
         raw_items = result.get("items") if isinstance(result, dict) else None
+        raw_count = len(raw_items) if isinstance(raw_items, list) else 0
+        logger.info(
+            "Lumi catalog read completed turn_id=%s operation=search phase=lookup duration_ms=%.1f result_count=%d",
+            turn_id,
+            (time.perf_counter() - lookup_started) * 1000,
+            raw_count,
+        )
+        compact_started = time.perf_counter()
         items = _compact_items(
             raw_items, max(1, min(10, limit)), include_history=history_enabled
         )
         total = result.get("total", 0) if isinstance(result, dict) else 0
+        logger.info(
+            "Lumi catalog read completed turn_id=%s operation=search phase=compact duration_ms=%.1f item_count=%d total=%d duration_ms_total=%.1f",
+            turn_id,
+            (time.perf_counter() - compact_started) * 1000,
+            len(items),
+            _count(total),
+            (time.perf_counter() - started) * 1000,
+        )
         return {"items": items, "total": _count(total)}
 
     async def item_detail(
@@ -65,17 +114,50 @@ class LumiCatalogAdapter:
         language: str | None,
     ) -> dict[str, Any]:
         user_id = _context_user_id(context)
+        turn_id = _turn_id(context)
+        started = time.perf_counter()
+        logger.info(
+            "Lumi catalog read started turn_id=%s operation=item_detail",
+            turn_id,
+        )
         try:
+            lookup_started = time.perf_counter()
             result, history_enabled = await run_foreground(
                 self._item_detail, self._catalog, user_id, entity_id, language
             )
+        except asyncio.CancelledError:
+            logger.info(
+                "Lumi catalog read cancelled turn_id=%s operation=item_detail phase=lookup duration_ms=%.1f",
+                turn_id,
+                (time.perf_counter() - started) * 1000,
+            )
+            raise
         except Exception as error:
+            logger.warning(
+                "Lumi catalog read failed turn_id=%s operation=item_detail phase=lookup category=%s duration_ms=%.1f",
+                turn_id,
+                type(error).__name__,
+                (time.perf_counter() - started) * 1000,
+                exc_info=True,
+            )
             raise self._tool_error(
                 "The local catalog lookup is unavailable."
             ) from error
+        logger.info(
+            "Lumi catalog read completed turn_id=%s operation=item_detail phase=lookup duration_ms=%.1f",
+            turn_id,
+            (time.perf_counter() - lookup_started) * 1000,
+        )
+        compact_started = time.perf_counter()
         if not isinstance(result, dict):
+            logger.info(
+                "Lumi catalog read completed turn_id=%s operation=item_detail phase=compact duration_ms=%.1f item_count=0 duration_ms_total=%.1f",
+                turn_id,
+                (time.perf_counter() - compact_started) * 1000,
+                (time.perf_counter() - started) * 1000,
+            )
             return {"item": None, "backgroundItem": None, "seasons": []}
-        return {
+        compact = {
             "item": _compact_item(result.get("item"), include_history=history_enabled),
             "backgroundItem": _compact_item(
                 result.get("backgroundItem"), include_history=history_enabled
@@ -84,6 +166,17 @@ class LumiCatalogAdapter:
                 result.get("seasons"), 12, include_history=history_enabled
             ),
         }
+        item_count = sum(
+            value is not None for value in (compact["item"], compact["backgroundItem"])
+        ) + len(compact["seasons"])
+        logger.info(
+            "Lumi catalog read completed turn_id=%s operation=item_detail phase=compact duration_ms=%.1f item_count=%d duration_ms_total=%.1f",
+            turn_id,
+            (time.perf_counter() - compact_started) * 1000,
+            item_count,
+            (time.perf_counter() - started) * 1000,
+        )
+        return compact
 
     async def home_recommendations(self, context: Any) -> dict[str, Any]:
         return await self._home_read(context, "recommendations")
@@ -96,34 +189,110 @@ class LumiCatalogAdapter:
 
     async def favorites(self, context: Any) -> dict[str, Any]:
         user_id = _context_user_id(context)
+        turn_id = _turn_id(context)
+        started = time.perf_counter()
+        logger.info(
+            "Lumi catalog read started turn_id=%s operation=favorites",
+            turn_id,
+        )
         try:
+            lookup_started = time.perf_counter()
             result, history_enabled = await run_foreground(
                 self._favorites, self._catalog, user_id
             )
+        except asyncio.CancelledError:
+            logger.info(
+                "Lumi catalog read cancelled turn_id=%s operation=favorites phase=lookup duration_ms=%.1f",
+                turn_id,
+                (time.perf_counter() - started) * 1000,
+            )
+            raise
         except Exception as error:
+            logger.warning(
+                "Lumi catalog read failed turn_id=%s operation=favorites phase=lookup category=%s duration_ms=%.1f",
+                turn_id,
+                type(error).__name__,
+                (time.perf_counter() - started) * 1000,
+                exc_info=True,
+            )
             raise self._tool_error(
                 "The local favorites lookup is unavailable."
             ) from error
+        logger.info(
+            "Lumi catalog read completed turn_id=%s operation=favorites phase=lookup duration_ms=%.1f",
+            turn_id,
+            (time.perf_counter() - lookup_started) * 1000,
+        )
+        compact_started = time.perf_counter()
         raw_items = result.get("items") if isinstance(result, dict) else None
         items = _compact_items(
             raw_items, MAX_LUMI_FAVORITES, include_history=history_enabled
         )
         total = result.get("total", 0) if isinstance(result, dict) else 0
+        logger.info(
+            "Lumi catalog read completed turn_id=%s operation=favorites phase=compact duration_ms=%.1f item_count=%d total=%d duration_ms_total=%.1f",
+            turn_id,
+            (time.perf_counter() - compact_started) * 1000,
+            len(items),
+            _count(total),
+            (time.perf_counter() - started) * 1000,
+        )
         return {"items": items, "total": _count(total)}
 
     async def _home_read(self, context: Any, section: str) -> dict[str, Any]:
         user_id = _context_user_id(context)
+        turn_id = _turn_id(context)
         methods = {
             "recommendations": self._catalog.home_recommendations,
             "continue-watching": self._catalog.home_continue_watching,
             "next-up": self._catalog.home_next_up,
         }
         method = methods[section]
+        started = time.perf_counter()
+        logger.info(
+            "Lumi catalog read started turn_id=%s operation=home section=%s",
+            turn_id,
+            section,
+        )
         try:
             result = await run_foreground(self._history_home, user_id, method)
+        except asyncio.CancelledError:
+            logger.info(
+                "Lumi catalog read cancelled turn_id=%s operation=home section=%s phase=lookup duration_ms=%.1f",
+                turn_id,
+                section,
+                (time.perf_counter() - started) * 1000,
+            )
+            raise
         except Exception as error:
+            logger.warning(
+                "Lumi catalog read failed turn_id=%s operation=home section=%s phase=lookup category=%s duration_ms=%.1f",
+                turn_id,
+                section,
+                type(error).__name__,
+                (time.perf_counter() - started) * 1000,
+                exc_info=True,
+            )
             raise self._tool_error("The local Home lookup is unavailable.") from error
-        return {"items": _compact_items(result, MAX_LUMI_ITEMS)}
+        lookup_duration = (time.perf_counter() - started) * 1000
+        compact_started = time.perf_counter()
+        items = _compact_items(result, MAX_LUMI_ITEMS)
+        logger.info(
+            "Lumi catalog read completed turn_id=%s operation=home section=%s phase=lookup duration_ms=%.1f result_count=%d",
+            turn_id,
+            section,
+            lookup_duration,
+            len(result) if isinstance(result, list) else 0,
+        )
+        logger.info(
+            "Lumi catalog read completed turn_id=%s operation=home section=%s phase=compact duration_ms=%.1f item_count=%d duration_ms_total=%.1f",
+            turn_id,
+            section,
+            (time.perf_counter() - compact_started) * 1000,
+            len(items),
+            (time.perf_counter() - started) * 1000,
+        )
+        return {"items": items}
 
     def _search(
         self,

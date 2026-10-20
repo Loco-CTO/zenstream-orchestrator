@@ -164,6 +164,11 @@ class _CatalogReadContext:
         self.query_count = 0
         self.read_model_ready: bool | None = None
         self.table_columns: dict[str, set[str]] = {}
+        self.search_mode: str | None = None
+        self.search_query_chars: int | None = None
+        self.search_gram_count: int | None = None
+        self.search_match_count: int | None = None
+        self.search_page_rows: int | None = None
 
     def measure(self, stage: str, action):
         started = time.perf_counter()
@@ -216,6 +221,19 @@ def _catalog_read(method):
                     )
                     if part
                 )
+                if method.__name__ == "search":
+                    details = " ".join(
+                        part
+                        for part in (
+                            details,
+                            f"search_mode={context.search_mode or 'unknown'}",
+                            f"search_query_chars={context.search_query_chars or 0}",
+                            f"search_gram_count={context.search_gram_count or 0}",
+                            f"search_match_count={context.search_match_count or 0}",
+                            f"search_page_rows={context.search_page_rows or 0}",
+                        )
+                        if part
+                    )
             log = logger.warning if elapsed > 2 else logger.debug
             log(
                 "catalog request complete operation=%s user_id=%s duration_seconds=%.3f %s",
@@ -3571,7 +3589,14 @@ class Catalog:
         page_size: int,
         entity_type: str | None = None,
     ) -> dict:
-        wanted = self._search_text(query)
+        context = self._read_context.get()
+
+        def measure(stage: str, action):
+            return context.measure(stage, action) if context is not None else action()
+
+        if context is not None:
+            context.search_query_chars = len(query)
+        wanted = measure("search_normalize", lambda: self._search_text(query))
         entity_type = entity_type.strip().lower() if entity_type is not None else None
         if entity_type == "all":
             entity_type = None
@@ -3579,7 +3604,7 @@ class Catalog:
             raise HTTPException(400, "Unsupported search type.")
         if not wanted:
             return _empty_search_page(page, page_size)
-        allowed = self.allowed_libraries(user_id)
+        allowed = measure("search_access", lambda: self.allowed_libraries(user_id))
         if not allowed:
             return _empty_search_page(page, page_size)
         configured_language = normalize_metadata_locale(language)
@@ -3591,13 +3616,18 @@ class Catalog:
             locale_order.append("en")
         locale_order.append("original")
         locale_placeholders = ",".join("?" for _ in locale_order)
-        if self._read_model_ready():
+        read_model_ready = measure("search_read_model_check", self._read_model_ready)
+        if read_model_ready:
+            if context is not None:
+                context.search_mode = "read_model"
             grams_table = (
                 "catalog_root_search_grams"
                 if self._has_table("catalog_root_search_grams")
                 else "catalog_search_grams"
             )
             query_grams = sorted(trigram_set(wanted) if len(wanted) >= 3 else {wanted})
+            if context is not None:
+                context.search_gram_count = len(query_grams)
             gram_placeholders = ",".join("?" for _ in query_grams)
             locale_rank = (
                 "CASE "
@@ -3629,9 +3659,21 @@ class Catalog:
                 "GROUP BY g.entity_id,g.locale,title_sort), best AS ("
                 "SELECT entity_id,locale,title_sort,score,locale_rank,"
                 "ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY score DESC,locale_rank,title_sort,entity_id) AS locale_choice "
-                "FROM scored), matches AS ("
+                "FROM scored), matches AS MATERIALIZED ("
                 "SELECT entity_id,score,locale_rank,title_sort "
-                "FROM best WHERE locale_choice=1 AND score>0) "
+                "FROM best WHERE locale_choice=1 AND score>0), "
+                "facet_counts AS MATERIALIZED ("
+                "SELECT "
+                + ",".join(
+                    "COALESCE(SUM(CASE WHEN e.entity_type='"
+                    + entity_type_name
+                    + "' THEN 1 ELSE 0 END),0) AS "
+                    + entity_type_name
+                    + "_count"
+                    for entity_type_name in SEARCH_ENTITY_TYPES
+                )
+                + " FROM matches JOIN library_entities e ON e.id=matches.entity_id), "
+                "page AS MATERIALIZED ("
             )
             match_params = [
                 wanted,
@@ -3640,32 +3682,54 @@ class Catalog:
                 *allowed,
                 *locale_order,
             ]
-            # Materialize the scored entity rows once. The previous path ran
-            # the entire trigram CTE once for facets and again for the page;
-            # only the selected page is hydrated after this bounded metadata
-            # rowset is sliced in memory.
-            all_source = (
+            page_filter = "WHERE e.entity_type=? " if entity_type is not None else ""
+            page_params = [
+                *match_params,
+                *([entity_type] if entity_type is not None else []),
+                page_size,
+                max(0, page - 1) * page_size,
+            ]
+            # Keep matching, facet counting, ordering, and pagination in SQLite.
+            # Returning every fuzzy match to Python caused large libraries to
+            # allocate and filter an unbounded list for a page of at most 10.
+            page_source = (
                 match_cte
                 + "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
-                "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
+                "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at,"
+                "matches.score,matches.locale_rank,matches.title_sort "
                 "FROM matches JOIN library_entities e ON e.id=matches.entity_id "
-                "ORDER BY matches.score DESC,matches.locale_rank,matches.title_sort,matches.entity_id"
+                + page_filter
+                + "ORDER BY matches.score DESC,matches.locale_rank,matches.title_sort,matches.entity_id "
+                "LIMIT ? OFFSET ?), "
+                "response AS ("
+                "SELECT page.id,page.library_id,page.parent_id,page.entity_type,page.relative_path,"
+                "page.season_number,page.episode_number,page.episode_end_number,page.created_at,page.updated_at,"
+                "facet_counts.movie_count,facet_counts.series_count,facet_counts.collection_count,"
+                "facet_counts.release_count,facet_counts.artist_count,facet_counts.track_count "
+                "FROM facet_counts LEFT JOIN page ON 1=1) "
+                "SELECT * FROM response"
             )
-            all_rows = self.db.execute(all_source, match_params)
-            facet_counts: dict[str, int] = {}
-            for row in all_rows:
-                facet_counts[str(row[3])] = facet_counts.get(str(row[3]), 0) + 1
+            rows = measure(
+                "search_match_and_page_sql",
+                lambda: self.db.execute(page_source, page_params),
+            )
+            first = rows[0]
+            facet_counts = {
+                entity_type_name: int(first[10 + index] or 0)
+                for index, entity_type_name in enumerate(SEARCH_ENTITY_TYPES)
+            }
             facets = _search_facets(facet_counts)
-            filtered_rows = (
-                [row for row in all_rows if row[3] == entity_type]
-                if entity_type is not None
-                else all_rows
-            )
-            start = max(0, page - 1) * page_size
-            page_rows = filtered_rows[start : start + page_size]
+            # LEFT JOIN keeps one aggregate row available for empty and
+            # out-of-range pages. Such a row has a NULL entity ID.
+            page_rows = [row[:10] for row in rows if row[0] is not None]
             total = facets[entity_type] if entity_type else facets["all"]
-            values = self._hydrate_rows(
-                user_id, [row[:10] for row in page_rows], language
+            if context is not None:
+                context.search_match_count = facets["all"]
+                context.search_page_rows = len(page_rows)
+                context.selected_rows += len(page_rows)
+            values = measure(
+                "search_hydrate",
+                lambda: self._hydrate_rows(user_id, page_rows, language),
             )
             return {
                 "items": values,
@@ -3676,6 +3740,8 @@ class Catalog:
             }
         if not self._has_table("catalog_search"):
             return _empty_search_page(page, page_size)
+        if context is not None:
+            context.search_mode = "legacy_index"
         indexed = self.db.execute(
             "SELECT s.entity_id,s.locale,s.title,0 "
             "FROM catalog_search s JOIN library_entities e ON e.id=s.entity_id "
@@ -3726,6 +3792,9 @@ class Catalog:
         ]
         start = (page - 1) * page_size
         facets = _search_facets(facet_counts)
+        if context is not None:
+            context.search_match_count = facets["all"]
+            context.search_page_rows = len(values[start : start + page_size])
         return {
             "items": values[start : start + page_size],
             "page": page,

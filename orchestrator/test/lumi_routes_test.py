@@ -133,6 +133,7 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             service.call[0], ("trusted-account", "conversation-1", "hello")
         )
+        self.assertRegex(service.call[1]["turn_id"], r"^[0-9a-f]{32}$")
         self.assertTrue(service.closed)
 
     async def test_stream_turn_uses_complete_event_for_older_installed_release(self):

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
+import time
 from dataclasses import asdict, is_dataclass
 from typing import Any
+from uuid import uuid4
 
 from app.client_auth import require_account
 from app.foreground import run_auth, run_control
@@ -216,6 +220,8 @@ async def lumi_turn(request: Request, conversation_id: str):
 
 @router.post("/api/lumi/conversations/{conversation_id}/turns/stream")
 async def lumi_turn_stream(request: Request, conversation_id: str):
+    turn_id = uuid4().hex
+    started = time.perf_counter()
     account = await _account(request)
     payload = await _object_body(request)
     message = payload.get("message")
@@ -232,10 +238,21 @@ async def lumi_turn_stream(request: Request, conversation_id: str):
     ):
         raise HTTPException(400, "The Lumi turn request is invalid.")
     service = _service()
+    logger.info(
+        "Lumi stream accepted turn_id=%s message_chars=%d model_override=%s thinking_override=%s",
+        turn_id,
+        len(message.strip()),
+        model is not None,
+        thinking is not None,
+    )
 
     async def events():
         stream = None
         completed = False
+        event_count = 0
+        delta_count = 0
+        visible_chars = 0
+        first_event_ms = None
         try:
             stream_method = getattr(service, "stream_chat_for_account", None)
             if not callable(stream_method):
@@ -250,39 +267,119 @@ async def lumi_turn_stream(request: Request, conversation_id: str):
                     thinking=thinking,
                 )
                 completed = True
+                logger.info(
+                    "Lumi stream completed turn_id=%s mode=legacy duration_ms=%.1f",
+                    turn_id,
+                    (time.perf_counter() - started) * 1000,
+                )
                 yield _sse_event("complete", _turn_payload(turn))
                 return
 
+            parameters = inspect.signature(stream_method).parameters
+            supports_turn_id = "turn_id" in parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            stream_kwargs = {"model": model, "thinking": thinking}
+            if supports_turn_id:
+                stream_kwargs["turn_id"] = turn_id
+            logger.info(
+                "Lumi stream execution started turn_id=%s mode=streaming supports_turn_id=%s",
+                turn_id,
+                supports_turn_id,
+            )
             stream = stream_method(
                 account["id"],
                 conversation_id,
                 message.strip(),
-                model=model,
-                thinking=thinking,
+                **stream_kwargs,
             )
             async for event in stream:
                 kind = getattr(event, "kind", None)
+                event_count += 1
+                if first_event_ms is None:
+                    first_event_ms = (time.perf_counter() - started) * 1000
+                    logger.info(
+                        "Lumi stream first event turn_id=%s kind=%s time_to_first_event_ms=%.1f",
+                        turn_id,
+                        kind or "unknown",
+                        first_event_ms,
+                    )
                 if kind == "delta" and not completed:
                     text = getattr(event, "text", None)
                     if isinstance(text, str) and text:
+                        delta_count += 1
+                        visible_chars += len(text)
+                        if delta_count == 1 or delta_count % 64 == 0:
+                            logger.info(
+                                "Lumi stream progress turn_id=%s delta_count=%d visible_chars=%d elapsed_ms=%.1f",
+                                turn_id,
+                                delta_count,
+                                visible_chars,
+                                (time.perf_counter() - started) * 1000,
+                            )
                         yield _sse_event("delta", {"text": text})
                 elif kind == "reset" and not completed:
                     reason = getattr(event, "reason", None)
                     if reason not in {"intermediate", "cpu_fallback"}:
                         reason = "intermediate"
+                    logger.info(
+                        "Lumi stream reset turn_id=%s reason=%s elapsed_ms=%.1f",
+                        turn_id,
+                        reason,
+                        (time.perf_counter() - started) * 1000,
+                    )
                     yield _sse_event("reset", {"reason": reason})
                 elif kind == "complete" and not completed:
                     turn = getattr(event, "turn", None)
                     if turn is None:
                         raise RuntimeError("Lumi stream completed without a turn")
                     completed = True
+                    logger.info(
+                        "Lumi stream completed turn_id=%s mode=streaming event_count=%d delta_count=%d visible_chars=%d duration_ms=%.1f",
+                        turn_id,
+                        event_count,
+                        delta_count,
+                        visible_chars,
+                        (time.perf_counter() - started) * 1000,
+                    )
                     yield _sse_event("complete", _turn_payload(turn))
+                elif not completed:
+                    logger.warning(
+                        "Lumi stream ignored unsupported event turn_id=%s event_kind=%s",
+                        turn_id,
+                        kind or "unknown",
+                    )
             if not completed:
+                logger.error(
+                    "Lumi stream ended without completion turn_id=%s event_count=%d delta_count=%d duration_ms=%.1f",
+                    turn_id,
+                    event_count,
+                    delta_count,
+                    (time.perf_counter() - started) * 1000,
+                )
                 yield _sse_event(
                     "error", {"message": "Lumi did not complete the response."}
                 )
+        except asyncio.CancelledError:
+            logger.info(
+                "Lumi stream cancelled turn_id=%s completed=%s event_count=%d delta_count=%d duration_ms=%.1f",
+                turn_id,
+                completed,
+                event_count,
+                delta_count,
+                (time.perf_counter() - started) * 1000,
+            )
+            raise
         except Exception as error:
-            logger.exception("Lumi streaming turn failed")
+            logger.exception(
+                "Lumi streaming turn failed turn_id=%s category=%s event_count=%d delta_count=%d duration_ms=%.1f",
+                turn_id,
+                type(error).__name__,
+                event_count,
+                delta_count,
+                (time.perf_counter() - started) * 1000,
+            )
             _status_code, safe_message = _service_error(error)
             yield _sse_event("error", {"message": safe_message})
         finally:
@@ -292,8 +389,19 @@ async def lumi_turn_stream(request: Request, conversation_id: str):
                     await close()
                 except Exception:
                     logger.warning(
-                        "Lumi streaming turn did not close cleanly", exc_info=True
+                        "Lumi stream close failed turn_id=%s duration_ms=%.1f",
+                        turn_id,
+                        (time.perf_counter() - started) * 1000,
+                        exc_info=True,
                     )
+            logger.info(
+                "Lumi stream closed turn_id=%s completed=%s event_count=%d delta_count=%d duration_ms=%.1f",
+                turn_id,
+                completed,
+                event_count,
+                delta_count,
+                (time.perf_counter() - started) * 1000,
+            )
 
     return StreamingResponse(
         events(),

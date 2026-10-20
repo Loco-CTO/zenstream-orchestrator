@@ -31,26 +31,51 @@ class MetadataPathTest(unittest.TestCase):
 class LoggingConfigurationTest(unittest.TestCase):
     def test_rotating_log_is_created_under_metadata_path(self):
         root = logging.getLogger("zenstream")
+        lumi_logger = logging.getLogger("lumi")
         existing_handlers = list(root.handlers)
+        existing_lumi_handlers = list(lumi_logger.handlers)
+        existing_lumi_level = lumi_logger.level
+        existing_lumi_propagate = lumi_logger.propagate
         root.handlers.clear()
+        lumi_logger.handlers.clear()
         try:
             with tempfile.TemporaryDirectory() as directory:
                 try:
                     with (
-                        patch.dict(os.environ, {"METADATA_PATH": directory}),
+                        patch.dict(
+                            os.environ,
+                            {"METADATA_PATH": directory, "ZENSTREAM_LOG_LEVEL": "INFO"},
+                        ),
                         patch.object(logging_config, "_configured", False),
                     ):
                         logging_config.configure_logging()
 
-                        self.assertTrue(
-                            (Path(directory) / "logs" / "orchestrator.log").is_file()
+                        log_path = Path(directory) / "logs" / "orchestrator.log"
+                        self.assertTrue(log_path.is_file())
+                        self.assertEqual(lumi_logger.level, logging.INFO)
+                        self.assertFalse(lumi_logger.propagate)
+                        self.assertEqual(lumi_logger.handlers, root.handlers)
+
+                        logging.getLogger("lumi.runtime.llama_cpp").info(
+                            "Lumi runtime request started turn_id=test"
+                        )
+                        for handler in lumi_logger.handlers:
+                            handler.flush()
+                        self.assertIn(
+                            "lumi.runtime.llama_cpp Lumi runtime request started turn_id=test",
+                            log_path.read_text(encoding="utf-8"),
                         )
                 finally:
-                    for handler in root.handlers:
-                        handler.close()
+                    configured_handlers = list(root.handlers)
                     root.handlers.clear()
+                    lumi_logger.handlers.clear()
+                    for handler in configured_handlers:
+                        handler.close()
         finally:
             root.handlers[:] = existing_handlers
+            lumi_logger.handlers[:] = existing_lumi_handlers
+            lumi_logger.setLevel(existing_lumi_level)
+            lumi_logger.propagate = existing_lumi_propagate
 
 
 if __name__ == "__main__":

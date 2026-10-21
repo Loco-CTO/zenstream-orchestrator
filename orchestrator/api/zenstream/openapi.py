@@ -2701,7 +2701,7 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     (
         "PATCH",
         "/api/lumi/conversations/{conversation_id}/choice",
-    ): LumiConversationResponse,
+    ): LumiConversationRecord,
     ("PUT", "/api/lumi/preferences/model"): LumiPreferenceResponse,
     ("GET", "/api/admin/lumi/status"): LumiAdminStatusResponse,
     ("GET", "/api/admin/lumi/releases"): LumiReleaseListResponse,

@@ -9185,17 +9185,15 @@
       },
       "response": {
         "body": {
-          "conversation": {
-            "createdAt": "2026-09-29T12:00:00Z",
-            "id": "fixture-id",
-            "model": "x",
-            "thinking": true,
-            "title": "Fixture Item",
-            "updatedAt": "2026-09-29T12:00:00Z"
-          }
+          "createdAt": "2026-09-29T12:00:00Z",
+          "id": "fixture-id",
+          "model": "x",
+          "thinking": true,
+          "title": "Fixture Item",
+          "updatedAt": "2026-09-29T12:00:00Z"
         },
         "contentType": "application/json",
-        "schemaRef": "#/components/schemas/LumiConversationResponse",
+        "schemaRef": "#/components/schemas/LumiConversationRecord",
         "status": 200
       }
     },

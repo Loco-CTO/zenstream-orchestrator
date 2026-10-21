@@ -26940,18 +26940,8 @@
           "200": {
             "content": {
               "application/json": {
-                "example": {
-                  "conversation": {
-                    "createdAt": "2026-01-01T12:00:00Z",
-                    "id": "conversation-0001",
-                    "model": "qwen3.5:2b",
-                    "thinking": true,
-                    "title": "What to watch next",
-                    "updatedAt": "2026-01-01T12:02:00Z"
-                  }
-                },
                 "schema": {
-                  "$ref": "#/components/schemas/LumiConversationResponse"
+                  "$ref": "#/components/schemas/LumiConversationRecord"
                 }
               }
             },

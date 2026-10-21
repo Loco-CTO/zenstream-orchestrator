@@ -187,6 +187,37 @@ async def lumi_conversation(request: Request, conversation_id: str):
     )
 
 
+@router.patch("/api/lumi/conversations/{conversation_id}")
+async def lumi_rename_conversation(request: Request, conversation_id: str):
+    account = await _account(request)
+    payload = await _object_body(request)
+    title = payload.get("title")
+    if (
+        set(payload) != {"title"}
+        or not isinstance(title, str)
+        or not title.strip()
+        or len(" ".join(title.split())) > 120
+    ):
+        raise HTTPException(400, "The Lumi conversation title is invalid.")
+    try:
+        result = await _service().rename_conversation_for_account(
+            account["id"], conversation_id, " ".join(title.split())
+        )
+    except Exception as error:
+        _raise_service_error(error)
+    return _private_json({"conversation": _conversation(result)})
+
+
+@router.delete("/api/lumi/conversations/{conversation_id}")
+async def lumi_delete_conversation(request: Request, conversation_id: str):
+    account = await _account(request)
+    try:
+        await _service().delete_conversation_for_account(account["id"], conversation_id)
+    except Exception as error:
+        _raise_service_error(error)
+    return _private_json({"deleted": True})
+
+
 @router.post("/api/lumi/conversations/{conversation_id}/turns")
 async def lumi_turn(request: Request, conversation_id: str):
     account = await _account(request)

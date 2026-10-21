@@ -232,6 +232,22 @@ class OpenApiContractTest(unittest.TestCase):
             answer["sources"]["items"]["$ref"],
             "#/components/schemas/LumiSource",
         )
+        rename = paths["/api/lumi/conversations/{conversation_id}"]["patch"]
+        rename_request = rename["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            rename_request["$ref"],
+            "#/components/schemas/LumiConversationRenameRequest",
+        )
+        self.assertIn({"UserBearerAuth": []}, rename["security"])
+        delete = paths["/api/lumi/conversations/{conversation_id}"]["delete"]
+        self.assertIn({"UserBearerAuth": []}, delete["security"])
+        delete_response = delete["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]
+        self.assertEqual(
+            delete_response["$ref"],
+            "#/components/schemas/LumiConversationDeleteResponse",
+        )
         runtime_settings = paths["/api/admin/lumi/models/settings"]["patch"]
         self.assertEqual(
             runtime_settings["requestBody"]["content"]["application/json"]["schema"][

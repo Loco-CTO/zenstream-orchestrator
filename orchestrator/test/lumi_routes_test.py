@@ -12,6 +12,8 @@ from api.zenstream import lumi_routes
 class FakeLumiService:
     def __init__(self):
         self.account_ids: list[str] = []
+        self.renamed: tuple[str, str, str] | None = None
+        self.deleted: tuple[str, str] | None = None
 
     async def list_conversations_for_account(self, account_id: str, limit: int):
         self.account_ids.append(account_id)
@@ -26,6 +28,22 @@ class FakeLumiService:
                 updated_at="2026-01-01T12:01:00Z",
             ),
         ]
+
+    async def rename_conversation_for_account(
+        self, account_id: str, conversation_id: str, title: str
+    ):
+        self.renamed = (account_id, conversation_id, title)
+        return FakeConversation(
+            id=conversation_id,
+            title=title,
+            model="qwen3.5:2b",
+            thinking=False,
+            created_at="2026-01-01T12:00:00Z",
+            updated_at="2026-01-01T12:02:00Z",
+        )
+
+    async def delete_conversation_for_account(self, account_id: str, conversation_id: str):
+        self.deleted = (account_id, conversation_id)
 
 
 @dataclass(frozen=True)
@@ -470,6 +488,60 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.account_ids, ["trusted-account"])
         self.assertEqual(service.limit, 50)
         self.assertEqual(payload["conversations"][0]["id"], "conversation-1")
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+
+    async def test_conversation_rename_uses_authenticated_account_and_normalizes_title(self):
+        service = FakeLumiService()
+        with (
+            patch.object(
+                lumi_routes,
+                "_account",
+                new=AsyncMock(return_value={"id": "trusted-account"}),
+            ),
+            patch.object(lumi_routes, "_service", return_value=service),
+        ):
+            response = await lumi_routes.lumi_rename_conversation(
+                FakeRequest({"title": "  A\tbetter   title  "}), "conversation-2"
+            )
+
+        self.assertEqual(
+            service.renamed,
+            ("trusted-account", "conversation-2", "A better title"),
+        )
+        self.assertEqual(
+            json.loads(response.body)["conversation"]["title"], "A better title"
+        )
+        self.assertEqual(response.headers["cache-control"], "private, no-store")
+
+    async def test_conversation_rename_rejects_empty_title(self):
+        with patch.object(
+            lumi_routes,
+            "_account",
+            new=AsyncMock(return_value={"id": "trusted-account"}),
+        ):
+            with self.assertRaises(lumi_routes.HTTPException) as error:
+                await lumi_routes.lumi_rename_conversation(
+                    FakeRequest({"title": "  "}), "conversation-2"
+                )
+
+        self.assertEqual(error.exception.status_code, 400)
+
+    async def test_conversation_delete_uses_authenticated_account(self):
+        service = FakeLumiService()
+        with (
+            patch.object(
+                lumi_routes,
+                "_account",
+                new=AsyncMock(return_value={"id": "trusted-account"}),
+            ),
+            patch.object(lumi_routes, "_service", return_value=service),
+        ):
+            response = await lumi_routes.lumi_delete_conversation(
+                None, "conversation-3"
+            )
+
+        self.assertEqual(service.deleted, ("trusted-account", "conversation-3"))
+        self.assertEqual(json.loads(response.body), {"deleted": True})
         self.assertEqual(response.headers["cache-control"], "private, no-store")
 
     async def test_service_errors_do_not_leak_internal_paths(self):

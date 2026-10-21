@@ -5223,6 +5223,21 @@
         "title": "LumiAnswer",
         "type": "object"
       },
+      "LumiConversationDeleteResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "deleted": {
+            "const": true,
+            "title": "Deleted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "title": "LumiConversationDeleteResponse",
+        "type": "object"
+      },
       "LumiConversationDetailResponse": {
         "additionalProperties": true,
         "properties": {
@@ -5294,6 +5309,35 @@
           "updatedAt"
         ],
         "title": "LumiConversationRecord",
+        "type": "object"
+      },
+      "LumiConversationRenameRequest": {
+        "additionalProperties": true,
+        "properties": {
+          "title": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "LumiConversationRenameRequest",
+        "type": "object"
+      },
+      "LumiConversationResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/LumiConversationRecord"
+          }
+        },
+        "required": [
+          "conversation"
+        ],
+        "title": "LumiConversationResponse",
         "type": "object"
       },
       "LumiEntityReference": {
@@ -26564,6 +26608,109 @@
       }
     },
     "/api/lumi/conversations/{conversation_id}": {
+      "delete": {
+        "description": "Delete a Lumi conversation and its messages. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `DELETE`; path: `/api/lumi/conversations/{conversation_id}`.",
+        "operationId": "delete_api_lumi_conversations_by_conversation_id",
+        "parameters": [
+          {
+            "description": "conversation_id value supplied in the path component.",
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlexibleObject"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "deleted": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiConversationDeleteResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Delete a Lumi conversation and its messages",
+        "tags": [
+          "Lumi"
+        ]
+      },
       "get": {
         "description": "Get a Lumi conversation. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `GET`; path: `/api/lumi/conversations/{conversation_id}`.",
         "operationId": "get_api_lumi_conversations_by_conversation_id",
@@ -26644,6 +26791,119 @@
         "tags": [
           "Lumi"
         ]
+      },
+      "patch": {
+        "description": "Rename a Lumi conversation. Conversations are scoped to the authenticated account. Lumi tools are read-only and references come from trusted local catalog results. Method: `PATCH`; path: `/api/lumi/conversations/{conversation_id}`.",
+        "operationId": "patch_api_lumi_conversations_by_conversation_id",
+        "parameters": [
+          {
+            "description": "conversation_id value supplied in the path component.",
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "example": {
+                "title": "What to watch next"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/LumiConversationRenameRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "conversation": {
+                    "createdAt": "2026-01-01T12:00:00Z",
+                    "id": "conversation-0001",
+                    "model": "qwen3.5:2b",
+                    "thinking": true,
+                    "title": "What to watch next",
+                    "updatedAt": "2026-01-01T12:02:00Z"
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/LumiConversationResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Rename a Lumi conversation",
+        "tags": [
+          "Lumi"
+        ]
       }
     },
     "/api/lumi/conversations/{conversation_id}/choice": {
@@ -26680,8 +26940,18 @@
           "200": {
             "content": {
               "application/json": {
+                "example": {
+                  "conversation": {
+                    "createdAt": "2026-01-01T12:00:00Z",
+                    "id": "conversation-0001",
+                    "model": "qwen3.5:2b",
+                    "thinking": true,
+                    "title": "What to watch next",
+                    "updatedAt": "2026-01-01T12:02:00Z"
+                  }
+                },
                 "schema": {
-                  "$ref": "#/components/schemas/LumiConversationRecord"
+                  "$ref": "#/components/schemas/LumiConversationResponse"
                 }
               }
             },

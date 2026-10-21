@@ -103,6 +103,14 @@ class LumiConversationRecord(DocsModel):
     updatedAt: str
 
 
+class LumiConversationResponse(DocsModel):
+    conversation: LumiConversationRecord
+
+
+class LumiConversationDeleteResponse(DocsModel):
+    deleted: Literal[True]
+
+
 class LumiEntityReference(DocsModel):
     type: Literal[
         "series",
@@ -153,6 +161,10 @@ class LumiTurnRequest(DocsModel):
 class LumiModelChoiceRequest(DocsModel):
     model: str = Field(min_length=1, max_length=200)
     thinking: bool
+
+
+class LumiConversationRenameRequest(DocsModel):
+    title: str = Field(min_length=1, max_length=120)
 
 
 class LumiAnswer(DocsModel):
@@ -1646,7 +1658,10 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     LumiSource,
     LumiMessage,
     LumiConversationListResponse,
+    LumiConversationResponse,
+    LumiConversationDeleteResponse,
     LumiConversationDetailResponse,
+    LumiConversationRenameRequest,
     LumiTurnRequest,
     LumiModelChoiceRequest,
     LumiAnswer,
@@ -2072,6 +2087,10 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/lumi/models"): "List models available to the current user",
     ("GET", "/api/lumi/conversations"): "List the current user's Lumi conversations",
     ("GET", "/api/lumi/conversations/{conversation_id}"): "Get a Lumi conversation",
+    ("PATCH", "/api/lumi/conversations/{conversation_id}"): "Rename a Lumi conversation",
+    ("DELETE", "/api/lumi/conversations/{conversation_id}"): (
+        "Delete a Lumi conversation and its messages"
+    ),
     (
         "POST",
         "/api/lumi/conversations/{conversation_id}/turns",
@@ -2502,6 +2521,10 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("PATCH", "/api/preferences/metadata-language"): MetadataLanguagePatchRequest,
     ("PATCH", "/api/preferences/playback"): PlaybackPreferences,
     ("PATCH", "/api/preferences/watch-history"): WatchHistoryPreferences,
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}",
+    ): LumiConversationRenameRequest,
     ("POST", "/api/lumi/conversations/{conversation_id}/turns"): LumiTurnRequest,
     (
         "POST",
@@ -2659,6 +2682,14 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
         "GET",
         "/api/lumi/conversations/{conversation_id}",
     ): LumiConversationDetailResponse,
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}",
+    ): LumiConversationResponse,
+    (
+        "DELETE",
+        "/api/lumi/conversations/{conversation_id}",
+    ): LumiConversationDeleteResponse,
     ("POST", "/api/lumi/conversations/{conversation_id}/turns"): LumiTurnResponse,
     (
         "POST",
@@ -2667,7 +2698,7 @@ _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     (
         "PATCH",
         "/api/lumi/conversations/{conversation_id}/choice",
-    ): LumiConversationRecord,
+    ): LumiConversationResponse,
     ("PUT", "/api/lumi/preferences/model"): LumiPreferenceResponse,
     ("GET", "/api/admin/lumi/status"): LumiAdminStatusResponse,
     ("GET", "/api/admin/lumi/releases"): LumiReleaseListResponse,
@@ -2843,6 +2874,7 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
         "model": "qwen3.5:2b",
         "thinking": True,
     },
+    LumiConversationRenameRequest: {"title": "What to watch next"},
     LumiModelChoiceRequest: {"model": "qwen3.5:2b", "thinking": True},
     LumiIntegrationSettingsRequest: {"enabled": True, "releaseTag": "v0.1.0"},
     LumiRuntimeSettingsRequest: {
@@ -2924,6 +2956,17 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
         "defaultThinking": True,
     },
     LumiConversationListResponse: {"conversations": []},
+    LumiConversationResponse: {
+        "conversation": {
+            "id": "conversation-0001",
+            "title": "What to watch next",
+            "model": "qwen3.5:2b",
+            "thinking": True,
+            "createdAt": "2026-01-01T12:00:00Z",
+            "updatedAt": "2026-01-01T12:02:00Z",
+        }
+    },
+    LumiConversationDeleteResponse: {"deleted": True},
     LumiConversationDetailResponse: {
         "conversation": {
             "id": "conversation-0001",

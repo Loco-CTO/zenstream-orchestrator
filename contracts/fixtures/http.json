@@ -9055,6 +9055,31 @@
       }
     },
     {
+      "operationId": "delete_api_lumi_conversations_by_conversation_id",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {}
+        },
+        "method": "DELETE",
+        "parameters": {
+          "path": {
+            "conversation_id": "fixture-id"
+          }
+        },
+        "path": "/api/lumi/conversations/fixture-id",
+        "pathTemplate": "/api/lumi/conversations/{conversation_id}"
+      },
+      "response": {
+        "body": {
+          "deleted": true
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/LumiConversationDeleteResponse",
+        "status": 200
+      }
+    },
+    {
       "operationId": "get_api_lumi_conversations_by_conversation_id",
       "request": {
         "method": "GET",
@@ -9106,6 +9131,40 @@
       }
     },
     {
+      "operationId": "patch_api_lumi_conversations_by_conversation_id",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "title": "Fixture Item"
+          }
+        },
+        "method": "PATCH",
+        "parameters": {
+          "path": {
+            "conversation_id": "fixture-id"
+          }
+        },
+        "path": "/api/lumi/conversations/fixture-id",
+        "pathTemplate": "/api/lumi/conversations/{conversation_id}"
+      },
+      "response": {
+        "body": {
+          "conversation": {
+            "createdAt": "2026-09-29T12:00:00Z",
+            "id": "fixture-id",
+            "model": "x",
+            "thinking": true,
+            "title": "Fixture Item",
+            "updatedAt": "2026-09-29T12:00:00Z"
+          }
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/LumiConversationResponse",
+        "status": 200
+      }
+    },
+    {
       "operationId": "patch_api_lumi_conversations_by_conversation_id_choice",
       "request": {
         "body": {
@@ -9126,15 +9185,17 @@
       },
       "response": {
         "body": {
-          "createdAt": "2026-09-29T12:00:00Z",
-          "id": "fixture-id",
-          "model": "x",
-          "thinking": true,
-          "title": "Fixture Item",
-          "updatedAt": "2026-09-29T12:00:00Z"
+          "conversation": {
+            "createdAt": "2026-09-29T12:00:00Z",
+            "id": "fixture-id",
+            "model": "x",
+            "thinking": true,
+            "title": "Fixture Item",
+            "updatedAt": "2026-09-29T12:00:00Z"
+          }
         },
         "contentType": "application/json",
-        "schemaRef": "#/components/schemas/LumiConversationRecord",
+        "schemaRef": "#/components/schemas/LumiConversationResponse",
         "status": 200
       }
     },

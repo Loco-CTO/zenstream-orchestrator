@@ -241,9 +241,9 @@ class OpenApiContractTest(unittest.TestCase):
         self.assertIn({"UserBearerAuth": []}, rename["security"])
         delete = paths["/api/lumi/conversations/{conversation_id}"]["delete"]
         self.assertIn({"UserBearerAuth": []}, delete["security"])
-        delete_response = delete["responses"]["200"]["content"][
-            "application/json"
-        ]["schema"]
+        delete_response = delete["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]
         self.assertEqual(
             delete_response["$ref"],
             "#/components/schemas/LumiConversationDeleteResponse",

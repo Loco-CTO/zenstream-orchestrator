@@ -42,7 +42,9 @@ class FakeLumiService:
             updated_at="2026-01-01T12:02:00Z",
         )
 
-    async def delete_conversation_for_account(self, account_id: str, conversation_id: str):
+    async def delete_conversation_for_account(
+        self, account_id: str, conversation_id: str
+    ):
         self.deleted = (account_id, conversation_id)
 
 
@@ -490,7 +492,9 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["conversations"][0]["id"], "conversation-1")
         self.assertEqual(response.headers["cache-control"], "private, no-store")
 
-    async def test_conversation_rename_uses_authenticated_account_and_normalizes_title(self):
+    async def test_conversation_rename_uses_authenticated_account_and_normalizes_title(
+        self,
+    ):
         service = FakeLumiService()
         with (
             patch.object(
@@ -514,15 +518,17 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.headers["cache-control"], "private, no-store")
 
     async def test_conversation_rename_rejects_empty_title(self):
-        with patch.object(
-            lumi_routes,
-            "_account",
-            new=AsyncMock(return_value={"id": "trusted-account"}),
+        with (
+            patch.object(
+                lumi_routes,
+                "_account",
+                new=AsyncMock(return_value={"id": "trusted-account"}),
+            ),
+            self.assertRaises(lumi_routes.HTTPException) as error,
         ):
-            with self.assertRaises(lumi_routes.HTTPException) as error:
-                await lumi_routes.lumi_rename_conversation(
-                    FakeRequest({"title": "  "}), "conversation-2"
-                )
+            await lumi_routes.lumi_rename_conversation(
+                FakeRequest({"title": "  "}), "conversation-2"
+            )
 
         self.assertEqual(error.exception.status_code, 400)
 

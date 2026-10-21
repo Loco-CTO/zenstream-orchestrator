@@ -2087,7 +2087,10 @@ _SUMMARY_OVERRIDES = {
     ("GET", "/api/lumi/models"): "List models available to the current user",
     ("GET", "/api/lumi/conversations"): "List the current user's Lumi conversations",
     ("GET", "/api/lumi/conversations/{conversation_id}"): "Get a Lumi conversation",
-    ("PATCH", "/api/lumi/conversations/{conversation_id}"): "Rename a Lumi conversation",
+    (
+        "PATCH",
+        "/api/lumi/conversations/{conversation_id}",
+    ): "Rename a Lumi conversation",
     ("DELETE", "/api/lumi/conversations/{conversation_id}"): (
         "Delete a Lumi conversation and its messages"
     ),

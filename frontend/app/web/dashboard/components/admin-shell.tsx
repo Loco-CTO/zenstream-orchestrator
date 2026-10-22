@@ -174,7 +174,7 @@ export default function AdminShell({
 
 	return (
 		<div
-			className="dashboard-design"
+			className="dashboard-design dashboard-shell"
 			style={{ display: "flex", minHeight: "100vh", background: "#000" }}
 		>
 			<nav
@@ -275,17 +275,13 @@ export default function AdminShell({
 				>
 					<IconMenu2 size={20} />
 				</button>
-				<span
-					style={{
-						color: "var(--primary)",
-						fontSize: 11,
-						fontWeight: 700,
-						letterSpacing: "0.18em",
-						textTransform: "uppercase",
-					}}
-				>
-					ZenStream
-				</span>
+				<Link href="/web/dashboard/" aria-label="ZenStream dashboard">
+					<img
+						src="/icons/icon.png"
+						alt="ZenStream"
+						style={{ width: 30, height: 30, display: "block" }}
+					/>
+				</Link>
 				<button
 					onClick={logout}
 					aria-label="Sign out"
@@ -330,16 +326,13 @@ export default function AdminShell({
 								padding: 20,
 							}}
 						>
-							<span
-								style={{
-									color: "var(--primary)",
-									fontSize: 11,
-									fontWeight: 700,
-									letterSpacing: "0.18em",
-								}}
-							>
-								ZenStream
-							</span>
+							<Link href="/web/dashboard/" aria-label="ZenStream dashboard">
+								<img
+									src="/icons/icon.png"
+									alt="ZenStream"
+									style={{ width: 30, height: 30, display: "block" }}
+								/>
+							</Link>
 							<button
 								aria-label="Close navigation"
 								onClick={() => setDrawerOpen(false)}

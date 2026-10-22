@@ -121,7 +121,12 @@ select:focus {
 
 /* Responsive behavior is isolated below the desktop design breakpoint. */
 @media (max-width: 1079px) {
+	.dashboard-shell {
+		flex-direction: column;
+	}
 	.dashboard-content {
+		width: 100%;
+		min-width: 0;
 		margin-left: 0 !important;
 		max-width: none !important;
 		padding: 28px 20px !important;
@@ -131,5 +136,10 @@ select:focus {
 	}
 	.dashboard-mobile-bar {
 		display: flex !important;
+		position: sticky;
+		top: 0;
+		z-index: 30;
+		width: 100%;
+		flex: 0 0 56px;
 	}
 }

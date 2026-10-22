@@ -1650,13 +1650,10 @@ class LumiReleaseManager:
                 "the Lumi package runtime API does not match its release manifest"
             )
         if runtime_api_version >= 2:
-            capabilities = getattr(
-                modules.runtime, "LUMI_RUNTIME_CAPABILITIES", ()
-            )
-            if (
-                not isinstance(capabilities, (set, frozenset, tuple, list))
-                or not LUMI_AUTOMATIC_CONTEXT_CAPABILITIES <= set(capabilities)
-            ):
+            capabilities = getattr(modules.runtime, "LUMI_RUNTIME_CAPABILITIES", ())
+            if not isinstance(
+                capabilities, (set, frozenset, tuple, list)
+            ) or not LUMI_AUTOMATIC_CONTEXT_CAPABILITIES <= set(capabilities):
                 raise LumiReleaseCompatibilityError(
                     "the Lumi package does not implement its advertised runtime capabilities"
                 )

@@ -116,7 +116,9 @@ def _message(value: Any) -> dict[str, Any]:
     }
 
 
-def _encode_message_cursor(owner_id: str, conversation_id: str, before_ordinal: int) -> str:
+def _encode_message_cursor(
+    owner_id: str, conversation_id: str, before_ordinal: int
+) -> str:
     payload = json.dumps(
         {
             "version": 1,
@@ -220,7 +222,9 @@ async def lumi_conversation(
     account = await _account(request)
     service = _service()
     try:
-        snapshot = await service.get_conversation_for_account(account["id"], conversation_id)
+        snapshot = await service.get_conversation_for_account(
+            account["id"], conversation_id
+        )
         next_cursor = None
         if cursor is None:
             messages = snapshot.messages
@@ -235,7 +239,9 @@ async def lumi_conversation(
             )
             page_loader = getattr(service, "get_message_page_for_account", None)
             if not callable(page_loader):
-                raise HTTPException(409, "This Lumi release does not support message pagination.")
+                raise HTTPException(
+                    409, "This Lumi release does not support message pagination."
+                )
             page = await page_loader(
                 account["id"],
                 conversation_id,

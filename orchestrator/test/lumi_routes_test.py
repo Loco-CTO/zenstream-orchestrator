@@ -151,7 +151,9 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["hasSummary"])
         self.assertEqual([item["id"] for item in payload["messages"]], ["message-10"])
 
-    async def test_conversation_detail_cursor_loads_one_page_and_rejects_cross_scope(self):
+    async def test_conversation_detail_cursor_loads_one_page_and_rejects_cross_scope(
+        self,
+    ):
         class DetailService:
             async def get_conversation_for_account(self, account_id, conversation_id):
                 return SimpleNamespace(
@@ -294,12 +296,8 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.headers["x-accel-buffering"], "no")
         self.assertEqual(body.count("event: delta"), 2)
-        self.assertIn(
-            'event: status\ndata: {"stage":"context_expansion"}\n\n', body
-        )
-        self.assertIn(
-            'event: status\ndata: {"stage":"summarization"}\n\n', body
-        )
+        self.assertIn('event: status\ndata: {"stage":"context_expansion"}\n\n', body)
+        self.assertIn('event: status\ndata: {"stage":"summarization"}\n\n', body)
         self.assertIn('event: status\ndata: {"stage":"generation"}\n\n', body)
         self.assertNotIn("private_reasoning", body)
         self.assertEqual(body.count("event: complete"), 1)

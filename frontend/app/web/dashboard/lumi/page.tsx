@@ -187,14 +187,16 @@ const RUNTIME_LIMIT_FIELDS: {
 		label: "Manual context limit",
 		minimum: 512,
 		maximum: 262144,
-		help: "Used when context mode is manual; automatic mode starts at 32,768 tokens.",
+		help:
+			"Used when context mode is manual; automatic mode starts at 32,768 tokens.",
 	},
 	{
 		key: "maxOutputTokens",
 		label: "Manual output limit",
 		minimum: 64,
 		maximum: 8192,
-		help: "Used when output mode is manual. Automatic mode uses available native context.",
+		help:
+			"Used when output mode is manual. Automatic mode uses available native context.",
 	},
 	{
 		key: "turnTimeoutMinutes",
@@ -352,7 +354,9 @@ function normalizeContextManagement(value: unknown): ContextManagement {
 	}
 	const readTokens = (key: keyof ContextManagement): number | null => {
 		const candidate = value[key];
-		return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate > 0
+		return typeof candidate === "number" &&
+			Number.isSafeInteger(candidate) &&
+			candidate > 0
 			? candidate
 			: null;
 	};
@@ -361,9 +365,13 @@ function normalizeContextManagement(value: unknown): ContextManagement {
 		allocatedContextTokens: readTokens("allocatedContextTokens"),
 		verifiedMaximumContextTokens: readTokens("verifiedMaximumContextTokens"),
 		growthCeilingContextTokens: readTokens("growthCeilingContextTokens"),
-		memoryGrowthCeilingContextTokens: readTokens("memoryGrowthCeilingContextTokens"),
+		memoryGrowthCeilingContextTokens: readTokens(
+			"memoryGrowthCeilingContextTokens",
+		),
 		growthState:
-			typeof value.growthState === "string" ? safeText(value.growthState) : "unknown",
+			typeof value.growthState === "string"
+				? safeText(value.growthState)
+				: "unknown",
 		compactionState:
 			typeof value.compactionState === "string"
 				? safeText(value.compactionState)
@@ -1838,10 +1846,7 @@ function RuntimeSettingsPanel({
 						value={runtimeLimits.contextMode}
 						disabled={runtimeSettingsBusy}
 						onChange={(event) =>
-							onModeChange(
-								"contextMode",
-								event.target.value as "automatic" | "manual",
-							)
+							onModeChange("contextMode", event.target.value as "automatic" | "manual")
 						}
 						className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
 					>
@@ -1849,8 +1854,8 @@ function RuntimeSettingsPanel({
 						<option value="manual">Manual fixed context limit</option>
 					</select>
 					<span className="mt-1 block text-xs console-muted">
-						Automatic mode starts at 32,768 tokens, then grows within verified model and
-						available memory limits.
+						Automatic mode starts at 32,768 tokens, then grows within verified model
+						and available memory limits.
 					</span>
 				</label>
 				<label className="block">
@@ -1859,10 +1864,7 @@ function RuntimeSettingsPanel({
 						value={runtimeLimits.outputMode}
 						disabled={runtimeSettingsBusy}
 						onChange={(event) =>
-							onModeChange(
-								"outputMode",
-								event.target.value as "automatic" | "manual",
-							)
+							onModeChange("outputMode", event.target.value as "automatic" | "manual")
 						}
 						className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
 					>
@@ -1870,8 +1872,8 @@ function RuntimeSettingsPanel({
 						<option value="manual">Manual output token limit</option>
 					</select>
 					<span className="mt-1 block text-xs console-muted">
-						Automatic output ends on the model end token, cancellation, context exhaustion,
-						or the overall deadline.
+						Automatic output ends on the model end token, cancellation, context
+						exhaustion, or the overall deadline.
 					</span>
 				</label>
 			</div>
@@ -1933,8 +1935,10 @@ function RuntimeSettingsPanel({
 				{(contextManagement.growthCeilingContextTokens !== null ||
 					contextManagement.memoryGrowthCeilingContextTokens !== null) && (
 					<p className="mt-1">
-						Growth ceiling: {(contextManagement.growthCeilingContextTokens ??
-							contextManagement.memoryGrowthCeilingContextTokens)!.toLocaleString()} tokens
+						Growth ceiling:{" "}
+						{(contextManagement.growthCeilingContextTokens ??
+							contextManagement.memoryGrowthCeilingContextTokens)!.toLocaleString()}{" "}
+						tokens
 						{contextManagement.memoryGrowthCeilingContextTokens !== null
 							? " (memory estimate)"
 							: ""}

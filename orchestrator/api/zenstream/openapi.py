@@ -110,7 +110,9 @@ class LumiAdminModelsResponse(LumiModelsResponse):
     limits: LumiRuntimeLimits | None = None
     gpuMode: Literal["automatic", "cpu_only", "gpu_preferred"] = "automatic"
     gpuAcceleration: LumiGpuAcceleration = Field(default_factory=LumiGpuAcceleration)
-    contextManagement: LumiContextManagement = Field(default_factory=LumiContextManagement)
+    contextManagement: LumiContextManagement = Field(
+        default_factory=LumiContextManagement
+    )
 
 
 class LumiConversationRecord(DocsModel):
@@ -191,7 +193,9 @@ class LumiConversationRenameRequest(DocsModel):
 
 class LumiAnswer(DocsModel):
     markdown: str
-    finishReason: Literal["stop", "tool_calls", "context_exhausted", "deadline"] = "stop"
+    finishReason: Literal["stop", "tool_calls", "context_exhausted", "deadline"] = (
+        "stop"
+    )
     references: list[LumiEntityReference] = Field(default_factory=list)
     sources: list[LumiSource] = Field(default_factory=list)
 

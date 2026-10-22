@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 import logging
@@ -115,6 +116,48 @@ def _message(value: Any) -> dict[str, Any]:
     }
 
 
+def _encode_message_cursor(
+    owner_id: str, conversation_id: str, before_ordinal: int
+) -> str:
+    payload = json.dumps(
+        {
+            "version": 1,
+            "owner": owner_id,
+            "conversation": conversation_id,
+            "before": before_ordinal,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+
+def _decode_message_cursor(value: str, owner_id: str, conversation_id: str) -> int:
+    try:
+        if not value or len(value) > 1_024:
+            raise ValueError
+        payload = json.loads(
+            base64.b64decode(
+                value + "=" * (-len(value) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+        )
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != 1
+            or payload.get("owner") != owner_id
+            or payload.get("conversation") != conversation_id
+            or type(payload.get("before")) is not int
+            or payload["before"] < 1
+        ):
+            raise ValueError
+        return payload["before"]
+    except (ValueError, UnicodeError, json.JSONDecodeError) as error:
+        raise HTTPException(400, "The Lumi message cursor is invalid.") from error
+
+
 def _raise_service_error(error: Exception) -> None:
     """Map package errors to a small stable HTTP surface without leaking internals."""
     status_code, message = _service_error(error)
@@ -140,6 +183,7 @@ def _turn_payload(turn: Any) -> dict[str, Any]:
         "conversation": _conversation(turn.conversation),
         "answer": {
             "markdown": turn.answer.markdown,
+            "finishReason": getattr(turn.answer, "finish_reason", "stop"),
             "references": [_reference(value) for value in turn.answer.references],
             "sources": [_source(value) for value in turn.answer.sources],
         },
@@ -170,19 +214,56 @@ async def lumi_conversations(request: Request):
 
 
 @router.get("/api/lumi/conversations/{conversation_id}")
-async def lumi_conversation(request: Request, conversation_id: str):
+async def lumi_conversation(
+    request: Request,
+    conversation_id: str,
+    cursor: str | None = None,
+):
     account = await _account(request)
     service = _service()
     try:
         snapshot = await service.get_conversation_for_account(
             account["id"], conversation_id
         )
+        next_cursor = None
+        if cursor is None:
+            messages = snapshot.messages
+            has_more = getattr(snapshot, "has_older_messages", False)
+            if has_more and messages:
+                next_cursor = _encode_message_cursor(
+                    account["id"], conversation_id, messages[0].ordinal
+                )
+        else:
+            before_ordinal = _decode_message_cursor(
+                cursor, account["id"], conversation_id
+            )
+            page_loader = getattr(service, "get_message_page_for_account", None)
+            if not callable(page_loader):
+                raise HTTPException(
+                    409, "This Lumi release does not support message pagination."
+                )
+            page = await page_loader(
+                account["id"],
+                conversation_id,
+                before_ordinal=before_ordinal,
+            )
+            messages = page.messages
+            has_more = page.has_more
+            if has_more and page.next_before_ordinal is not None:
+                next_cursor = _encode_message_cursor(
+                    account["id"], conversation_id, page.next_before_ordinal
+                )
     except Exception as error:
+        if isinstance(error, HTTPException):
+            raise
         _raise_service_error(error)
     return _private_json(
         {
             "conversation": _conversation(snapshot.conversation),
-            "messages": [_message(value) for value in snapshot.messages],
+            "messages": [_message(value) for value in messages],
+            "nextCursor": next_cursor,
+            "hasMore": has_more,
+            "hasSummary": getattr(snapshot, "summary", None) is not None,
         }
     )
 
@@ -361,6 +442,10 @@ async def lumi_turn_stream(request: Request, conversation_id: str):
                         (time.perf_counter() - started) * 1000,
                     )
                     yield _sse_event("reset", {"reason": reason})
+                elif kind == "status" and not completed:
+                    status = getattr(event, "status", None)
+                    if status in {"context_expansion", "summarization", "generation"}:
+                        yield _sse_event("status", {"stage": status})
                 elif kind == "complete" and not completed:
                     turn = getattr(event, "turn", None)
                     if turn is None:

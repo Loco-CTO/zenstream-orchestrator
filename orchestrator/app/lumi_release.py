@@ -70,7 +70,11 @@ LUMI_RELEASE_MANIFEST_NAME = "lumi-release.json"
 LUMI_RELEASE_INSTALL_MARKER_NAME = "lumi-release-install.json"
 LUMI_RELEASE_LIST_CACHE_NAME = ".lumi-release-candidates.json"
 LUMI_PLUGIN_API_VERSION = 1
-LUMI_RUNTIME_API_VERSION = 1
+LUMI_RUNTIME_API_VERSION = 2
+SUPPORTED_LUMI_RUNTIME_API_VERSIONS = frozenset({1, 2})
+LUMI_AUTOMATIC_CONTEXT_CAPABILITIES = frozenset(
+    {"token_counting", "context_capacity", "completion_reasons", "status_events"}
+)
 
 MAX_RELEASE_METADATA_BYTES = 1024 * 1024
 MAX_RELEASE_LIST_PAGE_SIZE = 5
@@ -1640,10 +1644,19 @@ class LumiReleaseManager:
         if (
             type(runtime_api_version) is not int
             or runtime_api_version != manifest.runtime_api_version
+            or runtime_api_version not in SUPPORTED_LUMI_RUNTIME_API_VERSIONS
         ):
             raise LumiReleaseCompatibilityError(
                 "the Lumi package runtime API does not match its release manifest"
             )
+        if runtime_api_version >= 2:
+            capabilities = getattr(modules.runtime, "LUMI_RUNTIME_CAPABILITIES", ())
+            if not isinstance(
+                capabilities, (set, frozenset, tuple, list)
+            ) or not LUMI_AUTOMATIC_CONTEXT_CAPABILITIES <= set(capabilities):
+                raise LumiReleaseCompatibilityError(
+                    "the Lumi package does not implement its advertised runtime capabilities"
+                )
         backend = _runtime_backend_distribution(manifest.runtime_dependencies)
         if backend != "llama-cpp-python":
             raise LumiReleaseCompatibilityError(
@@ -2100,7 +2113,10 @@ def _read_and_validate_manifest(
             "Lumi release manifest tag does not match the selected release"
         )
     api_version = raw.get("runtimeApiVersion")
-    if type(api_version) is not int or api_version != LUMI_RUNTIME_API_VERSION:
+    if (
+        type(api_version) is not int
+        or api_version not in SUPPORTED_LUMI_RUNTIME_API_VERSIONS
+    ):
         raise LumiReleaseCompatibilityError(
             "Lumi release runtime API version is unsupported"
         )

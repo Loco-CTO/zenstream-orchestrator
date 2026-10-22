@@ -48,10 +48,31 @@ type LumiModel = {
 
 type RuntimeLimits = {
 	idleUnloadSeconds: number;
+	contextMode: "automatic" | "manual";
+	outputMode: "automatic" | "manual";
+	turnTimeoutMinutes: number;
 	maxContextTokens: number;
 	maxOutputTokens: number;
 	maxConcurrentChats: number;
 	maxActiveConversations: number;
+};
+
+type NumericRuntimeLimitKey =
+	| "idleUnloadSeconds"
+	| "turnTimeoutMinutes"
+	| "maxContextTokens"
+	| "maxOutputTokens"
+	| "maxConcurrentChats"
+	| "maxActiveConversations";
+
+type ContextManagement = {
+	supported: boolean;
+	allocatedContextTokens: number | null;
+	verifiedMaximumContextTokens: number | null;
+	growthCeilingContextTokens: number | null;
+	memoryGrowthCeilingContextTokens: number | null;
+	growthState: string;
+	compactionState: string;
 };
 
 type GpuMode = "automatic" | "cpu_only" | "gpu_preferred";
@@ -83,6 +104,7 @@ type ModelCatalog = {
 	limits: RuntimeLimits;
 	gpuMode: GpuMode;
 	gpuAcceleration: GpuAcceleration;
+	contextManagement: ContextManagement;
 	modelInstallAvailable: boolean;
 };
 
@@ -93,10 +115,22 @@ type ModelAction = {
 
 const DEFAULT_RUNTIME_LIMITS: RuntimeLimits = {
 	idleUnloadSeconds: 300,
+	contextMode: "automatic",
+	outputMode: "automatic",
+	turnTimeoutMinutes: 30,
 	maxContextTokens: 8192,
 	maxOutputTokens: 2048,
 	maxConcurrentChats: 1,
 	maxActiveConversations: 128,
+};
+const DEFAULT_CONTEXT_MANAGEMENT: ContextManagement = {
+	supported: false,
+	allocatedContextTokens: null,
+	verifiedMaximumContextTokens: null,
+	growthCeilingContextTokens: null,
+	memoryGrowthCeilingContextTokens: null,
+	growthState: "unsupported",
+	compactionState: "unsupported",
 };
 const DEFAULT_GPU_ACCELERATION: GpuAcceleration = {
 	mode: "automatic",
@@ -135,7 +169,7 @@ function gpuAccelerationStateLabel(acceleration: GpuAcceleration): string {
 }
 
 const RUNTIME_LIMIT_FIELDS: {
-	key: keyof RuntimeLimits;
+	key: NumericRuntimeLimitKey;
 	label: string;
 	minimum: number;
 	maximum: number;
@@ -150,17 +184,26 @@ const RUNTIME_LIMIT_FIELDS: {
 	},
 	{
 		key: "maxContextTokens",
-		label: "Maximum context tokens",
+		label: "Manual context limit",
 		minimum: 512,
-		maximum: 32768,
-		help: "The conversation context budget per request.",
+		maximum: 262144,
+		help:
+			"Used when context mode is manual; automatic mode starts at 32,768 tokens.",
 	},
 	{
 		key: "maxOutputTokens",
-		label: "Maximum output tokens",
+		label: "Manual output limit",
 		minimum: 64,
 		maximum: 8192,
-		help: "Must leave at least 256 tokens inside the context limit.",
+		help:
+			"Used when output mode is manual. Automatic mode uses available native context.",
+	},
+	{
+		key: "turnTimeoutMinutes",
+		label: "Overall turn deadline",
+		minimum: 1,
+		maximum: 120,
+		help: "Minutes shared by model loading, summaries, tools, and generation.",
 	},
 	{
 		key: "maxConcurrentChats",
@@ -273,8 +316,24 @@ function normalizeModel(value: unknown): LumiModel | null {
 /** Validates every integer in the server's model runtime limits. */
 function normalizeRuntimeLimits(value: unknown): RuntimeLimits | null {
 	if (!isRecord(value)) return null;
-	const keys = Object.keys(DEFAULT_RUNTIME_LIMITS) as (keyof RuntimeLimits)[];
-	const limits: Partial<RuntimeLimits> = {};
+	if (
+		(value.contextMode !== "automatic" && value.contextMode !== "manual") ||
+		(value.outputMode !== "automatic" && value.outputMode !== "manual")
+	) {
+		return null;
+	}
+	const limits: Partial<RuntimeLimits> = {
+		contextMode: value.contextMode,
+		outputMode: value.outputMode,
+	};
+	const keys: NumericRuntimeLimitKey[] = [
+		"idleUnloadSeconds",
+		"turnTimeoutMinutes",
+		"maxContextTokens",
+		"maxOutputTokens",
+		"maxConcurrentChats",
+		"maxActiveConversations",
+	];
 	for (const key of keys) {
 		const candidate = value[key];
 		if (
@@ -287,6 +346,37 @@ function normalizeRuntimeLimits(value: unknown): RuntimeLimits | null {
 		limits[key] = candidate;
 	}
 	return limits as RuntimeLimits;
+}
+
+function normalizeContextManagement(value: unknown): ContextManagement {
+	if (!isRecord(value) || typeof value.supported !== "boolean") {
+		return DEFAULT_CONTEXT_MANAGEMENT;
+	}
+	const readTokens = (key: keyof ContextManagement): number | null => {
+		const candidate = value[key];
+		return typeof candidate === "number" &&
+			Number.isSafeInteger(candidate) &&
+			candidate > 0
+			? candidate
+			: null;
+	};
+	return {
+		supported: value.supported,
+		allocatedContextTokens: readTokens("allocatedContextTokens"),
+		verifiedMaximumContextTokens: readTokens("verifiedMaximumContextTokens"),
+		growthCeilingContextTokens: readTokens("growthCeilingContextTokens"),
+		memoryGrowthCeilingContextTokens: readTokens(
+			"memoryGrowthCeilingContextTokens",
+		),
+		growthState:
+			typeof value.growthState === "string"
+				? safeText(value.growthState)
+				: "unknown",
+		compactionState:
+			typeof value.compactionState === "string"
+				? safeText(value.compactionState)
+				: "unknown",
+	};
 }
 
 /** Parses a model list, rejecting the whole payload if any entry is invalid. */
@@ -344,6 +434,7 @@ function normalizeModelCatalog(value: unknown): ModelCatalog | null {
 		limits,
 		gpuMode,
 		gpuAcceleration,
+		contextManagement: normalizeContextManagement(value.contextManagement),
 		modelInstallAvailable: value.modelInstallAvailable,
 	};
 }
@@ -491,6 +582,9 @@ export default function LumiSettingsPage() {
 	const [defaultModel, setDefaultModel] = useState<string | null>(null);
 	const [defaultThinking, setDefaultThinking] = useState(false);
 	const [runtimeLimits, setRuntimeLimits] = useState(DEFAULT_RUNTIME_LIMITS);
+	const [contextManagement, setContextManagement] = useState(
+		DEFAULT_CONTEXT_MANAGEMENT,
+	);
 	const [gpuMode, setGpuMode] = useState<GpuMode>("automatic");
 	const [gpuAcceleration, setGpuAcceleration] = useState(
 		DEFAULT_GPU_ACCELERATION,
@@ -557,6 +651,7 @@ export default function LumiSettingsPage() {
 				);
 				setDefaultModel(nextDefaultModel);
 				if (modelCatalog) setGpuAcceleration(modelCatalog.gpuAcceleration);
+				if (modelCatalog) setContextManagement(modelCatalog.contextManagement);
 				if (!runtimeSettingsDirtyRef.current) {
 					setDefaultThinking(
 						modelCatalog?.defaultThinking ?? status.defaultThinking,
@@ -854,7 +949,7 @@ export default function LumiSettingsPage() {
 	}
 
 	/** Updates a runtime limit while marking the form as unsaved. */
-	function changeRuntimeLimit(key: keyof RuntimeLimits, rawValue: string) {
+	function changeRuntimeLimit(key: NumericRuntimeLimitKey, rawValue: string) {
 		runtimeSettingsDirtyRef.current = true;
 		setRuntimeSettingsDirty(true);
 		const value = Number(rawValue);
@@ -863,6 +958,15 @@ export default function LumiSettingsPage() {
 			...current,
 			[key]: Math.trunc(value),
 		}));
+	}
+
+	function changeRuntimeMode(
+		key: "contextMode" | "outputMode",
+		value: "automatic" | "manual",
+	) {
+		runtimeSettingsDirtyRef.current = true;
+		setRuntimeSettingsDirty(true);
+		setRuntimeLimits((current) => ({ ...current, [key]: value }));
 	}
 
 	/** Saves the default behavior, inference limits, and GPU mode. */
@@ -1000,11 +1104,13 @@ export default function LumiSettingsPage() {
 					/>
 					<RuntimeSettingsPanel
 						defaultThinking={defaultThinking}
+						contextManagement={contextManagement}
 						gpuMode={gpuMode}
 						gpuAcceleration={gpuAcceleration}
 						runtimeSettingsBusy={runtimeSettingsBusy}
 						runtimeSettingsDirty={runtimeSettingsDirty}
 						runtimeLimits={runtimeLimits}
+						onModeChange={changeRuntimeMode}
 						onThinkingChange={(enabled) => {
 							runtimeSettingsDirtyRef.current = true;
 							setRuntimeSettingsDirty(true);
@@ -1675,6 +1781,7 @@ function ModelActionButton({
 
 type RuntimeSettingsPanelProps = {
 	defaultThinking: boolean;
+	contextManagement: ContextManagement;
 	gpuMode: GpuMode;
 	gpuAcceleration: GpuAcceleration;
 	runtimeSettingsBusy: boolean;
@@ -1682,18 +1789,24 @@ type RuntimeSettingsPanelProps = {
 	runtimeLimits: RuntimeLimits;
 	onThinkingChange: (enabled: boolean) => void;
 	onGpuModeChange: (mode: GpuMode) => void;
-	onLimitChange: (key: keyof RuntimeLimits, value: string) => void;
+	onModeChange: (
+		key: "contextMode" | "outputMode",
+		value: "automatic" | "manual",
+	) => void;
+	onLimitChange: (key: NumericRuntimeLimitKey, value: string) => void;
 	onSave: () => void;
 };
 
 /** Edits Lumi's default thinking mode and bounded runtime limits. */
 function RuntimeSettingsPanel({
 	defaultThinking,
+	contextManagement,
 	gpuMode,
 	gpuAcceleration,
 	runtimeSettingsBusy,
 	runtimeSettingsDirty,
 	runtimeLimits,
+	onModeChange,
 	onThinkingChange,
 	onGpuModeChange,
 	onLimitChange,
@@ -1726,6 +1839,44 @@ function RuntimeSettingsPanel({
 					</span>
 				</span>
 			</label>
+			<div className="grid gap-4 sm:grid-cols-2">
+				<label className="block">
+					<span className="text-sm font-semibold">Conversation context</span>
+					<select
+						value={runtimeLimits.contextMode}
+						disabled={runtimeSettingsBusy}
+						onChange={(event) =>
+							onModeChange("contextMode", event.target.value as "automatic" | "manual")
+						}
+						className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
+					>
+						<option value="automatic">Automatic growth and history summaries</option>
+						<option value="manual">Manual fixed context limit</option>
+					</select>
+					<span className="mt-1 block text-xs console-muted">
+						Automatic mode starts at 32,768 tokens, then grows within verified model
+						and available memory limits.
+					</span>
+				</label>
+				<label className="block">
+					<span className="text-sm font-semibold">Answer output</span>
+					<select
+						value={runtimeLimits.outputMode}
+						disabled={runtimeSettingsBusy}
+						onChange={(event) =>
+							onModeChange("outputMode", event.target.value as "automatic" | "manual")
+						}
+						className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
+					>
+						<option value="automatic">Use available native context</option>
+						<option value="manual">Manual output token limit</option>
+					</select>
+					<span className="mt-1 block text-xs console-muted">
+						Automatic output ends on the model end token, cancellation, context
+						exhaustion, or the overall deadline.
+					</span>
+				</label>
+			</div>
 			<label className="block max-w-xl">
 				<span className="text-sm font-semibold">GPU acceleration</span>
 				<select
@@ -1768,6 +1919,37 @@ function RuntimeSettingsPanel({
 					)}
 				</div>
 			</label>
+			<div className="rounded-xl border border-white/10 bg-white/[0.025] p-4 text-xs console-muted">
+				<p className="font-semibold text-white">Conversation context status</p>
+				<p className="mt-1">
+					{contextManagement.supported
+						? `Growth: ${contextManagement.growthState.replaceAll("_", " ")} · Compaction: ${contextManagement.compactionState.replaceAll("_", " ")}`
+						: "Automatic context status requires a compatible Lumi release."}
+					{contextManagement.allocatedContextTokens !== null
+						? ` · Allocated: ${contextManagement.allocatedContextTokens.toLocaleString()} tokens`
+						: ""}
+					{contextManagement.verifiedMaximumContextTokens !== null
+						? ` · Verified maximum: ${contextManagement.verifiedMaximumContextTokens.toLocaleString()} tokens`
+						: ""}
+				</p>
+				{(contextManagement.growthCeilingContextTokens !== null ||
+					contextManagement.memoryGrowthCeilingContextTokens !== null) && (
+					<p className="mt-1">
+						Growth ceiling:{" "}
+						{(contextManagement.growthCeilingContextTokens ??
+							contextManagement.memoryGrowthCeilingContextTokens)!.toLocaleString()}{" "}
+						tokens
+						{contextManagement.memoryGrowthCeilingContextTokens !== null
+							? " (memory estimate)"
+							: ""}
+					</p>
+				)}
+				{contextManagement.memoryGrowthCeilingContextTokens !== null && (
+					<p className="mt-1">
+						Memory availability is an estimate; native allocation can still fail.
+					</p>
+				)}
+			</div>
 			<div className="grid gap-4 sm:grid-cols-2">
 				{RUNTIME_LIMIT_FIELDS.map((field) => (
 					<label key={field.key} className="block">
@@ -1778,7 +1960,13 @@ function RuntimeSettingsPanel({
 							max={field.maximum}
 							step={1}
 							value={runtimeLimits[field.key]}
-							disabled={runtimeSettingsBusy}
+							disabled={
+								runtimeSettingsBusy ||
+								(field.key === "maxContextTokens" &&
+									runtimeLimits.contextMode === "automatic") ||
+								(field.key === "maxOutputTokens" &&
+									runtimeLimits.outputMode === "automatic")
+							}
 							onChange={(event) => onLimitChange(field.key, event.target.value)}
 							className="console-input mt-2 h-11 w-full rounded-xl px-4 text-sm outline-none disabled:opacity-40"
 						/>
